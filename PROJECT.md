@@ -795,6 +795,104 @@ commitment to scientific integrity.
     — *Value: promotes architectural foresight and sustainable engineering
     practices.*
 
+### Research Objectives
+
+1. **Evidence-based decision making.** Every research conclusion, modeling choice, and
+   analytical claim must be supported by empirical evidence derived from systematically
+   collected and processed data. Opinions and intuitions are valuable as hypotheses but
+   must be validated before they inform platform outputs. — *Value: ensures that
+   research findings are grounded in observable reality rather than assumption.*
+
+2. **Scientific methodology.** Research activities must follow established scientific
+   practice: formulate testable hypotheses, design controlled experiments, collect and
+   analyze data impartially, and report results honestly — including negative and null
+   findings. — *Value: produces credible, self-correcting research that advances
+   collective understanding.*
+
+3. **Hypothesis-driven experimentation.** Every experiment should begin with a clearly
+   stated hypothesis that specifies the expected relationship between variables, the
+   measurement methodology, and the criteria for acceptance or rejection. Exploratory
+   analysis is valuable but must be explicitly distinguished from confirmatory
+   analysis. — *Value: prevents data dredging and ensures that reported results
+   address pre-specified questions.*
+
+4. **Reproducible research.** All experiments, analyses, and results generated within
+   the platform must be reproducible by independent parties given the same inputs,
+   code, and configuration. This requires versioned data snapshots, documented
+   feature definitions, tracked model parameters, and automated execution
+   pipelines. — *Value: enables verification, peer review, and cumulative
+   scientific progress.*
+
+5. **Data quality assurance.** Research quality is bounded by data quality. Automated
+   validation checks must verify data completeness, temporal consistency, alignment
+   across sources, and the absence of look-ahead bias before any dataset is used for
+   analysis or model training. — *Value: protects research integrity from the
+   foundational level upward.*
+
+6. **Statistical rigor.** All empirical claims must be supported by appropriate
+   statistical methods — including proper treatment of multiple comparisons, temporal
+   dependence, non-stationarity, and finite-sample uncertainty. Confidence intervals
+   and effect sizes must be reported alongside point estimates. — *Value: prevents
+   overconfident interpretations and spurious conclusions.*
+
+7. **Experimental transparency.** The complete experimental record — including data
+   provenance, preprocessing steps, model configuration, evaluation protocol, and
+   all results — must be documented and stored with each experiment. Transparency
+   ensures that research findings can be audited, challenged, and built upon. —
+   *Value: establishes trust in research outputs through full disclosure.*
+
+8. **Benchmark-driven evaluation.** All proposed models and analytical strategies must
+   be compared against appropriate baselines under identical evaluation conditions.
+   Benchmarks must include simple, interpretable methods — such as naive forecasts
+   or linear models — to establish the incremental value of more complex approaches.
+   — *Value: provides an honest assessment of whether complexity adds predictive
+   value.*
+
+9. **Bias identification and mitigation.** Research activities must actively identify
+   and mitigate sources of bias — including survivorship bias, selection bias,
+   look-ahead bias, measurement bias, and confirmation bias. Bias detection should
+   be a standard step in the research workflow. — *Value: protects against
+   systematic errors that undermine research validity.*
+
+10. **Continuous validation.** Models and analytical strategies deployed in the platform
+    must be subject to ongoing monitoring and periodic revalidation. Performance
+    degradation, concept drift, and regime changes must be detected early, and
+    models must be retired or retrained when they no longer meet established
+    criteria. — *Value: ensures that research outputs remain reliable as market
+    conditions evolve.*
+
+11. **Explainable analytical methods.** Preference should be given to methods that
+    provide insight into how inputs relate to outputs, unless a clear accuracy
+    advantage justifies the use of less interpretable approaches. When complex
+    models are necessary, supplementary explanations — feature attributions,
+    partial dependence plots, or counterfactual analyses — must be provided. —
+    *Value: enables auditability, debugging, and user trust in model outputs.*
+
+12. **Responsible use of predictive models.** Research outputs must never be presented
+    as guaranteed predictions or trading signals. All predictive outputs must include
+    appropriate uncertainty quantification, clearly stated limitations, and explicit
+    guidance that they are analytical inputs requiring human judgment. —
+    *Value: ensures that research findings are used appropriately and ethically.*
+
+13. **Ethical handling of research findings.** Research results — including negative
+    or unfavorable findings — must be reported honestly and completely. Results must
+    not be cherry-picked, p-hacked, or selectively reported to support a desired
+    conclusion. — *Value: maintains scientific integrity and contributes to an
+    honest cumulative research record.*
+
+14. **Clear documentation of assumptions.** Every analytical model, experimental
+    design, and evaluation protocol must explicitly document its assumptions —
+    including assumptions about data generating processes, stationarity,
+    independence, and the generalizability of results. — *Value: enables critical
+    evaluation of research findings by making boundary conditions explicit.*
+
+15. **Continuous refinement through experimentation.** Research is an iterative
+    process. Findings from one experiment should generate hypotheses for the next.
+    The platform must support a rapid experimentation cycle that allows researchers
+    to build on previous results, test alternative explanations, and progressively
+    refine their understanding of market dynamics. — *Value: drives cumulative
+    improvement in analytical capabilities and domain knowledge.*
+
 ## Target Users
 
 > To be completed in the following tasks.

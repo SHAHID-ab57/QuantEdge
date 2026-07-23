@@ -533,6 +533,75 @@ commitment to scientific integrity.
     improvements to the platform's data acquisition, feature engineering, and
     evaluation practices.
 
+## Project Objectives
+
+### Business Objectives
+
+1. **Create a professional quantitative research platform.** Develop a production-grade
+   system that meets the analytical and operational needs of researchers, quantitative
+   analysts, and data scientists working in cryptocurrency markets. The platform must
+   provide the reliability, performance, and flexibility expected of professional
+   research infrastructure.
+
+2. **Support informed decision-making through evidence-based analytics.** Deliver
+   analytical outputs that are grounded in empirical data, validated against historical
+   outcomes, and presented with quantified uncertainty. Decision-makers must be able
+   to distinguish between high-confidence signals and speculative hypotheses when
+   interpreting platform outputs.
+
+3. **Provide a high-quality educational resource for AI and financial markets.** Serve
+   as a practical learning platform for individuals seeking to develop expertise in
+   quantitative finance, machine learning, data engineering, and production software
+   systems. The platform's architecture, codebase, and documentation are structured
+   to support self-directed learning and academic study.
+
+4. **Demonstrate professional engineering and product development practices.** Showcase
+   disciplined software engineering — including modular architecture, automated testing,
+   continuous integration, code reviews, and comprehensive documentation — as the
+   standard for open-source quantitative research platforms. The project serves as a
+   reference implementation for how such systems should be built and maintained.
+
+5. **Encourage responsible and transparent use of AI in financial analysis.** Establish
+   norms for AI transparency, interpretability, and accountability that other projects
+   and organizations can adopt. The platform demonstrates that rigorous, explainable,
+   and uncertainty-aware AI is achievable and valuable in market analysis contexts.
+
+6. **Build a reusable and extensible research platform.** Design the platform so that
+   its core capabilities — data pipelines, feature engineering, model training,
+   evaluation frameworks, and backtesting infrastructure — can be repurposed for
+   research questions beyond the original Ethereum market analysis scope. Reusability
+   maximizes the return on engineering investment over the platform's lifetime.
+
+7. **Support future expansion into additional markets and asset classes.** Architect
+   the platform to accommodate new data sources, market types, and asset classes
+   without requiring structural changes. The domain model, data ingestion interfaces,
+   and analytical pipeline must be agnostic to the specific market being analyzed,
+   enabling horizontal expansion as the project evolves.
+
+8. **Deliver long-term value through modular design and maintainability.** Ensure that
+   the platform remains adaptable as technology, market structure, and research
+   priorities evolve. Modular design, clear interface boundaries, and rigorous
+   documentation protect the platform from obsolescence and reduce the cost of
+   future enhancements.
+
+9. **Promote reproducible research and analytical consistency.** Establish data
+   versioning, experiment tracking, and provenance documentation as standard
+   practices within the platform. Reproducibility ensures that analytical results
+   can be verified, challenged, and built upon by the research community, increasing
+   the credibility and impact of the platform's outputs.
+
+10. **Establish the platform as a foundation for continuous innovation.** Create an
+    ecosystem in which new models, features, and analytical strategies can be
+    developed, tested, and deployed with minimal friction. The platform must lower
+    the barrier to experimentation and enable researchers to iterate rapidly on
+    novel ideas while maintaining production reliability.
+
+11. **Attract and support a community of contributors and researchers.** Foster an
+    open environment where external contributors can participate in platform
+    development, submit research findings, and extend the system's capabilities.
+    Community engagement amplifies the platform's impact and accelerates its
+    evolution through diverse perspectives and expertise.
+
 ## Target Users
 
 > To be completed in the following tasks.

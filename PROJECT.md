@@ -602,6 +602,199 @@ commitment to scientific integrity.
     Community engagement amplifies the platform's impact and accelerates its
     evolution through diverse perspectives and expertise.
 
+### Technical Objectives
+
+1. **Scalable system architecture.** The platform must scale gracefully from a
+   single-machine research environment to a distributed production deployment
+   as data volumes, model complexity, and user load increase. Scalability ensures
+   that the platform can grow with the research agenda without requiring
+   architectural rewrites. — *Expected value: long-term capacity for growth
+   without fundamental redesign.*
+
+2. **Modular software design.** Every major capability — data ingestion, feature
+   engineering, model training, prediction serving, backtesting, risk analysis,
+   and portfolio analytics — must be encapsulated in independently deployable
+   modules with well-defined interfaces. Loose coupling between modules enables
+   parallel development, isolated testing, and targeted improvements. —
+   *Expected value: reduced cost of change and increased development velocity.*
+
+3. **Maintainability.** The codebase must be organized, documented, and structured
+   so that new contributors can understand, modify, and extend any component
+   without consulting the original author. Consistent coding conventions, clear
+   naming, and self-documenting code are requirements, not preferences. —
+   *Expected value: sustainable development over the project's lifetime.*
+
+4. **Reliability.** The platform must produce correct and consistent results under
+   normal and degraded operating conditions. Automated tests, defensive
+   programming, and comprehensive error handling ensure that failures are
+   detected early and contained locally rather than cascading through the
+   system. — *Expected value: trust in analytical outputs and platform stability.*
+
+5. **Performance.** Data processing pipelines, model inference, and API responses
+   must meet defined performance targets appropriate to their context — batch
+   research workloads prioritize throughput, while interactive queries prioritize
+   latency. Performance budgets are established and monitored. — *Expected value:
+   timely access to analytical results without excessive resource consumption.*
+
+6. **Security by design.** Security considerations must be integrated into every
+   layer of the platform, from data access controls and authentication to secrets
+   management and audit logging. The platform must protect sensitive market data,
+   model artifacts, and user credentials. — *Expected value: protection of
+   intellectual property and user trust.*
+
+7. **Testability.** Every module must be testable in isolation through well-defined
+   interfaces, dependency injection, and mockable external integrations. The test
+   suite must provide fast feedback and high coverage without requiring full
+   system deployment. — *Expected value: confidence that changes do not break
+   existing functionality.*
+
+8. **Observability.** The platform must expose comprehensive monitoring data —
+   including metrics, structured logs, and distributed traces — that enable
+   operators to understand system behavior, diagnose issues, and measure
+   performance in real time. — *Expected value: rapid incident detection and
+   resolution in production.*
+
+9. **Reproducibility.** Every analytical result produced by the platform must be
+   repeatable given the same inputs and configuration. This requires versioning
+   of data snapshots, feature definitions, model parameters, evaluation
+   procedures, and environment dependencies. — *Expected value: verifiable
+   research and credible analytical claims.*
+
+10. **Extensibility.** The platform must accommodate new data sources, model
+    architectures, feature types, and analytical strategies through defined
+    extension points rather than code modification. Extensibility ensures that
+    the platform can adopt innovations in the rapidly evolving fields of
+    cryptocurrency markets and AI. — *Expected value: future-proofing against
+    domain evolution.*
+
+11. **Fault tolerance.** The platform must remain operational or degrade gracefully
+    when individual components fail. Data pipelines must handle source
+    unavailability, model serving must handle increased latency, and the system
+    must recover automatically when dependencies are restored. —
+    *Expected value: continuous availability for research and decision-support
+    workflows.*
+
+12. **Documentation quality.** Every module, interface, data model, and operational
+    procedure must be documented at a level appropriate to its complexity and
+    audience. Documentation is treated as a first-class deliverable with the
+    same review requirements as code. — *Expected value: reduced onboarding
+    time and preserved institutional knowledge.*
+
+13. **API consistency.** All service interfaces must follow consistent design
+    conventions for naming, error handling, pagination, versioning, and
+    authentication. Consistent APIs reduce integration effort and make the
+    platform predictable for consumers. — *Expected value: lower cognitive
+    load for API consumers and faster integration of new modules.*
+
+14. **Data integrity.** Market data, feature values, model predictions, and
+    experimental results must be protected against corruption, loss, and
+    unauthorized modification. Checksums, validation rules, and access controls
+    ensure that data remains trustworthy throughout its lifecycle. —
+    *Expected value: confidence that analytical outputs are based on accurate
+    and untampered data.*
+
+15. **Automation.** Repetitive engineering tasks — including testing, linting,
+    building, deployment, data validation, and model evaluation — must be
+    automated to eliminate human error and free contributors for higher-value
+    work. Automation is applied wherever the cost of automation is less than
+    the cost of manual execution over the project's lifetime. —
+    *Expected value: consistent quality and reduced operational overhead.*
+
+### Learning Objectives
+
+1. **Understanding financial market structure.** Develop a working knowledge of how
+   cryptocurrency markets operate — including order book mechanics, liquidity dynamics,
+   market microstructure, and the role of on-chain data. This foundation is essential
+   for building analytical tools that reflect real market behavior rather than
+   theoretical abstractions. — *Value: enables credible and context-aware market
+   analysis.*
+
+2. **Developing quantitative reasoning.** Build the ability to frame market analysis
+   problems in quantitative terms — defining measurable hypotheses, selecting
+   appropriate statistical methods, interpreting results with appropriate rigor,
+   and communicating uncertainty honestly. — *Value: transforms intuition into
+   testable, data-driven frameworks.*
+
+3. **Building statistical thinking.** Acquire the habit of approaching every analytical
+   question with statistical discipline: understanding distributions, sampling,
+   variance, bias, and the difference between correlation and causation. Statistical
+   thinking prevents overconfident interpretations and spurious conclusions. —
+   *Value: protects against common analytical errors that undermine research validity.*
+
+4. **Learning probability-based forecasting.** Master the principles of probabilistic
+   prediction — including calibration, sharpness, scoring rules, and predictive
+   distributions — and develop the ability to evaluate forecasts on these dimensions
+   rather than on point-accuracy alone. — *Value: enables honest communication of
+   uncertainty and more robust decision-making.*
+
+5. **Understanding risk management.** Learn the core concepts of financial risk —
+   including volatility, drawdown, value at risk, tail risk, and position sizing —
+   and how they apply to both portfolio construction and model evaluation. —
+   *Value: ensures that analytical insights are interpreted within a risk-aware
+   framework rather than a return-only framework.*
+
+6. **Mastering time-series analysis concepts.** Develop practical expertise in
+   time-series methodology — including stationarity, autocorrelation, regime
+   detection, seasonality, and forecasting validation — that are fundamental to
+   market data analysis. — *Value: provides the technical vocabulary and tools
+   for rigorous temporal analysis.*
+
+7. **Applying machine learning responsibly.** Learn to select, train, evaluate, and
+   deploy machine learning models with an emphasis on generalization, robustness,
+   and interpretability — including techniques to detect overfitting, concept drift,
+   and data leakage specific to financial time series. — *Value: ensures that AI
+   capabilities are applied in ways that produce reliable and trustworthy results.*
+
+8. **Designing scalable software systems.** Develop the ability to architect systems
+   that can grow from experimental prototypes to production deployments —
+   understanding trade-offs in coupling, cohesion, state management, data flow,
+   and deployment topology. — *Value: builds systems-thinking skills applicable
+   to any large-scale software endeavor.*
+
+9. **Developing strong software architecture skills.** Practice making explicit
+   architectural decisions — documenting context, options, trade-offs, and
+   rationale — rather than allowing architecture to emerge implicitly from
+   implementation choices. — *Value: cultivates the discipline of intentional,
+   reviewable system design.*
+
+10. **Learning data engineering principles.** Gain hands-on experience with data
+    pipeline design, data quality assurance, schema management, versioning
+    strategies, and the operational challenges of maintaining reliable data
+    flows in a production environment. — *Value: builds the data infrastructure
+    competency critical to all data-intensive applications.*
+
+11. **Understanding AI system evaluation.** Learn to design and interpret rigorous
+    evaluation protocols for AI models — including appropriate metric selection,
+    statistical significance testing, cross-validation strategies for time series,
+    and the distinction between model performance and decision utility. —
+    *Value: ensures that model claims are evidence-based and reproducible.*
+
+12. **Improving debugging and problem-solving abilities.** Develop systematic
+    approaches to diagnosing issues across the full stack — from data anomalies
+    and model convergence failures to system performance bottlenecks and
+    integration errors. — *Value: builds the diagnostic intuition essential
+    for maintaining complex systems.*
+
+13. **Developing research methodology.** Practice the complete research lifecycle —
+    from literature review and hypothesis formulation, through experimental
+    design and implementation, to result documentation and peer review. —
+    *Value: establishes a reproducible, transparent research practice that
+    produces credible and cumulative knowledge.*
+
+14. **Writing high-quality technical documentation.** Cultivate the discipline of
+    writing clear, accurate, and audience-appropriate documentation for
+    architecture, APIs, data models, operational procedures, and research
+    findings. Documentation is treated as an integral output, not an afterthought.
+    — *Value: preserves institutional knowledge and enables effective
+    collaboration.*
+
+15. **Building long-term systems thinking.** Develop the ability to evaluate how
+    individual design decisions affect system properties — maintainability,
+    scalability, reliability, security — over years rather than weeks, and to
+    prioritize investments that compound in value over the project's lifecycle.
+    — *Value: promotes architectural foresight and sustainable engineering
+    practices.*
+
 ## Target Users
 
 > To be completed in the following tasks.

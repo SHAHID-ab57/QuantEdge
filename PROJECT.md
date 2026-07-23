@@ -286,7 +286,252 @@ commitment to scientific integrity.
 
 ## Goals
 
-> To be completed in the following tasks.
+### Short-Term Goals
+
+1. **Complete project planning and documentation.** Establish a comprehensive project
+   charter that defines scope, requirements, architecture principles, and development
+   milestones before any implementation begins. This ensures all stakeholders share a
+   common understanding of what the platform will deliver and how it will be built.
+
+2. **Finalize the software architecture.** Produce detailed architectural designs
+   covering system context, container decomposition, component interfaces, data flow,
+   and deployment topology. A well-documented architecture prevents costly redesigns
+   during later development phases.
+
+3. **Select and validate the technology stack.** Evaluate and commit to the core
+   technologies for backend services, frontend interfaces, data storage, messaging,
+   and infrastructure. Technology decisions must align with the architecture principles
+   of modularity, scalability, and maintainability.
+
+4. **Design the database schema and data access layer.** Model the domain entities,
+   relationships, and data storage strategies required to support market data ingestion,
+   historical storage, feature computation, and model outputs. A robust data foundation
+   is critical for all downstream analytical capabilities.
+
+5. **Design the API interface contracts.** Define the public API surface for the
+   platform, including endpoint specifications, request-response schemas, and
+   authentication models. Stable interface contracts allow frontend, backend, and
+   research modules to be developed in parallel with clear boundaries.
+
+6. **Establish development standards and workflows.** Define coding conventions, code
+   review processes, branching strategy, testing requirements, and documentation
+   standards. Consistent engineering practices ensure code quality and team velocity
+   as the codebase grows.
+
+7. **Set up the development environment and toolchain.** Provision local and shared
+   development environments with automated dependency management, linting, formatting,
+   and pre-commit hooks. A reproducible environment eliminates configuration drift and
+   reduces onboarding time for new contributors.
+
+8. **Create the project scaffold.** Initialize the repository structure, build
+   configurations, module skeletons, and continuous integration pipelines. The scaffold
+   provides the structural foundation upon which all features will be developed.
+
+9. **Build the core backend foundation.** Implement the base services for configuration
+   management, logging, error handling, health checks, and inter-module communication.
+   These cross-cutting concerns must be in place before feature development begins.
+
+10. **Build the core frontend foundation.** Establish the frontend project structure,
+    routing framework, state management pattern, API client layer, and shared component
+    library. This foundation ensures consistent user interface development across all
+    future features.
+
+11. **Prepare the platform for future AI and quantitative research modules.** Define
+    the interfaces and integration points for model training, prediction serving,
+    backtesting, and risk analysis modules. Architecting these extension points early
+    ensures that research capabilities can be added without disrupting the core
+    platform.
+
+### Medium-Term Goals
+
+1. **Build a reliable market data ingestion platform.** Establish automated pipelines
+   that connect to Ethereum market data sources and reliably ingest trade, order book,
+   and on-chain data. Data integrity at the ingestion layer is the foundation for every
+   downstream analytical capability — without trustworthy raw data, no subsequent
+   analysis can be valid.
+
+2. **Develop a historical data management system.** Design and implement storage
+   strategies for large volumes of historical market data, including efficient
+   retrieval, partitioning, and archival mechanisms. A well-organized historical data
+   store enables long-term backtesting, regime analysis, and model training across
+   diverse market conditions.
+
+3. **Implement live market data streaming.** Build infrastructure for real-time data
+   ingestion that supports low-latency access to current market conditions. Live
+   streaming enables the platform to support near-real-time feature computation,
+   model inference, and paper trading in future phases.
+
+4. **Design a robust feature engineering pipeline.** Create a modular, repeatable
+   pipeline that computes derived features from raw market data — including technical
+   indicators, volatility measures, on-chain metrics, and sentiment signals. Features
+   must be computed consistently across historical and live data to ensure training
+   and inference operate on identical representations.
+
+5. **Produce reusable, versioned datasets for machine learning.** Transform curated
+   raw data and computed features into standardized dataset artifacts that are
+   versioned, documented, and ready for model training. Versioned datasets ensure
+   reproducibility of experiments and allow direct comparison of model performance
+   across different data windows and feature configurations.
+
+6. **Implement dataset validation and quality assurance.** Establish automated checks
+   for data completeness, temporal consistency, outlier detection, and alignment
+   across data sources. Dataset quality must be measured and reported before any
+   dataset is approved for model training or backtesting use.
+
+7. **Build a complete AI research workflow.** Create a structured environment for
+   end-to-end model development — from hypothesis formulation and data selection,
+   through feature exploration and model training, to evaluation and documentation.
+   The workflow must support rapid iteration while enforcing reproducibility
+   standards at every stage.
+
+8. **Train and evaluate multiple model classes.** Develop and compare a diverse set
+   of modeling approaches — including statistical baselines, classical machine
+   learning models, and deep learning architectures — on the probabilistic
+   prediction task. Maintaining multiple model families provides baselines for
+   comparison and resilience through ensemble methods.
+
+9. **Establish experiment tracking and model versioning.** Implement a system that
+   automatically records every experimental configuration, dataset version, trained
+   model artifact, and evaluation result. Complete experiment provenance ensures
+   that any prediction can be traced back to the exact model, data, and parameters
+   that produced it.
+
+10. **Develop a probabilistic prediction engine.** Build the serving infrastructure
+    that loads trained models and produces probabilistic forecasts — including point
+    estimates, confidence intervals, full predictive distributions, and scenario
+    analyses. The prediction engine must support both batch evaluations for research
+    and low-latency inference for interactive use.
+
+11. **Evaluate prediction quality using rigorous statistical metrics.** Define and
+    implement a comprehensive suite of evaluation metrics tailored to probabilistic
+    forecasts — including calibration, sharpness, resolution, continuous ranked
+    probability score, and quantile loss. Models must be assessed on multiple
+    dimensions of forecast quality, not single-number accuracy.
+
+12. **Build a professional backtesting framework.** Construct a simulation environment
+    that evaluates predictive models and analytical strategies against historical
+    data under realistic conditions — accounting for data availability at time of
+    prediction, execution assumptions, and market impact. Backtesting is the primary
+    tool for validating whether a model's apparent performance generalizes beyond
+    its training period.
+
+13. **Implement walk-forward validation.** Design and automate a rolling evaluation
+    framework that trains models on expanding or sliding windows of historical data
+    and evaluates them on subsequent unseen periods. Walk-forward validation provides
+    a more realistic assessment of model performance than static train-test splits
+    and reveals how performance evolves across different market regimes.
+
+14. **Support paper trading for strategy validation.** Build a paper trading module
+    that simulates trading decisions based on model predictions without deploying
+    real capital. Paper trading bridges the gap between backtested results and
+    live-market behavior by introducing execution latency, slippage, and sequence
+    of fill uncertainties.
+
+15. **Create a modular research environment for continuous experimentation.** Design
+    the research workflow as a collection of interchangeable components — data
+    loaders, feature transformers, model trainers, evaluators — that can be
+    reconfigured and extended without modifying the core platform. A modular
+    research environment encourages experimentation and accelerates the cycle
+    from idea to validated result.
+
+### Long-Term Goals
+
+1. **Operate as a stable and scalable production platform.** Achieve a level of
+   operational maturity where the platform runs reliably in production with defined
+   service-level objectives, automated incident response, and predictable performance
+   under varying data volumes and user loads. Production stability is the foundation
+   upon which all advanced analytical capabilities depend.
+
+2. **Implement continuous AI model improvement and retraining.** Establish automated
+   pipelines that retrain models on new data, compare updated models against
+   production baselines, and promote improved versions with zero downtime.
+   Continuous retraining ensures that predictive performance does not degrade as
+   market regimes evolve and that the platform adapts to changing conditions without
+   manual intervention.
+
+3. **Monitor model quality and detect performance degradation.** Deploy comprehensive
+   monitoring that tracks prediction accuracy, calibration, and distributional
+   properties in real time. Automated alerting must detect concept drift, feature
+   drift, and performance deterioration before they materially affect the quality
+   of analytical outputs.
+
+4. **Expand analytical capabilities without compromising architectural quality.**
+   Introduce new analytical modules — such as regime detection, anomaly
+   identification, volatility forecasting, and correlation analysis — as
+   independently deployable extensions that integrate cleanly with existing
+   interfaces. Architectural quality must be preserved even as the platform's
+   analytical surface area grows.
+
+5. **Support multiple concurrent quantitative research workflows.** Enable multiple
+   researchers to independently develop, test, and compare hypotheses and models
+   within the same platform instance. Concurrent workflows require isolated
+   experiment environments, shared access to curated datasets, and structured
+   pathways for promoting research results into production services.
+
+6. **Enable continuous experimentation with new strategies.** Build infrastructure
+   that supports rapid prototyping and validation of novel analytical strategies,
+   including support for A/B testing of prediction models, ensemble composition
+   experiments, and systematic exploration of alternative feature sets and model
+   configurations. The platform must lower the cost of experimentation to
+   encourage innovation.
+
+7. **Maintain high standards for reliability, maintainability, and security.**
+   Institutionalize engineering practices that preserve codebase health over time,
+   including automated dependency management, vulnerability scanning, comprehensive
+   test suites, and regular architecture reviews. Security must be treated as a
+   continuous discipline, with data access controls, audit logging, and secrets
+   management embedded in every layer of the platform.
+
+8. **Support advanced portfolio analytics and risk management.** Develop analytical
+   modules for portfolio construction, position sizing, risk budgeting, drawdown
+   analysis, and scenario simulation. These capabilities transform raw predictions
+   into actionable decision-support tools that help users understand the portfolio
+   implications of different market outcomes.
+
+9. **Build a sustainable engineering ecosystem that evolves over time.** Design the
+   platform to accommodate changes in team composition, technology landscape, and
+   research priorities without requiring rewrites. Sustainable evolution requires
+   comprehensive documentation, well-defined extension points, clear ownership
+   boundaries, and a governance model that balances innovation with stability.
+
+10. **Advance explainable and transparent AI systems.** Invest in techniques that
+    improve the interpretability of complex models — including feature attribution,
+    partial dependence analysis, counterfactual explanations, and uncertainty
+    decomposition. Transparent AI builds user trust and enables rigorous auditing
+    of model behavior under diverse market conditions.
+
+11. **Promote responsible use of predictive analytics.** Establish guidelines,
+    defaults, and user-facing documentation that clearly communicate the
+    limitations of predictive outputs, the uncertainty inherent in all forecasts,
+    and the importance of human judgment in decision-making. The platform must
+    actively discourage misuse of its analytical outputs as guaranteed predictions
+    or trading signals.
+
+12. **Provide a reusable foundation for future market research initiatives.**
+    Package the platform's core capabilities — data pipelines, feature libraries,
+    evaluation frameworks, and backtesting infrastructure — as reusable components
+    that can be applied to research questions beyond the original Ethereum market
+    analysis scope. A reusable foundation maximizes the long-term value of the
+    engineering investment.
+
+13. **Establish professional MLOps practices across the full model lifecycle.**
+    Implement infrastructure for model registry, deployment orchestration, canary
+    releases, rollback procedures, and performance monitoring across all
+    production models. These MLOps capabilities ensure that AI models are
+    managed with the same rigor as traditional software services.
+
+14. **Achieve long-term scalability through modular architecture.** Demonstrate
+    that the platform's modular design enables linear scaling of development
+    velocity, computational capacity, and analytical scope. Each new module,
+    data source, or model type should integrate through well-defined interfaces
+    without requiring changes to existing components.
+
+15. **Continuously improve data quality and research quality.** Establish feedback
+    loops between production monitoring, research experimentation, and data
+    pipeline improvements. Lessons learned from model degradation, backtesting
+    discrepancies, and data quality incidents must systematically inform
+    improvements to the platform's data acquisition, feature engineering, and
+    evaluation practices.
 
 ## Target Users
 

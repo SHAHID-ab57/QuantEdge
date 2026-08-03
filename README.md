@@ -1,28 +1,52 @@
-# AI Ethereum Market Prediction Platform
+# Eth AI Platform
 
-A professional AI-powered platform for Ethereum market prediction and analysis.
+A professional AI-powered Ethereum Market Analysis and Probabilistic Prediction
+Platform for research, education, and decision support.
 
-## Repository Status
+## Overview
 
-**Planning Phase** — This repository is in the early planning and documentation stage. No application code has been created yet.
+The platform collects, processes, and analyzes Ethereum market data to produce
+probabilistic forecasts and quantitative research outputs. It combines quantitative
+finance, machine learning, data engineering, and production software engineering
+into a single, modular system.
 
-## Documentation Structure
+The platform does not provide financial advice and does not guarantee profitable
+trading. All outputs are analytical inputs intended to support informed,
+evidence-based decision-making.
 
-| Path | Description |
+## Repository Philosophy
+
+- **Architecture-first.** Design is documented before implementation begins.
+- **Bounded context ownership.** Domain code lives exclusively within its owning
+  service; cross-service communication happens only through versioned contracts.
+- **Reproducible research.** Every experiment, dataset, and model is versioned,
+  documented, and traceable.
+- **Probabilistic thinking.** Uncertainty is measured and communicated honestly;
+  nothing is presented as a guaranteed prediction.
+- **Professional engineering.** Quality gates, documentation, and standards apply
+  to every change.
+
+## Directory Overview
+
+| Directory | Purpose |
 |---|---|
-| `docs/architecture/` | System architecture and design decisions |
-| `docs/api/` | API specifications and usage |
-| `docs/database/` | Database schema and migrations |
-| `docs/ai/` | AI model architecture and pipeline |
-| `docs/deployment/` | Deployment and infrastructure |
-| `docs/testing/` | Testing strategy and plans |
-| `docs/decisions/` | Architecture Decision Records (ADRs) |
-| `docs/roadmap/` | Development roadmap |
-| `docs/assets/` | Diagrams and media assets |
-| `PROJECT.md` | Project overview |
-| `ROADMAP.md` | High-level roadmap |
-| `REQUIREMENTS.md` | Functional and non-functional requirements |
-| `CHANGELOG.md` | Version history |
+| `apps/` | Deployable application entry points (web, api, workers, cli) |
+| `services/` | One directory per bounded context — the platform's domain implementation |
+| `packages/` | Shared, reusable libraries (contracts, config, logging, observability) |
+| `infra/` | Infrastructure-as-code definitions |
+| `configs/` | Repository-level tooling configuration |
+| `docs/` | All platform documentation |
+| `scripts/` | Automation and maintenance scripts |
+| `tests/` | Cross-cutting integration and end-to-end tests |
+| `tools/` | Developer tooling and scaffolding utilities |
+
+## Development Status
+
+**Planning Phase** — The repository is in the early planning and documentation
+stage. Architecture, requirements, and engineering standards are being established.
+No application code has been created yet.
+
+Progress is tracked in `TASKBOOK.md`; decisions are recorded in `DECISIONS.md`.
 
 ## License
 

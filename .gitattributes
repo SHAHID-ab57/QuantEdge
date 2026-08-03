@@ -1,0 +1,54 @@
+# Normalize line endings
+* text=auto eol=lf
+
+# Source files
+*.py text
+*.js text
+*.jsx text
+*.ts text
+*.tsx text
+*.json text
+*.yml text
+*.yaml text
+*.toml text
+*.md text
+*.sh text
+*.html text
+*.css text
+*.scss text
+*.sql text
+
+# Binary files
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.eot binary
+*.zip binary
+*.tar binary
+*.gz binary
+*.7z binary
+*.parquet binary
+*.h5 binary
+*.hdf5 binary
+*.pkl binary
+*.pickle binary
+*.joblib binary
+*.onnx binary
+*.safetensors binary
+*.db binary
+*.sqlite binary
+*.sqlite3 binary
+
+# Notebooks
+*.ipynb binary
+
+# Editor configs are treated as text
+.editorconfig text
+.gitattributes text
+.gitignore text

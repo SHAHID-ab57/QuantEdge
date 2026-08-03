@@ -893,9 +893,279 @@ commitment to scientific integrity.
     refine their understanding of market dynamics. — *Value: drives cumulative
     improvement in analytical capabilities and domain knowledge.*
 
+### Engineering Objectives
+
+1. **Building maintainable software.** Every component of the platform must be written
+   with the understanding that it will be read, modified, and extended by others long
+   after its initial author has moved on. Clarity, simplicity, and consistency are
+   prioritized over cleverness in all code. — *Value: reduces the long-term cost of
+   change and protects the platform's evolution.*
+
+2. **Modular architecture.** The platform must be decomposed into cohesive, loosely
+   coupled modules with well-defined responsibilities and explicit interfaces. Modules
+   must be independently testable, deployable, and replaceable without cascading
+   changes across the system. — *Value: enables parallel development, isolated
+   testing, and targeted evolution.*
+
+3. **Clear separation of responsibilities.** Each component of the system must have a
+   single, well-defined purpose. Cross-cutting concerns — configuration, logging,
+   error handling, observability — must be separated from business logic rather than
+   interleaved throughout the codebase. — *Value: improves comprehensibility,
+   testability, and the ability to reason about system behavior.*
+
+4. **Clean code principles.** Code must be written according to established principles
+   of clarity and maintainability: meaningful naming, small and focused functions,
+   minimal duplication, and expressive structure. Code review should be able to
+   focus on substance rather than style. — *Value: keeps the codebase healthy and
+   productive over time.*
+
+5. **High-quality documentation.** Documentation is a first-class deliverable. Every
+   module, interface, data model, and operational procedure must be documented at a
+   level appropriate to its audience — from architecture overviews to usage guides
+   to operator runbooks. — *Value: preserves institutional knowledge and enables
+   effective collaboration and onboarding.*
+
+6. **Test-driven quality mindset.** Quality is verified continuously, not at the end.
+   Every behavioral change must be accompanied by appropriate automated tests that
+   run in the continuous integration pipeline. Tests are written alongside
+   implementation, not retrofitted afterward. — *Value: provides early detection
+   of defects and confidence in every change.*
+
+7. **Consistent coding standards.** A single set of coding conventions — covering
+   formatting, naming, structure, and style — must be applied uniformly across the
+   entire codebase. Standards are enforced automatically wherever possible. —
+   *Value: eliminates stylistic debates, reduces review friction, and improves
+   readability.*
+
+8. **Version-controlled development.** All work products — including code,
+   documentation, configuration, and infrastructure definitions — must live in
+   version control with clear commit discipline. Every commit represents a
+   coherent unit of work with a descriptive message. — *Value: provides a
+   complete, auditable history of the project's evolution.*
+
+9. **Incremental delivery.** Features must be delivered in small, reviewable
+   increments rather than large, monolithic changes. Each increment should be
+   functional, tested, and safe to merge independently. — *Value: reduces risk,
+   accelerates feedback, and keeps the mainline always releasable.*
+
+10. **Continuous refactoring.** The codebase must be continuously improved to reduce
+    complexity, eliminate duplication, and improve structure as understanding of the
+    domain deepens. Refactoring is a normal part of development, not a separate
+    activity. — *Value: prevents architectural decay and sustains development
+    velocity.*
+
+11. **Automation where appropriate.** Repetitive and error-prone activities —
+    including testing, formatting, static analysis, builds, and deployment steps —
+    must be automated wherever the automation cost is justified by the frequency
+    and consequence of the activity. — *Value: eliminates human error, enforces
+    consistency, and frees engineers for higher-value work.*
+
+12. **Observability.** The platform must expose the information needed to understand
+    its internal state — structured logs, metrics, and traces — as a built-in
+    property rather than an afterthought. Systems must be designed to be
+    inspectable and diagnosable in production. — *Value: enables rapid incident
+    resolution and informed operational decisions.*
+
+13. **Reliability.** The platform must behave predictably and correctly under normal
+    and degraded conditions. Failure handling, retries, graceful degradation, and
+    recovery must be designed into every service rather than assumed to happen by
+    chance. — *Value: maintains user trust and research continuity.*
+
+14. **Knowledge sharing.** Engineering knowledge — design rationale, lessons learned,
+    debugging insights, and best practices — must be captured and shared through
+    documentation, code reviews, and written records rather than residing only in
+    individual memory. — *Value: makes the project resilient to contributor
+    changes and multiplies collective expertise.*
+
+15. **Sustainable project evolution.** The platform must be built to evolve
+    indefinitely. This requires disciplined governance of dependencies, deliberate
+    management of technical debt, regular review of architecture decisions, and a
+    commitment to preserving quality as features and scale grow. — *Value: ensures
+    the platform remains healthy and valuable for years, not just for its initial
+    milestone.*
+
 ## Target Users
 
-> To be completed in the following tasks.
+The platform is designed to serve a diverse set of user groups unified by a common
+interest in evidence-based, probabilistic analysis of Ethereum markets. Users are
+organized into primary audiences — those for whom the platform is a core work
+instrument — and secondary audiences — those who benefit from the platform's
+capabilities as part of broader professional, academic, or learning activities.
+
+### Quantitative Researchers
+
+Quantitative researchers form the platform's primary audience. They are professionals
+and practitioners who design, implement, and evaluate quantitative models of market
+behavior, often with backgrounds in statistics, econometrics, mathematics, or physics.
+
+They would use the platform to develop and test hypotheses about Ethereum market
+dynamics, engineer predictive features, train and evaluate models under statistically
+sound protocols, and validate strategies through backtesting and walk-forward analysis.
+The platform provides them with the data infrastructure, research workflows, and
+evaluation frameworks that would otherwise require substantial bespoke engineering
+effort.
+
+In return, researchers receive a reproducible, transparent research environment in
+which their experiments are versioned, documented, and comparable — enabling them to
+focus on the substance of their research rather than on the plumbing of data pipelines
+and experiment tracking.
+
+### AI and Machine Learning Researchers
+
+AI researchers are specialists focused on advancing the application of machine
+learning and deep learning to financial time-series problems. They work on model
+architecture, feature representation, uncertainty quantification, and evaluation
+methodology for sequential and stochastic data.
+
+They would use the platform to access curated, versioned datasets, train models
+against standardized evaluation protocols, and compare novel approaches against
+established baselines under identical conditions. The platform's commitment to
+probabilistic forecasting aligns directly with their research interest in
+well-calibrated predictive distributions.
+
+The platform's value to this group is twofold: it reduces the infrastructure burden
+of experiment management, and it provides a rigorous evaluation environment in which
+claims about model performance are credible because they are measured against
+consistent, transparent benchmarks.
+
+### Data Scientists
+
+Data scientists are analytics practitioners who apply statistical and machine
+learning methods to extract insight from data. They are experienced in data
+wrangling, exploratory analysis, and predictive modeling, though their primary
+expertise lies in analysis rather than in building production systems.
+
+They would use the platform to conduct exploratory analysis of market data, develop
+and evaluate predictive models, and produce analytical reports grounded in rigorous
+methodology. The platform spares them the effort of assembling data pipelines and
+evaluation infrastructure from scratch.
+
+The platform delivers value to data scientists by providing trustworthy, validated
+data and standardized analytical workflows, enabling them to move quickly from
+question to insight while maintaining confidence in the reliability of their inputs
+and the soundness of their methods.
+
+### Portfolio Analysts
+
+Portfolio analysts are professionals responsible for constructing, monitoring, and
+evaluating investment portfolios. They bring domain knowledge of asset allocation,
+risk measurement, and performance attribution, and they rely on analytical tools to
+inform their recommendations.
+
+They would use the platform to obtain probabilistic views of Ethereum market
+conditions, evaluate scenario analyses, and incorporate uncertainty-aware risk
+assessments into their portfolio evaluation process. The platform's risk-focused
+analytical outputs — including tail risk and drawdown analysis — map directly onto
+their professional concerns.
+
+The platform provides portfolio analysts with a credible quantitative foundation for
+their analyses: outputs that are transparent about uncertainty and limitations,
+enabling them to communicate risks to stakeholders with greater confidence and
+precision.
+
+### Individual Researchers and Independent Analysts
+
+Individual researchers are self-directed analysts who study cryptocurrency markets
+independently, outside institutional settings. They may be professional researchers,
+independent consultants, or serious hobbyists with strong analytical skills.
+
+They would use the platform as a comprehensive research instrument that provides
+professional-grade capabilities — data management, feature engineering, model
+evaluation, and backtesting — that would otherwise be unavailable to them.
+
+The platform offers this group access to institutional-quality research infrastructure
+at no cost, democratizing capabilities that are typically reserved for well-funded
+organizations and enabling independent, verifiable contributions to the field.
+
+### Beginner Traders
+
+Beginner traders are individuals new to cryptocurrency trading who are seeking to
+understand market behavior before committing capital. They are characterized by
+limited market experience and a need for reliable educational foundations.
+
+They would use the platform to develop an understanding of how markets move, how
+uncertainty is quantified, and how to interpret analytical outputs responsibly. The
+platform's educational framing — explaining what predictions mean, how confident they
+are, and what their limitations are — supports their learning trajectory.
+
+The platform's value to beginner traders lies in instilling disciplined, probabilistic
+thinking early in their development — helping them avoid the common pitfalls of
+overconfidence and certainty-seeking that characterize uninformed market
+participation.
+
+### Intermediate Traders
+
+Intermediate traders have practical market experience and are seeking to move beyond
+intuition-driven analysis toward systematic, data-informed approaches. They
+understand market basics but lack formal quantitative training.
+
+They would use the platform to validate their market hypotheses against historical
+data, explore features and signals systematically, and learn how probabilistic
+frameworks can improve their decision-making.
+
+The platform provides intermediate traders with a structured bridge from discretionary
+to systematic analysis, equipping them with the vocabulary, methods, and tools of
+quantitative research in a way that is rigorous yet accessible.
+
+### Professional Traders
+
+Professional traders operate in markets as a profession, whether independently or for
+institutions. They have substantial market experience and require tools that meet
+professional standards of reliability, performance, and analytical depth.
+
+They would use the platform to complement their existing workflows with rigorous,
+probabilistic market analysis, scenario exploration, and risk assessment. The platform
+supports their decision-support needs while remaining explicitly distinct from
+financial advice or trading automation.
+
+For professional traders, the platform delivers analytical depth and transparency
+that is rare among commercial tools — outputs they can understand, audit, and
+integrate into their own disciplined decision processes.
+
+### Students of Finance and AI
+
+Students are learners enrolled in or pursuing formal education in finance, economics,
+data science, artificial intelligence, or computer science. They are building the
+foundational knowledge that will underpin their future professional work.
+
+They would use the platform as a live case study and practice environment: exploring
+real market data, replicating published research, implementing models, and developing
+skills in quantitative analysis and software engineering.
+
+The platform provides students with a rare combination of real-world data, rigorous
+methodology, and complete transparency — an environment where the entire analytical
+pipeline can be inspected and learned from, making abstract academic concepts
+concrete and practiceable.
+
+### Educators
+
+Educators are instructors and academic faculty who teach courses in finance,
+quantitative methods, machine learning, or data science. They design curricula that
+prepare students for professional practice in data-intensive fields.
+
+They would use the platform as teaching material: as a source of curated datasets for
+assignments, as a reference implementation of rigorous research methodology, and as a
+demonstration of how professional quantitative systems are architected and documented.
+
+The platform offers educators a credible, transparent foundation for coursework and
+research supervision, enabling them to expose students to professional-grade tools and
+practices within an academic context.
+
+### Software Engineers
+
+Software engineers are developers interested in quantitative finance, distributed
+systems, or AI infrastructure. They bring strong software craftsmanship and are
+primarily engaged by the engineering challenges of building production-grade
+analytical systems.
+
+They would use the platform to study and contribute to a professionally engineered
+codebase — examining modular architecture, data pipeline design, API design, testing
+practices, and MLOps patterns.
+
+The platform provides software engineers with a reference-quality codebase that
+demonstrates how quantitative research and production engineering can be combined
+into a single, well-structured system — a valuable learning and contribution
+environment for those seeking to specialize in financial technology.
 
 ## Scope
 

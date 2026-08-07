@@ -1,0 +1,26 @@
+# gitleaks configuration
+# Lightweight secret scanning: pre-commit hook + CI.
+
+title = "Eth AI Platform gitleaks config"
+
+[extend]
+useDefault = true
+
+[[allowlist]]
+description = "Placeholder values in environment example files (empty values only)"
+paths = [".env.example"]
+regexes = [
+  "(?i)^[A-Z0-9_]+=$",
+]
+
+[[allowlist]]
+description = "Documentation placeholders"
+paths = [".gitattributes", ".gitignore", ".editorconfig"]
+regexes = [
+  "EXAMPLE|PLACEHOLDER|TODO",
+]
+
+[log]
+level = "info"
+format = "text"
+verbose = false

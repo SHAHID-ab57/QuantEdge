@@ -1,0 +1,17 @@
+node_modules/
+dist/
+build/
+out/
+coverage/
+.next/
+.nuxt/
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+artifacts/
+datasets/
+models/
+runs/
+LICENSE

@@ -1,0 +1,30 @@
+#!/bin/sh
+# Husky pre-commit hook
+# Runs staged-file quality checks and secret scanning.
+
+if ! command -v npx >/dev/null 2>&1; then
+  echo "pre-commit: npx not found. Install Node.js (see docs/DevelopmentSetup.md)."
+  exit 1
+fi
+
+echo "pre-commit: running staged checks..."
+
+if npx --no-install lint-staged 2>/dev/null; then
+  echo "pre-commit: lint-staged passed."
+else
+  echo "pre-commit: lint-staged failed or is not installed."
+  echo "Install development tools first (see docs/DevelopmentSetup.md)."
+  exit 1
+fi
+
+if command -v gitleaks >/dev/null 2>&1; then
+  echo "pre-commit: scanning for secrets..."
+  if ! gitleaks protect --staged --no-banner 2>/dev/null; then
+    echo "pre-commit: potential secrets detected. Review and re-stage."
+    exit 1
+  fi
+else
+  echo "pre-commit: gitleaks not installed - secret scan skipped."
+fi
+
+exit 0

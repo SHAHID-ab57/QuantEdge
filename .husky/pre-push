@@ -1,0 +1,23 @@
+#!/bin/sh
+# Husky pre-push hook
+# Light verification before pushing: formatting and documentation lint.
+
+if ! command -v npx >/dev/null 2>&1; then
+  echo "pre-push: npx not found. Install Node.js (see docs/DevelopmentSetup.md)."
+  exit 1
+fi
+
+echo "pre-push: checking formatting..."
+if ! npx --no-install prettier --check . 2>/dev/null; then
+  echo "pre-push: formatting issues found. Run 'npx prettier --write .' before pushing."
+  exit 1
+fi
+
+echo "pre-push: linting markdown..."
+if ! npx --no-install markdownlint docs README.md PROJECT.md REQUIREMENTS.md 2>/dev/null; then
+  echo "pre-push: markdownlint issues found in docs."
+  exit 1
+fi
+
+echo "pre-push: checks passed."
+exit 0

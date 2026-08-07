@@ -1,0 +1,18 @@
+#!/bin/sh
+# Husky commit-msg hook
+# Enforces Conventional Commits via commitlint.
+
+if ! command -v npx >/dev/null 2>&1; then
+  echo "commit-msg: npx not found. Install Node.js (see docs/DevelopmentSetup.md)."
+  exit 1
+fi
+
+if npx --no-install commitlint --edit "$1" 2>/dev/null; then
+  echo "commit-msg: commit message valid."
+  exit 0
+else
+  echo "commit-msg: commit message does not follow Conventional Commits."
+  echo "Format: type(scope): description  e.g. feat(market-data): add order book collection"
+  echo "Install commitlint first (see docs/DevelopmentSetup.md)."
+  exit 1
+fi

@@ -1,0 +1,103 @@
+# Docker Compose — Local Development Infrastructure
+#
+# Infrastructure services only (PostgreSQL, Redis).
+# Application services (api, worker, web) are placeholders;
+# see the commented example blocks at the bottom of this file.
+#
+# Usage:
+#   docker compose -f infra/docker/docker-compose.yml up -d
+#   Or copy .env.example to .env and run:  docker compose up -d
+
+name: eth-ai-platform-dev
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: eth-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-research}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required (see infra/docker/.env.example)}
+      POSTGRES_DB: ${POSTGRES_DB:-eth_platform}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - eth-platform-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-research} -d ${POSTGRES_DB:-eth_platform}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    container_name: eth-redis
+    restart: unless-stopped
+    command: [
+      "redis-server",
+      "--appendonly", "yes",
+      "--requirepass", "${REDIS_PASSWORD:?REDIS_PASSWORD is required (see infra/docker/.env.example)}"
+    ]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - eth-platform-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ------------------------------------------------------------------
+  # Placeholder example — Future application services follow this pattern.
+  # Joining the network and depending on healthy infrastructure:
+  #
+  # api:
+  #   build:
+  #     context: ../../.
+  #     dockerfile: apps/api/Dockerfile
+  #   container_name: eth-api
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #     redis:
+  #       condition: service_healthy
+  #   networks:
+  #     - eth-platform-net
+  #
+  # worker:
+  #   build:
+  #     context: ../../.
+  #     dockerfile: apps/workers/Dockerfile
+  #   depends_on:
+  #     api:
+  #       condition: service_started
+  #   networks:
+  #     - eth-platform-net
+  #
+  # web:
+  #   build:
+  #     context: ../../.
+  #     dockerfile: apps/web/Dockerfile
+  #   ports:
+  #     - "${WEB_PORT:-3000}:3000"
+  #   networks:
+  #     - eth-platform-net
+  # ------------------------------------------------------------------
+
+networks:
+  eth-platform-net:
+    name: eth-platform-net
+    driver: bridge
+
+volumes:
+  postgres-data:
+    name: eth-postgres-data
+  redis-data:
+    name: eth-redis-data

@@ -40,11 +40,62 @@ evidence-based decision-making.
 | `tests/` | Cross-cutting integration and end-to-end tests |
 | `tools/` | Developer tooling and scaffolding utilities |
 
+## Getting Started
+
+### Prerequisites
+
+| Tool | Minimum Version |
+|---|---|
+| Node.js | 20+ |
+| pnpm | 9+ |
+| Python | 3.11+ (future AI/ML services) |
+
+### Install Dependencies
+
+```bash
+pnpm install
+```
+
+Installation triggers the `prepare` script, which wires the Git hooks via Husky.
+If hooks are not active, enable them explicitly:
+
+```bash
+git config core.hooksPath .husky
+```
+
+### Workspace Commands
+
+Scripts are orchestrated with Turbo; tasks run across all workspace packages
+(`apps/*`, `services/*`, `packages/*`, `tools/*`).
+
+| Command | Purpose |
+|---|---|
+| `pnpm dev` | Run all packages in development mode |
+| `pnpm build` | Build all packages in dependency order |
+| `pnpm lint` | Lint all packages |
+| `pnpm lint:fix` | Lint and autofix all packages |
+| `pnpm format` | Format the entire repository with Prettier |
+| `pnpm format:check` | Verify formatting |
+| `pnpm test` | Run tests across all packages |
+| `pnpm typecheck` | Type-check all packages |
+| `pnpm check` | Run lint and typecheck together |
+| `pnpm clean` | Remove build artifacts across all packages |
+| `pnpm docs:lint` | Lint documentation with markdownlint |
+
+### Workspace Structure
+
+- `pnpm-workspace.yaml` defines the workspace packages.
+- `turbo.json` defines the task graph (build order, caching, outputs).
+- `tsconfig.base.json` provides the shared TypeScript base configuration;
+  packages extend it and may override compiler options as needed.
+- Dependencies between workspace packages are declared in each package's
+  manifest using the `workspace:` protocol.
+
 ## Development Status
 
 **Planning Phase** — The repository is in the early planning and documentation
 stage. Architecture, requirements, and engineering standards are being established.
-No application code has been created yet.
+The workspace foundation is in place; no application code has been created yet.
 
 Progress is tracked in `TASKBOOK.md`; decisions are recorded in `DECISIONS.md`.
 

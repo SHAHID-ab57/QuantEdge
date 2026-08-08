@@ -1,0 +1,8 @@
+packages:
+  - apps/*
+  - services/*
+  - packages/*
+  - tools/*
+
+onlyBuiltDependencies:
+  - husky

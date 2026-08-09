@@ -1,11 +1,12 @@
 """Health endpoint.
 
-Provides liveness and service metadata for the API service.
+Provides liveness, service metadata, and database connectivity checks.
 """
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, HTTPException, status
 
 from app import __version__
+from app.db.engine import probe_database
 from app.schemas.health import HealthResponse
 
 router = APIRouter()
@@ -13,5 +14,16 @@ router = APIRouter()
 
 @router.get("/health", response_model=HealthResponse, status_code=status.HTTP_200_OK)
 async def health() -> HealthResponse:
-    """Return service health and version information."""
-    return HealthResponse(status="ok", service="api", version=__version__)
+    """Return service health, version, and database connectivity."""
+    error = await probe_database()
+    if error is not None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Database unavailable: {error}",
+        )
+    return HealthResponse(
+        status="ok",
+        service="api",
+        version=__version__,
+        database="connected",
+    )

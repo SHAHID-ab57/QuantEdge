@@ -162,12 +162,12 @@ Authentication Service, and is presented through the Web Frontend.
 
 ## 3. Communication Patterns
 
-| Pattern | Used for | Why appropriate |
-|---|---|---|
-| **Synchronous (request/response)** | User-facing operations — queries, configuration changes, strategy management, report generation. | Callers require immediate results; request/response provides natural correlation and error feedback. |
-| **Asynchronous (message-based)** | Data flow between producers and consumers — ingestion, feature computation, prediction distribution, execution events. | Decouples producer throughput from consumer capacity; absorbs load spikes; tolerates consumer unavailability. |
-| **Event-driven (publish/subscribe)** | Live market events, prediction publication, execution updates, telemetry. | Multiple consumers react independently to the same event; consumers scale and evolve without producer changes. |
-| **Scheduled (job orchestration)** | Recurring workloads — data collection, training, backtests, report generation, maintenance. | Time-based workloads have no natural caller; scheduling centralizes timing, sequencing, and failure handling. |
+| Pattern                              | Used for                                                                                                               | Why appropriate                                                                                                |
+| ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| **Synchronous (request/response)**   | User-facing operations — queries, configuration changes, strategy management, report generation.                       | Callers require immediate results; request/response provides natural correlation and error feedback.           |
+| **Asynchronous (message-based)**     | Data flow between producers and consumers — ingestion, feature computation, prediction distribution, execution events. | Decouples producer throughput from consumer capacity; absorbs load spikes; tolerates consumer unavailability.  |
+| **Event-driven (publish/subscribe)** | Live market events, prediction publication, execution updates, telemetry.                                              | Multiple consumers react independently to the same event; consumers scale and evolve without producer changes. |
+| **Scheduled (job orchestration)**    | Recurring workloads — data collection, training, backtests, report generation, maintenance.                            | Time-based workloads have no natural caller; scheduling centralizes timing, sequencing, and failure handling.  |
 
 **Pattern selection principles:**
 
@@ -185,24 +185,24 @@ Authentication Service, and is presented through the Web Frontend.
 The following operations run as background jobs or scheduled tasks rather than
 within user request paths:
 
-| Workload | Trigger | Rationale |
-|---|---|---|
-| Historical data collection | Scheduled (per source) | Long-running, provider-bound, no user interaction required. |
-| Raw data archival and retention | Scheduled | Bulk data movement; must not compete with request traffic. |
-| Data quality validation | Event-driven on ingestion + scheduled re-validation | Continuous verification without blocking ingestion. |
-| Dataset assembly and validation | Scheduled + on-demand | Compute-intensive; requested by research workflows. |
-| Model training | Scheduled + on-demand | Long-running, resource-intensive; must not affect serving. |
-| Model evaluation runs | Event-driven on training completion | Heavy computation triggered by training outcomes. |
-| Batch prediction runs | Scheduled | Periodic forecast production without real-time constraints. |
-| Backtest execution | Scheduled + on-demand | Long-running simulations; parallelizable. |
-| Walk-forward validation | Scheduled | Extensive sequential simulation; must run off the request path. |
-| Paper trading simulation loop | Scheduled / event-driven | Continuous strategy evaluation independent of user interaction. |
-| Order reconciliation | Scheduled | Periodic comparison of local and venue state. |
-| Risk scenario and stress runs | Scheduled | Periodic deep risk analysis beyond real-time limits. |
-| Report and analytics generation | Scheduled | Aggregation over large data volumes. |
-| Notification digest assembly | Scheduled | Batched user communication. |
-| Retention and maintenance jobs | Scheduled | Data lifecycle enforcement. |
-| Telemetry aggregation and alert evaluation | Continuous + scheduled | Real-time anomaly detection with periodic deep analysis. |
+| Workload                                   | Trigger                                             | Rationale                                                       |
+| ------------------------------------------ | --------------------------------------------------- | --------------------------------------------------------------- |
+| Historical data collection                 | Scheduled (per source)                              | Long-running, provider-bound, no user interaction required.     |
+| Raw data archival and retention            | Scheduled                                           | Bulk data movement; must not compete with request traffic.      |
+| Data quality validation                    | Event-driven on ingestion + scheduled re-validation | Continuous verification without blocking ingestion.             |
+| Dataset assembly and validation            | Scheduled + on-demand                               | Compute-intensive; requested by research workflows.             |
+| Model training                             | Scheduled + on-demand                               | Long-running, resource-intensive; must not affect serving.      |
+| Model evaluation runs                      | Event-driven on training completion                 | Heavy computation triggered by training outcomes.               |
+| Batch prediction runs                      | Scheduled                                           | Periodic forecast production without real-time constraints.     |
+| Backtest execution                         | Scheduled + on-demand                               | Long-running simulations; parallelizable.                       |
+| Walk-forward validation                    | Scheduled                                           | Extensive sequential simulation; must run off the request path. |
+| Paper trading simulation loop              | Scheduled / event-driven                            | Continuous strategy evaluation independent of user interaction. |
+| Order reconciliation                       | Scheduled                                           | Periodic comparison of local and venue state.                   |
+| Risk scenario and stress runs              | Scheduled                                           | Periodic deep risk analysis beyond real-time limits.            |
+| Report and analytics generation            | Scheduled                                           | Aggregation over large data volumes.                            |
+| Notification digest assembly               | Scheduled                                           | Batched user communication.                                     |
+| Retention and maintenance jobs             | Scheduled                                           | Data lifecycle enforcement.                                     |
+| Telemetry aggregation and alert evaluation | Continuous + scheduled                              | Real-time anomaly detection with periodic deep analysis.        |
 
 **Design rules for background processing:**
 
@@ -323,13 +323,13 @@ Analytics, with the Operations layer orchestrating, monitoring, and presenting.
 
 ### Trade-offs
 
-| Decision | Trade-off | Resolution |
-|---|---|---|
-| Mandatory risk gate on all execution | Adds latency to every order path. | Safety and control precedence is non-negotiable for a trading platform; latency is managed through contract design, not by removing the gate. |
-| Event-driven data flow | Adds infrastructure and eventual consistency to data pipelines. | Decoupling and resilience outweigh the cost; consistency requirements are defined per data domain. |
-| Centralized scheduling | All timing logic lives in one container, a single point of orchestration. | Provides uniform job visibility and governance; scheduler reliability is addressed by operational controls. |
-| Logical container boundaries ahead of physical deployment | Early milestones may co-deploy containers, deferring isolation benefits. | Boundaries are established now so that extraction later is mechanical, not architectural. |
-| Shared message backbone | Broker becomes a critical dependency. | Justified by the decoupling it provides; broker availability is treated as a platform availability requirement. |
+| Decision                                                  | Trade-off                                                                 | Resolution                                                                                                                                    |
+| --------------------------------------------------------- | ------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| Mandatory risk gate on all execution                      | Adds latency to every order path.                                         | Safety and control precedence is non-negotiable for a trading platform; latency is managed through contract design, not by removing the gate. |
+| Event-driven data flow                                    | Adds infrastructure and eventual consistency to data pipelines.           | Decoupling and resilience outweigh the cost; consistency requirements are defined per data domain.                                            |
+| Centralized scheduling                                    | All timing logic lives in one container, a single point of orchestration. | Provides uniform job visibility and governance; scheduler reliability is addressed by operational controls.                                   |
+| Logical container boundaries ahead of physical deployment | Early milestones may co-deploy containers, deferring isolation benefits.  | Boundaries are established now so that extraction later is mechanical, not architectural.                                                     |
+| Shared message backbone                                   | Broker becomes a critical dependency.                                     | Justified by the decoupling it provides; broker availability is treated as a platform availability requirement.                               |
 
 ### Future Extension Points
 

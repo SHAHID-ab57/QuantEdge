@@ -47,12 +47,12 @@ All other systems are outside the boundary and are treated purely as black boxes
 
 ## 2. Human Actors
 
-| Actor | Description |
-|---|---|
-| **Administrator** | Manages platform configuration, user accounts, data retention, system health, and operational security. Interacts with administration, monitoring, and configuration capabilities. |
-| **Researcher** | Conducts quantitative research: accesses data, engineers features, trains and evaluates models, runs backtests, and documents findings. Interacts with research, data, and model management capabilities. |
-| **Trader** | Uses analytical outputs and probabilistic forecasts to design, validate, and monitor strategies through paper trading and live trading. Interacts with analytics, prediction, risk, and order management capabilities. |
-| **Analyst** | Consumes platform outputs for market analysis, reporting, and decision support. Reviews data, predictions, risk assessments, and published research without modifying platform state. |
+| Actor             | Description                                                                                                                                                                                                            |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Administrator** | Manages platform configuration, user accounts, data retention, system health, and operational security. Interacts with administration, monitoring, and configuration capabilities.                                     |
+| **Researcher**    | Conducts quantitative research: accesses data, engineers features, trains and evaluates models, runs backtests, and documents findings. Interacts with research, data, and model management capabilities.              |
+| **Trader**        | Uses analytical outputs and probabilistic forecasts to design, validate, and monitor strategies through paper trading and live trading. Interacts with analytics, prediction, risk, and order management capabilities. |
+| **Analyst**       | Consumes platform outputs for market analysis, reporting, and decision support. Reviews data, predictions, risk assessments, and published research without modifying platform state.                                  |
 
 All actors interact with the platform exclusively through its user-facing capabilities.
 None of the actors interact directly with external systems; all external communication
@@ -62,15 +62,15 @@ is mediated by the platform.
 
 ## 3. External Systems
 
-| External System | Purpose |
-|---|---|
-| **Delta Exchange India** | Primary source of live and historical market data — including trades, order books, candles, and funding rates — and the execution venue for simulated and live trading operations. |
-| **CoinGecko** | Provides aggregated market data — including prices, market capitalization, trading volumes, and broader market statistics — used for cross-market context and validation. |
-| **Marketaux** | Supplies news and sentiment data used to derive market sentiment features for analysis and prediction. |
-| **Etherscan** | Provides on-chain Ethereum blockchain data — including transactions, blocks, addresses, and network activity — used for on-chain feature engineering. |
-| **FRED** | Supplies macroeconomic and financial time series — including interest rates and monetary aggregates — used to capture macroeconomic context in market analysis. |
-| **Alternative.me Fear & Greed Index** | Provides a sentiment index quantifying market fear and greed, used as a sentiment signal in feature engineering and analysis. |
-| **DefiLlama** | Supplies decentralized finance (DeFi) metrics — including total value locked and protocol data — used for DeFi market context and feature engineering. |
+| External System                       | Purpose                                                                                                                                                                            |
+| ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Delta Exchange India**              | Primary source of live and historical market data — including trades, order books, candles, and funding rates — and the execution venue for simulated and live trading operations. |
+| **CoinGecko**                         | Provides aggregated market data — including prices, market capitalization, trading volumes, and broader market statistics — used for cross-market context and validation.          |
+| **Marketaux**                         | Supplies news and sentiment data used to derive market sentiment features for analysis and prediction.                                                                             |
+| **Etherscan**                         | Provides on-chain Ethereum blockchain data — including transactions, blocks, addresses, and network activity — used for on-chain feature engineering.                              |
+| **FRED**                              | Supplies macroeconomic and financial time series — including interest rates and monetary aggregates — used to capture macroeconomic context in market analysis.                    |
+| **Alternative.me Fear & Greed Index** | Provides a sentiment index quantifying market fear and greed, used as a sentiment signal in feature engineering and analysis.                                                      |
+| **DefiLlama**                         | Supplies decentralized finance (DeFi) metrics — including total value locked and protocol data — used for DeFi market context and feature engineering.                             |
 
 These external systems are information sources and execution venues only. The
 platform defines the data contracts, retrieval policies, and error handling for

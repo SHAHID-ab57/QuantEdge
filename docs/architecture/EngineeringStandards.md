@@ -125,7 +125,7 @@ code changes.
 
 Dependencies flow downward:
 
-```
+```text
 apps/  →  services/  →  packages/  →  external dependencies
 ```
 
@@ -229,15 +229,15 @@ apps/  →  services/  →  packages/  →  external dependencies
 
 Branches follow the pattern:
 
-```
+```text
 {type}/{task-id}-{short-description}
 ```
 
-| Element | Convention | Example |
-|---|---|---|
-| Type | `feature`, `fix`, `refactor`, `docs`, `chore`, `test` | `feature` |
-| Task ID | TASKBOOK identifier | `M2-E1-T3-MT1` |
-| Description | Short kebab-case summary | `feature-store-api` |
+| Element     | Convention                                            | Example             |
+| ----------- | ----------------------------------------------------- | ------------------- |
+| Type        | `feature`, `fix`, `refactor`, `docs`, `chore`, `test` | `feature`           |
+| Task ID     | TASKBOOK identifier                                   | `M2-E1-T3-MT1`      |
+| Description | Short kebab-case summary                              | `feature-store-api` |
 
 Full example: `feature/M2-E1-T3-MT1-feature-store-api`
 
@@ -249,24 +249,24 @@ Branches are short-lived; long-lived branches are merged or abandoned.
 
 Commits follow the Conventional Commits specification:
 
-```
+```text
 {type}({scope}): {description}
 ```
 
 **Types:**
 
-| Type | Usage |
-|---|---|
-| `feat` | New capability |
-| `fix` | Bug correction |
-| `refactor` | Behavior-preserving restructuring |
-| `docs` | Documentation only |
-| `test` | Test additions or corrections |
-| `chore` | Maintenance, tooling, dependencies |
-| `build` | Build or dependency configuration |
-| `ci` | CI configuration |
-| `perf` | Performance improvement |
-| `style` | Formatting, no behavior change |
+| Type       | Usage                              |
+| ---------- | ---------------------------------- |
+| `feat`     | New capability                     |
+| `fix`      | Bug correction                     |
+| `refactor` | Behavior-preserving restructuring  |
+| `docs`     | Documentation only                 |
+| `test`     | Test additions or corrections      |
+| `chore`    | Maintenance, tooling, dependencies |
+| `build`    | Build or dependency configuration  |
+| `ci`       | CI configuration                   |
+| `perf`     | Performance improvement            |
+| `style`    | Formatting, no behavior change     |
 
 **Examples:**
 
@@ -359,12 +359,12 @@ Reviewers verify that every change:
 
 2. Log levels are used consistently:
 
-   | Level | Usage |
-   |---|---|
-   | `debug` | Diagnostic detail for development |
-   | `info` | Normal lifecycle events |
-   | `warn` | Unexpected but recoverable conditions |
-   | `error` | Failures requiring attention |
+   | Level   | Usage                                 |
+   | ------- | ------------------------------------- |
+   | `debug` | Diagnostic detail for development     |
+   | `info`  | Normal lifecycle events               |
+   | `warn`  | Unexpected but recoverable conditions |
+   | `error` | Failures requiring attention          |
 
 3. Every log entry identifies the service, component, and operation.
 

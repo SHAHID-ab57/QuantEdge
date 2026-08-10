@@ -36,6 +36,7 @@ which they are enforced are described elsewhere in this specification.
 **Purpose:** Manage the operational health, configuration, and security of the platform.
 
 **Responsibilities:**
+
 - Administer user accounts and role assignments.
 - Manage platform configuration and system settings.
 - Monitor platform health, performance, and security.
@@ -43,12 +44,14 @@ which they are enforced are described elsewhere in this specification.
 - Control access to sensitive platform functions.
 
 **Permissions:**
+
 - Full platform configuration and administration rights.
 - User account and role management.
 - System monitoring, logging, and diagnostic access.
 - Data maintenance and cleanup operations.
 
 **Typical Activities:**
+
 - Onboarding and offboarding users.
 - Applying configuration changes.
 - Responding to system alerts and incidents.
@@ -61,6 +64,7 @@ which they are enforced are described elsewhere in this specification.
 analytical findings using platform data and tools.
 
 **Responsibilities:**
+
 - Access and manage research datasets.
 - Design and execute experiments and analyses.
 - Develop, train, and evaluate predictive models.
@@ -68,6 +72,7 @@ analytical findings using platform data and tools.
 - Ensure research activities follow reproducibility and quality standards.
 
 **Permissions:**
+
 - Read access to market and historical data.
 - Create and manage research datasets and experiments.
 - Train and evaluate models within research environments.
@@ -76,6 +81,7 @@ analytical findings using platform data and tools.
 - No permission to execute live trades.
 
 **Typical Activities:**
+
 - Exploring and curating market data.
 - Engineering and validating features.
 - Training models and analyzing evaluation metrics.
@@ -88,6 +94,7 @@ analytical findings using platform data and tools.
 through simulated trading.
 
 **Responsibilities:**
+
 - Interpret analytical outputs and probabilistic forecasts.
 - Design and validate trading strategies through paper trading.
 - Monitor simulated portfolio performance.
@@ -95,6 +102,7 @@ through simulated trading.
 - Use platform outputs responsibly as decision support, not financial advice.
 
 **Permissions:**
+
 - Read access to market data, predictions, and analytics.
 - Create and manage paper trading strategies.
 - View and manage simulated portfolio positions.
@@ -102,6 +110,7 @@ through simulated trading.
 - No permission to execute real-money transactions.
 
 **Typical Activities:**
+
 - Reviewing forecasts and market analyses.
 - Configuring and running paper trading simulations.
 - Monitoring simulated positions and performance.
@@ -113,17 +122,20 @@ through simulated trading.
 without modifying platform state.
 
 **Responsibilities:**
+
 - Review market data, predictions, and analytical reports.
 - Produce analytical summaries and reports for stakeholders.
 - Follow platform usage and data governance guidelines.
 
 **Permissions:**
+
 - Read access to public market data and analytical outputs.
 - Read access to published research and reports.
 - No permission to create datasets, train models, run simulations, or modify
   platform data.
 
 **Typical Activities:**
+
 - Viewing dashboards and analytical reports.
 - Exporting published results for further analysis.
 - Monitoring market conditions using platform outputs.

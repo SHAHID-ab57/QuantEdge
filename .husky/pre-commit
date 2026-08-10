@@ -2,6 +2,16 @@
 # Husky pre-commit hook
 # Runs staged-file quality checks and secret scanning.
 
+# Hooks run in a minimal environment; GUI git clients and non-login shells
+# may not have nvm on PATH. Bootstrap the latest nvm-installed Node when
+# npx is not already available.
+if ! command -v npx >/dev/null 2>&1 && [ -d "$HOME/.nvm" ]; then
+  NODE_BIN=$(ls -d "$HOME"/.nvm/versions/node/*/bin 2>/dev/null | sort -V | tail -n 1)
+  if [ -n "$NODE_BIN" ]; then
+    export PATH="$NODE_BIN:$PATH"
+  fi
+fi
+
 if ! command -v npx >/dev/null 2>&1; then
   echo "pre-commit: npx not found. Install Node.js (see docs/DevelopmentSetup.md)."
   exit 1

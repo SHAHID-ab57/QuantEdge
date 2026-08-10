@@ -25,21 +25,21 @@ architecture (C4 Level 2) and will guide physical deployment decisions.
 
 **Context map summary:**
 
-| # | Bounded Context | Domain | Core / Supporting / Generic |
-|---|---|---|---|
-| BC1 | Identity & Access Management | Users, roles, permissions, sessions | Generic |
-| BC2 | Market Data | Data collection, historical storage, live streaming | Core |
-| BC3 | Feature Engineering | Features, datasets, versioning | Core |
-| BC4 | AI Research & Training | Experiments, models, model registry | Core |
-| BC5 | Prediction | Probabilistic forecasts | Core |
-| BC6 | Strategy Management | Strategy definitions and evaluation | Core |
-| BC7 | Backtesting | Historical simulation and validation | Core |
-| BC8 | Trading Execution | Order lifecycle, simulated and live trading | Core |
-| BC9 | Portfolio Management | Portfolios, positions, performance | Supporting |
-| BC10 | Risk Management | Risk metrics, limits, scenarios | Core |
-| BC11 | Analytics & Reporting | Analysis outputs, reports, dashboards | Supporting |
-| BC12 | Notifications | Alerts and user notifications | Generic |
-| BC13 | Administration & Operations | Configuration, scheduling, observability | Supporting |
+| #    | Bounded Context              | Domain                                              | Core / Supporting / Generic |
+| ---- | ---------------------------- | --------------------------------------------------- | --------------------------- |
+| BC1  | Identity & Access Management | Users, roles, permissions, sessions                 | Generic                     |
+| BC2  | Market Data                  | Data collection, historical storage, live streaming | Core                        |
+| BC3  | Feature Engineering          | Features, datasets, versioning                      | Core                        |
+| BC4  | AI Research & Training       | Experiments, models, model registry                 | Core                        |
+| BC5  | Prediction                   | Probabilistic forecasts                             | Core                        |
+| BC6  | Strategy Management          | Strategy definitions and evaluation                 | Core                        |
+| BC7  | Backtesting                  | Historical simulation and validation                | Core                        |
+| BC8  | Trading Execution            | Order lifecycle, simulated and live trading         | Core                        |
+| BC9  | Portfolio Management         | Portfolios, positions, performance                  | Supporting                  |
+| BC10 | Risk Management              | Risk metrics, limits, scenarios                     | Core                        |
+| BC11 | Analytics & Reporting        | Analysis outputs, reports, dashboards               | Supporting                  |
+| BC12 | Notifications                | Alerts and user notifications                       | Generic                     |
+| BC13 | Administration & Operations  | Configuration, scheduling, observability            | Supporting                  |
 
 ---
 
@@ -398,21 +398,21 @@ architecture (C4 Level 2) and will guide physical deployment decisions.
 
 ## 4. Communication Matrix
 
-| From \ To | BC1 | BC2 | BC3 | BC4 | BC5 | BC6 | BC7 | BC8 | BC9 | BC10 | BC11 | BC12 | BC13 |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| BC1 Identity & Access | — | • | • | • | • | • | • | • | • | • | • | • | • |
-| BC2 Market Data | — | — | → | | → | | → | → | | | → | | → |
-| BC3 Feature Engineering | | — | | → | → | | → | | | | | | |
-| BC4 AI Research & Training | | | ← | — | → | | | | | | → | | → |
-| BC5 Prediction | | ← | ← | ← | — | → | → | | → | → | → | | |
-| BC6 Strategy Management | | | | | ← | — | → | → | ← | → | → | | |
-| BC7 Backtesting | | ← | ← | | ← | ← | — | | | | → | | → |
-| BC8 Trading Execution | | → | | | | ← | | — | → | ← | | → | |
-| BC9 Portfolio Management | | | | | | → | | ← | — | → | → | | |
-| BC10 Risk Management | | | | | ← | → | | → | ← | — | → | → | |
-| BC11 Analytics & Reporting | | | | | | | | | | | — | | |
-| BC12 Notifications | | | | | | | | | | | | — | |
-| BC13 Administration & Ops | | → | | → | | | → | | | | | → | — |
+| From \ To                  | BC1 | BC2 | BC3 | BC4 | BC5 | BC6 | BC7 | BC8 | BC9 | BC10 | BC11 | BC12 | BC13 |
+| -------------------------- | --- | --- | --- | --- | --- | --- | --- | --- | --- | ---- | ---- | ---- | ---- |
+| BC1 Identity & Access      | —   | •   | •   | •   | •   | •   | •   | •   | •   | •    | •    | •    | •    |
+| BC2 Market Data            | —   | —   | →   |     | →   |     | →   | →   |     |      | →    |      | →    |
+| BC3 Feature Engineering    |     | —   |     | →   | →   |     | →   |     |     |      |      |      |      |
+| BC4 AI Research & Training |     |     | ←   | —   | →   |     |     |     |     |      | →    |      | →    |
+| BC5 Prediction             |     | ←   | ←   | ←   | —   | →   | →   |     | →   | →    | →    |      |      |
+| BC6 Strategy Management    |     |     |     |     | ←   | —   | →   | →   | ←   | →    | →    |      |      |
+| BC7 Backtesting            |     | ←   | ←   |     | ←   | ←   | —   |     |     |      | →    |      | →    |
+| BC8 Trading Execution      |     | →   |     |     |     | ←   |     | —   | →   | ←    |      | →    |      |
+| BC9 Portfolio Management   |     |     |     |     |     | →   |     | ←   | —   | →    | →    |      |      |
+| BC10 Risk Management       |     |     |     |     | ←   | →   |     | →   | ←   | —    | →    | →    |      |
+| BC11 Analytics & Reporting |     |     |     |     |     |     |     |     |     |      | —    |      |      |
+| BC12 Notifications         |     |     |     |     |     |     |     |     |     |      |      | —    |      |
+| BC13 Administration & Ops  |     | →   |     | →   |     |     | →   |     |     |      |      | →    | —    |
 
 **Legend:** `—` same context; `→` producer → consumer; `←` consumer; `•` authorization/identity dependency (BC1 is consulted, not consumed as data).
 
@@ -472,7 +472,7 @@ C4Context
 The repository layout mirrors the bounded contexts so that each context is a
 self-contained unit with explicit ownership.
 
-```
+```text
 platform/
 ├── apps/                        # Deployable applications (composition roots)
 ├── services/                    # One module per bounded context
@@ -533,14 +533,14 @@ platform/
 
 ## 8. Trade-offs
 
-| Trade-off | Resolution |
-|---|---|
+| Trade-off                                                                                                                        | Resolution                                                                                                                                                       |
+| -------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Context count vs. operational overhead** — thirteen contexts add coordination and infrastructure overhead in early milestones. | Logical boundaries are defined now; physical separation is introduced incrementally as complexity and scale justify it. Early milestones may co-deploy contexts. |
-| **Data duplication vs. coupling** — contexts that consume data owned elsewhere may cache or copy data. | Duplication is preferred where it serves autonomy and performance; ownership of truth remains with the owning context. |
-| **Serving consistency vs. research velocity** — strict model serving controls can slow research iteration. | Prediction (serving) and AI Research & Training (experimentation) are deliberately separated so each can optimize for its own priorities. |
-| **Centralized risk vs. path latency** — a mandatory risk gate adds latency to execution paths. | Independent risk enforcement is non-negotiable for a trading platform; latency is managed through contract design, not by removing the gate. |
-| **Generic vs. core contexts** — generic contexts (identity, notifications) could be replaced by external products. | They are isolated behind contracts, so substitution remains possible without affecting core contexts. |
-| **Shared kernel temptation** — contexts naturally want shared utility code. | Only non-semantic infrastructure is shared; domain concepts are never shared across boundaries. |
+| **Data duplication vs. coupling** — contexts that consume data owned elsewhere may cache or copy data.                           | Duplication is preferred where it serves autonomy and performance; ownership of truth remains with the owning context.                                           |
+| **Serving consistency vs. research velocity** — strict model serving controls can slow research iteration.                       | Prediction (serving) and AI Research & Training (experimentation) are deliberately separated so each can optimize for its own priorities.                        |
+| **Centralized risk vs. path latency** — a mandatory risk gate adds latency to execution paths.                                   | Independent risk enforcement is non-negotiable for a trading platform; latency is managed through contract design, not by removing the gate.                     |
+| **Generic vs. core contexts** — generic contexts (identity, notifications) could be replaced by external products.               | They are isolated behind contracts, so substitution remains possible without affecting core contexts.                                                            |
+| **Shared kernel temptation** — contexts naturally want shared utility code.                                                      | Only non-semantic infrastructure is shared; domain concepts are never shared across boundaries.                                                                  |
 
 ---
 

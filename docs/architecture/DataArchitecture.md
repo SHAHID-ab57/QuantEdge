@@ -200,7 +200,7 @@ defined by its purpose, owning bounded context, lifetime, consumers, and produce
 Data flows through a defined lifecycle as it moves from external observation to
 analytical insight and operational action.
 
-```
+```text
 Raw
  ↓
 Validated
@@ -222,18 +222,18 @@ Execution
 Analytics
 ```
 
-| Stage | Description |
-|---|---|
-| **Raw** | Unprocessed records as received from external sources. Preserved immutably for audit and reprocessing. |
-| **Validated** | Records checked for completeness, consistency, and correctness. Invalid records are quarantined and reported. |
-| **Normalized** | Records transformed into canonical platform representations with consistent schemas, units, and identifiers. |
-| **Stored** | Curated data persisted in the appropriate storage tier with retention and lifecycle policies. |
-| **Features** | Derived representations computed consistently from stored data, versioned by definition. |
-| **Dataset** | Versioned feature collections assembled and validated for training or evaluation. |
-| **Model** | Trained artifacts produced from datasets, registered with full metadata. |
-| **Prediction** | Probabilistic forecasts produced by models from features, with provenance. |
-| **Execution** | Decisions translated into orders — simulated or live — producing trading records. |
-| **Analytics** | Aggregated insights, reports, and dashboards derived from all upstream data. |
+| Stage          | Description                                                                                                   |
+| -------------- | ------------------------------------------------------------------------------------------------------------- |
+| **Raw**        | Unprocessed records as received from external sources. Preserved immutably for audit and reprocessing.        |
+| **Validated**  | Records checked for completeness, consistency, and correctness. Invalid records are quarantined and reported. |
+| **Normalized** | Records transformed into canonical platform representations with consistent schemas, units, and identifiers.  |
+| **Stored**     | Curated data persisted in the appropriate storage tier with retention and lifecycle policies.                 |
+| **Features**   | Derived representations computed consistently from stored data, versioned by definition.                      |
+| **Dataset**    | Versioned feature collections assembled and validated for training or evaluation.                             |
+| **Model**      | Trained artifacts produced from datasets, registered with full metadata.                                      |
+| **Prediction** | Probabilistic forecasts produced by models from features, with provenance.                                    |
+| **Execution**  | Decisions translated into orders — simulated or live — producing trading records.                             |
+| **Analytics**  | Aggregated insights, reports, and dashboards derived from all upstream data.                                  |
 
 **Lifecycle rules:**
 
@@ -248,15 +248,15 @@ Analytics
 
 ## 3. Data Classification
 
-| Class | Description | Domains |
-|---|---|---|
-| **Raw** | Unprocessed records as received from external sources; immutable. | D1, D2, D3, D4, D5 (pre-validation) |
-| **Processed** | Records that have been validated, normalized, and curated. | D1–D5 (post-validation), D15, D16 |
-| **Derived** | Data computed from other data through defined transformations. | D6, D7, D9, D11, D12, D13, D14 |
-| **Reference** | Slowly changing descriptive data providing context and stability. | D15, D16 |
-| **Operational** | Data that records and supports the operation of the platform itself. | D16, D17, D18 |
-| **Analytical** | Data produced for analysis and decision support. | D10, D11, D13, D14 |
-| **Experimental** | Data produced by research activities with non-production status. | D7 (research copies), D9, research-only artifacts |
+| Class            | Description                                                          | Domains                                           |
+| ---------------- | -------------------------------------------------------------------- | ------------------------------------------------- |
+| **Raw**          | Unprocessed records as received from external sources; immutable.    | D1, D2, D3, D4, D5 (pre-validation)               |
+| **Processed**    | Records that have been validated, normalized, and curated.           | D1–D5 (post-validation), D15, D16                 |
+| **Derived**      | Data computed from other data through defined transformations.       | D6, D7, D9, D11, D12, D13, D14                    |
+| **Reference**    | Slowly changing descriptive data providing context and stability.    | D15, D16                                          |
+| **Operational**  | Data that records and supports the operation of the platform itself. | D16, D17, D18                                     |
+| **Analytical**   | Data produced for analysis and decision support.                     | D10, D11, D13, D14                                |
+| **Experimental** | Data produced by research activities with non-production status.     | D7 (research copies), D9, research-only artifacts |
 
 **Classification rules:**
 
@@ -307,7 +307,7 @@ every analytical domain and produces consolidated decision-support information.
 
 **Key relationship summary:**
 
-```
+```text
 Observation (D1–D5) → Features (D6) → Datasets (D7) → Models (D8–D9)
                                                          ↓
 Observability (D17) ← all domains                        Predictions (D10)

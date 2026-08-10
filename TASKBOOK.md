@@ -19,15 +19,15 @@ the project as new epics are identified, priorities shift, and milestones are de
 
 ## Task Status
 
-| Status | Meaning |
-|---|---|
-| Planned | Task has been identified and described but is not yet ready to begin. |
-| Ready | All prerequisites are met; work can commence. |
-| In Progress | Development is actively underway. |
-| Review | Implementation is complete and awaiting review. |
-| Completed | Finished, reviewed, and approved. |
-| Blocked | Cannot proceed due to an unresolved dependency or external blocker. |
-| Deferred | Postponed to a future milestone; not currently scheduled. |
+| Status      | Meaning                                                               |
+| ----------- | --------------------------------------------------------------------- |
+| Planned     | Task has been identified and described but is not yet ready to begin. |
+| Ready       | All prerequisites are met; work can commence.                         |
+| In Progress | Development is actively underway.                                     |
+| Review      | Implementation is complete and awaiting review.                       |
+| Completed   | Finished, reviewed, and approved.                                     |
+| Blocked     | Cannot proceed due to an unresolved dependency or external blocker.   |
+| Deferred    | Postponed to a future milestone; not currently scheduled.             |
 
 ---
 
@@ -38,12 +38,12 @@ structure.
 
 **Format:** `M{0}-E{1}-T{2}-MT{3}`
 
-| Segment | Meaning | Example |
-|---|---|---|
-| `M0` | Milestone 0 | `M0` |
-| `E1` | Epic 1 within the milestone | `E1` |
-| `T3` | Task 3 within the epic | `T3` |
-| `MT2` | Micro-task 2 within the task | `MT2` |
+| Segment | Meaning                      | Example |
+| ------- | ---------------------------- | ------- |
+| `M0`    | Milestone 0                  | `M0`    |
+| `E1`    | Epic 1 within the milestone  | `E1`    |
+| `T3`    | Task 3 within the epic       | `T3`    |
+| `MT2`   | Micro-task 2 within the task | `MT2`   |
 
 **Examples:**
 
@@ -58,12 +58,12 @@ When a task does not require micro-task decomposition, `MT0` is used.
 
 ## Priority Levels
 
-| Priority | Usage |
-|---|---|
-| Critical | Blocks all other work; must be resolved immediately. |
-| High | Essential for the current milestone; should be completed before non-essentials. |
-| Medium | Important but can be deferred within the milestone if necessary. |
-| Low | Nice-to-have; addressed only after all higher-priority tasks are complete. |
+| Priority | Usage                                                                           |
+| -------- | ------------------------------------------------------------------------------- |
+| Critical | Blocks all other work; must be resolved immediately.                            |
+| High     | Essential for the current milestone; should be completed before non-essentials. |
+| Medium   | Important but can be deferred within the milestone if necessary.                |
+| Low      | Nice-to-have; addressed only after all higher-priority tasks are complete.      |
 
 Priority is reassessed at the beginning of each milestone.
 
@@ -99,37 +99,37 @@ one review per task.
 
 ## Progress Tracking
 
-| ID | Milestone | Epic | Task | Status | Priority | Dependencies | Git Commit |
-|---|---|---|---|---|---|---|---|
-| M0-E1-T1-MT1 | M0: Foundation | E1: Documentation | T1: Project Charter | Ready | Critical | None | — |
-| M0-E1-T1-MT2 | M0: Foundation | E1: Documentation | T1: Project Charter | Planned | Critical | M0-E1-T1-MT1 | — |
-| M0-E1-T2-MT1 | M0: Foundation | E1: Documentation | T2: Architecture | Planned | Critical | M0-E1-T1-MT2 | — |
-| M0-E2-T1-MT1 | M0: Foundation | E2: Scaffold | T1: Repository Setup | Planned | High | M0-E1-T2-MT1 | — |
-| M0-E2-T2-MT1 | M0: Foundation | E2: Scaffold | T2: Build Config | Planned | High | M0-E2-T1-MT1 | — |
-| M1-E1-T1-MT1 | M1: Data Layer | E1: Ingestion | T1: Data Sources | Planned | High | M0-E2-T2-MT1 | — |
-| M1-E1-T2-MT1 | M1: Data Layer | E1: Ingestion | T2: Pipeline | Planned | High | M1-E1-T1-MT1 | — |
-| M2-E1-T1-MT1 | M2: Features | E1: Engineering | T1: Feature API | Planned | Medium | M1-E1-T2-MT1 | — |
-| M3-E1-T1-MT1 | M3: AI Training | E1: Workflow | T1: Research Env | Planned | Medium | M2-E1-T1-MT1 | — |
-| M4-E1-T1-MT1 | M4: Prediction | E1: Engine | T1: Serving | Planned | Medium | M3-E1-T1-MT1 | — |
+| ID           | Milestone       | Epic              | Task                 | Status  | Priority | Dependencies | Git Commit |
+| ------------ | --------------- | ----------------- | -------------------- | ------- | -------- | ------------ | ---------- |
+| M0-E1-T1-MT1 | M0: Foundation  | E1: Documentation | T1: Project Charter  | Ready   | Critical | None         | —          |
+| M0-E1-T1-MT2 | M0: Foundation  | E1: Documentation | T1: Project Charter  | Planned | Critical | M0-E1-T1-MT1 | —          |
+| M0-E1-T2-MT1 | M0: Foundation  | E1: Documentation | T2: Architecture     | Planned | Critical | M0-E1-T1-MT2 | —          |
+| M0-E2-T1-MT1 | M0: Foundation  | E2: Scaffold      | T1: Repository Setup | Planned | High     | M0-E1-T2-MT1 | —          |
+| M0-E2-T2-MT1 | M0: Foundation  | E2: Scaffold      | T2: Build Config     | Planned | High     | M0-E2-T1-MT1 | —          |
+| M1-E1-T1-MT1 | M1: Data Layer  | E1: Ingestion     | T1: Data Sources     | Planned | High     | M0-E2-T2-MT1 | —          |
+| M1-E1-T2-MT1 | M1: Data Layer  | E1: Ingestion     | T2: Pipeline         | Planned | High     | M1-E1-T1-MT1 | —          |
+| M2-E1-T1-MT1 | M2: Features    | E1: Engineering   | T1: Feature API      | Planned | Medium   | M1-E1-T2-MT1 | —          |
+| M3-E1-T1-MT1 | M3: AI Training | E1: Workflow      | T1: Research Env     | Planned | Medium   | M2-E1-T1-MT1 | —          |
+| M4-E1-T1-MT1 | M4: Prediction  | E1: Engine        | T1: Serving          | Planned | Medium   | M3-E1-T1-MT1 | —          |
 
 ---
 
 ## Milestone Summary
 
-| Milestone | Name | Progress | Status |
-|---|---|---|---|
-| M0 | Foundation | 0% | Planned |
-| M1 | Data Layer | 0% | Planned |
-| M2 | Feature Engineering | 0% | Planned |
-| M3 | AI Research & Training | 0% | Planned |
-| M4 | Prediction Engine | 0% | Planned |
-| M5 | Backtesting | 0% | Planned |
-| M6 | Paper Trading | 0% | Planned |
-| M7 | Portfolio Analytics | 0% | Planned |
-| M8 | Risk Management | 0% | Planned |
-| M9 | Production Readiness | 0% | Planned |
-| M10 | Monitoring & Observability | 0% | Planned |
-| M11 | Community & Expansion | 0% | Planned |
+| Milestone | Name                       | Progress | Status  |
+| --------- | -------------------------- | -------- | ------- |
+| M0        | Foundation                 | 0%       | Planned |
+| M1        | Data Layer                 | 0%       | Planned |
+| M2        | Feature Engineering        | 0%       | Planned |
+| M3        | AI Research & Training     | 0%       | Planned |
+| M4        | Prediction Engine          | 0%       | Planned |
+| M5        | Backtesting                | 0%       | Planned |
+| M6        | Paper Trading              | 0%       | Planned |
+| M7        | Portfolio Analytics        | 0%       | Planned |
+| M8        | Risk Management            | 0%       | Planned |
+| M9        | Production Readiness       | 0%       | Planned |
+| M10       | Monitoring & Observability | 0%       | Planned |
+| M11       | Community & Expansion      | 0%       | Planned |
 
 ---
 

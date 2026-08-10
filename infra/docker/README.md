@@ -78,10 +78,10 @@ Afterward, start the stack again with `up -d`.
 
 Named volumes persist data independently of container lifecycle:
 
-| Volume | Backs | Purpose |
-|---|---|---|
+| Volume              | Backs                     | Purpose                   |
+| ------------------- | ------------------------- | ------------------------- |
 | `eth-postgres-data` | PostgreSQL data directory | Persistent database files |
-| `eth-redis-data` | Redis data directory | AOF snapshot persistence |
+| `eth-redis-data`    | Redis data directory      | AOF snapshot persistence  |
 
 ### Backup (PostgreSQL)
 

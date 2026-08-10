@@ -8,13 +8,13 @@ defined in `docs/architecture/EngineeringStandards.md`.
 
 ## Required Tools
 
-| Tool | Purpose | Minimum Version |
-|---|---|---|
-| Git | Version control | 2.40+ |
-| Node.js | Node-based tooling (commitlint, prettier, eslint, markdownlint, husky) | 20+ |
-| npm | Package management for tooling | 10+ |
-| Python | AI/ML services and research tooling | 3.11+ |
-| gitleaks | Secret scanning | Latest |
+| Tool     | Purpose                                                                | Minimum Version |
+| -------- | ---------------------------------------------------------------------- | --------------- |
+| Git      | Version control                                                        | 2.40+           |
+| Node.js  | Node-based tooling (commitlint, prettier, eslint, markdownlint, husky) | 20+             |
+| npm      | Package management for tooling                                         | 10+             |
+| Python   | AI/ML services and research tooling                                    | 3.11+           |
+| gitleaks | Secret scanning                                                        | Latest          |
 
 Optional: Docker (future containerized development), a code editor with the
 workspace recommendations (see `.vscode/extensions.json`).
@@ -28,7 +28,7 @@ workspace recommendations (see `.vscode/extensions.json`).
    npm install --save-dev husky commitlint @commitlint/cli @commitlint/config-conventional lint-staged prettier eslint @eslint/js markdownlint-cli2
    ```
 
-3. Install gitleaks (see https://github.com/gitleaks/gitleaks) and ensure it is on
+3. Install gitleaks (see <https://github.com/gitleaks/gitleaks>) and ensure it is on
    `PATH`.
 4. Enable the Git hooks:
 
@@ -37,6 +37,7 @@ workspace recommendations (see `.vscode/extensions.json`).
    ```
 
    (Alternatively, once Husky is installed, run `npx husky init`.)
+
 5. Install the recommended VS Code extensions when prompted, or run:
    `code --install-extension <extension-id>` for each entry in
    `.vscode/extensions.json`.
@@ -47,7 +48,7 @@ workspace recommendations (see `.vscode/extensions.json`).
   branches.
 - Branch naming follows the taskbook convention:
 
-  ```
+  ```text
   {type}/{task-id}-{short-description}
   ```
 
@@ -61,7 +62,7 @@ workspace recommendations (see `.vscode/extensions.json`).
 Commits follow Conventional Commits, enforced by commitlint via the `commit-msg`
 hook:
 
-```
+```text
 {type}({scope}): {description}
 ```
 
@@ -106,11 +107,11 @@ Rules:
 
 Hooks live in `.husky/` and are enabled by setting `core.hooksPath`:
 
-| Hook | Trigger | Checks |
-|---|---|---|
-| `pre-commit` | Before each commit | lint-staged (eslint, prettier, markdownlint on staged files) and gitleaks secret scan |
-| `commit-msg` | After commit message entry | commitlint (Conventional Commits) |
-| `pre-push` | Before pushing | prettier --check, markdownlint on documentation |
+| Hook         | Trigger                    | Checks                                                                                |
+| ------------ | -------------------------- | ------------------------------------------------------------------------------------- |
+| `pre-commit` | Before each commit         | lint-staged (eslint, prettier, markdownlint on staged files) and gitleaks secret scan |
+| `commit-msg` | After commit message entry | commitlint (Conventional Commits)                                                     |
+| `pre-push`   | Before pushing             | prettier --check, markdownlint on documentation                                       |
 
 If a tool is not installed, hooks fail with a message pointing to this document.
 Tools are invoked through `npx --no-install` so the hook uses only locally

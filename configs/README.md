@@ -8,15 +8,15 @@ codebase.
 Canonical shared tooling configuration lives at the **repository root** so that CLI
 tools and editor extensions auto-discover it:
 
-| Tool | Canonical location |
-|---|---|
-| Commitlint (Conventional Commits) | `commitlint.config.mjs` |
-| Prettier (formatting) | `.prettierrc.json` |
-| ESLint (shared linting) | `eslint.config.mjs` |
-| Markdownlint | `.markdownlint.json` |
-| Secret scanning | `.gitleaks.toml` |
-| Staged checks | `lint-staged.config.mjs` |
-| Docker environment template | `infra/docker/.env.example` |
+| Tool                              | Canonical location          |
+| --------------------------------- | --------------------------- |
+| Commitlint (Conventional Commits) | `commitlint.config.mjs`     |
+| Prettier (formatting)             | `.prettierrc.json`          |
+| ESLint (shared linting)           | `eslint.config.mjs`         |
+| Markdownlint                      | `.markdownlint.json`        |
+| Secret scanning                   | `.gitleaks.toml`            |
+| Staged checks                     | `lint-staged.config.mjs`    |
+| Docker environment template       | `infra/docker/.env.example` |
 
 This directory hosts repository-level configuration documentation:
 
@@ -38,24 +38,24 @@ behavior is predictable across development, testing, staging, and production.
 
 All environment variables are `UPPER_SNAKE_CASE` and prefixed by owning domain.
 
-| Prefix | Domain | Examples |
-|---|---|---|
-| `APP_` | Application-level configuration | `APP_ENV`, `APP_PORT`, `APP_LOG_LEVEL` |
-| `DB_` | Database connection | `DB_URL`, `DB_POOL_SIZE`, `DB_TIMEOUT` |
-| `REDIS_` | Redis connection | `REDIS_URL`, `REDIS_PASSWORD`, `REDIS_TTL` |
-| `JWT_` | Authentication | `JWT_SECRET`, `JWT_EXPIRATION_MINUTES` |
-| `DELTA_` | Delta Exchange India | `DELTA_API_KEY`, `DELTA_API_SECRET`, `DELTA_BASE_URL` |
-| `COINGECKO_` | CoinGecko provider | `COINGECKO_API_KEY`, `COINGECKO_BASE_URL` |
-| `MARKETAUX_` | Marketaux provider | `MARKETAUX_API_KEY`, `MARKETAUX_BASE_URL` |
-| `ETHERSCAN_` | Etherscan provider | `ETHERSCAN_API_KEY`, `ETHERSCAN_BASE_URL` |
-| `FRED_` | FRED provider | `FRED_API_KEY`, `FRED_BASE_URL` |
-| `DEFILLAMA_` | DefiLlama provider | `DEFILLAMA_BASE_URL` |
-| `OPENAI_` | OpenAI provider | `OPENAI_API_KEY`, `OPENAI_MODEL` |
-| `LOG_` | Logging | `LOG_LEVEL`, `LOG_FORMAT`, `LOG_OUTPUT` |
-| `AI_` | AI/ML services | `AI_MODEL_DIR`, `AI_BATCH_SIZE`, `AI_EXPERIMENT_DIR` |
-| `FEATURE_` | Feature pipeline | `FEATURE_STORE_URL`, `FEATURE_BATCH_SIZE` |
-| `SMTP_` | Notifications | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD` |
-| `OBJECT_STORAGE_` | Object storage | `OBJECT_STORAGE_ENDPOINT`, `OBJECT_STORAGE_BUCKET` |
+| Prefix            | Domain                          | Examples                                               |
+| ----------------- | ------------------------------- | ------------------------------------------------------ |
+| `APP_`            | Application-level configuration | `APP_ENV`, `APP_PORT`, `APP_LOG_LEVEL`                 |
+| `DB_`             | Database connection             | `DB_URL`, `DB_POOL_SIZE`, `DB_TIMEOUT`                 |
+| `REDIS_`          | Redis connection                | `REDIS_URL`, `REDIS_PASSWORD`, `REDIS_TTL`             |
+| `JWT_`            | Authentication                  | `JWT_SECRET`, `JWT_EXPIRATION_MINUTES`                 |
+| `DELTA_`          | Delta Exchange India            | `DELTA_API_KEY`, `DELTA_API_SECRET`, `DELTA_BASE_URL`  |
+| `COINGECKO_`      | CoinGecko provider              | `COINGECKO_API_KEY`, `COINGECKO_BASE_URL`              |
+| `MARKETAUX_`      | Marketaux provider              | `MARKETAUX_API_KEY`, `MARKETAUX_BASE_URL`              |
+| `ETHERSCAN_`      | Etherscan provider              | `ETHERSCAN_API_KEY`, `ETHERSCAN_BASE_URL`              |
+| `FRED_`           | FRED provider                   | `FRED_API_KEY`, `FRED_BASE_URL`                        |
+| `DEFILLAMA_`      | DefiLlama provider              | `DEFILLAMA_BASE_URL`                                   |
+| `OPENAI_`         | OpenAI provider                 | `OPENAI_API_KEY`, `OPENAI_MODEL`                       |
+| `LOG_`            | Logging                         | `LOG_LEVEL`, `LOG_FORMAT`, `LOG_OUTPUT`                |
+| `AI_`             | AI/ML services                  | `AI_MODEL_DIR`, `AI_BATCH_SIZE`, `AI_EXPERIMENT_DIR`   |
+| `FEATURE_`        | Feature pipeline                | `FEATURE_STORE_URL`, `FEATURE_BATCH_SIZE`              |
+| `SMTP_`           | Notifications                   | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD` |
+| `OBJECT_STORAGE_` | Object storage                  | `OBJECT_STORAGE_ENDPOINT`, `OBJECT_STORAGE_BUCKET`     |
 
 **Rules:**
 
@@ -73,7 +73,7 @@ All environment variables are `UPPER_SNAKE_CASE` and prefixed by owning domain.
 
 Configuration is resolved in the following order (highest precedence first):
 
-```
+```text
 Global defaults
       ↓
 Service-level defaults
@@ -83,12 +83,12 @@ Environment (dev / test / staging / prod)
 Runtime override
 ```
 
-| Layer | Description | Where it lives |
-|---|---|---|
-| Global defaults | Values shared by all services | `configs/` and shared packages |
-| Service-level defaults | Values specific to a service, applied by default | The service's own configuration module |
-| Environment | Environment-specific overrides | `.env` files (local) or platform-managed (deployed) |
-| Runtime override | Values provided at launch or deploy time | CLI flags, deployment manifests, runtime injection |
+| Layer                  | Description                                      | Where it lives                                      |
+| ---------------------- | ------------------------------------------------ | --------------------------------------------------- |
+| Global defaults        | Values shared by all services                    | `configs/` and shared packages                      |
+| Service-level defaults | Values specific to a service, applied by default | The service's own configuration module              |
+| Environment            | Environment-specific overrides                   | `.env` files (local) or platform-managed (deployed) |
+| Runtime override       | Values provided at launch or deploy time         | CLI flags, deployment manifests, runtime injection  |
 
 **Rules:**
 

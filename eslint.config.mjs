@@ -30,8 +30,8 @@ export default [
     rules: {
       'no-console': 'warn',
       'no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
-      'eqeqeq': ['error', 'always'],
-      'curly': ['error', 'all'],
+      eqeqeq: ['error', 'always'],
+      curly: ['error', 'all'],
       'no-var': 'error',
       'prefer-const': 'error',
       'prefer-template': 'error',

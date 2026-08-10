@@ -78,20 +78,20 @@ to start when connectivity cannot be verified at startup (fail fast).
 
 ### Environment Variables
 
-| Variable | Required | Description | Default |
-|---|---|---|---|
-| `DATABASE_URL` | No* | Async PostgreSQL connection string | — |
-| `DB_URL` | No* | Repo-convention alias for `DATABASE_URL` | — |
-| `DB_POOL_SIZE` | No | Connection pool size | `5` |
-| `DB_MAX_OVERFLOW` | No | Pool overflow connections | `10` |
-| `DB_ECHO` | No | Log all SQL statements | `false` |
+| Variable          | Required | Description                              | Default |
+| ----------------- | -------- | ---------------------------------------- | ------- |
+| `DATABASE_URL`    | No*      | Async PostgreSQL connection string       | —       |
+| `DB_URL`          | No*      | Repo-convention alias for `DATABASE_URL` | —       |
+| `DB_POOL_SIZE`    | No       | Connection pool size                     | `5`     |
+| `DB_MAX_OVERFLOW` | No       | Pool overflow connections                | `10`    |
+| `DB_ECHO`         | No       | Log all SQL statements                   | `false` |
 
 \* At least one of `DATABASE_URL` / `DB_URL` must be set for the database
 layer to activate. `DATABASE_URL` takes precedence when both are present.
 
 Example connection string:
 
-```
+```text
 postgresql+asyncpg://research:research@localhost:5432/eth_platform
 ```
 
@@ -169,6 +169,7 @@ Until the first ORM model exists, no tables are created by this service.
 
   Callers are responsible for `await session.commit()`; uncommitted work
   is rolled back when the session closes.
+
 - The application lifespan (in `app/application.py`) verifies connectivity
   with `SELECT 1` at startup and fails fast if the database is unreachable,
   and disposes the engine cleanly at shutdown.
@@ -186,7 +187,7 @@ later behind the same fixture override.
 
 ## Directory Structure
 
-```
+```text
 services/api/
 ├── app/
 │   ├── main.py              # Application entry point

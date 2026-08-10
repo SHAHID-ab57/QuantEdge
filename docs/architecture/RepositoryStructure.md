@@ -15,7 +15,7 @@
 
 ## 1. Complete Repository Tree
 
-```
+```text
 platform/
 ├── apps/                          # Deployable application entry points
 │   ├── web/                       # Frontend application
@@ -86,12 +86,14 @@ platform/
 compose services and packages into working applications.
 
 **What belongs there:**
+
 - Application entry points and bootstrapping logic.
 - Composition and wiring of services and packages.
 - Application-level configuration and startup concerns.
 - Application-level tests.
 
 **What should never be placed there:**
+
 - Domain logic, business rules, or data access code.
 - Code owned by a bounded context.
 - Reusable libraries (these belong in `packages/`).
@@ -103,12 +105,14 @@ compose services and packages into working applications.
 context. This is the primary location of platform code.
 
 **What belongs there:**
+
 - Complete domain implementation per context: domain model, application logic,
   data access, and infrastructure adapters.
 - Service-local tests.
 - Service-local configuration defaults.
 
 **What should never be placed there:**
+
 - Code from another bounded context.
 - Application entry points (these belong in `apps/`).
 - Shared libraries (these belong in `packages/`).
@@ -119,11 +123,13 @@ context. This is the primary location of platform code.
 **Purpose:** Home of reusable libraries shared across multiple services and apps.
 
 **What belongs there:**
+
 - Versioned cross-service contracts (events, commands, queries, types).
 - Generic infrastructure: configuration, logging, observability, testing, errors.
 - Any library with at least two consumers and no domain semantics.
 
 **What should never be placed there:**
+
 - Domain models or business rules.
 - Context-specific logic.
 - Application entry points.
@@ -135,12 +141,14 @@ context. This is the primary location of platform code.
 environment.
 
 **What belongs there:**
+
 - Environment definitions (`dev`, `staging`, `prod`).
 - Reusable infrastructure modules.
 - Foundation infrastructure (networking, base services).
 - Deployment and provisioning configuration.
 
 **What should never be placed there:**
+
 - Application code or domain logic.
 - Shared libraries.
 - Repository-level tooling configuration (this belongs in `configs/`).
@@ -151,12 +159,14 @@ environment.
 codebase.
 
 **What belongs there:**
+
 - Linting rules and tool configuration.
 - Formatting rules.
 - Static analysis rules.
 - Commit conventions and templates.
 
 **What should never be placed there:**
+
 - Runtime application configuration (this belongs in `apps/` or `services/`).
 - Secret or environment-specific values (these belong in `infra/`).
 - Infrastructure definitions.
@@ -167,6 +177,7 @@ codebase.
 **Purpose:** Home of all platform documentation, organized by discipline.
 
 **What belongs there:**
+
 - Architecture documents.
 - API, database, AI, deployment, and testing documentation.
 - Architecture Decision Records.
@@ -174,6 +185,7 @@ codebase.
 - Diagrams and media assets.
 
 **What should never be placed there:**
+
 - Source code.
 - Generated build artifacts.
 - Personal notes or ephemeral documents.
@@ -185,12 +197,14 @@ codebase.
 end-to-end tests, and cross-cutting validation suites.
 
 **What belongs there:**
+
 - Cross-service integration tests.
 - End-to-end workflows.
 - Performance and load test suites.
 - Shared test infrastructure spanning multiple services.
 
 **What should never be placed there:**
+
 - Service-local unit tests (these live inside the service).
 - Test utilities intended for reuse (these belong in `packages/testing/`).
 
@@ -200,11 +214,13 @@ end-to-end tests, and cross-cutting validation suites.
 and operational tasks.
 
 **What belongs there:**
+
 - Development setup scripts.
 - Repository maintenance utilities.
 - Operational automation invoked by developers and CI.
 
 **What should never be placed there:**
+
 - Application code.
 - Production-grade tooling with a UI (these belong in `apps/` or `tools/`).
 - One-off personal scripts.
@@ -215,11 +231,13 @@ and operational tasks.
 without being part of the runtime platform.
 
 **What belongs there:**
+
 - Scaffolding and generator tooling.
 - Custom developer utilities.
 - Code generation helpers.
 
 **What should never be placed there:**
+
 - Runtime platform components.
 - Infrastructure definitions.
 - Repository configuration (this belongs in `configs/`).
@@ -229,11 +247,13 @@ without being part of the runtime platform.
 **Purpose:** Home of CI/CD workflow definitions and contribution templates.
 
 **What belongs there:**
+
 - CI/CD pipeline definitions.
 - Contribution and issue templates.
 - Repository automation configuration.
 
 **What should never be placed there:**
+
 - Application code.
 - Domain logic.
 - Documentation content (this belongs in `docs/`).
@@ -243,6 +263,7 @@ without being part of the runtime platform.
 **Purpose:** Project-level governance and documentation.
 
 **What belongs there:**
+
 - `README.md` — project overview.
 - `PROJECT.md` — project charter.
 - `TASKBOOK.md` — master implementation backlog.
@@ -253,6 +274,7 @@ without being part of the runtime platform.
 - `CHANGELOG.md` — version history.
 
 **What should never be placed there:**
+
 - Source code.
 - Additional documentation that fits an existing directory.
 - Generated artifacts.
@@ -275,7 +297,7 @@ without being part of the runtime platform.
 
 Dependencies flow downward and never upward:
 
-```
+```text
 apps/  →  services/  →  packages/  →  external dependencies
 ```
 
@@ -306,17 +328,17 @@ apps/  →  services/  →  packages/  →  external dependencies
 
 ### Folder Naming Conventions
 
-| Element | Convention | Example |
-|---|---|---|
-| Directories | kebab-case, lowercase | `market-data`, `feature-store` |
-| Services | Named after their bounded context | `services/prediction/` |
-| Packages | Single descriptive word or kebab-case | `contracts`, `observability` |
-| Contract artifacts | `{domain}-{event\|command\|query}-{name}` | `prediction-forecast-produced` |
-| Event names | Past-tense domain events | `forecast-produced`, `order-filled` |
-| Command names | Imperative domain commands | `submit-order`, `retrain-model` |
-| Query names | Descriptive noun phrases | `get-portfolio-state` |
-| Environments | Lowercase, single word | `dev`, `staging`, `prod` |
-| Infrastructure modules | Descriptive kebab-case | `data-store`, `message-backbone` |
+| Element                | Convention                                | Example                             |
+| ---------------------- | ----------------------------------------- | ----------------------------------- |
+| Directories            | kebab-case, lowercase                     | `market-data`, `feature-store`      |
+| Services               | Named after their bounded context         | `services/prediction/`              |
+| Packages               | Single descriptive word or kebab-case     | `contracts`, `observability`        |
+| Contract artifacts     | `{domain}-{event\|command\|query}-{name}` | `prediction-forecast-produced`      |
+| Event names            | Past-tense domain events                  | `forecast-produced`, `order-filled` |
+| Command names          | Imperative domain commands                | `submit-order`, `retrain-model`     |
+| Query names            | Descriptive noun phrases                  | `get-portfolio-state`               |
+| Environments           | Lowercase, single word                    | `dev`, `staging`, `prod`            |
+| Infrastructure modules | Descriptive kebab-case                    | `data-store`, `message-backbone`    |
 
 **Naming principles:**
 

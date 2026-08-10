@@ -16,29 +16,29 @@ The platform decomposes into the following major containers. Each container is a
 independently deployable unit with a well-defined responsibility, communicating with
 other containers through explicit interfaces.
 
-| # | Container | Category | Summary |
-|---|---|---|---|
-| C1 | Web Frontend | Presentation | User interfaces for all actor roles. |
-| C2 | Backend API | Application | Primary service boundary exposing platform capabilities. |
-| C3 | Authentication Service | Application | Identity, authentication, and authorization. |
-| C4 | Market Data Collector | Data Ingestion | Retrieves and normalizes data from external sources. |
-| C5 | Streaming Service | Data Ingestion | Distributes live market data to interested consumers. |
-| C6 | Data Processing Pipeline | Data Processing | Validates, transforms, and stores raw and processed data. |
-| C7 | Feature Store | Data Storage | Stores and serves versioned computed features. |
-| C8 | AI Research & Training Service | Analytics | Model development, training, and experiment management. |
-| C9 | Prediction Service | Analytics | Produces probabilistic forecasts from trained models. |
-| C10 | Backtesting Engine | Analytics | Simulates strategy performance on historical data. |
-| C11 | Strategy Engine | Analytics | Defines, manages, and evaluates trading strategies. |
-| C12 | Risk Engine | Analytics | Computes risk metrics, limits, and scenario analyses. |
-| C13 | Portfolio Service | Analytics | Manages portfolios, positions, and performance analytics. |
-| C14 | Trading Execution Service | Execution | Manages simulated and live order execution. |
-| C15 | Notification Service | Application | Delivers alerts and notifications to users. |
-| C16 | Scheduler / Job Runner | Infrastructure | Orchestrates scheduled and recurring workloads. |
-| C17 | Monitoring & Logging Service | Infrastructure | Collects metrics, logs, and traces; supports observability. |
-| C18 | Relational Database | Data Storage | Primary transactional and domain data store. |
-| C19 | Cache | Data Storage | In-memory cache for high-throughput, low-latency access. |
-| C20 | Object Storage | Data Storage | Durable storage for large artifacts and files. |
-| C21 | Message Broker | Infrastructure | Asynchronous communication backbone between containers. |
+| #   | Container                      | Category        | Summary                                                     |
+| --- | ------------------------------ | --------------- | ----------------------------------------------------------- |
+| C1  | Web Frontend                   | Presentation    | User interfaces for all actor roles.                        |
+| C2  | Backend API                    | Application     | Primary service boundary exposing platform capabilities.    |
+| C3  | Authentication Service         | Application     | Identity, authentication, and authorization.                |
+| C4  | Market Data Collector          | Data Ingestion  | Retrieves and normalizes data from external sources.        |
+| C5  | Streaming Service              | Data Ingestion  | Distributes live market data to interested consumers.       |
+| C6  | Data Processing Pipeline       | Data Processing | Validates, transforms, and stores raw and processed data.   |
+| C7  | Feature Store                  | Data Storage    | Stores and serves versioned computed features.              |
+| C8  | AI Research & Training Service | Analytics       | Model development, training, and experiment management.     |
+| C9  | Prediction Service             | Analytics       | Produces probabilistic forecasts from trained models.       |
+| C10 | Backtesting Engine             | Analytics       | Simulates strategy performance on historical data.          |
+| C11 | Strategy Engine                | Analytics       | Defines, manages, and evaluates trading strategies.         |
+| C12 | Risk Engine                    | Analytics       | Computes risk metrics, limits, and scenario analyses.       |
+| C13 | Portfolio Service              | Analytics       | Manages portfolios, positions, and performance analytics.   |
+| C14 | Trading Execution Service      | Execution       | Manages simulated and live order execution.                 |
+| C15 | Notification Service           | Application     | Delivers alerts and notifications to users.                 |
+| C16 | Scheduler / Job Runner         | Infrastructure  | Orchestrates scheduled and recurring workloads.             |
+| C17 | Monitoring & Logging Service   | Infrastructure  | Collects metrics, logs, and traces; supports observability. |
+| C18 | Relational Database            | Data Storage    | Primary transactional and domain data store.                |
+| C19 | Cache                          | Data Storage    | In-memory cache for high-throughput, low-latency access.    |
+| C20 | Object Storage                 | Data Storage    | Durable storage for large artifacts and files.              |
+| C21 | Message Broker                 | Infrastructure  | Asynchronous communication backbone between containers.     |
 
 The container set is a logical decomposition. Some containers may be physically
 co-located in early milestones; the logical boundaries remain the contract for
@@ -377,10 +377,10 @@ future physical deployment decisions.
 
 Communication follows two principal patterns:
 
-| Pattern | Description | Example Paths |
-|---|---|---|
-| **Synchronous (request/response)** | Direct invocation for operations requiring immediate results. | Web Frontend ↔ Backend API; Backend API ↔ Feature Store / Prediction Service / Portfolio Service; Authentication Service ↔ Relational Database. |
-| **Asynchronous (event-driven)** | Event publication and consumption for decoupled, high-throughput, and scheduled workloads. | Market Data Collector → Message Broker → Data Processing Pipeline → Feature Store; Streaming Service → Prediction Service; Strategy Engine → Trading Execution Service; Risk Engine → Notification Service. |
+| Pattern                            | Description                                                                                | Example Paths                                                                                                                                                                                               |
+| ---------------------------------- | ------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Synchronous (request/response)** | Direct invocation for operations requiring immediate results.                              | Web Frontend ↔ Backend API; Backend API ↔ Feature Store / Prediction Service / Portfolio Service; Authentication Service ↔ Relational Database.                                                             |
+| **Asynchronous (event-driven)**    | Event publication and consumption for decoupled, high-throughput, and scheduled workloads. | Market Data Collector → Message Broker → Data Processing Pipeline → Feature Store; Streaming Service → Prediction Service; Strategy Engine → Trading Execution Service; Risk Engine → Notification Service. |
 
 **Communication rules:**
 
@@ -577,18 +577,18 @@ C4Container
 
 ## 6. Architecture Decisions
 
-| ADR Ref | Decision | Rationale |
-|---|---|---|
-| AD-1 | Asynchronous event-driven communication via a Message Broker for data flows. | Decouples producers from consumers; tolerates load spikes and consumer failures; enables independent scaling. |
-| AD-2 | Synchronous request/response only where immediate results are required. | Minimizes coupling while preserving usability where callers need direct answers. |
-| AD-3 | Feature computation centralized in a Feature Store. | Prevents training/serving skew; guarantees feature consistency across research and production. |
-| AD-4 | Research and training isolated from production serving. | Heavy computational workloads must not affect prediction latency or availability. |
-| AD-5 | Execution, strategy, and risk logic separated into distinct containers. | Enforces that no order can be placed without passing independent risk validation; enables strategy evolution without execution changes. |
-| AD-6 | All external integrations confined to the Market Data Collector and Trading Execution Service. | Isolates provider variability to two integration points; keeps the rest of the platform provider-agnostic. |
-| AD-7 | Observability centralized in a dedicated container. | Provides uniform operational insight across heterogeneous containers. |
-| AD-8 | Containers communicate only through defined interfaces; no cross-container shared state. | Preserves loose coupling and independent deployability. |
-| AD-9 | Data storage split by access pattern — transactional, cached, object, event transport. | Each store is optimized for its workload; enables independent scaling and lifecycle policies. |
-| AD-10 | Scheduler centralizes all recurring workload orchestration. | Timing and sequencing logic is not embedded in individual containers. |
+| ADR Ref | Decision                                                                                       | Rationale                                                                                                                               |
+| ------- | ---------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| AD-1    | Asynchronous event-driven communication via a Message Broker for data flows.                   | Decouples producers from consumers; tolerates load spikes and consumer failures; enables independent scaling.                           |
+| AD-2    | Synchronous request/response only where immediate results are required.                        | Minimizes coupling while preserving usability where callers need direct answers.                                                        |
+| AD-3    | Feature computation centralized in a Feature Store.                                            | Prevents training/serving skew; guarantees feature consistency across research and production.                                          |
+| AD-4    | Research and training isolated from production serving.                                        | Heavy computational workloads must not affect prediction latency or availability.                                                       |
+| AD-5    | Execution, strategy, and risk logic separated into distinct containers.                        | Enforces that no order can be placed without passing independent risk validation; enables strategy evolution without execution changes. |
+| AD-6    | All external integrations confined to the Market Data Collector and Trading Execution Service. | Isolates provider variability to two integration points; keeps the rest of the platform provider-agnostic.                              |
+| AD-7    | Observability centralized in a dedicated container.                                            | Provides uniform operational insight across heterogeneous containers.                                                                   |
+| AD-8    | Containers communicate only through defined interfaces; no cross-container shared state.       | Preserves loose coupling and independent deployability.                                                                                 |
+| AD-9    | Data storage split by access pattern — transactional, cached, object, event transport.         | Each store is optimized for its workload; enables independent scaling and lifecycle policies.                                           |
+| AD-10   | Scheduler centralizes all recurring workload orchestration.                                    | Timing and sequencing logic is not embedded in individual containers.                                                                   |
 
 ---
 

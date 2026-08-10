@@ -5,6 +5,7 @@
   "MD033": false,
   "MD041": true,
   "MD040": true,
+  "MD029": false,
   "MD046": { "style": "fenced" },
   "MD048": { "style": "backtick" },
   "MD047": true,

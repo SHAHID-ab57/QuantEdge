@@ -608,97 +608,97 @@ commitment to scientific integrity.
    single-machine research environment to a distributed production deployment
    as data volumes, model complexity, and user load increase. Scalability ensures
    that the platform can grow with the research agenda without requiring
-   architectural rewrites. — *Expected value: long-term capacity for growth
-   without fundamental redesign.*
+   architectural rewrites. — _Expected value: long-term capacity for growth
+   without fundamental redesign._
 
 2. **Modular software design.** Every major capability — data ingestion, feature
    engineering, model training, prediction serving, backtesting, risk analysis,
    and portfolio analytics — must be encapsulated in independently deployable
    modules with well-defined interfaces. Loose coupling between modules enables
    parallel development, isolated testing, and targeted improvements. —
-   *Expected value: reduced cost of change and increased development velocity.*
+   _Expected value: reduced cost of change and increased development velocity._
 
 3. **Maintainability.** The codebase must be organized, documented, and structured
    so that new contributors can understand, modify, and extend any component
    without consulting the original author. Consistent coding conventions, clear
    naming, and self-documenting code are requirements, not preferences. —
-   *Expected value: sustainable development over the project's lifetime.*
+   _Expected value: sustainable development over the project's lifetime._
 
 4. **Reliability.** The platform must produce correct and consistent results under
    normal and degraded operating conditions. Automated tests, defensive
    programming, and comprehensive error handling ensure that failures are
    detected early and contained locally rather than cascading through the
-   system. — *Expected value: trust in analytical outputs and platform stability.*
+   system. — _Expected value: trust in analytical outputs and platform stability._
 
 5. **Performance.** Data processing pipelines, model inference, and API responses
    must meet defined performance targets appropriate to their context — batch
    research workloads prioritize throughput, while interactive queries prioritize
-   latency. Performance budgets are established and monitored. — *Expected value:
-   timely access to analytical results without excessive resource consumption.*
+   latency. Performance budgets are established and monitored. — _Expected value:
+   timely access to analytical results without excessive resource consumption._
 
 6. **Security by design.** Security considerations must be integrated into every
    layer of the platform, from data access controls and authentication to secrets
    management and audit logging. The platform must protect sensitive market data,
-   model artifacts, and user credentials. — *Expected value: protection of
-   intellectual property and user trust.*
+   model artifacts, and user credentials. — _Expected value: protection of
+   intellectual property and user trust._
 
 7. **Testability.** Every module must be testable in isolation through well-defined
    interfaces, dependency injection, and mockable external integrations. The test
    suite must provide fast feedback and high coverage without requiring full
-   system deployment. — *Expected value: confidence that changes do not break
-   existing functionality.*
+   system deployment. — _Expected value: confidence that changes do not break
+   existing functionality._
 
 8. **Observability.** The platform must expose comprehensive monitoring data —
    including metrics, structured logs, and distributed traces — that enable
    operators to understand system behavior, diagnose issues, and measure
-   performance in real time. — *Expected value: rapid incident detection and
-   resolution in production.*
+   performance in real time. — _Expected value: rapid incident detection and
+   resolution in production._
 
 9. **Reproducibility.** Every analytical result produced by the platform must be
    repeatable given the same inputs and configuration. This requires versioning
    of data snapshots, feature definitions, model parameters, evaluation
-   procedures, and environment dependencies. — *Expected value: verifiable
-   research and credible analytical claims.*
+   procedures, and environment dependencies. — _Expected value: verifiable
+   research and credible analytical claims._
 
 10. **Extensibility.** The platform must accommodate new data sources, model
     architectures, feature types, and analytical strategies through defined
     extension points rather than code modification. Extensibility ensures that
     the platform can adopt innovations in the rapidly evolving fields of
-    cryptocurrency markets and AI. — *Expected value: future-proofing against
-    domain evolution.*
+    cryptocurrency markets and AI. — _Expected value: future-proofing against
+    domain evolution._
 
 11. **Fault tolerance.** The platform must remain operational or degrade gracefully
     when individual components fail. Data pipelines must handle source
     unavailability, model serving must handle increased latency, and the system
     must recover automatically when dependencies are restored. —
-    *Expected value: continuous availability for research and decision-support
-    workflows.*
+    _Expected value: continuous availability for research and decision-support
+    workflows._
 
 12. **Documentation quality.** Every module, interface, data model, and operational
     procedure must be documented at a level appropriate to its complexity and
     audience. Documentation is treated as a first-class deliverable with the
-    same review requirements as code. — *Expected value: reduced onboarding
-    time and preserved institutional knowledge.*
+    same review requirements as code. — _Expected value: reduced onboarding
+    time and preserved institutional knowledge._
 
 13. **API consistency.** All service interfaces must follow consistent design
     conventions for naming, error handling, pagination, versioning, and
     authentication. Consistent APIs reduce integration effort and make the
-    platform predictable for consumers. — *Expected value: lower cognitive
-    load for API consumers and faster integration of new modules.*
+    platform predictable for consumers. — _Expected value: lower cognitive
+    load for API consumers and faster integration of new modules._
 
 14. **Data integrity.** Market data, feature values, model predictions, and
     experimental results must be protected against corruption, loss, and
     unauthorized modification. Checksums, validation rules, and access controls
     ensure that data remains trustworthy throughout its lifecycle. —
-    *Expected value: confidence that analytical outputs are based on accurate
-    and untampered data.*
+    _Expected value: confidence that analytical outputs are based on accurate
+    and untampered data._
 
 15. **Automation.** Repetitive engineering tasks — including testing, linting,
     building, deployment, data validation, and model evaluation — must be
     automated to eliminate human error and free contributors for higher-value
     work. Automation is applied wherever the cost of automation is less than
     the cost of manual execution over the project's lifetime. —
-    *Expected value: consistent quality and reduced operational overhead.*
+    _Expected value: consistent quality and reduced operational overhead._
 
 ### Learning Objectives
 
@@ -706,283 +706,283 @@ commitment to scientific integrity.
    cryptocurrency markets operate — including order book mechanics, liquidity dynamics,
    market microstructure, and the role of on-chain data. This foundation is essential
    for building analytical tools that reflect real market behavior rather than
-   theoretical abstractions. — *Value: enables credible and context-aware market
-   analysis.*
+   theoretical abstractions. — _Value: enables credible and context-aware market
+   analysis._
 
 2. **Developing quantitative reasoning.** Build the ability to frame market analysis
    problems in quantitative terms — defining measurable hypotheses, selecting
    appropriate statistical methods, interpreting results with appropriate rigor,
-   and communicating uncertainty honestly. — *Value: transforms intuition into
-   testable, data-driven frameworks.*
+   and communicating uncertainty honestly. — _Value: transforms intuition into
+   testable, data-driven frameworks._
 
 3. **Building statistical thinking.** Acquire the habit of approaching every analytical
    question with statistical discipline: understanding distributions, sampling,
    variance, bias, and the difference between correlation and causation. Statistical
    thinking prevents overconfident interpretations and spurious conclusions. —
-   *Value: protects against common analytical errors that undermine research validity.*
+   _Value: protects against common analytical errors that undermine research validity._
 
 4. **Learning probability-based forecasting.** Master the principles of probabilistic
    prediction — including calibration, sharpness, scoring rules, and predictive
    distributions — and develop the ability to evaluate forecasts on these dimensions
-   rather than on point-accuracy alone. — *Value: enables honest communication of
-   uncertainty and more robust decision-making.*
+   rather than on point-accuracy alone. — _Value: enables honest communication of
+   uncertainty and more robust decision-making._
 
 5. **Understanding risk management.** Learn the core concepts of financial risk —
    including volatility, drawdown, value at risk, tail risk, and position sizing —
    and how they apply to both portfolio construction and model evaluation. —
-   *Value: ensures that analytical insights are interpreted within a risk-aware
-   framework rather than a return-only framework.*
+   _Value: ensures that analytical insights are interpreted within a risk-aware
+   framework rather than a return-only framework._
 
 6. **Mastering time-series analysis concepts.** Develop practical expertise in
    time-series methodology — including stationarity, autocorrelation, regime
    detection, seasonality, and forecasting validation — that are fundamental to
-   market data analysis. — *Value: provides the technical vocabulary and tools
-   for rigorous temporal analysis.*
+   market data analysis. — _Value: provides the technical vocabulary and tools
+   for rigorous temporal analysis._
 
 7. **Applying machine learning responsibly.** Learn to select, train, evaluate, and
    deploy machine learning models with an emphasis on generalization, robustness,
    and interpretability — including techniques to detect overfitting, concept drift,
-   and data leakage specific to financial time series. — *Value: ensures that AI
-   capabilities are applied in ways that produce reliable and trustworthy results.*
+   and data leakage specific to financial time series. — _Value: ensures that AI
+   capabilities are applied in ways that produce reliable and trustworthy results._
 
 8. **Designing scalable software systems.** Develop the ability to architect systems
    that can grow from experimental prototypes to production deployments —
    understanding trade-offs in coupling, cohesion, state management, data flow,
-   and deployment topology. — *Value: builds systems-thinking skills applicable
-   to any large-scale software endeavor.*
+   and deployment topology. — _Value: builds systems-thinking skills applicable
+   to any large-scale software endeavor._
 
 9. **Developing strong software architecture skills.** Practice making explicit
    architectural decisions — documenting context, options, trade-offs, and
    rationale — rather than allowing architecture to emerge implicitly from
-   implementation choices. — *Value: cultivates the discipline of intentional,
-   reviewable system design.*
+   implementation choices. — _Value: cultivates the discipline of intentional,
+   reviewable system design._
 
 10. **Learning data engineering principles.** Gain hands-on experience with data
     pipeline design, data quality assurance, schema management, versioning
     strategies, and the operational challenges of maintaining reliable data
-    flows in a production environment. — *Value: builds the data infrastructure
-    competency critical to all data-intensive applications.*
+    flows in a production environment. — _Value: builds the data infrastructure
+    competency critical to all data-intensive applications._
 
 11. **Understanding AI system evaluation.** Learn to design and interpret rigorous
     evaluation protocols for AI models — including appropriate metric selection,
     statistical significance testing, cross-validation strategies for time series,
     and the distinction between model performance and decision utility. —
-    *Value: ensures that model claims are evidence-based and reproducible.*
+    _Value: ensures that model claims are evidence-based and reproducible._
 
 12. **Improving debugging and problem-solving abilities.** Develop systematic
     approaches to diagnosing issues across the full stack — from data anomalies
     and model convergence failures to system performance bottlenecks and
-    integration errors. — *Value: builds the diagnostic intuition essential
-    for maintaining complex systems.*
+    integration errors. — _Value: builds the diagnostic intuition essential
+    for maintaining complex systems._
 
 13. **Developing research methodology.** Practice the complete research lifecycle —
     from literature review and hypothesis formulation, through experimental
     design and implementation, to result documentation and peer review. —
-    *Value: establishes a reproducible, transparent research practice that
-    produces credible and cumulative knowledge.*
+    _Value: establishes a reproducible, transparent research practice that
+    produces credible and cumulative knowledge._
 
 14. **Writing high-quality technical documentation.** Cultivate the discipline of
     writing clear, accurate, and audience-appropriate documentation for
     architecture, APIs, data models, operational procedures, and research
     findings. Documentation is treated as an integral output, not an afterthought.
-    — *Value: preserves institutional knowledge and enables effective
-    collaboration.*
+    — _Value: preserves institutional knowledge and enables effective
+    collaboration._
 
 15. **Building long-term systems thinking.** Develop the ability to evaluate how
     individual design decisions affect system properties — maintainability,
     scalability, reliability, security — over years rather than weeks, and to
     prioritize investments that compound in value over the project's lifecycle.
-    — *Value: promotes architectural foresight and sustainable engineering
-    practices.*
+    — _Value: promotes architectural foresight and sustainable engineering
+    practices._
 
 ### Research Objectives
 
 1. **Evidence-based decision making.** Every research conclusion, modeling choice, and
    analytical claim must be supported by empirical evidence derived from systematically
    collected and processed data. Opinions and intuitions are valuable as hypotheses but
-   must be validated before they inform platform outputs. — *Value: ensures that
-   research findings are grounded in observable reality rather than assumption.*
+   must be validated before they inform platform outputs. — _Value: ensures that
+   research findings are grounded in observable reality rather than assumption._
 
 2. **Scientific methodology.** Research activities must follow established scientific
    practice: formulate testable hypotheses, design controlled experiments, collect and
    analyze data impartially, and report results honestly — including negative and null
-   findings. — *Value: produces credible, self-correcting research that advances
-   collective understanding.*
+   findings. — _Value: produces credible, self-correcting research that advances
+   collective understanding._
 
 3. **Hypothesis-driven experimentation.** Every experiment should begin with a clearly
    stated hypothesis that specifies the expected relationship between variables, the
    measurement methodology, and the criteria for acceptance or rejection. Exploratory
    analysis is valuable but must be explicitly distinguished from confirmatory
-   analysis. — *Value: prevents data dredging and ensures that reported results
-   address pre-specified questions.*
+   analysis. — _Value: prevents data dredging and ensures that reported results
+   address pre-specified questions._
 
 4. **Reproducible research.** All experiments, analyses, and results generated within
    the platform must be reproducible by independent parties given the same inputs,
    code, and configuration. This requires versioned data snapshots, documented
    feature definitions, tracked model parameters, and automated execution
-   pipelines. — *Value: enables verification, peer review, and cumulative
-   scientific progress.*
+   pipelines. — _Value: enables verification, peer review, and cumulative
+   scientific progress._
 
 5. **Data quality assurance.** Research quality is bounded by data quality. Automated
    validation checks must verify data completeness, temporal consistency, alignment
    across sources, and the absence of look-ahead bias before any dataset is used for
-   analysis or model training. — *Value: protects research integrity from the
-   foundational level upward.*
+   analysis or model training. — _Value: protects research integrity from the
+   foundational level upward._
 
 6. **Statistical rigor.** All empirical claims must be supported by appropriate
    statistical methods — including proper treatment of multiple comparisons, temporal
    dependence, non-stationarity, and finite-sample uncertainty. Confidence intervals
-   and effect sizes must be reported alongside point estimates. — *Value: prevents
-   overconfident interpretations and spurious conclusions.*
+   and effect sizes must be reported alongside point estimates. — _Value: prevents
+   overconfident interpretations and spurious conclusions._
 
 7. **Experimental transparency.** The complete experimental record — including data
    provenance, preprocessing steps, model configuration, evaluation protocol, and
    all results — must be documented and stored with each experiment. Transparency
    ensures that research findings can be audited, challenged, and built upon. —
-   *Value: establishes trust in research outputs through full disclosure.*
+   _Value: establishes trust in research outputs through full disclosure._
 
 8. **Benchmark-driven evaluation.** All proposed models and analytical strategies must
    be compared against appropriate baselines under identical evaluation conditions.
    Benchmarks must include simple, interpretable methods — such as naive forecasts
    or linear models — to establish the incremental value of more complex approaches.
-   — *Value: provides an honest assessment of whether complexity adds predictive
-   value.*
+   — _Value: provides an honest assessment of whether complexity adds predictive
+   value._
 
 9. **Bias identification and mitigation.** Research activities must actively identify
    and mitigate sources of bias — including survivorship bias, selection bias,
    look-ahead bias, measurement bias, and confirmation bias. Bias detection should
-   be a standard step in the research workflow. — *Value: protects against
-   systematic errors that undermine research validity.*
+   be a standard step in the research workflow. — _Value: protects against
+   systematic errors that undermine research validity._
 
 10. **Continuous validation.** Models and analytical strategies deployed in the platform
     must be subject to ongoing monitoring and periodic revalidation. Performance
     degradation, concept drift, and regime changes must be detected early, and
     models must be retired or retrained when they no longer meet established
-    criteria. — *Value: ensures that research outputs remain reliable as market
-    conditions evolve.*
+    criteria. — _Value: ensures that research outputs remain reliable as market
+    conditions evolve._
 
 11. **Explainable analytical methods.** Preference should be given to methods that
     provide insight into how inputs relate to outputs, unless a clear accuracy
     advantage justifies the use of less interpretable approaches. When complex
     models are necessary, supplementary explanations — feature attributions,
     partial dependence plots, or counterfactual analyses — must be provided. —
-    *Value: enables auditability, debugging, and user trust in model outputs.*
+    _Value: enables auditability, debugging, and user trust in model outputs._
 
 12. **Responsible use of predictive models.** Research outputs must never be presented
     as guaranteed predictions or trading signals. All predictive outputs must include
     appropriate uncertainty quantification, clearly stated limitations, and explicit
     guidance that they are analytical inputs requiring human judgment. —
-    *Value: ensures that research findings are used appropriately and ethically.*
+    _Value: ensures that research findings are used appropriately and ethically._
 
 13. **Ethical handling of research findings.** Research results — including negative
     or unfavorable findings — must be reported honestly and completely. Results must
     not be cherry-picked, p-hacked, or selectively reported to support a desired
-    conclusion. — *Value: maintains scientific integrity and contributes to an
-    honest cumulative research record.*
+    conclusion. — _Value: maintains scientific integrity and contributes to an
+    honest cumulative research record._
 
 14. **Clear documentation of assumptions.** Every analytical model, experimental
     design, and evaluation protocol must explicitly document its assumptions —
     including assumptions about data generating processes, stationarity,
-    independence, and the generalizability of results. — *Value: enables critical
-    evaluation of research findings by making boundary conditions explicit.*
+    independence, and the generalizability of results. — _Value: enables critical
+    evaluation of research findings by making boundary conditions explicit._
 
 15. **Continuous refinement through experimentation.** Research is an iterative
     process. Findings from one experiment should generate hypotheses for the next.
     The platform must support a rapid experimentation cycle that allows researchers
     to build on previous results, test alternative explanations, and progressively
-    refine their understanding of market dynamics. — *Value: drives cumulative
-    improvement in analytical capabilities and domain knowledge.*
+    refine their understanding of market dynamics. — _Value: drives cumulative
+    improvement in analytical capabilities and domain knowledge._
 
 ### Engineering Objectives
 
 1. **Building maintainable software.** Every component of the platform must be written
    with the understanding that it will be read, modified, and extended by others long
    after its initial author has moved on. Clarity, simplicity, and consistency are
-   prioritized over cleverness in all code. — *Value: reduces the long-term cost of
-   change and protects the platform's evolution.*
+   prioritized over cleverness in all code. — _Value: reduces the long-term cost of
+   change and protects the platform's evolution._
 
 2. **Modular architecture.** The platform must be decomposed into cohesive, loosely
    coupled modules with well-defined responsibilities and explicit interfaces. Modules
    must be independently testable, deployable, and replaceable without cascading
-   changes across the system. — *Value: enables parallel development, isolated
-   testing, and targeted evolution.*
+   changes across the system. — _Value: enables parallel development, isolated
+   testing, and targeted evolution._
 
 3. **Clear separation of responsibilities.** Each component of the system must have a
    single, well-defined purpose. Cross-cutting concerns — configuration, logging,
    error handling, observability — must be separated from business logic rather than
-   interleaved throughout the codebase. — *Value: improves comprehensibility,
-   testability, and the ability to reason about system behavior.*
+   interleaved throughout the codebase. — _Value: improves comprehensibility,
+   testability, and the ability to reason about system behavior._
 
 4. **Clean code principles.** Code must be written according to established principles
    of clarity and maintainability: meaningful naming, small and focused functions,
    minimal duplication, and expressive structure. Code review should be able to
-   focus on substance rather than style. — *Value: keeps the codebase healthy and
-   productive over time.*
+   focus on substance rather than style. — _Value: keeps the codebase healthy and
+   productive over time._
 
 5. **High-quality documentation.** Documentation is a first-class deliverable. Every
    module, interface, data model, and operational procedure must be documented at a
    level appropriate to its audience — from architecture overviews to usage guides
-   to operator runbooks. — *Value: preserves institutional knowledge and enables
-   effective collaboration and onboarding.*
+   to operator runbooks. — _Value: preserves institutional knowledge and enables
+   effective collaboration and onboarding._
 
 6. **Test-driven quality mindset.** Quality is verified continuously, not at the end.
    Every behavioral change must be accompanied by appropriate automated tests that
    run in the continuous integration pipeline. Tests are written alongside
-   implementation, not retrofitted afterward. — *Value: provides early detection
-   of defects and confidence in every change.*
+   implementation, not retrofitted afterward. — _Value: provides early detection
+   of defects and confidence in every change._
 
 7. **Consistent coding standards.** A single set of coding conventions — covering
    formatting, naming, structure, and style — must be applied uniformly across the
    entire codebase. Standards are enforced automatically wherever possible. —
-   *Value: eliminates stylistic debates, reduces review friction, and improves
-   readability.*
+   _Value: eliminates stylistic debates, reduces review friction, and improves
+   readability._
 
 8. **Version-controlled development.** All work products — including code,
    documentation, configuration, and infrastructure definitions — must live in
    version control with clear commit discipline. Every commit represents a
-   coherent unit of work with a descriptive message. — *Value: provides a
-   complete, auditable history of the project's evolution.*
+   coherent unit of work with a descriptive message. — _Value: provides a
+   complete, auditable history of the project's evolution._
 
 9. **Incremental delivery.** Features must be delivered in small, reviewable
    increments rather than large, monolithic changes. Each increment should be
-   functional, tested, and safe to merge independently. — *Value: reduces risk,
-   accelerates feedback, and keeps the mainline always releasable.*
+   functional, tested, and safe to merge independently. — _Value: reduces risk,
+   accelerates feedback, and keeps the mainline always releasable._
 
 10. **Continuous refactoring.** The codebase must be continuously improved to reduce
     complexity, eliminate duplication, and improve structure as understanding of the
     domain deepens. Refactoring is a normal part of development, not a separate
-    activity. — *Value: prevents architectural decay and sustains development
-    velocity.*
+    activity. — _Value: prevents architectural decay and sustains development
+    velocity._
 
 11. **Automation where appropriate.** Repetitive and error-prone activities —
     including testing, formatting, static analysis, builds, and deployment steps —
     must be automated wherever the automation cost is justified by the frequency
-    and consequence of the activity. — *Value: eliminates human error, enforces
-    consistency, and frees engineers for higher-value work.*
+    and consequence of the activity. — _Value: eliminates human error, enforces
+    consistency, and frees engineers for higher-value work._
 
 12. **Observability.** The platform must expose the information needed to understand
     its internal state — structured logs, metrics, and traces — as a built-in
     property rather than an afterthought. Systems must be designed to be
-    inspectable and diagnosable in production. — *Value: enables rapid incident
-    resolution and informed operational decisions.*
+    inspectable and diagnosable in production. — _Value: enables rapid incident
+    resolution and informed operational decisions._
 
 13. **Reliability.** The platform must behave predictably and correctly under normal
     and degraded conditions. Failure handling, retries, graceful degradation, and
     recovery must be designed into every service rather than assumed to happen by
-    chance. — *Value: maintains user trust and research continuity.*
+    chance. — _Value: maintains user trust and research continuity._
 
 14. **Knowledge sharing.** Engineering knowledge — design rationale, lessons learned,
     debugging insights, and best practices — must be captured and shared through
     documentation, code reviews, and written records rather than residing only in
-    individual memory. — *Value: makes the project resilient to contributor
-    changes and multiplies collective expertise.*
+    individual memory. — _Value: makes the project resilient to contributor
+    changes and multiplies collective expertise._
 
 15. **Sustainable project evolution.** The platform must be built to evolve
     indefinitely. This requires disciplined governance of dependencies, deliberate
     management of technical debt, regular review of architecture decisions, and a
-    commitment to preserving quality as features and scale grow. — *Value: ensures
+    commitment to preserving quality as features and scale grow. — _Value: ensures
     the platform remains healthy and valuable for years, not just for its initial
-    milestone.*
+    milestone._
 
 ## Target Users
 

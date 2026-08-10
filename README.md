@@ -28,27 +28,27 @@ evidence-based decision-making.
 
 ## Directory Overview
 
-| Directory | Purpose |
-|---|---|
-| `apps/` | Deployable application entry points (web, api, workers, cli) |
+| Directory   | Purpose                                                                  |
+| ----------- | ------------------------------------------------------------------------ |
+| `apps/`     | Deployable application entry points (web, api, workers, cli)             |
 | `services/` | One directory per bounded context — the platform's domain implementation |
-| `packages/` | Shared, reusable libraries (contracts, config, logging, observability) |
-| `infra/` | Infrastructure-as-code definitions |
-| `configs/` | Repository-level tooling configuration |
-| `docs/` | All platform documentation |
-| `scripts/` | Automation and maintenance scripts |
-| `tests/` | Cross-cutting integration and end-to-end tests |
-| `tools/` | Developer tooling and scaffolding utilities |
+| `packages/` | Shared, reusable libraries (contracts, config, logging, observability)   |
+| `infra/`    | Infrastructure-as-code definitions                                       |
+| `configs/`  | Repository-level tooling configuration                                   |
+| `docs/`     | All platform documentation                                               |
+| `scripts/`  | Automation and maintenance scripts                                       |
+| `tests/`    | Cross-cutting integration and end-to-end tests                           |
+| `tools/`    | Developer tooling and scaffolding utilities                              |
 
 ## Getting Started
 
 ### Prerequisites
 
-| Tool | Minimum Version |
-|---|---|
-| Node.js | 20+ |
-| pnpm | 9+ |
-| Python | 3.11+ (future AI/ML services) |
+| Tool    | Minimum Version               |
+| ------- | ----------------------------- |
+| Node.js | 20+                           |
+| pnpm    | 9+                            |
+| Python  | 3.11+ (future AI/ML services) |
 
 ### Install Dependencies
 
@@ -68,19 +68,19 @@ git config core.hooksPath .husky
 Scripts are orchestrated with Turbo; tasks run across all workspace packages
 (`apps/*`, `services/*`, `packages/*`, `tools/*`).
 
-| Command | Purpose |
-|---|---|
-| `pnpm dev` | Run all packages in development mode |
-| `pnpm build` | Build all packages in dependency order |
-| `pnpm lint` | Lint all packages |
-| `pnpm lint:fix` | Lint and autofix all packages |
-| `pnpm format` | Format the entire repository with Prettier |
-| `pnpm format:check` | Verify formatting |
-| `pnpm test` | Run tests across all packages |
-| `pnpm typecheck` | Type-check all packages |
-| `pnpm check` | Run lint and typecheck together |
-| `pnpm clean` | Remove build artifacts across all packages |
-| `pnpm docs:lint` | Lint documentation with markdownlint |
+| Command             | Purpose                                    |
+| ------------------- | ------------------------------------------ |
+| `pnpm dev`          | Run all packages in development mode       |
+| `pnpm build`        | Build all packages in dependency order     |
+| `pnpm lint`         | Lint all packages                          |
+| `pnpm lint:fix`     | Lint and autofix all packages              |
+| `pnpm format`       | Format the entire repository with Prettier |
+| `pnpm format:check` | Verify formatting                          |
+| `pnpm test`         | Run tests across all packages              |
+| `pnpm typecheck`    | Type-check all packages                    |
+| `pnpm check`        | Run lint and typecheck together            |
+| `pnpm clean`        | Remove build artifacts across all packages |
+| `pnpm docs:lint`    | Lint documentation with markdownlint       |
 
 ### Workspace Structure
 

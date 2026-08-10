@@ -16,3 +16,9 @@ htmlcov/
 .env
 .env.*
 !.env.example
+
+# The repo-wide "models/" rule targets ML artifact directories only;
+# the ORM models package must always be tracked.
+!app/models/
+!app/models/**
+app/models/__pycache__/

@@ -73,7 +73,7 @@ dvc.yaml
 .dvc/
 runs/
 experiments/
-models/
+
 artifacts/
 datasets/
 *.parquet.tmp*

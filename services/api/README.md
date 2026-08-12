@@ -12,6 +12,7 @@ Probabilistic Prediction Platform.
 - SQLAlchemy 2.x (async, with asyncpg)
 - PostgreSQL 17
 - Alembic (async, wired for migrations)
+- httpx (async HTTP client, powers the Delta Exchange integration)
 - Redis client (dependency only, not yet wired)
 
 Package management uses **uv**.
@@ -191,6 +192,84 @@ new revisions.
   with `SELECT 1` at startup and fails fast if the database is unreachable,
   and disposes the engine cleanly at shutdown.
 
+## Delta Exchange Integration
+
+An async REST client for the Delta Exchange API lives in
+`app/integrations/delta/` and is wired into the existing configuration system.
+
+### Configuration
+
+| Variable                | Required    | Description                      | Default                            |
+| ----------------------- | ----------- | -------------------------------- | ---------------------------------- |
+| `DELTA_BASE_URL`        | No          | REST base URL                    | `https://api.india.delta.exchange` |
+| `DELTA_API_KEY`         | Conditional | API key (authenticated calls)    | —                                  |
+| `DELTA_API_SECRET`      | Conditional | API secret (authenticated calls) | —                                  |
+| `DELTA_REQUEST_TIMEOUT` | No          | Request timeout in seconds       | `10`                               |
+
+Public market-data endpoints need no credentials. For authenticated requests
+set **both** `DELTA_API_KEY` and `DELTA_API_SECRET` — they are validated
+together, and an inconsistent pair fails fast with a descriptive error.
+
+### Usage
+
+```python
+from app.integrations.delta import get_delta_client
+
+async with get_delta_client() as client:
+    products = await client.get("/v2/products", params={"state": "live"})
+```
+
+- `client.get(path, params=..., response_model=...)` and
+  `client.post(path, json_body=..., response_model=...)` perform requests;
+  pass `response_model` to validate the envelope `result` into a Pydantic
+  model (e.g. `response_model=list[SomeModel]`), or omit it to get the raw
+  result.
+- Set `auth=True` to sign the request with your credentials (Delta
+  HMAC-SHA256 signature; public calls stay unsigned).
+- Transient failures are retried with exponential backoff: HTTP 429 and 5xx
+  for idempotent methods, plus transport errors for any method. `Retry-After`
+  is honored on 429.
+- Errors are typed: `AuthenticationError`, `RateLimitError`, `APIError`, and
+  `NetworkError` — all subclass `DeltaError`.
+- Use the client as an async context manager so pooled connections are always
+  released (`aclose()` releases them directly).
+
+### Extending the client
+
+Add a Pydantic model per endpoint payload, then a thin wrapper method:
+
+```python
+from pydantic import BaseModel
+from app.integrations.delta import DeltaClient
+
+
+class Product(BaseModel):
+    id: int
+    symbol: str
+
+
+async def list_products(client: DeltaClient) -> list[Product]:
+    return await client.get(
+        "/v2/products",
+        params={"state": "live"},
+        response_model=list[Product],
+    )
+```
+
+### Testing
+
+Tests mock HTTP with `httpx.MockTransport` — no network access or
+credentials are needed:
+
+```bash
+uv run pytest tests/integrations/delta
+```
+
+Covered behaviors: successful validation, malformed bodies, error envelopes,
+schema mismatches, rate limiting (retried and exhausted), server errors,
+timeouts, connect failures, signed headers, missing credentials, and secret
+redaction in logs.
+
 ## Test
 
 ```bash
@@ -219,6 +298,7 @@ services/api/
 │   │   ├── engine.py        # Async engine, pooling, probe
 │   │   ├── session.py       # Session factory and get_db() dependency
 │   │   └── base.py          # Declarative base (for future models)
+│   ├── integrations/        # External API clients (Delta Exchange)
 │   ├── models/              # ORM models (placeholder)
 │   ├── schemas/             # Pydantic schemas
 │   ├── services/            # Business services (placeholder)
@@ -243,7 +323,8 @@ services/api/
 - Authentication and authorization.
 - ORM models backed by Alembic migrations.
 - Redis integration.
-- External market data providers.
+- Additional market data providers (beyond Delta Exchange).
+- Market data ingestion from the Delta Exchange client.
 - Feature engineering and prediction endpoints.
 - Background workers for data collection and model training.
 

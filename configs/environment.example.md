@@ -42,12 +42,13 @@ configuration strategy.
 
 ## Delta Exchange India
 
-| Variable              | Required    | Description   | Example                             |
-| --------------------- | ----------- | ------------- | ----------------------------------- |
-| `DELTA_API_KEY`       | Conditional | API key       | —                                   |
-| `DELTA_API_SECRET`    | Conditional | API secret    | —                                   |
-| `DELTA_BASE_URL`      | No          | REST base URL | `https://api.india.delta.exchange`  |
-| `DELTA_WEBSOCKET_URL` | No          | WebSocket URL | `wss://socket.india.delta.exchange` |
+| Variable                | Required    | Description                    | Example                             |
+| ----------------------- | ----------- | ------------------------------ | ----------------------------------- |
+| `DELTA_API_KEY`         | Conditional | API key                        | —                                   |
+| `DELTA_API_SECRET`      | Conditional | API secret                     | —                                   |
+| `DELTA_BASE_URL`        | No          | REST base URL                  | `https://api.india.delta.exchange`  |
+| `DELTA_REQUEST_TIMEOUT` | No          | REST request timeout (seconds) | `10`                                |
+| `DELTA_WEBSOCKET_URL`   | No          | WebSocket URL                  | `wss://socket.india.delta.exchange` |
 
 ## CoinGecko
 

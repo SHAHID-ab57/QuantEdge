@@ -35,6 +35,11 @@ class Settings(BaseSettings):
     db_max_overflow: int = 10
     db_echo: bool = False
 
+    delta_base_url: str = "https://api.india.delta.exchange"
+    delta_api_key: str = ""
+    delta_api_secret: str = ""
+    delta_request_timeout: float = 10.0
+
 
 @lru_cache
 def get_settings() -> Settings:

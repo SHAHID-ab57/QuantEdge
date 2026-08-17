@@ -5,7 +5,7 @@ from collections.abc import Iterator
 import pytest
 from pydantic import ValidationError
 
-from app.core.config import get_settings
+from app.core.config import Settings, get_settings
 from app.integrations.delta.config import DeltaConfig, get_delta_config
 
 
@@ -36,6 +36,8 @@ def test_build_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_defaults_without_delta_variables(monkeypatch: pytest.MonkeyPatch) -> None:
     """Without DELTA_* variables, documented service defaults apply."""
+    Settings.model_config["env_file"] = None
+    monkeypatch.setattr(Settings, "model_config", Settings.model_config)
     for name in (
         "DELTA_BASE_URL",
         "DELTA_API_KEY",

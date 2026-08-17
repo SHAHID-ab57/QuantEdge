@@ -13,7 +13,12 @@ from app.integrations.delta.exceptions import (
     NetworkError,
     RateLimitError,
 )
-from app.integrations.delta.models import DeltaErrorBody, DeltaResponse
+from app.integrations.delta.models import (
+    DeltaErrorBody,
+    DeltaResponse,
+    Product,
+    ProductAsset,
+)
 
 __all__ = [
     "APIError",
@@ -24,6 +29,8 @@ __all__ = [
     "DeltaErrorBody",
     "DeltaResponse",
     "NetworkError",
+    "Product",
+    "ProductAsset",
     "RateLimitError",
     "get_delta_client",
     "get_delta_config",

@@ -565,6 +565,117 @@ Router (app/api/v1/endpoints/market_data.py)
 Responses never expose ORM models; the OpenAPI schema documents parameters,
 examples, and error responses for every endpoint.
 
+## WebSocket Streaming
+
+Live market data is consumed from the Delta Exchange private WebSocket endpoint.
+The client authenticates with API credentials (key-auth), subscribes to channels,
+and automatically reconnects with exponential backoff. The default endpoint
+(`wss://socket.india.delta.exchange`) is the private socket and **requires**
+`DELTA_API_KEY` / `DELTA_API_SECRET`; the public socket
+(`wss://socket.delta.exchange`) offers only public channels and no authentication.
+
+### Architecture
+
+```text
+Delta WebSocket ──> ConnectionManager (app/ws)   reconnect, backoff, monitors
+                         │
+                         ▼
+              DeltaWebSocketClient (app/integrations/delta/websocket)
+                         │   key-auth, heartbeat, ping/pong, resubscribe
+                         ▼
+              MessageParser (exact + wildcard type registry)
+                         │
+                         ▼
+              EventDispatcher ──> your listener coroutines (WSEvent subclasses)
+```
+
+`app/ws/` is a protocol-agnostic layer (connection, dispatcher, parser,
+subscriptions, settings); `app/integrations/delta/websocket/` implements the
+Delta protocol on top of it.
+
+### Environment variables
+
+| Variable                   | Default                             | Description                             |
+| -------------------------- | ----------------------------------- | --------------------------------------- |
+| `DELTA_WS_URL`             | `wss://socket.india.delta.exchange` | WebSocket endpoint                      |
+| `DELTA_WS_RECONNECT_DELAY` | `2.0`                               | Initial reconnect delay (seconds)       |
+| `DELTA_WS_MAX_RETRIES`     | `0`                                 | Max reconnect attempts; `0` = unlimited |
+| `DELTA_API_KEY`            | —                                   | Required for the private socket         |
+| `DELTA_API_SECRET`         | —                                   | Required for the private socket         |
+
+### CLI listener
+
+```bash
+# Ticker for a single symbol
+uv run python scripts/ws_listener.py --channel ticker=BTCUSD
+
+# Multiple channels, multiple symbols each (all --run arguments start the stream)
+uv run python scripts/ws_listener.py \
+  --channel ticker=BTCUSD,ETHUSD \
+  --channel candlestick_1m=BTCUSD \
+  --verbose
+
+# Stop after 30 seconds
+uv run python scripts/ws_listener.py --channel trades=BTCUSD --duration 30
+```
+
+Channels: `ticker`, `ob_l1`, `ob_l2`, `ob_updates`, `trades`,
+`candlestick_<resolution>` (e.g. `candlestick_1m`), `spot_price`,
+`spot_30mtwap_price`, `funding_rate`, `product_updates`, `system_status`.
+Private channels (`orders`, `positions`, `user_trades`, `margins`) work
+against the private socket with valid credentials. Omit the symbol list to
+subscribe to a whole channel (e.g. `--channel product_updates`). Events are
+typed in `app/integrations/delta/websocket/models.py`.
+
+### Connection lifecycle
+
+1. Connect with `connect_timeout`; on failure wait `reconnect_delay`
+   (capped at `max_backoff`), doubling each attempt.
+2. On connect: `enable_heartbeat`, then `key-auth` (HMAC-SHA256 signature;
+   requires credentials or the client raises `AuthenticationError`).
+3. On successful auth: resubscribe all previously queued subscriptions.
+4. Server sends `heartbeat` every ~30s; if none arrives within
+   `heartbeat_timeout` (35s default) the connection is treated as dead and
+   reconnects. The client answers server `ping` frames with `pong`
+   (`pong_timeout`).
+5. `subscribe`/`unsubscribe` calls while disconnected are queued and sent on
+   the next successful connection.
+
+### Library usage
+
+```python
+from app.integrations.delta.websocket.client import get_delta_ws_client
+from app.integrations.delta.websocket import models as events
+
+
+async def on_ticker(event: events.TickerEvent) -> None:
+    print(event.sy, event.ts, event.d)
+
+
+async def main() -> None:
+    client = get_delta_ws_client()
+    client.add_listener("ticker", on_ticker)
+    await client.subscribe("ticker", ["BTCUSD"])
+    client.start()
+    try:
+        await asyncio.Future()  # run forever
+    finally:
+        await client.close()
+```
+
+### Troubleshooting
+
+- **Rate limits.** Delta allows 150 connections per 5 minutes per IP. On
+  429/close, wait 5–10 minutes before retrying.
+- **Inactivity.** The server drops connections idle for 60s; heartbeats
+  keep the connection alive.
+- **Legacy channels.** Public channels on the private endpoint and
+  legacy formats are removed 2026-07-31 — always use the current endpoint
+  and channel names above.
+- **Auth failures.** Wrong API key, expired timestamp, or an IP not
+  whitelisted produces an auth failure and the client reconnects (the
+  auth error is logged; credentials are never logged).
+
 ## Test
 
 ```bash
@@ -599,13 +710,23 @@ services/api/
 │   │   ├── session.py       # Session factory and get_db() dependency
 │   │   └── base.py          # Declarative base (for future models)
 │   ├── integrations/        # External API clients (Delta Exchange)
+│   │   ├── delta/           # Delta REST client + WS protocol layer
+│   │   │   └── websocket/   # Delta WS models, auth, parser, client
 │   ├── models/              # ORM models (placeholder)
 │   ├── schemas/             # Pydantic schemas
-│   ├── services/            # Business services (placeholder)
-│   ├── repositories/        # Data access layer (placeholder)
-│   ├── dependencies/        # FastAPI dependencies (placeholder)
+│   ├── services/            # Business services
+│   ├── repositories/        # Data access layer
+│   ├── dependencies/        # FastAPI dependencies
+│   ├── ws/                  # Protocol-agnostic WebSocket layer
+│   │   ├── connection.py    # Reconnect, backoff, heartbeat/ping monitors
+│   │   ├── parser.py        # Message -> WSEvent parsing registry
+│   │   ├── dispatcher.py    # Listener dispatch (exact + "*" wildcard)
+│   │   ├── subscriptions.py # Subscribe/unsubscribe state + resubscribe
+│   │   └── config.py        # WebSocketSettings
 │   ├── middleware/          # Custom middleware (placeholder)
 │   └── utils/               # Utility helpers
+├── scripts/                 # Operational scripts
+│   └── ws_listener.py       # WebSocket market data listener CLI
 ├── tests/                   # Test suite
 ├── alembic/                 # Migration environment and versions/
 │   ├── env.py               # Async migration environment (app settings)
@@ -623,7 +744,6 @@ services/api/
 - Authentication and authorization.
 - Redis integration.
 - Additional market data providers (beyond Delta Exchange).
-- WebSocket streaming for live candles and tickers.
 - Feature engineering and prediction endpoints.
 - Background workers for data collection and model training.
 

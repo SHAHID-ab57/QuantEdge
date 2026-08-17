@@ -43,6 +43,10 @@ class Settings(BaseSettings):
     delta_api_secret: str = ""
     delta_request_timeout: float = 10.0
 
+    delta_ws_url: str = "wss://socket.india.delta.exchange"
+    delta_ws_reconnect_delay: float = 2.0
+    delta_ws_max_retries: int = 0
+
 
 @lru_cache
 def get_settings() -> Settings:

@@ -86,9 +86,9 @@ class Candle(BaseModel, TimestampMixin):
         Numeric(PRECISION, SCALE),
         nullable=False,
     )
-    quote_volume: Mapped[Decimal] = mapped_column(
+    quote_volume: Mapped[Decimal | None] = mapped_column(
         Numeric(PRECISION, SCALE),
-        nullable=False,
+        nullable=True,
     )
 
     trade_count: Mapped[int | None] = mapped_column(

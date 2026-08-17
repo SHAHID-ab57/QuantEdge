@@ -1,5 +1,7 @@
 """Pydantic models for Delta Exchange API responses."""
 
+from decimal import Decimal
+
 from pydantic import BaseModel
 
 
@@ -43,3 +45,19 @@ class Product(BaseModel):
     state: str | None = None
     underlying_asset: ProductAsset | None = None
     quoting_asset: ProductAsset | None = None
+
+
+class CandleResponse(BaseModel):
+    """A single OHLCV candle returned by ``GET /v2/history/candles``.
+
+    ``time`` is the bucket open time as a Unix timestamp in seconds.
+    Decimal fields reject NaN/Inf and non-numeric payloads, so malformed
+    records fail validation instead of entering the pipeline.
+    """
+
+    time: int
+    open: Decimal
+    high: Decimal
+    low: Decimal
+    close: Decimal
+    volume: Decimal

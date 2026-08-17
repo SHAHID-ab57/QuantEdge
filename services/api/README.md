@@ -270,6 +270,110 @@ schema mismatches, rate limiting (retried and exhausted), server errors,
 timeouts, connect failures, signed headers, missing credentials, and secret
 redaction in logs.
 
+### Historical candle ingestion
+
+`app/services/candle_ingest.py` fetches historical OHLCV candles from the
+public `GET /v2/history/candles` endpoint, validates and normalizes each
+record, and persists them into the `candles` table.
+
+#### Supported timeframes
+
+Delta Exchange India documents the following resolutions (as of 2025-10-18,
+`7d`/`30d`/`2w` were deprecated by Delta and are intentionally unsupported):
+
+| Resolution | Meaning    |
+| ---------- | ---------- |
+| `1m`       | 1 minute   |
+| `3m`       | 3 minutes  |
+| `5m`       | 5 minutes  |
+| `15m`      | 15 minutes |
+| `30m`      | 30 minutes |
+| `1h`       | 1 hour     |
+| `2h`       | 2 hours    |
+| `4h`       | 4 hours    |
+| `6h`       | 6 hours    |
+| `1d`       | 1 day      |
+
+#### Ingestion command
+
+```bash
+uv run python scripts/ingest_candles.py \
+  --symbol ETHUSDT \
+  --timeframe 1h \
+  --start 2026-01-01 \
+  --end 2026-01-31
+```
+
+- `--symbol` — the Delta market symbol exactly as stored in `markets`
+  (synced by `scripts/sync_markets.py`; the initial use case is `ETHUSDT`).
+- `--timeframe` — one of the supported resolutions above.
+- `--start` / `--end` — `YYYY-MM-DD` (midnight UTC) or an ISO datetime;
+  the range is half-open `[start, end)`.
+- `--max-candles-per-request` — default `2000`, the documented Delta limit.
+
+The market must already exist in the database (run the market sync first);
+ingestion fails with guidance otherwise.
+
+#### Historical range behavior
+
+Delta returns up to 2000 candles per request and delivers them **newest
+first**. The service:
+
+- splits ranges longer than one request into contiguous, non-overlapping
+  windows, one API request per window;
+- sorts every fetched batch chronologically before validation;
+- persists the whole run in a single transaction, so a failed request
+  persists nothing (re-run the command — it is idempotent).
+
+#### Validation rules
+
+Each record is validated before persistence; invalid records are **logged
+and rejected** (never silently fixed or inserted):
+
+- timestamp is a non-negative Unix seconds value inside `[start, end)`;
+- bucket-aligned open time (`time % duration == 0`);
+- bucket already closed (`open_time + duration <= now`);
+- `high >= max(open, close)` and `low <= min(open, close)`;
+- `high >= low`, all prices non-negative;
+- `volume >= 0`.
+
+Timestamps are stored as timezone-aware UTC; prices and volume are stored as
+`NUMERIC(38, 18)` decimals (no float corruption). Delta candles carry no
+quote volume or trade count — those columns are `NULL` for ingested candles.
+
+#### Duplicate handling
+
+`(market_id, timeframe, open_time)` is unique. Re-running the same range
+skips candles already stored (`duplicates_skipped` in the report) and never
+inserts twice; the unique constraint is the backstop. Rows that still fail
+at the database level (e.g. a concurrent ingest) are isolated, logged, and
+counted as rejected.
+
+#### Troubleshooting
+
+| Symptom                          | Cause / fix                                                                      |
+| -------------------------------- | -------------------------------------------------------------------------------- |
+| `Market 'X' not found ...`       | Run `uv run python scripts/sync_markets.py` first.                               |
+| `Unsupported timeframe`          | `7d`/`30d`/`2w` were deprecated by Delta; use a supported resolution.            |
+| `Database is not configured`     | Set `DATABASE_URL` (or `DB_URL`) — see Environment Variables above.              |
+| HTTP 429 / rate limit errors     | The client retries automatically with backoff; lower concurrency or retry later. |
+| `table "candles" does not exist` | Run `make db-upgrade` to apply migrations.                                       |
+
+#### Real API integration test
+
+`tests/manual/test_real_candle_ingest.py` calls the live Delta API and
+writes into the configured database. It is opt-in and never runs in the
+normal suite:
+
+```bash
+uv run pytest tests/manual -m integration --run-integration -v
+```
+
+Optional environment overrides: `DELTA_INTEGRATION_SYMBOL` (default
+`ETHUSD` — Delta India has no `ETHUSDT` product), `DELTA_INTEGRATION_TIMEFRAME`
+(default `1h`), `DELTA_INTEGRATION_DAYS` (default `3`). The test ingests the
+recent range twice and asserts the second run inserts nothing.
+
 ## Test
 
 ```bash
@@ -278,8 +382,13 @@ uv run pytest
 
 Tests run without a database: `tests/conftest.py` forces an empty
 `DATABASE_URL`, so the health endpoints deterministically exercise the
-503/degraded path. Integration tests against a live PostgreSQL can be added
-later behind the same fixture override.
+503/degraded path. Integration tests that call real external APIs are
+marked `integration` and require `--run-integration`:
+
+```bash
+uv run pytest                                    # unit tests only
+uv run pytest -m integration --run-integration   # real-API integration tests
+```
 
 ## Directory Structure
 
@@ -321,10 +430,9 @@ services/api/
 ## Future Expansion
 
 - Authentication and authorization.
-- ORM models backed by Alembic migrations.
 - Redis integration.
 - Additional market data providers (beyond Delta Exchange).
-- Market data ingestion from the Delta Exchange client.
+- WebSocket streaming for live candles and tickers.
 - Feature engineering and prediction endpoints.
 - Background workers for data collection and model training.
 

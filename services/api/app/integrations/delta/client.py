@@ -28,7 +28,7 @@ from app.integrations.delta.exceptions import (
     NetworkError,
     RateLimitError,
 )
-from app.integrations.delta.models import DeltaResponse
+from app.integrations.delta.models import CandleResponse, DeltaResponse
 
 logger = logging.getLogger("app.integrations.delta")
 
@@ -38,6 +38,8 @@ DEFAULT_MAX_RETRIES = 3
 DEFAULT_RETRY_BACKOFF = 0.5
 _MAX_RETRY_DELAY = 30.0
 _USER_AGENT = "eth-ai-platform/0.1.0"
+
+CANDLES_PATH = "/v2/history/candles"
 
 T = TypeVar("T")
 
@@ -144,6 +146,55 @@ class DeltaClient:
             response_model=response_model,
             auth=auth,
         )
+
+    async def get_candles(
+        self,
+        *,
+        symbol: str,
+        resolution: str,
+        start: int,
+        end: int,
+    ) -> list[CandleResponse]:
+        """Fetch historical OHLCV candles for one market and resolution.
+
+        Args:
+            symbol: The market symbol, e.g. ``ETHUSDT``.
+            resolution: Candle resolution, e.g. ``1h`` (see Delta docs for
+                supported values such as ``1m 3m 5m 15m 30m 1h 2h 4h 6h 1d``).
+            start: Range start as a Unix timestamp in seconds (inclusive).
+            end: Range end as a Unix timestamp in seconds (exclusive).
+
+        Returns:
+            The candles returned by Delta, in the order the API provided
+            them. Note that Delta returns the most recent candle first;
+            callers that need chronological order must sort.
+
+        Raises:
+            APIError: When the response envelope or candle records are
+                malformed.
+        """
+        result = await self.get(
+            CANDLES_PATH,
+            params={
+                "symbol": symbol,
+                "resolution": resolution,
+                "start": start,
+                "end": end,
+            },
+            response_model=list[CandleResponse],
+        )
+        if not isinstance(result, list):
+            raise APIError(
+                f"Delta candles response for {symbol} is not a list",
+                detail=result,
+            )
+        try:
+            return [CandleResponse.model_validate(record) for record in result]
+        except ValidationError as exc:
+            raise APIError(
+                f"Delta candles response for {symbol} does not match CandleResponse",
+                detail=exc.errors(include_url=False),
+            ) from exc
 
     async def post(
         self,

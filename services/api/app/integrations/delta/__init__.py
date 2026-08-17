@@ -14,6 +14,7 @@ from app.integrations.delta.exceptions import (
     RateLimitError,
 )
 from app.integrations.delta.models import (
+    CandleResponse,
     DeltaErrorBody,
     DeltaResponse,
     Product,
@@ -23,6 +24,7 @@ from app.integrations.delta.models import (
 __all__ = [
     "APIError",
     "AuthenticationError",
+    "CandleResponse",
     "DeltaClient",
     "DeltaConfig",
     "DeltaError",

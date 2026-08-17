@@ -374,6 +374,75 @@ Optional environment overrides: `DELTA_INTEGRATION_SYMBOL` (default
 (default `1h`), `DELTA_INTEGRATION_DAYS` (default `3`). The test ingests the
 recent range twice and asserts the second run inserts nothing.
 
+### Market data quality validation
+
+`scripts/validate_market_data.py` is a **read-only** framework that checks
+the integrity of stored OHLCV candles before they are consumed by APIs,
+feature engineering, or AI models. It never writes to the database.
+
+```bash
+uv run python scripts/validate_market_data.py --symbol ETHUSD --timeframe 1h
+```
+
+Optional range (when omitted, the observed span of stored candles is
+validated — from the oldest stored candle to the newest plus one bucket):
+
+```bash
+uv run python scripts/validate_market_data.py \
+  --symbol ETHUSD \
+  --timeframe 1h \
+  --start 2026-01-01 \
+  --end 2026-01-31
+```
+
+#### Validation rules
+
+| Rule                                | Description                                                                                                                                                                                                                           |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| OHLC dominance                      | `high >= open`, `high >= close`, `low <= open`, `low <= close`, `high >= low`.                                                                                                                                                        |
+| Non-negative volume                 | `volume >= 0` and `quote_volume >= 0` when present.                                                                                                                                                                                   |
+| Bucket alignment                    | `open_time` must fall on a timeframe bucket boundary (Unix epoch is the alignment origin).                                                                                                                                            |
+| Close time consistency              | `close_time == open_time + timeframe duration`.                                                                                                                                                                                       |
+| UTC timestamps                      | Aware timestamps must have zero UTC offset; naive timestamps are treated as UTC.                                                                                                                                                      |
+| Chronological ordering / no overlap | Each candle's `open_time` must be at least the previous candle's `close_time`.                                                                                                                                                        |
+| Duplicates                          | Exact duplicates on `(market_id, timeframe, open_time)` are checked (defensive; the unique constraint normally prevents them). Multiple candles inside one bucket (e.g. `12:00` and `12:30` for 1h) are counted as duplicate buckets. |
+| Missing candles (gaps)              | Every bucket start in the validated range is expected; absent bucket starts are reported.                                                                                                                                             |
+
+#### Quality score
+
+The report includes two sub-metrics and one overall score (percentages):
+
+```text
+coverage = (expected - missing) / expected     # 0 when nothing is expected
+validity = (total - invalid) / total           # 0 when no candles are stored
+quality_score = 100 * coverage * validity
+```
+
+A perfect dataset scores 100; an empty one scores 0. Issue and missing
+timestamp samples are capped (`--limit`, default 100) while counts stay
+exact.
+
+#### Common issues and how to fix them
+
+| Symptom                                        | Cause / fix                                                                                                                                     |
+| ---------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| Missing candles in the middle of history       | API outages or ingestion failures. Re-run `scripts/ingest_candles.py` for the affected range — ingestion is idempotent and fills only the gaps. |
+| Missing candles at the leading edge            | History was never fetched. Determine the desired start and run `ingest_candles.py` with an earlier `--start`.                                   |
+| `overlaps previous bucket` / duplicate buckets | Misaligned records entered through another path. Inspect the issue list and delete the offending rows (see below).                              |
+| Invalid OHLC, negative volume                  | Corrupt rows in storage. Delete them and re-ingest the range from the exchange.                                                                 |
+
+Deleting a single bad row (PostgreSQL):
+
+```sql
+DELETE FROM candles
+WHERE market_id = (SELECT id FROM markets WHERE symbol = 'ETHUSD')
+  AND timeframe = '1h'
+  AND open_time = '2026-08-14 06:00:00+00';
+```
+
+Then re-run `scripts/ingest_candles.py` for the affected range to restore the
+row from the exchange.
+
 ## Test
 
 ```bash

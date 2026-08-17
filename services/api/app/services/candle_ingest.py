@@ -167,7 +167,7 @@ async def _run_ingest(
         market = await _resolve_market(session, symbol)
         existing_keys = await _load_existing_keys(session, market.id, timeframe)
 
-    duration = _resolution_duration(timeframe)
+    duration = resolution_duration(timeframe)
     windows = _request_windows(start, end, duration, max_candles_per_request)
 
     records: list[CandleResponse] = []
@@ -269,7 +269,7 @@ async def _load_existing_keys(
     return set(rows.scalars())
 
 
-def _resolution_duration(timeframe: str) -> timedelta:
+def resolution_duration(timeframe: str) -> timedelta:
     """Map a resolution string to its bucket duration (e.g. ``1h`` -> 3600s)."""
     amount = int(timeframe[:-1])
     seconds = _RESOLUTION_UNIT_SECONDS[timeframe[-1]] * amount

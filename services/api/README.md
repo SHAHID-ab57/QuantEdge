@@ -698,6 +698,76 @@ For private channels, use `get_delta_ws_client(public=False)` and set
   whitelisted produces an auth failure and the client reconnects (the
   auth error is logged; credentials are never logged).
 
+## In-process Event Bus
+
+An in-memory, broker-free publish/subscribe bus that decouples modules
+(WebSocket ingestion, market data storage, feature engineering, AI
+prediction, paper trading, risk engine, notifications). Events are routed
+by `event_type` to registered async handlers. The abstraction is thin on
+purpose so a broker-backed implementation (Kafka/RabbitMQ) can replace it
+without touching producers or consumers.
+
+### Architecture
+
+```text
+Producer ──publish(event)──> EventBus ──schedules a task per handler──> Handler
+                                                                         │
+                                                                         ▼
+                                                          logs + error isolation
+```
+
+- **Event** (`app/events/event.py`): `event_id` (UUID), `event_type`
+  (defaults to the class name), `timestamp` (UTC), `source`, `payload`
+  (auto-populated wire body from the typed subclass fields).
+- **EventBus** (`app/events/bus.py`): `subscribe`, `unsubscribe`,
+  `unsubscribe_all`, `publish`, `drain`; per-type handler sets (duplicate
+  registrations are no-ops).
+- **Handlers**: plain `async (event) -> None` callables. `LoggingHandler`
+  and `DebugHandler` in `app/events/handlers.py` are reference examples.
+- **Example events** (`app/events/example_events.py`):
+  `MarketTradeReceived`, `CandleClosed`, `OrderBookUpdated`.
+
+### Event lifecycle
+
+1. A producer creates an event (`MarketTradeReceived(source="delta.ws", ...)`);
+   `event_type` and `payload` are filled automatically.
+2. `await bus.publish(event)` schedules one task per matching handler and
+   returns immediately — publishers never block on handler work.
+3. Each handler task runs concurrently; a raising handler is logged via
+   `logger.exception` and never affects the others.
+4. Publish (with subscriber count) and per-handler completion (with
+   execution time in ms) are logged at DEBUG; failures at ERROR.
+5. `await bus.drain()` waits for all pending handler tasks — used by
+   tests and application shutdown.
+
+### Adding a new handler
+
+```python
+from app.events import EventBus
+
+bus = EventBus()
+
+async def persist_candle(event) -> None:  # your async handler
+    ...
+
+bus.subscribe("CandleClosed", persist_candle)
+await bus.publish(CandleClosed(source="ingest", symbol="BTCUSD", ...))
+```
+
+### Future migration to Kafka/RabbitMQ
+
+Producers and consumers keep the same API. Swap `EventBus` for a
+broker-backed implementation of the same interface:
+
+- `publish` → broker producer (payload as the wire body, `event_id` for
+  idempotent consumption).
+- `subscribe`/`unsubscribe` → consumer group membership (external
+  cancellation or broker-managed groups replace in-process references).
+- `drain` → flush/pending-message accounting on the broker client.
+- Gains: process-spanning delivery, durability, replay, backpressure,
+  and horizontal scaling. Costs: ordering guarantees and exactly-once
+  semantics become broker concerns.
+
 ## Test
 
 ```bash
@@ -739,6 +809,11 @@ services/api/
 │   ├── services/            # Business services
 │   ├── repositories/        # Data access layer
 │   ├── dependencies/        # FastAPI dependencies
+│   ├── events/              # In-process async event bus
+│   │   ├── event.py         # Event base (id, type, UTC timestamp, source, payload)
+│   │   ├── bus.py           # EventBus: subscribe/unsubscribe/publish/drain
+│   │   ├── handlers.py      # LoggingHandler, DebugHandler (reference)
+│   │   └── example_events.py# MarketTradeReceived, CandleClosed, OrderBookUpdated
 │   ├── ws/                  # Protocol-agnostic WebSocket layer
 │   │   ├── connection.py    # Reconnect, backoff, heartbeat/ping monitors
 │   │   ├── parser.py        # Message -> WSEvent parsing registry

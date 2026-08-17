@@ -35,6 +35,9 @@ class Settings(BaseSettings):
     db_max_overflow: int = 10
     db_echo: bool = False
 
+    candles_default_limit: int = 100
+    candles_max_limit: int = 1000
+
     delta_base_url: str = "https://api.india.delta.exchange"
     delta_api_key: str = ""
     delta_api_secret: str = ""

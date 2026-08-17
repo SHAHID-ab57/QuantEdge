@@ -33,6 +33,9 @@ development dependencies.
 uv run uvicorn app.main:app --reload --port 8000
 ```
 
+Interactive API documentation (Swagger UI) is served at
+<http://localhost:8000/docs> (ReDoc at <http://localhost:8000/redoc>).
+
 The API is served at `http://localhost:8000`.
 
 Interactive documentation:
@@ -442,6 +445,125 @@ WHERE market_id = (SELECT id FROM markets WHERE symbol = 'ETHUSD')
 
 Then re-run `scripts/ingest_candles.py` for the affected range to restore the
 row from the exchange.
+
+## Market Data REST API
+
+The API exposes validated historical candle data from the `candles` table.
+It is read-only: no authentication, no WebSocket streaming, no trading.
+Interactive docs (Swagger UI) at `http://localhost:8000/docs`.
+
+### Endpoints
+
+All endpoints are versioned under `/api/v1`.
+
+| Method | Path                                  | Description                                                                    |
+| ------ | ------------------------------------- | ------------------------------------------------------------------------------ |
+| GET    | `/api/v1/markets`                     | All available markets, ordered by symbol.                                      |
+| GET    | `/api/v1/markets/{symbol}/timeframes` | Timeframes that have stored candle data for the market (empty list when none). |
+| GET    | `/api/v1/markets/{symbol}/candles`    | Page of candles for a timeframe, ascending by `open_time`.                     |
+| GET    | `/api/v1/markets/{symbol}/latest`     | The candle with the newest `open_time` for a timeframe.                        |
+
+### Query parameters (`/candles`)
+
+| Parameter   | Type     | Required | Default | Description                                                                                                    |
+| ----------- | -------- | -------- | ------- | -------------------------------------------------------------------------------------------------------------- |
+| `timeframe` | string   | yes      | —       | Resolution, e.g. `1m`, `15m`, `1h`, `1d` (platform set: `1m 3m 5m 15m 30m 1h 2h 4h 6h 8h 12h 1d 1w`).          |
+| `start`     | datetime | no       | —       | Range start (inclusive), ISO-8601. Naive values are treated as UTC.                                            |
+| `end`       | datetime | no       | —       | Range end (exclusive), ISO-8601. Must be after `start`; `start` and `end` are provided together or not at all. |
+| `limit`     | integer  | no       | 100     | Max candles per page (1–1000, configured via `CANDLES_MAX_LIMIT`).                                             |
+| `offset`    | integer  | no       | 0       | Candles to skip (>= 0).                                                                                        |
+
+`/latest` takes `timeframe` (required). `/timeframes` and `/latest` take the
+symbol in the path.
+
+### Pagination
+
+`/candles` responses include a `pagination` object:
+
+```json
+{
+  "total": 79,
+  "returned": 10,
+  "has_more": true,
+  "limit": 10,
+  "offset": 0
+}
+```
+
+Walk pages by incrementing `offset` until `has_more` is `false`.
+
+### Response format
+
+Prices and volumes serialize as JSON strings (exact decimals, no float
+corruption); timestamps are ISO-8601 UTC:
+
+```json
+{
+  "open_time": "2026-08-14T00:00:00Z",
+  "close_time": "2026-08-14T01:00:00Z",
+  "open": "3050.5",
+  "high": "3060",
+  "low": "3040",
+  "close": "3055.25",
+  "volume": "120.5",
+  "quote_volume": null,
+  "trade_count": null,
+  "source": "delta"
+}
+```
+
+### Error codes
+
+Domain errors use the `{"code": ..., "detail": ...}` shape; malformed query
+values (e.g. a bad datetime, `limit=0`, `offset=-1`) return FastAPI's
+standard 422 `validation_error` shape.
+
+| Code                | Status | Meaning                                                                           |
+| ------------------- | ------ | --------------------------------------------------------------------------------- |
+| `market_not_found`  | 404    | The symbol does not exist in the `markets` table.                                 |
+| `candle_not_found`  | 404    | No candles stored for the market/timeframe (`/latest`).                           |
+| `invalid_timeframe` | 400    | Timeframe not in the supported set.                                               |
+| `invalid_range`     | 400    | `start` without `end` (or vice versa), or `end <= start`.                         |
+| `limit_exceeded`    | 400    | `limit` above the configured maximum (query validation also rejects it with 422). |
+
+### curl examples
+
+```bash
+# All markets
+curl http://localhost:8000/api/v1/markets
+
+# Timeframes with data for ETHUSD
+curl http://localhost:8000/api/v1/markets/ETHUSD/timeframes
+
+# First 10 hourly candles
+curl "http://localhost:8000/api/v1/markets/ETHUSD/candles?timeframe=1h&limit=10"
+
+# Next page
+curl "http://localhost:8000/api/v1/markets/ETHUSD/candles?timeframe=1h&limit=10&offset=10"
+
+# Range filter (half-open: 00:00 inclusive, 04:00 exclusive)
+curl "http://localhost:8000/api/v1/markets/ETHUSD/candles?timeframe=1h&start=2026-08-14T00:00:00Z&end=2026-08-14T04:00:00Z"
+
+# Latest hourly candle
+curl "http://localhost:8000/api/v1/markets/ETHUSD/latest?timeframe=1h"
+
+# Error: unknown symbol
+curl -i http://localhost:8000/api/v1/markets/NOPE/candles?timeframe=1h
+```
+
+### Architecture
+
+Requests flow through the layered pipeline:
+
+```text
+Router (app/api/v1/endpoints/market_data.py)
+  -> Service (app/services/market_data.py)     validation + DTOs + domain errors
+  -> Repository (app/repositories/)            all SQL
+  -> PostgreSQL (candles, markets)
+```
+
+Responses never expose ORM models; the OpenAPI schema documents parameters,
+examples, and error responses for every endpoint.
 
 ## Test
 

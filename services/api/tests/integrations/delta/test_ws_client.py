@@ -54,10 +54,17 @@ def client_settings(url: str, **overrides: Any) -> WebSocketSettings:
     return WebSocketSettings(**base)
 
 
-async def make_client(server: MockWSServer, **overrides: Any) -> DeltaWebSocketClient:
-    """Build a client wired to the mock server with test credentials."""
+async def make_client(
+    server: MockWSServer, *, public: bool = False, **overrides: Any
+) -> DeltaWebSocketClient:
+    """Build a client wired to the mock server.
+
+    Private mode (default) exercises the ``key-auth`` flow with test
+    credentials; pass ``public=True`` for the unauthenticated flow.
+    """
     return DeltaWebSocketClient(
         client_settings(server.url, **overrides),
+        public=public,
         api_key=API_KEY,
         api_secret=API_SECRET,
     )
@@ -211,9 +218,49 @@ async def test_unsubscribe_sends_payload() -> None:
         await client.close()
 
 
-def test_credentials_required() -> None:
+def test_credentials_required_for_private_socket() -> None:
     settings = WebSocketSettings(url="ws://127.0.0.1:1")
     with pytest.raises(AuthenticationError, match="credentials"):
-        DeltaWebSocketClient(settings, api_key="", api_secret="")
+        DeltaWebSocketClient(settings, public=False, api_key="", api_secret="")
     with pytest.raises(AuthenticationError, match="credentials"):
-        DeltaWebSocketClient(settings, api_key="only-key", api_secret="")
+        DeltaWebSocketClient(settings, public=False, api_key="only-key", api_secret="")
+    public_client = DeltaWebSocketClient(settings, public=True)
+    assert public_client is not None
+
+
+@pytest.mark.asyncio
+async def test_public_client_skips_auth_and_subscribes() -> None:
+    server = MockWSServer(script=[("send", ACK), ("send", TICKER)])
+    async with server:
+        client = await make_client(server, public=True)
+        received_events: list[WSEvent] = []
+        client.add_listener("ticker", lambda event: _record(received_events, event))
+        await client.subscribe("ticker", ["ETHUSD"])
+        client.start()
+        await wait_until(
+            lambda: any(isinstance(e, events.TickerEvent) for e in received_events)
+        )
+
+        assert find_received(server.received, "key-auth") == []
+        assert find_received(server.received, "enable_heartbeat")
+        subscribe_messages = find_received(server.received, "subscribe")
+        assert len(subscribe_messages) == 1
+        channels = cast(list[dict[str, Any]], subscribe_messages[0]["payload"]["channels"])
+        assert channels == [{"name": "ticker", "symbols": ["ETHUSD"]}]
+
+        assert server.connections == 1
+        assert client.is_connected
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_public_client_queues_subscribe_until_connected() -> None:
+    server = MockWSServer(script=[("send", ACK)])
+    async with server:
+        client = await make_client(server, public=True)
+        await client.subscribe("ticker", ["ETHUSD"])
+        assert find_received(server.received, "subscribe") == []
+        client.start()
+        await wait_until(lambda: bool(find_received(server.received, "subscribe")))
+        assert find_received(server.received, "key-auth") == []
+        await client.close()

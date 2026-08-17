@@ -114,11 +114,11 @@ class OrderBookUpdatesEvent(WSEvent):
     """Incremental orderbook update (``ob_updates`` channel).
 
     The first frame has ``action`` ``snapshot``; follow-up frames carry
-    ``seq_no`` that must be contiguous per symbol.
+    ``seq`` that must be contiguous per symbol.
     """
 
     action: str
-    seq_no: int | None = None
+    seq: int | None = None
     a: list[list[Decimal]] | None = None
     b: list[list[Decimal]] | None = None
     sy: str
@@ -166,11 +166,15 @@ class SpotPriceEvent(WSEvent):
 
 
 class SpotTwapPriceEvent(WSEvent):
-    """A 30-minute TWAP of an underlying index (``spot_30mtwap_price``)."""
+    """A 30-minute TWAP of an underlying index (``spot_30mtwap_price``).
 
-    p: Decimal
-    sy: str
-    ts: int
+    Note this channel uses the long field names (``symbol``, ``price``,
+    ``timestamp``) instead of the compact keys used elsewhere.
+    """
+
+    symbol: str
+    price: Decimal
+    timestamp: int
 
 
 class FundingRateEvent(WSEvent):

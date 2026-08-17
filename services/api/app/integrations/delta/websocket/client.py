@@ -1,10 +1,11 @@
 """Async WebSocket client for Delta Exchange streaming data.
 
 Wires the generic connection machinery (:mod:`app.ws`) to the Delta
-protocol: key-auth on every (re)connect, heartbeat and ping/pong
-supervision, subscription tracking with resubscribe-on-reconnect, typed
-message parsing, and event dispatch to listeners. No persistence or
-business logic lives here.
+protocol: key-auth on every (re)connect to the private socket, heartbeat
+and ping/pong supervision, subscription tracking with
+resubscribe-on-reconnect, typed message parsing, and event dispatch to
+listeners. Public channels use the public socket and need no
+authentication. No persistence or business logic lives here.
 """
 
 import asyncio
@@ -37,39 +38,48 @@ class DeltaWebSocketClient:
     Connect with :meth:`run` (or :meth:`start` for background use), close
     with :meth:`close`. Subscribe to channels with :meth:`subscribe` and
     consume typed events through listeners added with :meth:`add_listener`.
-    The client authenticates automatically after every (re)connect and
-    re-requests tracked subscriptions, so listeners observe a seamless
-    stream across connection drops.
+    On the private socket the client authenticates automatically after
+    every (re)connect and re-requests tracked subscriptions, so listeners
+    observe a seamless stream across connection drops.
     """
 
     def __init__(
         self,
         settings: WebSocketSettings,
         *,
-        api_key: str,
-        api_secret: str,
+        public: bool = True,
+        api_key: str | None = None,
+        api_secret: str | None = None,
         auth_timeout: float = DEFAULT_AUTH_TIMEOUT,
     ) -> None:
         """Initialize the client.
 
         Args:
             settings: Connection settings; ``url`` should point at the
-                private socket when private channels are needed.
+                public socket for public channels or the private socket
+                for private channels.
+            public: True for the public endpoint (no authentication).
+                False for the private endpoint, which requires
+                ``api_key``/``api_secret`` and performs ``key-auth``.
             api_key: Delta API key used for ``key-auth``.
             api_secret: Delta API secret used for ``key-auth``.
             auth_timeout: Seconds to wait for the ``key-auth`` response.
 
         Raises:
-            AuthenticationError: When credentials are missing or the
-                ``key-auth`` request is rejected.
+            AuthenticationError: When the private endpoint is used
+                without credentials, or the ``key-auth`` request is
+                rejected.
         """
-        if not api_key or not api_secret:
+        if public:
+            api_key = api_secret = None
+        elif not api_key or not api_secret:
             raise AuthenticationError(
-                "Delta API credentials required for WebSocket "
+                "Delta API credentials required for the private WebSocket "
                 "(set DELTA_API_KEY / DELTA_API_SECRET)"
             )
         if auth_timeout <= 0:
             raise ValueError("auth_timeout must be positive")
+        self._public = public
         self._api_key = api_key
         self._api_secret = api_secret
         self._auth_timeout = auth_timeout
@@ -161,16 +171,18 @@ class DeltaWebSocketClient:
 
         The auth waiter must be registered before any await so the
         receive loop can resolve it no matter how quickly the server
-        responds.
+        responds. Public endpoints skip ``key-auth`` entirely.
         """
-        self._auth_waiter = asyncio.get_running_loop().create_future()
+        if not self._public:
+            self._auth_waiter = asyncio.get_running_loop().create_future()
         await self._manager.send_json({"type": "enable_heartbeat"})
-        try:
-            await self._authenticate()
-        except AuthenticationError as exc:
-            logger.error("WebSocket authentication failed: %s", exc.message)
-            await self._manager.abort("key-auth failed")
-            return
+        if not self._public:
+            try:
+                await self._authenticate()
+            except AuthenticationError as exc:
+                logger.error("WebSocket authentication failed: %s", exc.message)
+                await self._manager.abort("key-auth failed")
+                return
         payload = self._subscriptions.resubscribe_payload()
         if payload is not None:
             logger.info(
@@ -187,6 +199,7 @@ class DeltaWebSocketClient:
         """Send ``key-auth`` and wait for the server response."""
         waiter = self._auth_waiter
         assert waiter is not None
+        assert self._api_secret is not None
         timestamp = str(int(time.time()))
         await self._manager.send_json(
             {
@@ -248,20 +261,27 @@ class DeltaWebSocketClient:
 
 def get_delta_ws_client(
     settings: WebSocketSettings | None = None,
+    *,
+    public: bool = True,
 ) -> DeltaWebSocketClient:
     """Return a Delta WebSocket client configured from application settings.
 
-    Reads ``DELTA_WS_URL``, ``DELTA_WS_RECONNECT_DELAY``,
-    ``DELTA_WS_MAX_RETRIES``, ``DELTA_API_KEY``, and ``DELTA_API_SECRET``.
+    Public mode (default) reads ``DELTA_WS_URL`` (the public socket by
+    default) and needs no credentials. Private mode reads
+    ``DELTA_WS_PRIVATE_URL`` and requires ``DELTA_API_KEY`` /
+    ``DELTA_API_SECRET``. Reconnect behavior comes from
+    ``DELTA_WS_RECONNECT_DELAY`` and ``DELTA_WS_MAX_RETRIES``.
     """
     app_settings = get_settings()
+    url = app_settings.delta_ws_url if public else app_settings.delta_ws_private_url
     return DeltaWebSocketClient(
         settings
         or WebSocketSettings(
-            url=app_settings.delta_ws_url,
+            url=url,
             reconnect_delay=app_settings.delta_ws_reconnect_delay,
             max_retries=app_settings.delta_ws_max_retries,
         ),
+        public=public,
         api_key=app_settings.delta_api_key,
         api_secret=app_settings.delta_api_secret,
     )

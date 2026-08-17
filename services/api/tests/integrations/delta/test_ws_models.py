@@ -156,6 +156,29 @@ def test_spot_price_event() -> None:
     assert event.p == events.Decimal("1")
 
 
+def test_order_book_updates_snapshot_event() -> None:
+    event = parse(
+        '{"action":"snapshot","a":[["16919.0","1087"],["16919.5","1193"]],'
+        '"b":[["16918.0","602"]],"ts":1671140718980723,"seq":6199,'
+        '"sy":"BTCUSD","type":"ob_updates","cs":2178756498}'
+    )
+    assert isinstance(event, events.OrderBookUpdatesEvent)
+    assert event.action == "snapshot"
+    assert event.seq == 6199
+    assert event.sy == "BTCUSD"
+
+
+def test_spot_twap_price_event() -> None:
+    event = parse(
+        '{"symbol":".DEXBTUSD","price":"0.0014579",'
+        '"type":"spot_30mtwap_price","timestamp":1561634049751430}'
+    )
+    assert isinstance(event, events.SpotTwapPriceEvent)
+    assert event.symbol == ".DEXBTUSD"
+    assert event.price == events.Decimal("0.0014579")
+    assert event.timestamp == 1561634049751430
+
+
 def test_funding_rate_event() -> None:
     event = parse(
         '{"fi":28800,"fr":0.010000000000000002,"nfr":1775836800000000,'

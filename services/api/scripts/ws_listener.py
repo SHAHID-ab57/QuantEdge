@@ -4,7 +4,9 @@ Connects to the Delta WebSocket API, subscribes to the requested
 channels, and prints every parsed event until interrupted (or for a
 fixed ``--duration``).
 
-Requires ``DELTA_API_KEY`` / ``DELTA_API_SECRET`` for ``key-auth``.
+By default it connects to the public socket (no credentials needed);
+``--private`` switches to the private socket, which requires
+``DELTA_API_KEY`` / ``DELTA_API_SECRET`` for ``key-auth``.
 
 Usage:
     uv run python scripts/ws_listener.py --channel ticker=ETHUSD,BTCUSD
@@ -43,6 +45,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         metavar="NAME[=SYMBOL[,SYMBOL...]]",
         help="channel to subscribe, e.g. ticker=ETHUSD,BTCUSD (repeatable)",
+    )
+    parser.add_argument(
+        "--private",
+        action="store_true",
+        help="use the private socket and authenticate with API credentials",
     )
     parser.add_argument("--url", default=None, help="override the WebSocket URL")
     parser.add_argument(
@@ -84,7 +91,14 @@ def resolve_settings(args: argparse.Namespace) -> WebSocketSettings:
     """Build connection settings from CLI overrides and app settings."""
     app_settings = get_settings()
     return WebSocketSettings(
-        url=args.url or app_settings.delta_ws_url,
+        url=(
+            args.url
+            or (
+                app_settings.delta_ws_private_url
+                if args.private
+                else app_settings.delta_ws_url
+            )
+        ),
         reconnect_delay=(
             args.reconnect_delay
             if args.reconnect_delay is not None
@@ -115,6 +129,7 @@ async def run(args: argparse.Namespace) -> int:
     app_settings = get_settings()
     client = DeltaWebSocketClient(
         resolve_settings(args),
+        public=not args.private,
         api_key=app_settings.delta_api_key,
         api_secret=app_settings.delta_api_secret,
     )

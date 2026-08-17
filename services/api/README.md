@@ -567,12 +567,20 @@ examples, and error responses for every endpoint.
 
 ## WebSocket Streaming
 
-Live market data is consumed from the Delta Exchange private WebSocket endpoint.
-The client authenticates with API credentials (key-auth), subscribes to channels,
-and automatically reconnects with exponential backoff. The default endpoint
-(`wss://socket.india.delta.exchange`) is the private socket and **requires**
-`DELTA_API_KEY` / `DELTA_API_SECRET`; the public socket
-(`wss://socket.delta.exchange`) offers only public channels and no authentication.
+Live market data is consumed from the Delta Exchange WebSocket API. Delta
+splits the feed across two endpoints ("pods"): **public channels** (market
+data, no credentials) live on the public socket, **private channels**
+(account data) live on the private socket with `key-auth`. The client
+defaults to the public socket; pass `public=False` (or `--private`) for the
+private socket.
+
+| Socket  | URL                                        | Channels                                        | Auth       |
+| ------- | ------------------------------------------ | ----------------------------------------------- | ---------- |
+| Public  | `wss://public-socket.india.delta.exchange` | All public market data                          | None       |
+| Private | `wss://socket.india.delta.exchange`        | `orders`, `positions`, `user_trades`, `margins` | `key-auth` |
+
+Subscribing to a public channel on the private socket (or vice versa) is
+rejected with `subscription forbidden on this channel. Use appropriate pod`.
 
 ### Architecture
 
@@ -581,7 +589,8 @@ Delta WebSocket ──> ConnectionManager (app/ws)   reconnect, backoff, monitor
                          │
                          ▼
               DeltaWebSocketClient (app/integrations/delta/websocket)
-                         │   key-auth, heartbeat, ping/pong, resubscribe
+                         │   heartbeat, ping/pong, resubscribe
+                         │   (+ key-auth on the private socket)
                          ▼
               MessageParser (exact + wildcard type registry)
                          │
@@ -595,45 +604,54 @@ Delta protocol on top of it.
 
 ### Environment variables
 
-| Variable                   | Default                             | Description                             |
-| -------------------------- | ----------------------------------- | --------------------------------------- |
-| `DELTA_WS_URL`             | `wss://socket.india.delta.exchange` | WebSocket endpoint                      |
-| `DELTA_WS_RECONNECT_DELAY` | `2.0`                               | Initial reconnect delay (seconds)       |
-| `DELTA_WS_MAX_RETRIES`     | `0`                                 | Max reconnect attempts; `0` = unlimited |
-| `DELTA_API_KEY`            | —                                   | Required for the private socket         |
-| `DELTA_API_SECRET`         | —                                   | Required for the private socket         |
+| Variable                   | Default                                    | Description                             |
+| -------------------------- | ------------------------------------------ | --------------------------------------- |
+| `DELTA_WS_URL`             | `wss://public-socket.india.delta.exchange` | Public WebSocket endpoint               |
+| `DELTA_WS_PRIVATE_URL`     | `wss://socket.india.delta.exchange`        | Private WebSocket endpoint              |
+| `DELTA_WS_RECONNECT_DELAY` | `2.0`                                      | Initial reconnect delay (seconds)       |
+| `DELTA_WS_MAX_RETRIES`     | `0`                                        | Max reconnect attempts; `0` = unlimited |
+| `DELTA_API_KEY`            | —                                          | Required for the private socket         |
+| `DELTA_API_SECRET`         | —                                          | Required for the private socket         |
 
 ### CLI listener
 
 ```bash
-# Ticker for a single symbol
+# Ticker for a single symbol (public socket, no credentials needed)
 uv run python scripts/ws_listener.py --channel ticker=BTCUSD
 
-# Multiple channels, multiple symbols each (all --run arguments start the stream)
+# Multiple channels, multiple symbols each
 uv run python scripts/ws_listener.py \
   --channel ticker=BTCUSD,ETHUSD \
   --channel candlestick_1m=BTCUSD \
   --verbose
+
+# Private channels: authenticate against the private socket
+uv run python scripts/ws_listener.py --private --channel orders=all
 
 # Stop after 30 seconds
 uv run python scripts/ws_listener.py --channel trades=BTCUSD --duration 30
 ```
 
 Channels: `ticker`, `ob_l1`, `ob_l2`, `ob_updates`, `trades`,
-`candlestick_<resolution>` (e.g. `candlestick_1m`), `spot_price`,
-`spot_30mtwap_price`, `funding_rate`, `product_updates`, `system_status`.
-Private channels (`orders`, `positions`, `user_trades`, `margins`) work
-against the private socket with valid credentials. Omit the symbol list to
-subscribe to a whole channel (e.g. `--channel product_updates`). Events are
-typed in `app/integrations/delta/websocket/models.py`.
+`candlestick_<resolution>` (e.g. `candlestick_1m`), `mark_price`,
+`spot_price`, `spot_30mtwap_price`, `funding_rate`, `product_updates`,
+`system_status` (all public, no auth). Private channels (`orders`,
+`positions`, `user_trades`, `margins`) require `--private` with valid
+credentials. Omit the symbol list to subscribe to a whole channel (e.g.
+`--channel product_updates`). Symbols use the product symbol (`BTCUSD`),
+`MARK:`-prefixed symbols for mark price, option chain codes like
+`BTC-310326`, category names like `put_options`, index symbols like
+`.DEXBTUSD`, or `all`. Events are typed in
+`app/integrations/delta/websocket/models.py`.
 
 ### Connection lifecycle
 
 1. Connect with `connect_timeout`; on failure wait `reconnect_delay`
    (capped at `max_backoff`), doubling each attempt.
-2. On connect: `enable_heartbeat`, then `key-auth` (HMAC-SHA256 signature;
-   requires credentials or the client raises `AuthenticationError`).
-3. On successful auth: resubscribe all previously queued subscriptions.
+2. On connect: `enable_heartbeat`. On the private socket, then `key-auth`
+   (HMAC-SHA256 signature; missing credentials raise `AuthenticationError`).
+3. Resubscribe all previously queued subscriptions (after successful auth
+   on the private socket).
 4. Server sends `heartbeat` every ~30s; if none arrives within
    `heartbeat_timeout` (35s default) the connection is treated as dead and
    reconnects. The client answers server `ping` frames with `pong`
@@ -653,7 +671,7 @@ async def on_ticker(event: events.TickerEvent) -> None:
 
 
 async def main() -> None:
-    client = get_delta_ws_client()
+    client = get_delta_ws_client()          # public socket, no credentials
     client.add_listener("ticker", on_ticker)
     await client.subscribe("ticker", ["BTCUSD"])
     client.start()
@@ -663,15 +681,19 @@ async def main() -> None:
         await client.close()
 ```
 
+For private channels, use `get_delta_ws_client(public=False)` and set
+`DELTA_API_KEY` / `DELTA_API_SECRET`.
+
 ### Troubleshooting
 
+- **"subscription forbidden on this channel. Use appropriate pod."** The
+  channel is not served by the endpoint you connected to. Public channels
+  require the public socket; private channels require the private socket
+  with authentication.
 - **Rate limits.** Delta allows 150 connections per 5 minutes per IP. On
   429/close, wait 5–10 minutes before retrying.
 - **Inactivity.** The server drops connections idle for 60s; heartbeats
   keep the connection alive.
-- **Legacy channels.** Public channels on the private endpoint and
-  legacy formats are removed 2026-07-31 — always use the current endpoint
-  and channel names above.
 - **Auth failures.** Wrong API key, expired timestamp, or an IP not
   whitelisted produces an auth failure and the client reconnects (the
   auth error is logged; credentials are never logged).

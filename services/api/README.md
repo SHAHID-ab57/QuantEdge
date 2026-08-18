@@ -873,6 +873,92 @@ pipeline unchanged:
 - Exchange-specific conversion (field names, timestamp units, symbol
   formats) stays inside the normalizer.
 
+## Market State Manager
+
+`app/state/` maintains the latest market state per symbol in memory —
+the single source of truth for live data inside the application. It
+consumes normalized events from the bus and serves them through a
+synchronous query interface. No persistence, no Redis.
+
+### State lifecycle
+
+```text
+Event Bus (TradeEventReceived / TickerUpdated / OrderBookUpdated / CandleClosed)
+    │
+    ▼
+MarketStateManager handlers   (isinstance validation, then atomic store)
+    │
+    ▼
+Per-symbol slots             (trades, tickers, books, candles per (symbol, resolution))
+    │
+    ▼
+Query interface              (get_latest_* / get_order_book / get_market_state)
+```
+
+1. The manager subscribes to the four market event types via
+   `manager.attach(bus)`.
+2. Each handler validates the wrapper shape; malformed events are
+   logged, counted as `invalid_events`, and dropped.
+3. Valid events replace the previous value for the symbol (last-writer
+   wins; stream order is authoritative). Candles are keyed per
+   `(symbol, resolution)`.
+4. `_updated[symbol]` records the last update timestamp.
+5. Queries return the latest state; unknown symbols return `None`.
+
+### Query interface
+
+| Method                                       | Returns                                                   |
+| -------------------------------------------- | --------------------------------------------------------- |
+| `get_latest_trade(symbol)`                   | `TradeEvent \| None`                                      |
+| `get_latest_ticker(symbol)`                  | `TickerEvent \| None`                                     |
+| `get_latest_candle(symbol, resolution=None)` | `CandleClosed \| None`                                    |
+| `get_order_book(symbol)`                     | `OrderBookEvent \| None`                                  |
+| `get_market_state(symbol)`                   | `MarketState \| None` (immutable snapshot + `updated_at`) |
+| `symbols()`                                  | `frozenset[str]` of symbols with recorded updates         |
+
+`MarketState.last_price` derives the best price (trade, else ticker
+last/mark). Query hits and misses are counted (`cache_hits` /
+`cache_misses`).
+
+### Wiring
+
+```python
+from app.events import EventBus
+from app.state import MarketStateManager
+
+manager = MarketStateManager().attach(bus)  # bus feeds the manager
+price = manager.get_latest_trade("BTCUSD")  # None until first event
+```
+
+### Thread safety
+
+Handlers mutate state with no `await` between read-modify-write steps,
+so concurrent handler tasks on the single asyncio event loop never
+interleave mid-update. Queries are synchronous and atomic. If the
+application ever runs multiple event loops or threads, wrap the update
+handlers and queries in a lock (documented extension point).
+
+### Extending to Redis
+
+- Keys: `market_state:{symbol}` storing the latest snapshot (JSON of
+  `MarketState`), `trade:{symbol}`/`ticker:{symbol}`/`book:{symbol}`.
+- Write-through on every state update, with a TTL (e.g. 60s) so stale
+  symbols expire; restart resyncs by backfilling from the WS stream.
+- Cache-aside on query misses: `get_latest_trade` checks Redis before
+  returning `None`; the first WS event re-poisons the cache.
+- The `snapshot()` metrics contract maps directly to Redis
+  `INCR`/`GET` keys or Prometheus counters.
+
+### Future clustering support
+
+- Symbol-shard instances: assign each symbol to a node via
+  `hash(symbol) % N`; each node owns its shard's state.
+- Fan out updates through the event bus broker (Kafka/RabbitMQ) so every
+  node sees every update but only the owner answers queries.
+- On resync, a node replays the update stream (or fetches snapshots from
+  a peer) before serving; `seq`/event_id make replay idempotent.
+- Cluster-wide metrics aggregate per-node `snapshot()` values.
+
 ## Test
 
 ```bash
@@ -925,6 +1011,10 @@ services/api/
 │   │   ├── bus_events.py    # TradeEventReceived, TickerUpdated, OrderBookUpdated
 │   │   ├── pipeline.py      # MarketDataPipeline (parse -> normalize -> validate -> publish)
 │   │   └── metrics.py       # ProcessingMetrics (counters + latency, Prometheus-ready)
+│   ├── state/               # Market state manager (in-memory source of truth)
+│   │   ├── manager.py       # MarketStateManager: bus handlers + query interface
+│   │   ├── models.py        # MarketState snapshot (trade/ticker/candle/book + updated_at)
+│   │   └── metrics.py       # StateMetrics (updates, hits/misses, latency)
 │   ├── ws/                  # Protocol-agnostic WebSocket layer
 │   │   ├── connection.py    # Reconnect, backoff, heartbeat/ping monitors
 │   │   ├── parser.py        # Message -> WSEvent parsing registry

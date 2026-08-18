@@ -119,6 +119,7 @@ class OrderBookUpdatesEvent(WSEvent):
 
     action: str
     seq: int | None = None
+    cs: int | None = None
     a: list[list[Decimal]] | None = None
     b: list[list[Decimal]] | None = None
     sy: str

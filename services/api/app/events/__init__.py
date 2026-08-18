@@ -7,7 +7,7 @@ abstraction can be replaced by Kafka/RabbitMQ later.
 
 from app.events.bus import EventBus, Handler
 from app.events.event import Event
-from app.events.example_events import CandleClosed, MarketTradeReceived, OrderBookUpdated
+from app.events.example_events import CandleClosed
 from app.events.handlers import DebugHandler, LoggingHandler
 
 __all__ = [
@@ -17,6 +17,4 @@ __all__ = [
     "EventBus",
     "Handler",
     "LoggingHandler",
-    "MarketTradeReceived",
-    "OrderBookUpdated",
 ]

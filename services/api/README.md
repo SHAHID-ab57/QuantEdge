@@ -768,6 +768,111 @@ broker-backed implementation of the same interface:
   and horizontal scaling. Costs: ordering guarantees and exactly-once
   semantics become broker concerns.
 
+## Market Data Processing Pipeline
+
+Converts raw Delta Exchange WebSocket messages into
+exchange-independent domain models and publishes them on the event bus.
+Nothing in the application outside `app/marketdata` ever sees a
+Delta-specific JSON structure. No persistence, no Redis — the pipeline
+is a pure transform layer.
+
+### Architecture
+
+```text
+Raw message
+    │
+    ▼
+Parser        app.integrations.delta.websocket.parser (raw JSON -> typed WSEvent)
+    │
+    ▼
+Normalizer    DeltaNormalizer (WSEvent -> TradeEvent / TickerEvent / OrderBookEvent)
+    │
+    ▼
+Validator     pydantic constraints (prices > 0, UTC timestamps, symbol format)
+    │
+    ▼
+Domain event  exchange-independent model
+    │
+    ▼
+Event Bus     TradeEventReceived / TickerUpdated / OrderBookUpdated
+```
+
+Each stage is independently testable (`tests/marketdata/`). The pipeline
+is wired into a WebSocket client as a listener — no client changes
+needed:
+
+```python
+from app.events import EventBus
+from app.marketdata import MarketDataPipeline, DeltaNormalizer
+
+pipeline = MarketDataPipeline(normalizer=DeltaNormalizer(), bus=EventBus())
+for message_type in ("trades", "ticker", "ob_l1", "ob_l2", "ob_updates"):
+    client.add_listener(message_type, pipeline.handle)
+```
+
+`MarketDataPipeline.process_raw(raw)` runs the full chain from a raw
+JSON frame (used by tests and replay tooling).
+
+### Live demo
+
+`scripts/marketdata_demo.py` streams the public socket through the whole
+pipeline and prints metrics with a pass/fail verdict:
+
+```bash
+uv run python scripts/marketdata_demo.py --duration 15
+uv run python scripts/marketdata_demo.py --symbols BTCUSD --channels trades,ticker,ob_l1
+```
+
+It uses only the public client API (`start`/`run`/`close`/`subscribe`/
+`add_listener`) — no context manager, no client modifications.
+
+### Supported message types
+
+| Delta channel | Domain event (bus `event_type`) | Notes                                                             |
+| ------------- | ------------------------------- | ----------------------------------------------------------------- |
+| `trades`      | `TradeEventReceived`            | `side` is `"unknown"` (public feed carries no side)               |
+| `ticker`      | `TickerUpdated`                 | one event per product in the `d` array                            |
+| `ob_l1`       | `OrderBookUpdated`              | top of book, `kind="l1"`, always snapshot                         |
+| `ob_l2`       | `OrderBookUpdated`              | top-15 levels, `kind="l2"`, always snapshot                       |
+| `ob_updates`  | `OrderBookUpdated`              | `kind="full"`, `is_snapshot` from `action`, `sequence` from `seq` |
+
+Control and system messages (`heartbeat`, `pong`, `key-auth`,
+`subscriptions`, `system_status`, `product_updates`) are recognized and
+ignored. Well-formed messages of unhandled types (`mark_price`,
+`spot_price`, `candlestick_*`, private account channels, unknown
+channels) are counted as `unsupported_messages` and dropped.
+
+### Event lifecycle
+
+1. A raw frame arrives; the parser rejects malformed JSON and missing
+   required wire fields (logged, counted as a validation failure).
+2. The normalizer maps the parsed message to one or more domain events.
+3. Domain model construction validates prices, sizes, timestamps, and
+   symbols; failures are logged with the offending field and dropped.
+4. Valid events are wrapped and published on the bus
+   (`TradeEventReceived`, `TickerUpdated`, `OrderBookUpdated`).
+5. `bus.drain()` waits for handler completion (application shutdown,
+   tests).
+
+### Metrics
+
+`app.marketdata.metrics.ProcessingMetrics` tracks `messages_received`,
+`messages_normalized`, `validation_failures`, `unsupported_messages`,
+`events_published`, and processing latency (samples + average ms).
+`metrics.snapshot()` is the stable contract a future Prometheus exporter
+or `/metrics` endpoint will render.
+
+### Extending to a new exchange
+
+Implement the `Normalizer` protocol for the new exchange and reuse the
+pipeline unchanged:
+
+- The parser stage is injected (`MarketDataPipeline(parser=...)`); the
+  default is the Delta parser.
+- Domain models, validation, bus events, and metrics are shared.
+- Exchange-specific conversion (field names, timestamp units, symbol
+  formats) stays inside the normalizer.
+
 ## Test
 
 ```bash
@@ -813,7 +918,13 @@ services/api/
 │   │   ├── event.py         # Event base (id, type, UTC timestamp, source, payload)
 │   │   ├── bus.py           # EventBus: subscribe/unsubscribe/publish/drain
 │   │   ├── handlers.py      # LoggingHandler, DebugHandler (reference)
-│   │   └── example_events.py# MarketTradeReceived, CandleClosed, OrderBookUpdated
+│   │   └── example_events.py# CandleClosed (future candle pipeline example)
+│   ├── marketdata/          # Market data processing pipeline
+│   │   ├── models.py        # TradeEvent, TickerEvent, OrderBookEvent (domain models)
+│   │   ├── normalizer.py    # Normalizer protocol + DeltaNormalizer
+│   │   ├── bus_events.py    # TradeEventReceived, TickerUpdated, OrderBookUpdated
+│   │   ├── pipeline.py      # MarketDataPipeline (parse -> normalize -> validate -> publish)
+│   │   └── metrics.py       # ProcessingMetrics (counters + latency, Prometheus-ready)
 │   ├── ws/                  # Protocol-agnostic WebSocket layer
 │   │   ├── connection.py    # Reconnect, backoff, heartbeat/ping monitors
 │   │   ├── parser.py        # Message -> WSEvent parsing registry
@@ -823,7 +934,8 @@ services/api/
 │   ├── middleware/          # Custom middleware (placeholder)
 │   └── utils/               # Utility helpers
 ├── scripts/                 # Operational scripts
-│   └── ws_listener.py       # WebSocket market data listener CLI
+│   ├── ws_listener.py       # WebSocket market data listener CLI
+│   └── marketdata_demo.py   # Live pipeline demo (WS -> bus -> metrics)
 ├── tests/                   # Test suite
 ├── alembic/                 # Migration environment and versions/
 │   ├── env.py               # Async migration environment (app settings)
@@ -840,9 +952,11 @@ services/api/
 
 - Authentication and authorization.
 - Redis integration.
-- Additional market data providers (beyond Delta Exchange).
+- Additional market data providers (beyond Delta Exchange) — implement
+  the `Normalizer` protocol to join the pipeline.
 - Feature engineering and prediction endpoints.
 - Background workers for data collection and model training.
+- Prometheus exporter for `ProcessingMetrics.snapshot()`.
 
 No business logic is implemented in this scaffold; the infrastructure is
 ready to grow module by module.

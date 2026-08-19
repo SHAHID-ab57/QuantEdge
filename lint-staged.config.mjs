@@ -1,5 +1,6 @@
 /** lint-staged configuration — staged-file quality checks on pre-commit. */
 export default {
+  'apps/dashboard/**/*.{ts,tsx}': ['pnpm --filter dashboard exec eslint --fix', 'prettier --write'],
   '*.{js,mjs,cjs,ts,mts,cts,jsx,tsx}': ['eslint --fix', 'prettier --write'],
   '*.{json,jsonc,yaml,yml}': ['prettier --write'],
   '*.md': ['prettier --write', 'markdownlint --fix'],

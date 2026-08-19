@@ -111,6 +111,7 @@ def test_list_markets(client: TestClient, seeded: None) -> None:
     assert body["total"] == 1
     assert body["markets"][0]["symbol"] == "ETHUSD"
     assert body["markets"][0]["market_type"] == "perpetual"
+    assert body["markets"][0]["exchange"] == "Delta Exchange"
 
 
 def test_list_timeframes(client: TestClient, seeded: None) -> None:

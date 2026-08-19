@@ -1,16 +1,17 @@
-import CandlestickChartIcon from '@mui/icons-material/CandlestickChart';
+import { Suspense } from 'react';
 import { PageHeader } from '@/components/layout/page-header';
-import { PlaceholderPage } from '@/components/ui/placeholder-page';
+import { MarketsPage } from '@/features/markets/markets-page';
 
-export default function MarketsPage() {
+export default function MarketsRoute() {
   return (
     <>
-      <PageHeader title="Markets" subtitle="Browse live markets, symbols, and trading pairs." />
-      <PlaceholderPage
-        icon={<CandlestickChartIcon />}
+      <PageHeader
         title="Markets"
-        description="Market directory and symbol overview will be listed here."
+        subtitle="Browse synchronized markets, symbols, and data quality."
       />
+      <Suspense fallback={null}>
+        <MarketsPage />
+      </Suspense>
     </>
   );
 }

@@ -19,10 +19,17 @@ class MarketDTO(BaseModel):
 
     id: uuid.UUID
     symbol: str
+    exchange: str
     base_asset: str
     quote_asset: str
     market_type: str
     is_active: bool
+
+    @field_validator("exchange", mode="before")
+    @classmethod
+    def _exchange_name(cls, value: object) -> object:
+        """Extract the exchange name from the ORM relationship."""
+        return getattr(value, "name", value)
 
 
 class MarketListResponse(BaseModel):

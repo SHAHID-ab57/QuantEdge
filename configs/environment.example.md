@@ -42,13 +42,21 @@ configuration strategy.
 
 ## Delta Exchange India
 
-| Variable                | Required    | Description                    | Example                             |
-| ----------------------- | ----------- | ------------------------------ | ----------------------------------- |
-| `DELTA_API_KEY`         | Conditional | API key                        | —                                   |
-| `DELTA_API_SECRET`      | Conditional | API secret                     | —                                   |
-| `DELTA_BASE_URL`        | No          | REST base URL                  | `https://api.india.delta.exchange`  |
-| `DELTA_REQUEST_TIMEOUT` | No          | REST request timeout (seconds) | `10`                                |
-| `DELTA_WEBSOCKET_URL`   | No          | WebSocket URL                  | `wss://socket.india.delta.exchange` |
+| Variable                | Required    | Description                             | Example                             |
+| ----------------------- | ----------- | --------------------------------------- | ----------------------------------- |
+| `DELTA_API_KEY`         | Conditional | API key                                 | —                                   |
+| `DELTA_API_SECRET`      | Conditional | API secret                              | —                                   |
+| `DELTA_BASE_URL`        | No          | REST base URL                           | `https://api.india.delta.exchange`  |
+| `DELTA_REQUEST_TIMEOUT` | No          | REST request timeout (seconds)          | `10`                                |
+| `DELTA_WEBSOCKET_URL`   | No          | WebSocket URL                           | `wss://socket.india.delta.exchange` |
+| `DELTA_MARKET_SYMBOLS`  | No          | Live-streamed symbols (comma-separated) | `BTCUSD,ETHUSD`                     |
+
+## Platform Health
+
+| Variable           | Required | Description                                                                                           | Example                        |
+| ------------------ | -------- | ----------------------------------------------------------------------------------------------------- | ------------------------------ |
+| `MARKET_DATA_LIVE` | No       | Start the live WebSocket client + pipeline inside the API process                                     | `true`                         |
+| `CORS_ORIGINS`     | No       | Allowed browser origins (JSON list; defaults to `["http://localhost:3000", "http://127.0.0.1:3000"]`) | `["https://dash.example.com"]` |
 
 ## CoinGecko
 

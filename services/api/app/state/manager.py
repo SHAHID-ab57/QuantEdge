@@ -63,6 +63,34 @@ class MarketStateManager:
         """Symbols with at least one recorded update."""
         return frozenset(self._updated)
 
+    def snapshot(self) -> dict[str, object]:
+        """Immutable view of live market state for the metrics endpoint.
+
+        Prices are the latest ticker ``last_price``, falling back to the
+        latest trade price; rendered as strings to preserve precision in
+        JSON.
+        """
+        symbols = sorted(self._updated)
+        prices: dict[str, str] = {}
+        for symbol in symbols:
+            ticker = self._tickers.get(symbol)
+            if ticker is not None and ticker.last_price is not None:
+                prices[symbol] = str(ticker.last_price)
+            else:
+                trade = self._trades.get(symbol)
+                if trade is not None:
+                    prices[symbol] = str(trade.price)
+        return {
+            "symbols": symbols,
+            "symbols_tracked": len(symbols),
+            "latest_update_at": max(self._updated.values()) if self._updated else None,
+            "latest_prices": prices,
+            "trades_cached": len(self._trades),
+            "tickers_cached": len(self._tickers),
+            "order_books_cached": len(self._books),
+            "candles_cached": len(self._candles),
+        }
+
     def get_latest_trade(self, symbol: str) -> TradeEvent | None:
         """Latest normalized trade for ``symbol``, or ``None``."""
         return self._count(self._trades.get(symbol))

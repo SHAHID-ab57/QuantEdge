@@ -33,11 +33,47 @@ class EventBus:
     def __init__(self) -> None:
         self._handlers: dict[str, set[Handler]] = {}
         self._pending: set[asyncio.Task[None]] = set()
+        self._published_events = 0
+        self._failed_handlers = 0
+        self._latency_total_seconds = 0.0
+        self._latency_samples = 0
 
     @property
     def pending_count(self) -> int:
         """Number of handler tasks currently running or queued."""
         return len(self._pending)
+
+    def handler_count(self) -> int:
+        """Total number of handlers registered across all event types."""
+        return sum(len(handlers) for handlers in self._handlers.values())
+
+    @property
+    def published_events(self) -> int:
+        """Number of events dispatched since startup."""
+        return self._published_events
+
+    @property
+    def failed_handlers(self) -> int:
+        """Number of handler invocations that raised."""
+        return self._failed_handlers
+
+    @property
+    def average_handler_latency_ms(self) -> float | None:
+        """Mean handler execution time in ms, or ``None`` when empty."""
+        if self._latency_samples == 0:
+            return None
+        return self._latency_total_seconds / self._latency_samples * 1000.0
+
+    def snapshot(self) -> dict[str, int | float | None]:
+        """Immutable view for observability tooling."""
+        return {
+            "subscribers": self.handler_count(),
+            "pending": self.pending_count,
+            "published_events": self._published_events,
+            "failed_handlers": self._failed_handlers,
+            "handler_latency_samples": self._latency_samples,
+            "average_handler_latency_ms": self.average_handler_latency_ms,
+        }
 
     def subscribe(self, event_type: str, handler: Handler) -> None:
         """Register ``handler`` for events of type ``event_type``.
@@ -89,6 +125,7 @@ class EventBus:
         others.
         """
         handlers = list(self._handlers.get(event.event_type, ()))
+        self._published_events += 1
         logger.debug(
             "Event published: type=%s id=%s source=%s subscribers=%d",
             event.event_type,
@@ -116,6 +153,7 @@ class EventBus:
         try:
             await handler(event)
         except Exception:
+            self._failed_handlers += 1
             logger.exception(
                 "Event handler %r failed on %s (id=%s)",
                 handler,
@@ -123,6 +161,8 @@ class EventBus:
                 event.event_id,
             )
         duration_ms = (time.perf_counter() - start) * 1000
+        self._latency_total_seconds += duration_ms / 1000.0
+        self._latency_samples += 1
         logger.debug(
             "Event handler %r completed: type=%s id=%s duration=%.2fms",
             handler,

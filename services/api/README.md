@@ -31,6 +31,8 @@ development dependencies.
 
 ```bash
 uv run uvicorn app.main:app --reload --port 8000
+
+MARKET_DATA_LIVE=true uv run uvicorn app.main:app --reload --port 8000
 ```
 
 Interactive API documentation (Swagger UI) is served at
@@ -564,6 +566,109 @@ Router (app/api/v1/endpoints/market_data.py)
 
 Responses never expose ORM models; the OpenAPI schema documents parameters,
 examples, and error responses for every endpoint.
+
+## Platform Health API
+
+Operational monitoring endpoints for the dashboard. They report per-component
+status and live metrics from the in-process runtime (see
+`app/runtime.py`): the event bus and market state manager always run, and
+the Delta WebSocket client + processing pipeline run when
+`MARKET_DATA_LIVE=true`.
+
+### Endpoints
+
+All three endpoints are mounted at `/api/v1/system/*` (and mirrored at
+`/system/*`, consistent with the unversioned `/health`). They always return
+HTTP 200; component states live in the response body.
+
+| Method | Path                     | Purpose                                                                             |
+| ------ | ------------------------ | ----------------------------------------------------------------------------------- |
+| GET    | `/api/v1/system/health`  | Per-component status: api, database, delta_rest, delta_ws, event_bus, state_manager |
+| GET    | `/api/v1/system/status`  | Uptime, version, environment, live WS connection state, health timeline             |
+| GET    | `/api/v1/system/metrics` | Counters: markets, candles, message processing, state + caches, bus load            |
+
+### Environment variables
+
+| Variable               | Default         | Description                                              |
+| ---------------------- | --------------- | -------------------------------------------------------- |
+| `MARKET_DATA_LIVE`     | `false`         | Run the live WebSocket client + pipeline in this process |
+| `DELTA_MARKET_SYMBOLS` | `BTCUSD,ETHUSD` | Comma-separated symbols streamed in live mode            |
+
+When live mode is off, `delta_ws` reports `unavailable` and pipeline metrics
+are zero — the API still serves historical market data.
+
+For the dashboard to call the API from the browser, add the dashboard origin
+to `CORS_ORIGINS` (a JSON list), e.g.
+`CORS_ORIGINS='["http://localhost:3000"]'`.
+
+### curl examples
+
+```bash
+# Component health (database reachable, live market data on)
+curl http://localhost:8000/api/v1/system/health
+
+# Status: uptime + freshness
+curl http://localhost:8000/api/v1/system/status
+
+# Metrics: stored counts + processing counters
+curl http://localhost:8000/api/v1/system/metrics
+```
+
+Health response shape:
+
+```json
+{
+  "status": "ok",
+  "api": { "name": "api", "status": "ok", "detail": "serving requests" },
+  "database": { "name": "database", "status": "ok", "detail": null },
+  "delta_rest": {
+    "name": "delta_rest",
+    "status": "ok",
+    "latency_ms": 42.0,
+    "detail": "reachable in 42ms"
+  },
+  "delta_ws": {
+    "name": "delta_ws",
+    "status": "ok",
+    "state": "connected",
+    "latency_ms": 250.0,
+    "updated_at": "2026-08-19T17:00:00Z",
+    "uptime_seconds": 3600.0,
+    "detail": "connected, unauthenticated, 4 subscription(s), last message 0.3s ago"
+  },
+  "event_bus": {
+    "name": "event_bus",
+    "status": "ok",
+    "detail": "4 subscribers, 0 pending, 28531 published, 0 failed"
+  },
+  "state_manager": {
+    "name": "state_manager",
+    "status": "ok",
+    "detail": "2 symbols tracked, 28531 updates"
+  }
+}
+```
+
+The WebSocket status is derived from the **live connection state**, never from
+the configured mode: `stopped` (live mode off) is `unavailable`; connecting or
+disconnected while live mode is on is `degraded`; connected is `ok`. Full
+connection telemetry (`state`, subscriptions, message count, reconnects,
+heartbeat timestamps, uptime) is embedded in `/system/status` under
+`delta_ws`, and the timeline fields (`last_heartbeat_at`,
+`last_ws_reconnect_at`, `last_rest_request_at`) come from the runtime, not
+from configuration.
+
+Notes:
+
+- `last_ingestion_at` in `/system/status` is **derived** from the newest
+  stored candle `close_time` (no ingestion-run tracking table exists).
+- DB-derived metric fields are `null` when no database is configured;
+  they are never fabricated.
+- The Delta REST probe is time-boxed (5s) and retry-free so health checks
+  fail fast.
+- `messages_received` counts every message entering the pipeline (raw
+  frames via `process_raw` and pre-parsed client events via `handle`), so
+  it is always >= `messages_normalized`.
 
 ## WebSocket Streaming
 

@@ -84,10 +84,10 @@ class MarketDataPipeline:
 
     async def process_raw(self, raw: str) -> None:
         """Process one raw JSON frame through the full pipeline."""
-        self._metrics.messages_received += 1
         started = time.perf_counter()
         parsed = self._parser.parse(raw)
         if parsed.error is not None:
+            self._metrics.messages_received += 1
             self._metrics.validation_failures += 1
             logger.warning("Market data message rejected: %s", parsed.error)
             return
@@ -97,6 +97,7 @@ class MarketDataPipeline:
 
     async def handle(self, message: WSEvent, *, _started: float | None = None) -> None:
         """Process one already-parsed message (client listener wiring)."""
+        self._metrics.messages_received += 1
         started = _started if _started is not None else time.perf_counter()
         try:
             result = self._normalizer.normalize(message)

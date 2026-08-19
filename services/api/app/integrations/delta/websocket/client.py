@@ -12,6 +12,9 @@ import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Literal
 
 from app.core.config import get_settings
 from app.integrations.delta.exceptions import AuthenticationError
@@ -30,6 +33,30 @@ logger = logging.getLogger("app.integrations.delta.websocket")
 DEFAULT_AUTH_TIMEOUT = 10.0
 
 Listener = Callable[[WSEvent], Awaitable[None]]
+
+
+@dataclass(frozen=True)
+class DeltaConnectionSnapshot:
+    """Immutable view of the client's live connection state.
+
+    The health and status endpoints serialize this into
+    ``DeltaConnectionState`` so the dashboard reports the actual runtime
+    state rather than the configured mode.
+    """
+
+    state: Literal["stopped", "connecting", "connected", "disconnected"]
+    connected: bool
+    authenticated: bool
+    public: bool
+    subscriptions: tuple[str, ...]
+    requested_subscriptions: tuple[str, ...]
+    last_message_at: datetime | None
+    last_heartbeat_at: datetime | None
+    connected_at: datetime | None
+    messages_received: int
+    connection_attempts: int
+    reconnects: int
+    uptime_seconds: float | None
 
 
 class DeltaWebSocketClient:
@@ -87,6 +114,8 @@ class DeltaWebSocketClient:
         self._dispatcher = EventDispatcher()
         self._subscriptions = SubscriptionManager()
         self._auth_waiter: asyncio.Future[events.KeyAuthEvent] | None = None
+        self._authenticated = False
+        self._active_subscriptions: tuple[str, ...] = ()
         self._manager = ConnectionManager(
             settings,
             on_connected=self._on_connected,
@@ -103,6 +132,30 @@ class DeltaWebSocketClient:
     def subscriptions(self) -> dict[str, list[str] | None]:
         """Snapshot of tracked subscriptions (symbols sorted)."""
         return self._subscriptions.requested
+
+    @property
+    def authenticated(self) -> bool:
+        """True once ``key-auth`` succeeded on the current connection."""
+        return self._authenticated
+
+    def connection_snapshot(self) -> DeltaConnectionSnapshot:
+        """Immutable view of the live connection state for health reporting."""
+        requested = tuple(sorted(self._subscriptions.requested))
+        return DeltaConnectionSnapshot(
+            state=self._manager.state,
+            connected=self._manager.is_connected,
+            authenticated=self._authenticated,
+            public=self._public,
+            subscriptions=self._active_subscriptions,
+            requested_subscriptions=requested,
+            last_message_at=self._manager.last_message_at,
+            last_heartbeat_at=self._manager.last_heartbeat_at,
+            connected_at=self._manager.connected_at,
+            messages_received=self._manager.messages_received,
+            connection_attempts=self._manager.attempts,
+            reconnects=max(self._manager.attempts - 1, 0),
+            uptime_seconds=self._manager.uptime_seconds,
+        )
 
     async def run(self) -> None:
         """Run until shutdown or retries are exhausted."""
@@ -175,6 +228,7 @@ class DeltaWebSocketClient:
         """
         if not self._public:
             self._auth_waiter = asyncio.get_running_loop().create_future()
+        self._authenticated = False
         await self._manager.send_json({"type": "enable_heartbeat"})
         if not self._public:
             try:
@@ -220,6 +274,7 @@ class DeltaWebSocketClient:
                 f"WebSocket key-auth failed: {response.status} "
                 f"({response.status_code})"
             )
+        self._authenticated = True
         logger.info("WebSocket authenticated")
 
     async def _on_message(self, raw: str) -> None:
@@ -248,9 +303,12 @@ class DeltaWebSocketClient:
             errors = self._subscriptions.handle_ack(
                 [channel.model_dump() for channel in event.channels]
             )
+            self._active_subscriptions = tuple(
+                channel.name for channel in event.channels
+            )
             logger.info(
                 "WebSocket subscriptions active: %s",
-                [channel.name for channel in event.channels],
+                list(self._active_subscriptions),
             )
             for error in errors:
                 logger.error("WebSocket subscription rejected: %s", error)

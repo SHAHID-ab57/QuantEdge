@@ -86,6 +86,20 @@ class CandleRepository:
         )
         return (await self._session.execute(query)).scalar_one_or_none()
 
+    async def count_all(self) -> int:
+        """Return the total number of stored candles."""
+        query = select(func.count()).select_from(Candle)
+        return int((await self._session.execute(query)).scalar_one())
+
+    async def latest_close_time(self) -> datetime | None:
+        """Return the newest stored candle close time, or ``None``.
+
+        Used as the derived "last ingestion time" signal: the most recent
+        candle written is the most recent evidence of ingestion.
+        """
+        query = select(func.max(Candle.close_time))
+        return (await self._session.execute(query)).scalar_one_or_none()
+
     async def candle_exists(
         self,
         market_id: uuid.UUID,

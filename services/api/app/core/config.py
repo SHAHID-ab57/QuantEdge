@@ -25,7 +25,10 @@ class Settings(BaseSettings):
     app_version: str = "0.1.0"
     app_env: Literal["development", "test", "staging", "production"] = "development"
     log_level: str = "INFO"
-    cors_origins: list[str] = []
+    cors_origins: list[str] = [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ]
 
     database_url: str = Field(
         default="",
@@ -47,6 +50,9 @@ class Settings(BaseSettings):
     delta_ws_private_url: str = "wss://socket.india.delta.exchange"
     delta_ws_reconnect_delay: float = 2.0
     delta_ws_max_retries: int = 0
+
+    market_data_live: bool = False
+    delta_market_symbols: str = "BTCUSD,ETHUSD"
 
 
 @lru_cache

@@ -29,3 +29,23 @@ async def get_db() -> AsyncIterator[AsyncSession]:
     )
     async with session_factory() as session:
         yield session
+
+
+async def get_db_or_none() -> AsyncIterator[AsyncSession | None]:
+    """Yield a database session when configured, else ``None``.
+
+    Used by endpoints that degrade gracefully without a database
+    (e.g. system metrics) instead of failing the request.
+    """
+    engine = get_engine()
+    if engine is None:
+        yield None
+        return
+
+    session_factory = async_sessionmaker(
+        bind=engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+    )
+    async with session_factory() as session:
+        yield session

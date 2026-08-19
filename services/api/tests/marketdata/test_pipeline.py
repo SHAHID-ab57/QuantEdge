@@ -262,7 +262,7 @@ async def test_handle_skips_parsing_for_client_wiring() -> None:
 
     assert len(collector.events) == 1
     metrics = pipeline.metrics.snapshot()
-    assert metrics["messages_received"] == 0
+    assert metrics["messages_received"] == 1
     assert metrics["messages_normalized"] == 1
     assert metrics["events_published"] == 1
 

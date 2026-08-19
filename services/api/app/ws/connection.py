@@ -22,7 +22,8 @@ import random
 from asyncio import CancelledError
 from collections.abc import Callable, Coroutine
 from contextlib import suppress
-from typing import Any
+from datetime import UTC, datetime
+from typing import Any, Literal
 
 import websockets
 from websockets import ConnectionClosed
@@ -39,6 +40,8 @@ MessageHandler = Callable[[str], Coroutine[Any, Any, None]]
 LifecycleHook = Callable[[], Coroutine[Any, Any, None]]
 
 _ABNORMAL_CLOSE = 1012
+
+ConnectionState = Literal["stopped", "connecting", "connected", "disconnected"]
 
 
 def backoff_delay(attempt: int, base: float, cap: float) -> float:
@@ -79,6 +82,16 @@ class ConnectionManager:
         self._heartbeat_event = asyncio.Event()
         self._pong_event = asyncio.Event()
         self._attempt = 0
+        self._state: ConnectionState = "stopped"
+        self._connected_at: datetime | None = None
+        self._last_message_at: datetime | None = None
+        self._last_heartbeat_at: datetime | None = None
+        self._messages_received = 0
+
+    @property
+    def state(self) -> ConnectionState:
+        """Current connection lifecycle state."""
+        return self._state
 
     @property
     def is_connected(self) -> bool:
@@ -88,6 +101,38 @@ class ConnectionManager:
             and self._ws is not None
             and self._ws.state is not State.CLOSED
         )
+
+    @property
+    def connected_at(self) -> datetime | None:
+        """When the current connection was established, or ``None``."""
+        return self._connected_at
+
+    @property
+    def last_message_at(self) -> datetime | None:
+        """When the last text frame was received, or ``None``."""
+        return self._last_message_at
+
+    @property
+    def last_heartbeat_at(self) -> datetime | None:
+        """When the last protocol heartbeat was received, or ``None``."""
+        return self._last_heartbeat_at
+
+    @property
+    def messages_received(self) -> int:
+        """Number of text frames received across all connections."""
+        return self._messages_received
+
+    @property
+    def attempts(self) -> int:
+        """Number of connection attempts made so far."""
+        return self._attempt
+
+    @property
+    def uptime_seconds(self) -> float | None:
+        """Seconds since the current connection was established, or ``None``."""
+        if self._connected_at is None or not self.is_connected:
+            return None
+        return max((datetime.now(UTC) - self._connected_at).total_seconds(), 0.0)
 
     def start(self) -> None:
         """Begin connecting in the background; returns immediately."""
@@ -129,6 +174,7 @@ class ConnectionManager:
     def notify_heartbeat(self) -> None:
         """Reset the heartbeat supervisor (feed from protocol heartbeats)."""
         self._heartbeat_event.set()
+        self._last_heartbeat_at = datetime.now(UTC)
 
     def notify_pong(self) -> None:
         """Record a received pong."""
@@ -159,6 +205,7 @@ class ConnectionManager:
                 )
                 break
             self._attempt += 1
+            self._state = "connecting"
             try:
                 await self._connect_once()
             except CancelledError:
@@ -182,6 +229,8 @@ class ConnectionManager:
                 await asyncio.sleep(jittered)
             except CancelledError:
                 raise
+        self._state = "stopped"
+        self._connected_at = None
         logger.info("WebSocket run loop stopped")
 
     async def _connect_once(self) -> None:
@@ -202,6 +251,8 @@ class ConnectionManager:
 
         ws = self._ws
         self._connected_event.set()
+        self._state = "connected"
+        self._connected_at = datetime.now(UTC)
         logger.info(
             "WebSocket connected to %s (attempt %d)", self._settings.url, self._attempt
         )
@@ -221,6 +272,8 @@ class ConnectionManager:
                 if isinstance(raw, bytes):
                     logger.warning("WebSocket received a binary frame; ignoring")
                     continue
+                self._messages_received += 1
+                self._last_message_at = datetime.now(UTC)
                 if self._on_message is not None:
                     await self._on_message(raw)
         except ConnectionClosed as exc:
@@ -240,6 +293,8 @@ class ConnectionManager:
                 else:
                     setup_task.cancel()
             self._connected_event.clear()
+            self._state = "disconnected"
+            self._connected_at = None
             with suppress(WebSocketException, OSError):
                 await ws.close()
             self._ws = None

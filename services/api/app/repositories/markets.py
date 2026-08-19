@@ -3,7 +3,7 @@
 All SQL for reading market metadata lives in this module.
 """
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.market import Market
@@ -19,6 +19,11 @@ class MarketRepository:
         """Return all markets ordered by symbol."""
         query = select(Market).order_by(Market.symbol.asc())
         return list((await self._session.execute(query)).scalars())
+
+    async def count_all(self) -> int:
+        """Return the number of stored markets."""
+        query = select(func.count()).select_from(Market)
+        return int((await self._session.execute(query)).scalar_one())
 
     async def get_by_symbol(self, symbol: str) -> Market | None:
         """Return the market matching a symbol, or ``None``."""

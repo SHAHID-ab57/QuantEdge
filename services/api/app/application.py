@@ -16,6 +16,7 @@ from app.core.config import get_settings
 from app.core.exceptions import register_exception_handlers
 from app.core.logging import setup_logging
 from app.db.engine import dispose_engine, get_engine, probe_database
+from app.runtime import shutdown_runtime, start_runtime
 
 logger = logging.getLogger(__name__)
 
@@ -45,11 +46,13 @@ async def startup() -> None:
         logger.error("Database connection failed: %s", error)
         raise RuntimeError(f"Database connection failed: {error}")
     logger.info("Database connection established")
+    await start_runtime()
     logger.info("API startup complete")
 
 
 async def shutdown() -> None:
-    """Dispose the database engine and pooled connections."""
+    """Stop the runtime, then dispose the database engine."""
+    await shutdown_runtime()
     await dispose_engine()
     logger.info("API shutdown complete")
 

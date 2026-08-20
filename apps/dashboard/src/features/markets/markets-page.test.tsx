@@ -132,6 +132,49 @@ const markets: Market[] = (
 
 const validList: MarketList = { markets, total: markets.length };
 
+const emptyCandlePage = {
+  symbol: 'ETHUSD',
+  timeframe: '1h',
+  items: [],
+  pagination: { total: 5000, returned: 0, has_more: true, limit: 1, offset: 0 },
+  statistics: {
+    highest_price: null,
+    lowest_price: null,
+    highest_volume: null,
+    lowest_volume: null,
+    average_open: null,
+    average_close: null,
+    average_high: null,
+    average_low: null,
+    average_volume: null,
+    total_candles: 0,
+    first_candle_at: null,
+    last_candle_at: null,
+    expected_candles: 0,
+    missing_candles: 0,
+    completeness: null,
+  },
+  quality: {
+    completeness_score: 0.0,
+    freshness_score: 0.0,
+    missing_interval_count: 0,
+    missing_intervals: [],
+    duplicate_candles: 0,
+    out_of_order_candles: 0,
+    invalid_ohlc_candles: 0,
+    gaps_detected: false,
+    overall_quality_score: 0.0,
+  },
+  meta: {
+    execution_time_ms: 1.0,
+    database_time_ms: 0.5,
+    rows_scanned: 0,
+    rows_returned: 0,
+    cache_status: 'disabled',
+    generated_at: '2026-08-21T12:00:00Z',
+  },
+};
+
 const navigationMock = vi.hoisted(() => {
   let searchParams = new URLSearchParams();
   const replace = vi.fn();
@@ -215,12 +258,7 @@ beforeEach(() => {
       source: 'delta',
     },
   });
-  mocked.fetchCandlePage.mockResolvedValue({
-    symbol: 'ETHUSD',
-    timeframe: '1h',
-    items: [],
-    pagination: { total: 5000, returned: 0, has_more: true, limit: 1, offset: 0 },
-  });
+  mocked.fetchCandlePage.mockResolvedValue(emptyCandlePage);
   mocked.fetchMarketResearch.mockResolvedValue({
     symbol: 'ETHUSD',
     oldest_candle_at: '2026-08-13T00:00:00Z',
@@ -435,9 +473,7 @@ describe('MarketsPage', () => {
       },
     });
     mocked.fetchCandlePage.mockResolvedValue({
-      symbol: 'ETHUSD',
-      timeframe: '1h',
-      items: [],
+      ...emptyCandlePage,
       pagination: { total: 137, returned: 0, has_more: false, limit: 1, offset: 0 },
     });
     renderPage();

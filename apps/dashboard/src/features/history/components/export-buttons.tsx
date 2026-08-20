@@ -8,32 +8,12 @@ import Stack from '@mui/material/Stack';
 import Typography from '@mui/material/Typography';
 import { useState } from 'react';
 import { fetchCandlePage } from '@/lib/api/market';
-import type { Candle } from '@/types/api/market';
+import type { Candle, CandlePage } from '@/types/api/market';
 import type { HistoryQuery } from '../hooks/use-history-data';
+import { buildEnvelope, envelopeToCsv, exportFileName } from '../lib/export';
 import { formatNumber } from '../lib/format';
 
 const MAX_EXPORT_PAGES = 250;
-
-function sanitizeFilenamePart(value: string | null): string {
-  return value ? value.replace(/[^a-zA-Z0-9_-]/g, '-') : 'all';
-}
-
-function fileName(query: HistoryQuery, extension: 'csv' | 'json'): string {
-  const start = sanitizeFilenamePart(query.start?.slice(0, 10) ?? null);
-  const end = sanitizeFilenamePart(query.end?.slice(0, 10) ?? null);
-  return `${query.symbol}-${query.timeframe}-${start}-${end}.${extension}`;
-}
-
-function toCsv(candles: Candle[]): string {
-  const header = 'Open Time,Open,High,Low,Close,Volume';
-  const escape = (value: string) => `"${value.replaceAll('"', '""')}"`;
-  const rows = candles.map((candle) =>
-    [candle.open_time, candle.open, candle.high, candle.low, candle.close, candle.volume]
-      .map(escape)
-      .join(','),
-  );
-  return [header, ...rows].join('\n');
-}
 
 function download(blob: Blob, filename: string) {
   const url = URL.createObjectURL(blob);
@@ -49,8 +29,9 @@ function download(blob: Blob, filename: string) {
 async function fetchAllCandles(
   query: HistoryQuery,
   onProgress: (fetched: number, total: number) => void,
-): Promise<Candle[]> {
+): Promise<{ candles: Candle[]; page: CandlePage }> {
   const candles: Candle[] = [];
+  let firstPage: CandlePage | null = null;
   let offset = 0;
   let total = Infinity;
   while (offset < total && candles.length < MAX_EXPORT_PAGES * query.limit) {
@@ -59,7 +40,10 @@ async function fetchAllCandles(
       offset,
       start: query.start ?? undefined,
       end: query.end ?? undefined,
+      sort: query.sort,
+      dir: query.dir,
     });
+    firstPage ??= page;
     candles.push(...page.items);
     total = page.pagination.total;
     offset += page.items.length;
@@ -68,7 +52,7 @@ async function fetchAllCandles(
       break;
     }
   }
-  return candles;
+  return { candles, page: firstPage as CandlePage };
 }
 
 interface ExportButtonsProps {
@@ -84,16 +68,17 @@ export function ExportButtons({ query, disabled }: ExportButtonsProps) {
     setExporting(kind);
     setProgress(null);
     try {
-      const candles = await fetchAllCandles(query, (fetched, total) =>
+      const { candles, page } = await fetchAllCandles(query, (fetched, total) =>
         setProgress({ fetched, total }),
       );
+      const envelope = buildEnvelope(query, candles, page);
       const blob =
         kind === 'csv'
-          ? new Blob([toCsv(candles)], { type: 'text/csv;charset=utf-8' })
-          : new Blob([JSON.stringify(candles, null, 2)], {
+          ? new Blob([envelopeToCsv(envelope)], { type: 'text/csv;charset=utf-8' })
+          : new Blob([JSON.stringify(envelope, null, 2)], {
               type: 'application/json;charset=utf-8',
             });
-      download(blob, fileName(query, kind));
+      download(blob, exportFileName(query, kind));
     } finally {
       setExporting(null);
       setProgress(null);
@@ -110,7 +95,8 @@ export function ExportButtons({ query, disabled }: ExportButtonsProps) {
             Export
           </Typography>
           <Typography variant="body2" color="text.secondary">
-            Downloads every candle matching the current filters
+            Downloads every candle matching the current filters, with the backend-computed
+            statistics and quality metrics attached
             {progress
               ? ` (${formatNumber(progress.fetched)} of ${formatNumber(progress.total)} fetched)`
               : ''}

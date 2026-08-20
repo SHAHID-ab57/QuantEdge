@@ -7,33 +7,44 @@ import Paper from '@mui/material/Paper';
 import Skeleton from '@mui/material/Skeleton';
 import Stack from '@mui/material/Stack';
 import Typography from '@mui/material/Typography';
-import { useCallback, useState } from 'react';
-import { ApiError } from '@/lib/api/errors';
+import { useSearchParams } from 'next/navigation';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { resolveRange } from './lib/resolve-range';
 import { CandlesTable } from './components/candles-table';
 import { ExportButtons } from './components/export-buttons';
 import { HistoryForm, type HistoryFormValues } from './components/history-form';
 import { PerformanceCard } from './components/performance-card';
+import { QualityCard } from './components/quality-card';
 import { StatsCard } from './components/stats-card';
 import {
+  type CandleSortColumn,
+  type CandleSortDirection,
   type HistoryQuery,
   useCandles,
-  useCandleStats,
   useMarkets,
 } from './hooks/use-history-data';
+import { queryFromSearchParams, useHistoryUrlState } from './hooks/use-history-url-state';
+
+const DAY_MS = 86_400_000;
 
 function convertToQuery(values: HistoryFormValues): HistoryQuery {
-  const start = values.start ? `${values.start}T00:00:00Z` : null;
-  const end = values.end
-    ? new Date(new Date(`${values.end}T00:00:00Z`).getTime() + 86_400_000)
-        .toISOString()
-        .replace(/\.\d{3}Z$/, 'Z')
-    : null;
+  const resolved = resolveRange(values.range);
+  const start =
+    values.range === 'custom' && values.start ? `${values.start}T00:00:00Z` : resolved.start;
+  const end =
+    values.range === 'custom' && values.end
+      ? new Date(new Date(`${values.end}T00:00:00Z`).getTime() + DAY_MS)
+          .toISOString()
+          .replace(/\.\d{3}Z$/, 'Z')
+      : resolved.end;
   return {
     symbol: values.market,
     timeframe: values.timeframe,
     start,
     end,
     limit: values.limit,
+    sort: 'open_time',
+    dir: 'asc',
   };
 }
 
@@ -55,11 +66,23 @@ function HistorySkeleton() {
 
 export function HistoryPage() {
   const markets = useMarkets();
-  const [query, setQuery] = useState<HistoryQuery | null>(null);
-  const [page, setPage] = useState(1);
+  const searchParams = useSearchParams();
+  const { apply } = useHistoryUrlState();
+
+  const initial = useMemo(
+    () => queryFromSearchParams(new URLSearchParams(searchParams.toString())),
+    [searchParams],
+  );
+  const [query, setQuery] = useState<HistoryQuery | null>(initial?.query ?? null);
+  const [page, setPage] = useState(initial?.page ?? 1);
+
+  useEffect(() => {
+    if (query) {
+      apply(query, page);
+    }
+  }, [apply, page, query]);
 
   const candles = useCandles(query, page);
-  const stats = useCandleStats(query);
 
   const handleSubmitted = useCallback((values: HistoryFormValues) => {
     setQuery(convertToQuery(values));
@@ -80,6 +103,16 @@ export function HistoryPage() {
     [query],
   );
 
+  const handleSortChange = useCallback(
+    (sort: CandleSortColumn, dir: CandleSortDirection) => {
+      if (query) {
+        setQuery({ ...query, sort, dir });
+        setPage(1);
+      }
+    },
+    [query],
+  );
+
   const handleRetry = useCallback(() => {
     markets.refetch();
     if (query) {
@@ -87,9 +120,10 @@ export function HistoryPage() {
     }
   }, [markets, query]);
 
-  const total = candles.data?.page.pagination.total ?? 0;
-  const statsEmpty = stats.error instanceof ApiError && stats.error.status === 404;
+  const pageData = candles.data;
+  const total = pageData?.pagination.total ?? 0;
   const filtersLoading = Boolean(query) && candles.isLoading && !candles.data;
+  const queryEmpty = query !== null && total === 0;
 
   if (markets.isLoading) {
     return <HistorySkeleton />;
@@ -110,6 +144,7 @@ export function HistoryPage() {
       <HistoryForm
         markets={marketList}
         defaultMarket={query?.symbol ?? ''}
+        defaultRange={query?.start && query?.end ? 'custom' : 'all'}
         onSubmitted={handleSubmitted}
       />
 
@@ -131,12 +166,15 @@ export function HistoryPage() {
         <Grid container spacing={2}>
           <Grid size={{ xs: 12, lg: 8 }}>
             <CandlesTable
-              data={candles.data}
+              data={pageData}
               isLoading={candles.isLoading}
               page={page}
               limit={query.limit}
+              sort={query.sort}
+              dir={query.dir}
               onPageChange={handlePageChange}
               onLimitChange={handleLimitChange}
+              onSortChange={handleSortChange}
             />
             {filtersLoading ? (
               <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
@@ -147,15 +185,20 @@ export function HistoryPage() {
           <Grid size={{ xs: 12, lg: 4 }}>
             <Stack spacing={2}>
               <StatsCard
-                stats={stats.data}
-                isLoading={stats.isLoading}
-                isEmpty={statsEmpty || total === 0}
+                statistics={pageData?.statistics}
+                isLoading={candles.isLoading && !candles.data}
+                isEmpty={queryEmpty}
+              />
+              <QualityCard
+                quality={pageData?.quality}
+                isLoading={candles.isLoading && !candles.data}
+                isEmpty={queryEmpty}
               />
               <PerformanceCard
                 query={query}
                 page={page}
-                latencyMs={candles.data?.latencyMs ?? null}
-                returned={candles.data?.page.pagination.returned ?? 0}
+                meta={pageData?.meta}
+                returned={pageData?.pagination.returned ?? 0}
                 total={total}
               />
               <ExportButtons query={query} disabled={candles.isLoading || total === 0} />

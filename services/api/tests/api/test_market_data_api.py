@@ -11,6 +11,7 @@ from decimal import Decimal
 import pytest
 import pytest_asyncio
 from fastapi.testclient import TestClient
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -268,6 +269,186 @@ def test_get_candles_negative_offset_rejected(client: TestClient, seeded: None) 
     assert response.status_code == 422
 
 
+def test_get_candles_invalid_sort(client: TestClient, seeded: None) -> None:
+    response = client.get(
+        "/api/v1/markets/ETHUSD/candles", params={"timeframe": "1h", "sort": "pepe"}
+    )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "invalid_sort"
+
+
+def test_get_candles_invalid_direction(client: TestClient, seeded: None) -> None:
+    response = client.get(
+        "/api/v1/markets/ETHUSD/candles", params={"timeframe": "1h", "dir": "sideways"}
+    )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "invalid_sort"
+
+
+def test_get_candles_sorted_by_column(client: TestClient, seeded_varied: None) -> None:
+    response = client.get(
+        "/api/v1/markets/ETCUSD/candles",
+        params={"timeframe": "1h", "sort": "volume", "dir": "desc"},
+    )
+
+    assert response.status_code == 200
+    items = response.json()["items"]
+    assert [item["open_time"] for item in items] == [
+        "2026-01-01T02:00:00Z",
+        "2026-01-01T01:00:00Z",
+        "2026-01-01T00:00:00Z",
+    ]
+    assert [item["volume"] for item in items] == ["300", "200", "100"]
+
+
+def test_get_candles_sorted_open_time_desc(client: TestClient, seeded_varied: None) -> None:
+    response = client.get(
+        "/api/v1/markets/ETCUSD/candles",
+        params={"timeframe": "1h", "sort": "open_time", "dir": "desc"},
+    )
+
+    assert response.status_code == 200
+    items = response.json()["items"]
+    assert [item["open_time"] for item in items] == [
+        "2026-01-01T02:00:00Z",
+        "2026-01-01T01:00:00Z",
+        "2026-01-01T00:00:00Z",
+    ]
+
+
+def test_get_candles_includes_statistics(client: TestClient, seeded: None) -> None:
+    response = client.get("/api/v1/markets/ETHUSD/candles", params={"timeframe": "1h"})
+
+    assert response.status_code == 200
+    assert response.json()["statistics"] == {
+        "highest_price": "3060",
+        "lowest_price": "3040",
+        "highest_volume": "120.5",
+        "lowest_volume": "120.5",
+        "average_open": "3050.5",
+        "average_close": "3055.25",
+        "average_high": "3060",
+        "average_low": "3040",
+        "average_volume": "120.5",
+        "total_candles": 5,
+        "first_candle_at": "2026-01-01T00:00:00Z",
+        "last_candle_at": "2026-01-01T04:00:00Z",
+        "expected_candles": 5,
+        "missing_candles": 0,
+        "completeness": 100.0,
+    }
+
+
+def test_get_candles_statistics_respect_range(client: TestClient, seeded: None) -> None:
+    response = client.get(
+        "/api/v1/markets/ETHUSD/candles",
+        params={
+            "timeframe": "1h",
+            "start": "2026-01-01T01:00:00Z",
+            "end": "2026-01-01T04:00:00Z",
+        },
+    )
+
+    assert response.status_code == 200
+    statistics = response.json()["statistics"]
+    assert statistics["total_candles"] == 3
+    assert statistics["first_candle_at"] == "2026-01-01T01:00:00Z"
+    assert statistics["last_candle_at"] == "2026-01-01T03:00:00Z"
+    assert statistics["expected_candles"] == 3
+    assert statistics["missing_candles"] == 0
+    assert statistics["completeness"] == 100.0
+
+
+def test_get_candles_quality_clean(client: TestClient, seeded: None) -> None:
+    response = client.get("/api/v1/markets/ETHUSD/candles", params={"timeframe": "1h"})
+
+    assert response.status_code == 200
+    quality = response.json()["quality"]
+    assert quality["completeness_score"] == 100.0
+    assert quality["freshness_score"] == 0.0  # 2026 fixture data is older than 30 days
+    assert quality["missing_interval_count"] == 0
+    assert quality["missing_intervals"] == []
+    assert quality["duplicate_candles"] == 0
+    assert quality["out_of_order_candles"] == 0
+    assert quality["invalid_ohlc_candles"] == 0
+    assert quality["gaps_detected"] is False
+    assert quality["overall_quality_score"] == 100.0
+
+
+def test_get_candles_quality_reports_gaps(client: TestClient, seeded_with_gap: None) -> None:
+    response = client.get("/api/v1/markets/BTCUSD/candles", params={"timeframe": "1h"})
+
+    assert response.status_code == 200
+    quality = response.json()["quality"]
+    assert quality["missing_interval_count"] == 1
+    assert quality["missing_intervals"] == ["2026-01-01T03:00:00Z"]
+    assert quality["gaps_detected"] is True
+    assert quality["completeness_score"] == round(100.0 * 5 / 6, 1)
+    assert quality["overall_quality_score"] == round(100.0 * 5 / 6, 2)
+
+
+def test_get_candles_quality_detects_issues(
+    client: TestClient, seeded_with_issues: None
+) -> None:
+    response = client.get("/api/v1/markets/SOLUSD/candles", params={"timeframe": "1h"})
+
+    assert response.status_code == 200
+    quality = response.json()["quality"]
+    assert quality["invalid_ohlc_candles"] == 1
+    assert quality["out_of_order_candles"] == 1
+    assert quality["duplicate_candles"] == 0
+    assert quality["overall_quality_score"] == 75.0
+    assert response.json()["statistics"]["total_candles"] == 4
+
+
+def test_get_candles_empty_range_zeroed_analytics(
+    client: TestClient, seeded: None
+) -> None:
+    response = client.get(
+        "/api/v1/markets/ETHUSD/candles",
+        params={
+            "timeframe": "1h",
+            "start": "2026-01-02T00:00:00Z",
+            "end": "2026-01-03T00:00:00Z",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["items"] == []
+    assert body["pagination"]["total"] == 0
+    statistics = body["statistics"]
+    assert statistics["total_candles"] == 0
+    assert statistics["expected_candles"] == 0
+    assert statistics["completeness"] is None
+    assert statistics["highest_price"] is None
+    quality = body["quality"]
+    assert quality["completeness_score"] == 0.0
+    assert quality["freshness_score"] == 0.0
+    assert quality["overall_quality_score"] == 0.0
+    assert quality["gaps_detected"] is False
+    assert body["meta"]["rows_scanned"] == 0
+    assert body["meta"]["rows_returned"] == 0
+
+
+def test_get_candles_meta_reports_execution(client: TestClient, seeded: None) -> None:
+    response = client.get(
+        "/api/v1/markets/ETHUSD/candles",
+        params={"timeframe": "1h", "limit": 2, "offset": 1},
+    )
+
+    assert response.status_code == 200
+    meta = response.json()["meta"]
+    assert meta["execution_time_ms"] >= 0
+    assert meta["database_time_ms"] >= 0
+    assert meta["rows_scanned"] == 3
+    assert meta["rows_returned"] == 2
+    assert meta["cache_status"] == "disabled"
+    assert meta["generated_at"].endswith("Z")
+
+
 def test_get_latest(client: TestClient, seeded: None) -> None:
     response = client.get("/api/v1/markets/ETHUSD/latest", params={"timeframe": "1h"})
 
@@ -442,6 +623,91 @@ async def seeded_with_gap(session_factory: SessionFactory) -> None:
         await session.commit()
 
 
+@pytest_asyncio.fixture
+async def seeded_varied(session_factory: SessionFactory) -> None:
+    """Three 1h candles with distinct OHLCV values for sort tests."""
+    async with session_factory() as session:
+        exchange = Exchange(name="Delta Exchange", slug="delta", country="India")
+        session.add(exchange)
+        await session.flush()
+        market = Market(
+            exchange_id=exchange.id,
+            symbol="ETCUSD",
+            base_asset="ETC",
+            quote_asset="USD",
+            market_type="perpetual",
+        )
+        session.add(market)
+        await session.commit()
+        rows = [
+            (Decimal("10"), Decimal("12"), Decimal("9"), Decimal("11"), Decimal("100")),
+            (Decimal("20"), Decimal("25"), Decimal("19"), Decimal("24"), Decimal("200")),
+            (Decimal("30"), Decimal("33"), Decimal("28"), Decimal("32"), Decimal("300")),
+        ]
+        for hour, (open_price, high, low, close, volume) in enumerate(rows):
+            open_time = utc(hour)
+            session.add(
+                Candle(
+                    market_id=market.id,
+                    timeframe="1h",
+                    open_time=open_time,
+                    close_time=open_time + HOUR,
+                    open=open_price,
+                    high=high,
+                    low=low,
+                    close=close,
+                    volume=volume,
+                    quote_volume=None,
+                    trade_count=None,
+                    source="delta",
+                )
+            )
+        await session.commit()
+
+
+@pytest_asyncio.fixture
+async def seeded_with_issues(session_factory: SessionFactory) -> None:
+    """Candles with an invalid-OHLC row and an overlapping out-of-order row."""
+    async with session_factory() as session:
+        exchange = Exchange(name="Delta Exchange", slug="delta", country="India")
+        session.add(exchange)
+        await session.flush()
+        market = Market(
+            exchange_id=exchange.id,
+            symbol="SOLUSD",
+            base_asset="SOL",
+            quote_asset="USD",
+            market_type="perpetual",
+        )
+        session.add(market)
+        await session.commit()
+
+        def add_candle(open_time: datetime, *, high: Decimal) -> None:
+            session.add(
+                Candle(
+                    market_id=market.id,
+                    timeframe="1h",
+                    open_time=open_time,
+                    close_time=open_time + HOUR,
+                    open=Decimal("100"),
+                    high=high,
+                    low=Decimal("90"),
+                    close=Decimal("98"),
+                    volume=Decimal("10"),
+                    quote_volume=None,
+                    trade_count=None,
+                    source="delta",
+                )
+            )
+
+        add_candle(utc(0), high=Decimal("110"))
+        add_candle(utc(1), high=Decimal("105"))
+        await session.execute(text("PRAGMA ignore_check_constraints = ON"))
+        add_candle(utc(2), high=Decimal("95"))  # high < open/close: invalid OHLC
+        add_candle(utc(2) + timedelta(minutes=30), high=Decimal("106"))  # overlap
+        await session.commit()
+
+
 def test_get_research_counts_gaps(client: TestClient, seeded_with_gap: None) -> None:
     """Missing buckets inside the stored range are reported per timeframe."""
     response = client.get("/api/v1/markets/BTCUSD/research")
@@ -479,6 +745,8 @@ def test_openapi_documents_endpoints_and_errors(client: TestClient) -> None:
     assert "end" in param_names
     assert "limit" in param_names
     assert "offset" in param_names
+    assert "sort" in param_names
+    assert "dir" in param_names
     assert "400" in candles["responses"]
     assert "404" in candles["responses"]
     assert candles["responses"]["400"]["content"]["application/json"]["examples"][

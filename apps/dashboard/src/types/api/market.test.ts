@@ -118,8 +118,54 @@ describe('CandlePageSchema', () => {
       timeframe: '1h',
       items: [candle],
       pagination: { total: 42, returned: 1, has_more: true, limit: 1, offset: 0 },
+      statistics: {
+        highest_price: '3200',
+        lowest_price: '2950',
+        highest_volume: '120.5',
+        lowest_volume: '85',
+        average_open: '3027.63',
+        average_close: '3117.88',
+        average_high: '3150',
+        average_low: '2995',
+        average_volume: '102.75',
+        total_candles: 42,
+        first_candle_at: '2026-08-01T00:00:00Z',
+        last_candle_at: '2026-08-01T01:00:00Z',
+        expected_candles: 42,
+        missing_candles: 0,
+        completeness: 100.0,
+      },
+      quality: {
+        completeness_score: 100.0,
+        freshness_score: 100.0,
+        missing_interval_count: 0,
+        missing_intervals: [],
+        duplicate_candles: 0,
+        out_of_order_candles: 0,
+        invalid_ohlc_candles: 0,
+        gaps_detected: false,
+        overall_quality_score: 100.0,
+      },
+      meta: {
+        execution_time_ms: 4.2,
+        database_time_ms: 3.1,
+        rows_scanned: 1,
+        rows_returned: 1,
+        cache_status: 'disabled',
+        generated_at: '2026-08-21T12:00:00Z',
+      },
     };
     expect(CandlePageSchema.parse(page).pagination.total).toBe(42);
+  });
+
+  it('rejects a page without backend statistics', () => {
+    const page = {
+      symbol: 'ETHUSD',
+      timeframe: '1h',
+      items: [candle],
+      pagination: { total: 42, returned: 1, has_more: true, limit: 1, offset: 0 },
+    };
+    expect(() => CandlePageSchema.parse(page)).toThrow();
   });
 });
 

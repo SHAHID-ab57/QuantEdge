@@ -145,10 +145,12 @@ async def get_research(
     response_model=CandlePageResponse,
     summary="Query historical candles",
     description=(
-        "Return candles for a market/timeframe sorted ascending by open time. "
-        "The range [start, end) is half-open; dates may be ISO-8601 datetimes "
-        "(naive values are treated as UTC). Omit start/end to query all "
-        "history. Pages use limit/offset with total/returned/has_more metadata."
+        "Return candles for a market/timeframe sorted by a whitelisted "
+        "column. The range [start, end) is half-open; dates may be ISO-8601 "
+        "datetimes (naive values are treated as UTC). Omit start/end to "
+        "query all history. Every response embeds backend-computed "
+        "statistics, data-quality metrics, and query metadata for the full "
+        "range. Pages use limit/offset with total/returned/has_more metadata."
     ),
     responses=_ERROR_RESPONSES,
 )
@@ -182,8 +184,19 @@ async def get_candles(
         int,
         Query(ge=0, description="Number of candles to skip"),
     ] = 0,
+    sort: Annotated[
+        str,
+        Query(
+            examples=["open_time"],
+            description="Sort column; one of open_time, open, high, low, close, volume",
+        ),
+    ] = "open_time",
+    dir: Annotated[
+        str,
+        Query(examples=["asc"], description="Sort direction; asc or desc"),
+    ] = "asc",
 ) -> CandlePageResponse:
-    """Return a page of candles, ascending by open time."""
+    """Return a page of candles plus backend analytics for the range."""
     return await service.get_candles(
         symbol=symbol,
         timeframe=timeframe,
@@ -191,6 +204,8 @@ async def get_candles(
         end=end,
         limit=limit,
         offset=offset,
+        sort=sort,
+        direction=dir,
     )
 
 

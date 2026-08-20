@@ -158,12 +158,129 @@ class Pagination(BaseModel):
 
 
 class CandlePageResponse(BaseModel):
-    """A page of candles, sorted ascending by open time."""
+    """A page of candles with backend-computed analytics.
+
+    ``statistics`` and ``quality`` describe the full query range ``[start, end)``
+    (not just the returned page); ``meta`` reports server-side timing and
+    execution metadata.
+    """
 
     symbol: str
     timeframe: str
     items: list[CandleDTO]
     pagination: Pagination
+    statistics: "CandleStatistics"
+    quality: "CandleQuality"
+    meta: "QueryMetadata"
+
+
+class CandleStatistics(BaseModel):
+    """Aggregate statistics for candles in the query range.
+
+    Computed server-side from a single SQL aggregate over the range; the
+    frontend never derives these values.
+    """
+
+    highest_price: Decimal | None
+    lowest_price: Decimal | None
+    highest_volume: Decimal | None
+    lowest_volume: Decimal | None
+    average_open: Decimal | None
+    average_close: Decimal | None
+    average_high: Decimal | None
+    average_low: Decimal | None
+    average_volume: Decimal | None
+    total_candles: int
+    first_candle_at: datetime | None = None
+    last_candle_at: datetime | None = None
+    expected_candles: int
+    missing_candles: int
+    completeness: float | None = None
+
+    @field_serializer(
+        "highest_price",
+        "lowest_price",
+        "highest_volume",
+        "lowest_volume",
+        "average_open",
+        "average_close",
+        "average_high",
+        "average_low",
+        "average_volume",
+    )
+    def _serialize_decimal(self, value: Decimal | None) -> str | None:
+        """Serialize decimals as plain strings without trailing zeros."""
+        if value is None:
+            return None
+        text = format(value, "f")
+        if "." in text:
+            text = text.rstrip("0").rstrip(".")
+        return text
+
+    @field_validator("first_candle_at", "last_candle_at", mode="before")
+    @classmethod
+    def _ensure_utc(cls, value: datetime | None) -> datetime | None:
+        """Normalize datetimes to aware UTC for a stable JSON contract."""
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)
+
+
+class CandleQuality(BaseModel):
+    """Backend-generated data quality metrics for the query range.
+
+    Counts are exact; ``missing_intervals`` samples the earliest missing
+    buckets (capped) so large ranges stay cheap to serve.
+    """
+
+    completeness_score: float
+    freshness_score: float
+    missing_interval_count: int
+    missing_intervals: list[datetime] = []
+    duplicate_candles: int
+    out_of_order_candles: int
+    invalid_ohlc_candles: int
+    gaps_detected: bool
+    overall_quality_score: float
+
+    @field_validator("missing_intervals", mode="before")
+    @classmethod
+    def _ensure_utc_list(cls, value: list[datetime] | None) -> list[datetime]:
+        """Normalize datetimes to aware UTC for a stable JSON contract."""
+        if value is None:
+            return []
+        normalized: list[datetime] = []
+        for item in value:
+            if item.tzinfo is None:
+                normalized.append(item.replace(tzinfo=UTC))
+            else:
+                normalized.append(item.astimezone(UTC))
+        return normalized
+
+
+class QueryMetadata(BaseModel):
+    """Server-side execution metadata for one candle query.
+
+    ``rows_scanned`` counts the ordered rows walked to reach the page
+    (``offset + returned``); ``cache_status`` is reserved for a future read
+    cache and currently reports ``"disabled"``.
+    """
+
+    execution_time_ms: float
+    database_time_ms: float
+    rows_scanned: int
+    rows_returned: int
+    cache_status: str
+    generated_at: datetime
+
+    @field_serializer("generated_at")
+    def _serialize_utc(self, value: datetime) -> str:
+        """Serialize datetimes as ISO-8601 UTC."""
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC).isoformat().replace("+00:00", "Z")
+        return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
 class LatestCandleResponse(BaseModel):

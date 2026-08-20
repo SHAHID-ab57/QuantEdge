@@ -474,24 +474,26 @@ Interactive docs (Swagger UI) at `http://localhost:8000/docs`.
 
 All endpoints are versioned under `/api/v1`.
 
-| Method | Path                                     | Description                                                                                                                                            |
-| ------ | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| GET    | `/api/v1/markets`                        | All available markets, ordered by symbol, including contract metadata (tick size, funding, listing date, Delta product id).                            |
-| GET    | `/api/v1/markets/{symbol}/timeframes`    | Timeframes that have stored candle data for the market (empty list when none).                                                                         |
-| GET    | `/api/v1/markets/{symbol}/research`      | Per-timeframe coverage metrics: oldest/newest candle, coverage span, expected vs stored candles, missing candles, completeness, average daily candles. |
-| GET    | `/api/v1/markets/{symbol}/candles`       | Page of candles for a timeframe, ascending by `open_time`.                                                                                             |
-| GET    | `/api/v1/markets/{symbol}/candles/stats` | Aggregate stats for a timeframe over a range: count, highest/lowest price, average volume, first and last candle.                                      |
-| GET    | `/api/v1/markets/{symbol}/latest`        | The candle with the newest `open_time` for a timeframe.                                                                                                |
+| Method | Path                                     | Description                                                                                                                                                            |
+| ------ | ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| GET    | `/api/v1/markets`                        | All available markets, ordered by symbol, including contract metadata (tick size, funding, listing date, Delta product id).                                            |
+| GET    | `/api/v1/markets/{symbol}/timeframes`    | Timeframes that have stored candle data for the market (empty list when none).                                                                                         |
+| GET    | `/api/v1/markets/{symbol}/research`      | Per-timeframe coverage metrics: oldest/newest candle, coverage span, expected vs stored candles, missing candles, completeness, average daily candles.                 |
+| GET    | `/api/v1/markets/{symbol}/candles`       | Page of candles for a timeframe, sorted by a whitelisted column. Response embeds range-wide statistics, data-quality metrics, and query metadata (server-side timing). |
+| GET    | `/api/v1/markets/{symbol}/candles/stats` | Aggregate stats for a timeframe over a range: count, highest/lowest price, average volume, first and last candle.                                                      |
+| GET    | `/api/v1/markets/{symbol}/latest`        | The candle with the newest `open_time` for a timeframe.                                                                                                                |
 
 ### Query parameters (`/candles`)
 
-| Parameter   | Type     | Required | Default | Description                                                                                                    |
-| ----------- | -------- | -------- | ------- | -------------------------------------------------------------------------------------------------------------- |
-| `timeframe` | string   | yes      | —       | Resolution, e.g. `1m`, `15m`, `1h`, `1d` (platform set: `1m 3m 5m 15m 30m 1h 2h 4h 6h 8h 12h 1d 1w`).          |
-| `start`     | datetime | no       | —       | Range start (inclusive), ISO-8601. Naive values are treated as UTC.                                            |
-| `end`       | datetime | no       | —       | Range end (exclusive), ISO-8601. Must be after `start`; `start` and `end` are provided together or not at all. |
-| `limit`     | integer  | no       | 100     | Max candles per page (1–1000, configured via `CANDLES_MAX_LIMIT`).                                             |
-| `offset`    | integer  | no       | 0       | Candles to skip (>= 0).                                                                                        |
+| Parameter   | Type     | Required | Default     | Description                                                                                                    |
+| ----------- | -------- | -------- | ----------- | -------------------------------------------------------------------------------------------------------------- |
+| `timeframe` | string   | yes      | —           | Resolution, e.g. `1m`, `15m`, `1h`, `1d` (platform set: `1m 3m 5m 15m 30m 1h 2h 4h 6h 8h 12h 1d 1w`).          |
+| `start`     | datetime | no       | —           | Range start (inclusive), ISO-8601. Naive values are treated as UTC.                                            |
+| `end`       | datetime | no       | —           | Range end (exclusive), ISO-8601. Must be after `start`; `start` and `end` are provided together or not at all. |
+| `limit`     | integer  | no       | 100         | Max candles per page (1–1000, configured via `CANDLES_MAX_LIMIT`).                                             |
+| `offset`    | integer  | no       | 0           | Candles to skip (>= 0).                                                                                        |
+| `sort`      | string   | no       | `open_time` | Sort column: `open_time`, `open`, `high`, `low`, `close`, `volume`.                                            |
+| `dir`       | string   | no       | `asc`       | Sort direction: `asc` or `desc`.                                                                               |
 
 `/latest` takes `timeframe` (required). `/timeframes` and `/latest` take the
 symbol in the path.
@@ -511,6 +513,31 @@ symbol in the path.
 ```
 
 Walk pages by incrementing `offset` until `has_more` is `false`.
+
+### Statistics, quality, and query metadata
+
+Every `/candles` response embeds three backend-computed objects describing the
+full query range `[start, end)` (not just the returned page):
+
+- `statistics` — aggregate metrics: highest/lowest price, highest/lowest
+  volume, average open/close/high/low/volume, total/expected/missing candles,
+  completeness percentage, and first/last candle timestamps. Fields are `null`
+  (and counts zero) when the range is empty.
+- `quality` — data-quality metrics: completeness score, freshness score (age
+  of the newest candle: <1h = 100, <24h = 80, <7d = 50, <30d = 20, older = 0),
+  exact missing interval count, up to 100 earliest missing bucket samples
+  (sampled only when the span is at most 200,000 buckets; otherwise empty),
+  duplicate-bucket count, out-of-order candle count (open time before the
+  previous close), invalid-OHLC candle count, a `gaps_detected` flag, and an
+  `overall_quality_score` combining coverage and validity.
+- `meta` — query metadata: `execution_time_ms`, `database_time_ms`,
+  `rows_scanned` (the ordered rows walked to reach the page, i.e.
+  `offset + returned`), `rows_returned`, `cache_status` (reserved for a
+  future read cache; currently `"disabled"`), and `generated_at`.
+
+The quality semantics mirror the validation script's: `coverage` is the share
+of expected buckets present, `validity` the share of stored candles that are
+internally consistent, and the overall score is `100 * coverage * validity`.
 
 ### Response format
 
@@ -545,6 +572,7 @@ standard 422 `validation_error` shape.
 | `invalid_timeframe` | 400    | Timeframe not in the supported set.                                               |
 | `invalid_range`     | 400    | `start` without `end` (or vice versa), or `end <= start`.                         |
 | `limit_exceeded`    | 400    | `limit` above the configured maximum (query validation also rejects it with 422). |
+| `invalid_sort`      | 400    | `sort` not in the supported columns, or `dir` not `asc`/`desc`.                   |
 
 ### curl examples
 
@@ -563,6 +591,9 @@ curl "http://localhost:8000/api/v1/markets/ETHUSD/candles?timeframe=1h&limit=10&
 
 # Range filter (half-open: 00:00 inclusive, 04:00 exclusive)
 curl "http://localhost:8000/api/v1/markets/ETHUSD/candles?timeframe=1h&start=2026-08-14T00:00:00Z&end=2026-08-14T04:00:00Z"
+
+# Sort by volume, descending
+curl "http://localhost:8000/api/v1/markets/ETHUSD/candles?timeframe=1h&limit=10&sort=volume&dir=desc"
 
 # Latest hourly candle
 curl "http://localhost:8000/api/v1/markets/ETHUSD/latest?timeframe=1h"

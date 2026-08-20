@@ -13,8 +13,15 @@ import TableContainer from '@mui/material/TableContainer';
 import TableHead from '@mui/material/TableHead';
 import TablePagination from '@mui/material/TablePagination';
 import TableRow from '@mui/material/TableRow';
+import TableSortLabel from '@mui/material/TableSortLabel';
 import Typography from '@mui/material/Typography';
-import type { CandlePageResult } from '../hooks/use-history-data';
+import { memo, useCallback, useEffect, useRef, useState } from 'react';
+import type { CandlePage } from '@/types/api/market';
+import {
+  HISTORY_LIMIT_OPTIONS,
+  type CandleSortColumn,
+  type CandleSortDirection,
+} from '../hooks/use-history-data';
 import { formatDecimal, formatTime } from '../lib/format';
 
 const COLUMNS = [
@@ -27,12 +34,15 @@ const COLUMNS = [
 ];
 
 interface CandlesTableProps {
-  data: CandlePageResult | undefined;
+  data: CandlePage | undefined;
   isLoading: boolean;
   page: number;
   limit: number;
+  sort: CandleSortColumn;
+  dir: CandleSortDirection;
   onPageChange: (page: number) => void;
   onLimitChange: (limit: number) => void;
+  onSortChange: (sort: CandleSortColumn, dir: CandleSortDirection) => void;
 }
 
 function LoadingRows({ rows }: { rows: number }) {
@@ -49,16 +59,112 @@ function LoadingRows({ rows }: { rows: number }) {
   );
 }
 
+async function copyToClipboard(value: string): Promise<boolean> {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(value);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
+interface CandleRowProps {
+  openTime: string;
+  open: string;
+  high: string;
+  low: string;
+  close: string;
+  volume: string;
+  selected: boolean;
+  onCopy: (openTime: string, value: string) => void;
+}
+
+const CandleRow = memo(function CandleRow({
+  openTime,
+  open,
+  high,
+  low,
+  close,
+  volume,
+  selected,
+  onCopy,
+}: CandleRowProps) {
+  const cellSx = { cursor: 'pointer' };
+  return (
+    <TableRow hover selected={selected}>
+      <TableCell sx={cellSx} onClick={() => onCopy(openTime, openTime)} title={`UTC: ${openTime}`}>
+        {formatTime(openTime)}
+      </TableCell>
+      <TableCell align="right" sx={cellSx} onClick={() => onCopy(openTime, open)}>
+        {formatDecimal(open)}
+      </TableCell>
+      <TableCell align="right" sx={cellSx} onClick={() => onCopy(openTime, high)}>
+        {formatDecimal(high)}
+      </TableCell>
+      <TableCell align="right" sx={cellSx} onClick={() => onCopy(openTime, low)}>
+        {formatDecimal(low)}
+      </TableCell>
+      <TableCell align="right" sx={cellSx} onClick={() => onCopy(openTime, close)}>
+        <Typography variant="body2" fontWeight={600}>
+          {formatDecimal(close)}
+        </Typography>
+      </TableCell>
+      <TableCell align="right" sx={cellSx} onClick={() => onCopy(openTime, volume)}>
+        {formatDecimal(volume)}
+      </TableCell>
+    </TableRow>
+  );
+});
+
 export function CandlesTable({
   data,
   isLoading,
   page,
   limit,
+  sort,
+  dir,
   onPageChange,
   onLimitChange,
+  onSortChange,
 }: CandlesTableProps) {
-  const candles = data?.page.items ?? [];
-  const total = data?.page.pagination.total ?? 0;
+  const candles = data?.items ?? [];
+  const total = data?.pagination.total ?? 0;
+  const [selected, setSelected] = useState<string | null>(null);
+  const [copied, setCopied] = useState<string | null>(null);
+  const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (copyTimer.current) {
+        clearTimeout(copyTimer.current);
+      }
+    };
+  }, []);
+
+  const handleCopy = useCallback(async (openTime: string, value: string) => {
+    setSelected(openTime);
+    if (await copyToClipboard(value)) {
+      setCopied(`${formatTime(openTime)} · ${value}`);
+      if (copyTimer.current) {
+        clearTimeout(copyTimer.current);
+      }
+      copyTimer.current = setTimeout(() => setCopied(null), 1600);
+    }
+  }, []);
+
+  const handleSort = useCallback(
+    (key: CandleSortColumn) => {
+      if (key === sort) {
+        onSortChange(key, dir === 'asc' ? 'desc' : 'asc');
+      } else {
+        onSortChange(key, 'asc');
+      }
+    },
+    [dir, onSortChange, sort],
+  );
 
   return (
     <Paper variant="outlined">
@@ -67,8 +173,18 @@ export function CandlesTable({
           <TableHead>
             <TableRow>
               {COLUMNS.map((column) => (
-                <TableCell key={column.key} align={column.align}>
-                  {column.label}
+                <TableCell
+                  key={column.key}
+                  align={column.align}
+                  sortDirection={sort === column.key ? dir : false}
+                >
+                  <TableSortLabel
+                    active={sort === column.key}
+                    direction={sort === column.key ? dir : 'asc'}
+                    onClick={() => handleSort(column.key as CandleSortColumn)}
+                  >
+                    {column.label}
+                  </TableSortLabel>
                 </TableCell>
               ))}
             </TableRow>
@@ -78,18 +194,17 @@ export function CandlesTable({
               <LoadingRows rows={Math.min(limit, 20)} />
             ) : (
               candles.map((candle) => (
-                <TableRow key={`${candle.open_time}-${candle.close_time}`} hover>
-                  <TableCell>{formatTime(candle.open_time)}</TableCell>
-                  <TableCell align="right">{formatDecimal(candle.open)}</TableCell>
-                  <TableCell align="right">{formatDecimal(candle.high)}</TableCell>
-                  <TableCell align="right">{formatDecimal(candle.low)}</TableCell>
-                  <TableCell align="right">
-                    <Typography variant="body2" fontWeight={600}>
-                      {formatDecimal(candle.close)}
-                    </Typography>
-                  </TableCell>
-                  <TableCell align="right">{formatDecimal(candle.volume)}</TableCell>
-                </TableRow>
+                <CandleRow
+                  key={candle.open_time}
+                  openTime={candle.open_time}
+                  open={candle.open}
+                  high={candle.high}
+                  low={candle.low}
+                  close={candle.close}
+                  volume={candle.volume}
+                  selected={selected === candle.open_time}
+                  onCopy={handleCopy}
+                />
               ))
             )}
             {!isLoading && candles.length === 0 ? (
@@ -109,6 +224,18 @@ export function CandlesTable({
           </TableBody>
         </Table>
       </TableContainer>
+      {copied ? (
+        <Box sx={{ px: 2, pt: 1 }}>
+          <Typography
+            variant="caption"
+            color="text.secondary"
+            role="status"
+            aria-label="Copied value"
+          >
+            Copied {copied} to the clipboard.
+          </Typography>
+        </Box>
+      ) : null}
       <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', px: 1 }}>
         <FormControl size="small" sx={{ mr: 1, minWidth: 80 }}>
           <Select
@@ -116,7 +243,7 @@ export function CandlesTable({
             onChange={(event) => onLimitChange(Number(event.target.value))}
             aria-label="Rows per page"
           >
-            {[100, 250, 500, 1000].map((option) => (
+            {HISTORY_LIMIT_OPTIONS.map((option) => (
               <MenuItem key={option} value={option}>
                 {option} / page
               </MenuItem>

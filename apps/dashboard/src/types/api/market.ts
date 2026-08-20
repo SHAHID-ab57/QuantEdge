@@ -58,11 +58,59 @@ export const PaginationSchema = z.object({
 
 export type Pagination = z.infer<typeof PaginationSchema>;
 
+export const CandleStatisticsSchema = z.object({
+  highest_price: z.string().nullable(),
+  lowest_price: z.string().nullable(),
+  highest_volume: z.string().nullable(),
+  lowest_volume: z.string().nullable(),
+  average_open: z.string().nullable(),
+  average_close: z.string().nullable(),
+  average_high: z.string().nullable(),
+  average_low: z.string().nullable(),
+  average_volume: z.string().nullable(),
+  total_candles: z.number().int().nonnegative(),
+  first_candle_at: z.string().datetime().nullable(),
+  last_candle_at: z.string().datetime().nullable(),
+  expected_candles: z.number().int().nonnegative(),
+  missing_candles: z.number().int().nonnegative(),
+  completeness: z.number().nullable(),
+});
+
+export type CandleStatistics = z.infer<typeof CandleStatisticsSchema>;
+
+export const CandleQualitySchema = z.object({
+  completeness_score: z.number(),
+  freshness_score: z.number(),
+  missing_interval_count: z.number().int().nonnegative(),
+  missing_intervals: z.array(z.string().datetime()),
+  duplicate_candles: z.number().int().nonnegative(),
+  out_of_order_candles: z.number().int().nonnegative(),
+  invalid_ohlc_candles: z.number().int().nonnegative(),
+  gaps_detected: z.boolean(),
+  overall_quality_score: z.number(),
+});
+
+export type CandleQuality = z.infer<typeof CandleQualitySchema>;
+
+export const QueryMetadataSchema = z.object({
+  execution_time_ms: z.number(),
+  database_time_ms: z.number(),
+  rows_scanned: z.number().int().nonnegative(),
+  rows_returned: z.number().int().nonnegative(),
+  cache_status: z.string(),
+  generated_at: z.string().datetime(),
+});
+
+export type QueryMetadata = z.infer<typeof QueryMetadataSchema>;
+
 export const CandlePageSchema = z.object({
   symbol: z.string(),
   timeframe: z.string(),
   items: z.array(CandleSchema),
   pagination: PaginationSchema,
+  statistics: CandleStatisticsSchema,
+  quality: CandleQualitySchema,
+  meta: QueryMetadataSchema,
 });
 
 export type CandlePage = z.infer<typeof CandlePageSchema>;

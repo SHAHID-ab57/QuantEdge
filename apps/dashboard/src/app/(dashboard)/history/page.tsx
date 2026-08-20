@@ -1,3 +1,4 @@
+import { Suspense } from 'react';
 import { PageHeader } from '@/components/layout/page-header';
 import { HistoryPage } from '@/features/history/history-page';
 
@@ -8,7 +9,9 @@ export default function HistoryRoute() {
         title="History"
         subtitle="Explore historical OHLCV candles, statistics, and exports."
       />
-      <HistoryPage />
+      <Suspense fallback={null}>
+        <HistoryPage />
+      </Suspense>
     </>
   );
 }

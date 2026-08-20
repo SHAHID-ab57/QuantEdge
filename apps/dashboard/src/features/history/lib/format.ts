@@ -26,7 +26,6 @@ export function formatDateTime(iso: string | null | undefined): string {
   return new Intl.DateTimeFormat(undefined, {
     dateStyle: 'medium',
     timeStyle: 'medium',
-    timeZone: 'UTC',
   }).format(new Date(iso));
 }
 
@@ -34,6 +33,16 @@ export function formatTime(iso: string): string {
   return new Intl.DateTimeFormat(undefined, {
     dateStyle: 'short',
     timeStyle: 'short',
+  }).format(new Date(iso));
+}
+
+export function formatUtcIso(iso: string | null | undefined): string {
+  if (!iso) {
+    return '—';
+  }
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: 'full',
+    timeStyle: 'long',
     timeZone: 'UTC',
   }).format(new Date(iso));
 }

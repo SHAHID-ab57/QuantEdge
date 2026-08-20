@@ -46,13 +46,22 @@ export function fetchLatestCandle(symbol: string, timeframe: string): Promise<La
 export function fetchCandlePage(
   symbol: string,
   timeframe: string,
-  params: { limit?: number; offset?: number; start?: string; end?: string } = {},
+  params: {
+    limit?: number;
+    offset?: number;
+    start?: string;
+    end?: string;
+    sort?: string;
+    dir?: string;
+  } = {},
 ): Promise<CandlePage> {
   const search = new URLSearchParams({ timeframe });
   if (params.limit !== undefined) search.set('limit', String(params.limit));
   if (params.offset !== undefined) search.set('offset', String(params.offset));
   if (params.start) search.set('start', params.start);
   if (params.end) search.set('end', params.end);
+  if (params.sort) search.set('sort', params.sort);
+  if (params.dir) search.set('dir', params.dir);
   return getValidated(
     `/api/v1/markets/${encodeURIComponent(symbol)}/candles`,
     CandlePageSchema,

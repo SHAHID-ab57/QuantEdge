@@ -28,12 +28,13 @@ The API exposes historical market data and operational monitoring:
 
 ### Market data
 
-| Method | Path                                  | Purpose                                 |
-| ------ | ------------------------------------- | --------------------------------------- |
-| GET    | `/api/v1/markets`                     | All tracked markets, ordered by symbol  |
-| GET    | `/api/v1/markets/{symbol}/timeframes` | Timeframes with stored candles          |
-| GET    | `/api/v1/markets/{symbol}/candles`    | Paginated candle history (limit/offset) |
-| GET    | `/api/v1/markets/{symbol}/latest`     | Newest candle for a market/timeframe    |
+| Method | Path                                     | Purpose                                                                                                                  |
+| ------ | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| GET    | `/api/v1/markets`                        | All tracked markets, ordered by symbol                                                                                   |
+| GET    | `/api/v1/markets/{symbol}/timeframes`    | Timeframes with stored candles                                                                                           |
+| GET    | `/api/v1/markets/{symbol}/candles`       | Paginated candle history (limit/offset)                                                                                  |
+| GET    | `/api/v1/markets/{symbol}/candles/stats` | Aggregate stats for a timeframe/range (count, min/max price, avg volume, first/last candle); 404 when the range is empty |
+| GET    | `/api/v1/markets/{symbol}/latest`        | Newest candle for a market/timeframe                                                                                     |
 
 ### Platform health
 

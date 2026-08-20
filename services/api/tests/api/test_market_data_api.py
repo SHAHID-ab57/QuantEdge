@@ -251,12 +251,105 @@ def test_get_latest_unknown_symbol(client: TestClient, seeded: None) -> None:
     assert response.json()["code"] == "market_not_found"
 
 
+def test_get_candle_stats(client: TestClient, seeded: None) -> None:
+    response = client.get(
+        "/api/v1/markets/ETHUSD/candles/stats",
+        params={"timeframe": "1h"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["symbol"] == "ETHUSD"
+    assert body["timeframe"] == "1h"
+    assert body["start"] is None
+    assert body["end"] is None
+    assert body["total_candles"] == 5
+    assert body["highest_price"] == "3060"
+    assert body["lowest_price"] == "3040"
+    assert body["average_volume"] == "120.5"
+    assert body["first_candle"]["open_time"] == "2026-01-01T00:00:00Z"
+    assert body["last_candle"]["open_time"] == "2026-01-01T04:00:00Z"
+    assert body["first_candle"]["close"] == "3055.25"
+
+
+def test_get_candle_stats_range(client: TestClient, seeded: None) -> None:
+    response = client.get(
+        "/api/v1/markets/ETHUSD/candles/stats",
+        params={
+            "timeframe": "1h",
+            "start": "2026-01-01T00:00:00Z",
+            "end": "2026-01-01T03:00:00Z",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total_candles"] == 3
+    assert body["start"] == "2026-01-01T00:00:00Z"
+    assert body["end"] == "2026-01-01T03:00:00Z"
+    assert body["first_candle"]["open_time"] == "2026-01-01T00:00:00Z"
+    assert body["last_candle"]["open_time"] == "2026-01-01T02:00:00Z"
+
+
+def test_get_candle_stats_no_candles(client: TestClient, seeded: None) -> None:
+    response = client.get(
+        "/api/v1/markets/ETHUSD/candles/stats",
+        params={
+            "timeframe": "1d",
+            "start": "2026-01-01T00:00:00Z",
+            "end": "2026-01-02T00:00:00Z",
+        },
+    )
+
+    assert response.status_code == 404
+    assert response.json()["code"] == "candle_not_found"
+
+
+def test_get_candle_stats_empty_range(client: TestClient, seeded: None) -> None:
+    response = client.get(
+        "/api/v1/markets/ETHUSD/candles/stats",
+        params={
+            "timeframe": "1h",
+            "start": "2026-01-02T00:00:00Z",
+            "end": "2026-01-03T00:00:00Z",
+        },
+    )
+
+    assert response.status_code == 404
+    assert response.json()["code"] == "candle_not_found"
+
+
+def test_get_candle_stats_invalid_timeframe(client: TestClient, seeded: None) -> None:
+    response = client.get(
+        "/api/v1/markets/ETHUSD/candles/stats",
+        params={"timeframe": "7d"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "invalid_timeframe"
+
+
+def test_get_candle_stats_invalid_range(client: TestClient, seeded: None) -> None:
+    response = client.get(
+        "/api/v1/markets/ETHUSD/candles/stats",
+        params={
+            "timeframe": "1h",
+            "start": "2026-01-02T00:00:00Z",
+            "end": "2026-01-01T00:00:00Z",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "invalid_range"
+
+
 def test_openapi_documents_endpoints_and_errors(client: TestClient) -> None:
     spec = client.get("/openapi.json").json()
     paths = spec["paths"]
     assert "/api/v1/markets" in paths
     assert "/api/v1/markets/{symbol}/timeframes" in paths
     assert "/api/v1/markets/{symbol}/candles" in paths
+    assert "/api/v1/markets/{symbol}/candles/stats" in paths
     assert "/api/v1/markets/{symbol}/latest" in paths
 
     candles = paths["/api/v1/markets/{symbol}/candles"]["get"]

@@ -26,7 +26,7 @@ interface NavItem {
 const NAV_ITEMS: NavItem[] = [
   { label: 'Dashboard', href: '/dashboard', icon: DashboardIcon },
   { label: 'Markets', href: '/markets', icon: CandlestickChartIcon },
-  { label: 'Historical Data', href: '/historical', icon: HistoryIcon },
+  { label: 'History', href: '/history', icon: HistoryIcon },
   { label: 'Live Market', href: '/live-market', icon: BoltIcon },
   { label: 'Research', href: '/research', icon: ScienceIcon },
   { label: 'Settings', href: '/settings', icon: SettingsIcon },

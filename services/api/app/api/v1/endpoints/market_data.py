@@ -13,6 +13,7 @@ from app.core.config import get_settings
 from app.dependencies.market_data import get_market_data_service
 from app.schemas.market_data import (
     CandlePageResponse,
+    CandleStatsResponse,
     LatestCandleResponse,
     MarketListResponse,
     TimeframesResponse,
@@ -185,3 +186,43 @@ async def get_latest_candle(
 ) -> LatestCandleResponse:
     """Return the most recent candle for a market/timeframe."""
     return await service.get_latest_candle(symbol, timeframe)
+
+
+@router.get(
+    "/{symbol}/candles/stats",
+    response_model=CandleStatsResponse,
+    summary="Candle statistics for a range",
+    description=(
+        "Return aggregate statistics (count, highest/lowest price, average "
+        "volume, first and last candle) for a market/timeframe over the "
+        "half-open range [start, end). Omit start/end for all history; "
+        "raises 404 when no candles match."
+    ),
+    responses=_ERROR_RESPONSES,
+)
+async def get_candle_stats(
+    symbol: SymbolPath,
+    timeframe: TimeframeQuery,
+    service: MarketDataServiceDep,
+    start: Annotated[
+        datetime | None,
+        Query(
+            examples=["2026-08-14T00:00:00Z"],
+            description="Range start (inclusive), ISO-8601 UTC",
+        ),
+    ] = None,
+    end: Annotated[
+        datetime | None,
+        Query(
+            examples=["2026-08-17T00:00:00Z"],
+            description="Range end (exclusive), ISO-8601 UTC",
+        ),
+    ] = None,
+) -> CandleStatsResponse:
+    """Return aggregate candle statistics for a market/timeframe range."""
+    return await service.get_candle_stats(
+        symbol=symbol,
+        timeframe=timeframe,
+        start=start,
+        end=end,
+    )

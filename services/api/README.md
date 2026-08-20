@@ -458,12 +458,13 @@ Interactive docs (Swagger UI) at `http://localhost:8000/docs`.
 
 All endpoints are versioned under `/api/v1`.
 
-| Method | Path                                  | Description                                                                    |
-| ------ | ------------------------------------- | ------------------------------------------------------------------------------ |
-| GET    | `/api/v1/markets`                     | All available markets, ordered by symbol.                                      |
-| GET    | `/api/v1/markets/{symbol}/timeframes` | Timeframes that have stored candle data for the market (empty list when none). |
-| GET    | `/api/v1/markets/{symbol}/candles`    | Page of candles for a timeframe, ascending by `open_time`.                     |
-| GET    | `/api/v1/markets/{symbol}/latest`     | The candle with the newest `open_time` for a timeframe.                        |
+| Method | Path                                     | Description                                                                                                       |
+| ------ | ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| GET    | `/api/v1/markets`                        | All available markets, ordered by symbol.                                                                         |
+| GET    | `/api/v1/markets/{symbol}/timeframes`    | Timeframes that have stored candle data for the market (empty list when none).                                    |
+| GET    | `/api/v1/markets/{symbol}/candles`       | Page of candles for a timeframe, ascending by `open_time`.                                                        |
+| GET    | `/api/v1/markets/{symbol}/candles/stats` | Aggregate stats for a timeframe over a range: count, highest/lowest price, average volume, first and last candle. |
+| GET    | `/api/v1/markets/{symbol}/latest`        | The candle with the newest `open_time` for a timeframe.                                                           |
 
 ### Query parameters (`/candles`)
 

@@ -19,6 +19,7 @@ from app.repositories.markets import MarketRepository
 from app.schemas.market_data import (
     CandleDTO,
     CandlePageResponse,
+    CandleStatsResponse,
     LatestCandleResponse,
     MarketDTO,
     MarketListResponse,
@@ -172,6 +173,66 @@ class MarketDataService:
             symbol=symbol,
             timeframe=timeframe,
             candle=CandleDTO.model_validate(candle),
+        )
+
+    async def get_candle_stats(
+        self,
+        symbol: str,
+        timeframe: str,
+        *,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> CandleStatsResponse:
+        """Return aggregate statistics for candles in a market/timeframe.
+
+        The range ``[start, end)`` is half-open; naive datetimes are treated
+        as UTC. When no candles match, a 404 domain error is raised so callers
+        can distinguish "no data" from a broken query.
+        """
+        market = await self._require_market(symbol)
+        self._validate_timeframe(timeframe)
+        start, end = self._validate_range(start, end)
+
+        stats = await self.candle_repository.get_candle_stats(
+            market.id,
+            timeframe,
+            start=start,
+            end=end,
+        )
+        if stats.total_candles == 0:
+            raise CandleNotFoundError(symbol, timeframe)
+
+        first_candle = await self.candle_repository.get_first_candle(
+            market.id,
+            timeframe,
+            start=start,
+            end=end,
+        )
+        last_candle = await self.candle_repository.get_latest_candle(
+            market.id,
+            timeframe,
+            start=start,
+            end=end,
+        )
+        logger.info(
+            "Serving candle stats (symbol=%s timeframe=%s start=%s end=%s total=%d)",
+            symbol,
+            timeframe,
+            start,
+            end,
+            stats.total_candles,
+        )
+        return CandleStatsResponse(
+            symbol=symbol,
+            timeframe=timeframe,
+            start=start,
+            end=end,
+            total_candles=stats.total_candles,
+            highest_price=stats.highest_price,
+            lowest_price=stats.lowest_price,
+            average_volume=stats.average_volume,
+            first_candle=CandleDTO.model_validate(first_candle) if first_candle else None,
+            last_candle=CandleDTO.model_validate(last_candle) if last_candle else None,
         )
 
     async def _require_market(self, symbol: str) -> Market:

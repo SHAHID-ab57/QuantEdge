@@ -67,3 +67,18 @@ export const LatestCandleSchema = z.object({
 });
 
 export type LatestCandle = z.infer<typeof LatestCandleSchema>;
+
+export const CandleStatsSchema = z.object({
+  symbol: z.string(),
+  timeframe: z.string(),
+  start: z.string().datetime().nullable(),
+  end: z.string().datetime().nullable(),
+  total_candles: z.number().int().nonnegative(),
+  highest_price: z.string().nullable(),
+  lowest_price: z.string().nullable(),
+  average_volume: z.string().nullable(),
+  first_candle: CandleSchema.nullable(),
+  last_candle: CandleSchema.nullable(),
+});
+
+export type CandleStats = z.infer<typeof CandleStatsSchema>;

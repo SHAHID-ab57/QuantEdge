@@ -5,12 +5,24 @@ never build queries themselves.
 """
 
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.candle import Candle
+
+
+@dataclass
+class CandleStats:
+    """Aggregate statistics for a candle range (one row of aggregates)."""
+
+    total_candles: int
+    highest_price: Decimal | None
+    lowest_price: Decimal | None
+    average_volume: Decimal | None
 
 
 class CandleRepository:
@@ -73,6 +85,9 @@ class CandleRepository:
         self,
         market_id: uuid.UUID,
         timeframe: str,
+        *,
+        start: datetime | None = None,
+        end: datetime | None = None,
     ) -> Candle | None:
         """Return the candle with the newest open time, or ``None``."""
         query = (
@@ -84,6 +99,75 @@ class CandleRepository:
             .order_by(Candle.open_time.desc())
             .limit(1)
         )
+        if start is not None:
+            query = query.where(Candle.open_time >= start)
+        if end is not None:
+            query = query.where(Candle.open_time < end)
+        return (await self._session.execute(query)).scalar_one_or_none()
+
+    async def get_candle_stats(
+        self,
+        market_id: uuid.UUID,
+        timeframe: str,
+        *,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> CandleStats:
+        """Return aggregate statistics for candles in the range.
+
+        ``start``/``end`` form a half-open range ``[start, end)``; when
+        omitted no temporal filter is applied. ``total_candles`` is 0 when
+        nothing matches — callers decide how to present that.
+        """
+        conditions = [
+            Candle.market_id == market_id,
+            Candle.timeframe == timeframe,
+        ]
+        if start is not None:
+            conditions.append(Candle.open_time >= start)
+        if end is not None:
+            conditions.append(Candle.open_time < end)
+
+        aggregate = (
+            select(
+                func.count().label("total_candles"),
+                func.max(Candle.high).label("highest_price"),
+                func.min(Candle.low).label("lowest_price"),
+                func.avg(Candle.volume).label("average_volume"),
+            )
+            .select_from(Candle)
+            .where(*conditions)
+        )
+        row = (await self._session.execute(aggregate)).one()
+        return CandleStats(
+            total_candles=int(row.total_candles),
+            highest_price=row.highest_price,
+            lowest_price=row.lowest_price,
+            average_volume=row.average_volume,
+        )
+
+    async def get_first_candle(
+        self,
+        market_id: uuid.UUID,
+        timeframe: str,
+        *,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> Candle | None:
+        """Return the candle with the earliest open time in the range."""
+        query = (
+            select(Candle)
+            .where(
+                Candle.market_id == market_id,
+                Candle.timeframe == timeframe,
+            )
+            .order_by(Candle.open_time.asc())
+            .limit(1)
+        )
+        if start is not None:
+            query = query.where(Candle.open_time >= start)
+        if end is not None:
+            query = query.where(Candle.open_time < end)
         return (await self._session.execute(query)).scalar_one_or_none()
 
     async def count_all(self) -> int:

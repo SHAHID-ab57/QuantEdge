@@ -2,10 +2,12 @@ import type { z } from 'zod';
 import { apiClient } from './client';
 import {
   CandlePageSchema,
+  CandleStatsSchema,
   LatestCandleSchema,
   MarketListSchema,
   TimeframesSchema,
   type CandlePage,
+  type CandleStats,
   type LatestCandle,
   type MarketList,
   type Timeframes,
@@ -35,14 +37,31 @@ export function fetchLatestCandle(symbol: string, timeframe: string): Promise<La
 export function fetchCandlePage(
   symbol: string,
   timeframe: string,
-  params: { limit?: number; offset?: number } = {},
+  params: { limit?: number; offset?: number; start?: string; end?: string } = {},
 ): Promise<CandlePage> {
   const search = new URLSearchParams({ timeframe });
   if (params.limit !== undefined) search.set('limit', String(params.limit));
   if (params.offset !== undefined) search.set('offset', String(params.offset));
+  if (params.start) search.set('start', params.start);
+  if (params.end) search.set('end', params.end);
   return getValidated(
     `/api/v1/markets/${encodeURIComponent(symbol)}/candles`,
     CandlePageSchema,
+    search.toString(),
+  );
+}
+
+export function fetchCandleStats(
+  symbol: string,
+  timeframe: string,
+  params: { start?: string; end?: string } = {},
+): Promise<CandleStats> {
+  const search = new URLSearchParams({ timeframe });
+  if (params.start) search.set('start', params.start);
+  if (params.end) search.set('end', params.end);
+  return getValidated(
+    `/api/v1/markets/${encodeURIComponent(symbol)}/candles/stats`,
+    CandleStatsSchema,
     search.toString(),
   );
 }

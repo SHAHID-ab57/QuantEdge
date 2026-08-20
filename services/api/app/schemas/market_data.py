@@ -110,3 +110,41 @@ class LatestCandleResponse(BaseModel):
     symbol: str
     timeframe: str
     candle: CandleDTO
+
+
+class CandleStatsResponse(BaseModel):
+    """Aggregate statistics for candles in a market/timeframe range."""
+
+    symbol: str
+    timeframe: str
+    start: datetime | None = Field(
+        None, description="Applied range start (inclusive), ISO-8601 UTC"
+    )
+    end: datetime | None = Field(
+        None, description="Applied range end (exclusive), ISO-8601 UTC"
+    )
+    total_candles: int
+    highest_price: Decimal | None
+    lowest_price: Decimal | None
+    average_volume: Decimal | None
+    first_candle: CandleDTO | None = None
+    last_candle: CandleDTO | None = None
+
+    @field_serializer("highest_price", "lowest_price", "average_volume")
+    def _serialize_decimal(self, value: Decimal | None) -> str | None:
+        """Serialize decimals as plain strings without trailing zeros."""
+        if value is None:
+            return None
+        text = format(value, "f")
+        if "." in text:
+            text = text.rstrip("0").rstrip(".")
+        return text
+
+    @field_serializer("start", "end")
+    def _serialize_utc(self, value: datetime | None) -> str | None:
+        """Serialize datetimes as ISO-8601 UTC (or ``null`` when unset)."""
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC).isoformat().replace("+00:00", "Z")
+        return value.astimezone(UTC).isoformat().replace("+00:00", "Z")

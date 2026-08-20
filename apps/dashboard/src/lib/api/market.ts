@@ -5,11 +5,13 @@ import {
   CandleStatsSchema,
   LatestCandleSchema,
   MarketListSchema,
+  MarketResearchSchema,
   TimeframesSchema,
   type CandlePage,
   type CandleStats,
   type LatestCandle,
   type MarketList,
+  type MarketResearch,
   type Timeframes,
 } from '@/types/api/market';
 
@@ -24,6 +26,13 @@ export function fetchMarkets(): Promise<MarketList> {
 
 export function fetchTimeframes(symbol: string): Promise<Timeframes> {
   return getValidated(`/api/v1/markets/${encodeURIComponent(symbol)}/timeframes`, TimeframesSchema);
+}
+
+export function fetchMarketResearch(symbol: string): Promise<MarketResearch> {
+  return getValidated(
+    `/api/v1/markets/${encodeURIComponent(symbol)}/research`,
+    MarketResearchSchema,
+  );
 }
 
 export function fetchLatestCandle(symbol: string, timeframe: string): Promise<LatestCandle> {

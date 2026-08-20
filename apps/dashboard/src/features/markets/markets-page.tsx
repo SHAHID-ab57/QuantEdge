@@ -1,13 +1,14 @@
 'use client';
 
 import Alert from '@mui/material/Alert';
+import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
 import Grid from '@mui/material/Grid';
 import Paper from '@mui/material/Paper';
 import Skeleton from '@mui/material/Skeleton';
 import Stack from '@mui/material/Stack';
 import Typography from '@mui/material/Typography';
-import { useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import type { Market } from '@/types/api/market';
 import { DetailPanel } from './components/detail-panel';
 import { MarketsTable } from './components/markets-table';
@@ -18,8 +19,14 @@ import { useMarkets } from './hooks/use-markets-data';
 function MarketsSkeleton() {
   return (
     <Stack spacing={2} role="status" aria-label="Loading markets">
-      <Skeleton variant="rounded" height={56} />
-      <Skeleton variant="rounded" height={420} />
+      <Skeleton variant="rounded" height={64} />
+      <Paper variant="outlined" sx={{ p: 2 }}>
+        <Stack spacing={1.5}>
+          {Array.from({ length: 6 }).map((_, index) => (
+            <Skeleton key={index} variant="rounded" height={48} />
+          ))}
+        </Stack>
+      </Paper>
     </Stack>
   );
 }
@@ -86,9 +93,9 @@ export function MarketsPage() {
     [markets.data, selectedSymbol],
   );
 
-  const handleSelectRow = (symbol: string) => {
+  const handleSelectRow = useCallback((symbol: string) => {
     setSelectedSymbol((current) => (current === symbol ? null : symbol));
-  };
+  }, []);
 
   if (markets.isLoading) {
     return <MarketsSkeleton />;
@@ -121,8 +128,8 @@ export function MarketsPage() {
   }
 
   return (
-    <Grid container spacing={2}>
-      <Grid size={{ xs: 12, lg: 8 }}>
+    <Grid container spacing={{ xs: 2, lg: 2.5 }}>
+      <Grid size={{ xs: 12, lg: 8, xl: 7.5 }} sx={{ minWidth: 0 }}>
         <Stack spacing={2}>
           <MarketsToolbar
             search={state.q}
@@ -153,9 +160,30 @@ export function MarketsPage() {
           </Typography>
         </Stack>
       </Grid>
-      <Grid size={{ xs: 12, lg: 4 }}>
+      <Grid
+        size={{ xs: 12, lg: 4, xl: 4.5 }}
+        sx={{
+          minWidth: 0,
+          position: { lg: 'sticky' },
+          top: { lg: 16 },
+          alignSelf: 'flex-start',
+          maxHeight: { lg: 'calc(100dvh - 32px)' },
+          overflowY: { lg: 'auto' },
+        }}
+      >
         {selectedMarket ? (
-          <DetailPanel market={selectedMarket} />
+          <Box
+            key={selectedMarket.symbol}
+            sx={{
+              '@keyframes detailFadeIn': {
+                from: { opacity: 0, transform: 'translateY(4px)' },
+                to: { opacity: 1, transform: 'none' },
+              },
+              animation: 'detailFadeIn 250ms ease-out',
+            }}
+          >
+            <DetailPanel market={selectedMarket} />
+          </Box>
         ) : (
           <Paper variant="outlined" sx={{ p: 3, textAlign: 'center' }}>
             <Typography variant="body2" color="text.secondary">

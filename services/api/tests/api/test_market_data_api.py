@@ -114,6 +114,46 @@ def test_list_markets(client: TestClient, seeded: None) -> None:
     assert body["markets"][0]["exchange"] == "Delta Exchange"
 
 
+@pytest_asyncio.fixture
+async def seeded_with_metadata(session_factory: SessionFactory) -> None:
+    async with session_factory() as session:
+        exchange = Exchange(name="Delta Exchange", slug="delta", country="India")
+        session.add(exchange)
+        await session.flush()
+        session.add(
+            Market(
+                exchange_id=exchange.id,
+                symbol="BTCUSD",
+                base_asset="BTC",
+                quote_asset="USD",
+                market_type="perpetual",
+                delta_product_id=27,
+                delta_contract_type="perpetual_futures",
+                tick_size="0.5",
+                funding_method="mark_price",
+                funding_interval_seconds=28800,
+                listing_date=datetime(2023, 12, 18, 13, 10, 39, tzinfo=UTC),
+            )
+        )
+        await session.commit()
+
+
+def test_list_markets_includes_product_metadata(
+    client: TestClient, seeded_with_metadata: None
+) -> None:
+    response = client.get("/api/v1/markets")
+
+    assert response.status_code == 200
+    market = response.json()["markets"][0]
+    assert market["exchange_id"] == market["id"] or market["exchange_id"] is not None
+    assert market["delta_product_id"] == 27
+    assert market["delta_contract_type"] == "perpetual_futures"
+    assert market["tick_size"] == "0.5"
+    assert market["funding_method"] == "mark_price"
+    assert market["funding_interval_seconds"] == 28800
+    assert market["listing_date"] == "2023-12-18T13:10:39Z"
+
+
 def test_list_timeframes(client: TestClient, seeded: None) -> None:
     response = client.get("/api/v1/markets/ETHUSD/timeframes")
 
@@ -343,11 +383,91 @@ def test_get_candle_stats_invalid_range(client: TestClient, seeded: None) -> Non
     assert response.json()["code"] == "invalid_range"
 
 
+def test_get_research_reports_coverage(client: TestClient, seeded: None) -> None:
+    """Research metrics match the stored 1h range with no gaps."""
+    response = client.get("/api/v1/markets/ETHUSD/research")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["symbol"] == "ETHUSD"
+    assert body["total_candles"] == 5
+    assert body["oldest_candle_at"] == "2026-01-01T00:00:00Z"
+    assert body["newest_candle_at"] == "2026-01-01T04:00:00Z"
+    assert body["coverage_days"] == 0.2
+    assert len(body["timeframes"]) == 1
+    entry = body["timeframes"][0]
+    assert entry["timeframe"] == "1h"
+    assert entry["stored_candles"] == 5
+    assert entry["oldest_at"] == "2026-01-01T00:00:00Z"
+    assert entry["newest_at"] == "2026-01-01T04:00:00Z"
+    assert entry["expected_candles"] == 5
+    assert entry["missing_candles"] == 0
+    assert entry["completeness"] == 100.0
+    assert entry["average_daily_candles"] == 25.0
+
+
+@pytest_asyncio.fixture
+async def seeded_with_gap(session_factory: SessionFactory) -> None:
+    async with session_factory() as session:
+        exchange = Exchange(name="Delta Exchange", slug="delta", country="India")
+        session.add(exchange)
+        await session.flush()
+        market = Market(
+            exchange_id=exchange.id,
+            symbol="BTCUSD",
+            base_asset="BTC",
+            quote_asset="USD",
+            market_type="perpetual",
+        )
+        session.add(market)
+        await session.commit()
+        for hour in (0, 1, 2, 4, 5):  # 03:00 bucket missing
+            open_time = utc(hour)
+            session.add(
+                Candle(
+                    market_id=market.id,
+                    timeframe="1h",
+                    open_time=open_time,
+                    close_time=open_time + HOUR,
+                    open=Decimal("60000"),
+                    high=Decimal("60100"),
+                    low=Decimal("59900"),
+                    close=Decimal("60050"),
+                    volume=Decimal("1"),
+                    quote_volume=None,
+                    trade_count=None,
+                    source="delta",
+                )
+            )
+        await session.commit()
+
+
+def test_get_research_counts_gaps(client: TestClient, seeded_with_gap: None) -> None:
+    """Missing buckets inside the stored range are reported per timeframe."""
+    response = client.get("/api/v1/markets/BTCUSD/research")
+
+    assert response.status_code == 200
+    entry = response.json()["timeframes"][0]
+    assert entry["stored_candles"] == 5
+    assert entry["expected_candles"] == 6
+    assert entry["missing_candles"] == 1
+    assert entry["completeness"] == round(100.0 * 5 / 6, 1)
+    assert entry["coverage_days"] == 0.2
+
+
+def test_get_research_unknown_symbol(client: TestClient, seeded: None) -> None:
+    response = client.get("/api/v1/markets/NOPE/research")
+
+    assert response.status_code == 404
+    assert response.json()["code"] == "market_not_found"
+
+
 def test_openapi_documents_endpoints_and_errors(client: TestClient) -> None:
     spec = client.get("/openapi.json").json()
     paths = spec["paths"]
     assert "/api/v1/markets" in paths
     assert "/api/v1/markets/{symbol}/timeframes" in paths
+    assert "/api/v1/markets/{symbol}/research" in paths
     assert "/api/v1/markets/{symbol}/candles" in paths
     assert "/api/v1/markets/{symbol}/candles/stats" in paths
     assert "/api/v1/markets/{symbol}/latest" in paths

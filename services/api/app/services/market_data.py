@@ -7,7 +7,7 @@ routers never see ORM models or build queries.
 
 import logging
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from fastapi import status
 
@@ -23,7 +23,9 @@ from app.schemas.market_data import (
     LatestCandleResponse,
     MarketDTO,
     MarketListResponse,
+    MarketResearchResponse,
     Pagination,
+    ResearchTimeframeMetrics,
     TimeframesResponse,
 )
 
@@ -101,6 +103,44 @@ class MarketDataService:
         market = await self._require_market(symbol)
         timeframes = await self.candle_repository.get_available_timeframes(market.id)
         return TimeframesResponse(symbol=symbol, timeframes=timeframes)
+
+    async def get_research(self, symbol: str) -> MarketResearchResponse:
+        """Return data-coverage research metrics for a market.
+
+        Expected buckets are derived from the stored range ``[oldest, newest]``
+        of each timeframe; missing candles are the difference between the
+        expected contiguous bucket count and what is actually stored.
+        """
+        market = await self._require_market(symbol)
+        rows = await self.candle_repository.get_research_metrics(market.id)
+
+        per_timeframe: list[ResearchTimeframeMetrics] = []
+        for timeframe, stored, oldest, newest in rows:
+            per_timeframe.append(_research_timeframe(timeframe, stored, oldest, newest))
+
+        oldest_at = min(
+            (entry.oldest_at for entry in per_timeframe if entry.oldest_at is not None),
+            default=None,
+        )
+        newest_at = max(
+            (entry.newest_at for entry in per_timeframe if entry.newest_at is not None),
+            default=None,
+        )
+        total_candles = sum(entry.stored_candles for entry in per_timeframe)
+        logger.info(
+            "Serving research metrics (symbol=%s timeframes=%d total=%d)",
+            symbol,
+            len(per_timeframe),
+            total_candles,
+        )
+        return MarketResearchResponse(
+            symbol=symbol,
+            oldest_candle_at=oldest_at,
+            newest_candle_at=newest_at,
+            coverage_days=_coverage_days(oldest_at, newest_at),
+            total_candles=total_candles,
+            timeframes=per_timeframe,
+        )
 
     async def get_candles(
         self,
@@ -271,3 +311,51 @@ def _as_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
     return value.astimezone(UTC)
+
+
+def _timeframe_duration(timeframe: str) -> timedelta:
+    """Return the bucket duration of a supported timeframe."""
+    amount = int(timeframe[:-1])
+    unit = timeframe[-1]
+    seconds = {"m": 60, "h": 3600, "d": 86400}[unit] * amount
+    return timedelta(seconds=seconds)
+
+
+def _coverage_days(
+    oldest: datetime | None,
+    newest: datetime | None,
+) -> float | None:
+    """Return the covered span in days (1 decimal), or ``None`` without data."""
+    if oldest is None or newest is None:
+        return None
+    return round((newest - oldest).total_seconds() / 86_400, 1)
+
+
+def _research_timeframe(
+    timeframe: str,
+    stored: int,
+    oldest: datetime,
+    newest: datetime,
+) -> ResearchTimeframeMetrics:
+    """Compute research metrics for one stored timeframe."""
+    duration = _timeframe_duration(timeframe)
+    expected = int((newest - oldest).total_seconds() // duration.total_seconds()) + 1
+    missing = max(0, expected - stored)
+    coverage_days = _coverage_days(oldest, newest)
+    completeness = round(100.0 * stored / expected, 1) if expected > 0 else None
+    average_daily = (
+        round(stored / coverage_days, 1)
+        if coverage_days is not None and coverage_days > 0
+        else None
+    )
+    return ResearchTimeframeMetrics(
+        timeframe=timeframe,
+        stored_candles=stored,
+        oldest_at=oldest,
+        newest_at=newest,
+        coverage_days=coverage_days,
+        expected_candles=expected,
+        missing_candles=missing,
+        completeness=completeness,
+        average_daily_candles=average_daily,
+    )

@@ -57,6 +57,10 @@ def make_product(
         "state": "live",
         "underlying_asset": {"symbol": base},
         "quoting_asset": {"symbol": quote},
+        "tick_size": "0.5",
+        "launch_time": "2023-12-18T13:10:39Z",
+        "funding_method": "mark_price",
+        "product_specs": {"rate_exchange_interval": 28800},
     }
 
 
@@ -137,6 +141,50 @@ async def test_sync_inserts_markets_and_creates_exchange(
     assert markets["SOLUSDT"].market_type == "expiry"
     assert markets["SOLUSDT"].base_asset == "SOL"
     assert markets["SOLUSDT"].quote_asset == "USDT"
+
+
+@pytest.mark.asyncio
+async def test_sync_persists_product_metadata(session_factory: SessionFactory) -> None:
+    """Upstream product metadata is stored with the market on insert."""
+    products = [make_product("BTCUSD", "perpetual_futures", product_id=27)]
+    client = client_for(handler_for(products))
+
+    await sync_markets(client=client, session=session_factory())
+
+    async with session_factory() as check:
+        market = (await check.execute(select(Market))).scalar_one()
+    assert market.delta_product_id == 27
+    assert market.delta_contract_type == "perpetual_futures"
+    assert market.tick_size == "0.5"
+    assert market.funding_method == "mark_price"
+    assert market.funding_interval_seconds == 28800
+    assert market.listing_date is not None
+    assert market.listing_date.year == 2023
+
+
+@pytest.mark.asyncio
+async def test_sync_updates_changed_metadata(session_factory: SessionFactory) -> None:
+    """A changed upstream metadata value updates the stored market."""
+    original = [make_product("BTCUSD", "perpetual_futures", product_id=27)]
+    changed = [
+        {
+            **make_product("BTCUSD", "perpetual_futures", product_id=27),
+            "tick_size": "1",
+            "product_specs": {"rate_exchange_interval": 14400},
+        }
+    ]
+
+    first = await sync_markets(client=client_for(handler_for(original)), session=session_factory())
+    assert first.inserted == 1
+
+    second = await sync_markets(client=client_for(handler_for(changed)), session=session_factory())
+    assert second.updated == 1
+    assert second.skipped == 0
+
+    async with session_factory() as check:
+        market = (await check.execute(select(Market))).scalar_one()
+        assert market.tick_size == "1"
+        assert market.funding_interval_seconds == 14400
 
 
 @pytest.mark.asyncio

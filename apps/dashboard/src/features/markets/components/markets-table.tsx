@@ -2,9 +2,11 @@
 
 import Box from '@mui/material/Box';
 import Chip from '@mui/material/Chip';
+import Divider from '@mui/material/Divider';
 import FormControl from '@mui/material/FormControl';
 import MenuItem from '@mui/material/MenuItem';
 import Paper from '@mui/material/Paper';
+import SearchOffIcon from '@mui/icons-material/SearchOff';
 import Select from '@mui/material/Select';
 import Stack from '@mui/material/Stack';
 import Table from '@mui/material/Table';
@@ -17,8 +19,11 @@ import TableRow from '@mui/material/TableRow';
 import TableSortLabel from '@mui/material/TableSortLabel';
 import Typography from '@mui/material/Typography';
 import useMediaQuery from '@mui/material/useMediaQuery';
-import { useTheme } from '@mui/material/styles';
+import { alpha, useTheme } from '@mui/material/styles';
+import { useQueryClient } from '@tanstack/react-query';
+import { useEffect, useRef, type KeyboardEvent } from 'react';
 import type { Market } from '@/types/api/market';
+import { prefetchMarketDetail } from '../hooks/use-markets-data';
 import { PAGE_SIZE_OPTIONS, type SortDir, type SortKey } from '../hooks/use-market-url-state';
 
 export interface ColumnMeta {
@@ -74,6 +79,38 @@ export function MarketsTable({
 }: MarketsTableProps) {
   const theme = useTheme();
   const compact = useMediaQuery(theme.breakpoints.down('md'));
+  const queryClient = useQueryClient();
+  const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(
+    () => () => {
+      if (hoverTimer.current) {
+        clearTimeout(hoverTimer.current);
+      }
+    },
+    [],
+  );
+
+  const handleRowEnter = (symbol: string) => {
+    if (hoverTimer.current) {
+      clearTimeout(hoverTimer.current);
+    }
+    hoverTimer.current = setTimeout(() => prefetchMarketDetail(queryClient, symbol), 250);
+  };
+
+  const handleRowLeave = () => {
+    if (hoverTimer.current) {
+      clearTimeout(hoverTimer.current);
+      hoverTimer.current = null;
+    }
+  };
+
+  const handleRowKeyDown = (event: KeyboardEvent<HTMLTableRowElement>, symbol: string) => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      onSelectRow(symbol);
+    }
+  };
 
   return (
     <Paper variant="outlined">
@@ -90,6 +127,12 @@ export function MarketsTable({
                       compact && column.key !== 'symbol' && column.key !== 'exchange'
                         ? 'none'
                         : undefined,
+                    fontWeight: 700,
+                    whiteSpace: 'nowrap',
+                    borderBottomColor: 'divider',
+                    '&:hover': {
+                      backgroundColor: alpha(theme.palette.action.hover, 0.35),
+                    },
                   }}
                 >
                   <TableSortLabel
@@ -101,7 +144,16 @@ export function MarketsTable({
                   </TableSortLabel>
                 </TableCell>
               ))}
-              <TableCell sx={{ display: compact ? 'none' : undefined }}>Status</TableCell>
+              <TableCell
+                sx={{
+                  display: compact ? 'none' : undefined,
+                  fontWeight: 700,
+                  whiteSpace: 'nowrap',
+                  borderBottomColor: 'divider',
+                }}
+              >
+                Status
+              </TableCell>
             </TableRow>
           </TableHead>
           <TableBody>
@@ -113,22 +165,53 @@ export function MarketsTable({
                   hover
                   selected={isSelected}
                   onClick={() => onSelectRow(market.symbol)}
-                  sx={{ cursor: 'pointer' }}
+                  onMouseEnter={() => handleRowEnter(market.symbol)}
+                  onMouseLeave={handleRowLeave}
+                  onFocus={() => handleRowEnter(market.symbol)}
+                  onKeyDown={(event) => handleRowKeyDown(event, market.symbol)}
+                  tabIndex={0}
                   aria-selected={isSelected}
+                  sx={{
+                    cursor: 'pointer',
+                    transition: 'background-color 120ms ease',
+                    '&.Mui-selected': {
+                      backgroundColor: alpha(theme.palette.primary.main, 0.08),
+                      '&:hover': {
+                        backgroundColor: alpha(theme.palette.primary.main, 0.14),
+                      },
+                    },
+                    '&:focus-visible': {
+                      outline: '2px solid',
+                      outlineColor: 'primary.main',
+                      outlineOffset: -2,
+                    },
+                  }}
                 >
-                  <TableCell component="th" scope="row">
-                    <Typography variant="body2" fontWeight={600}>
+                  <TableCell
+                    component="th"
+                    scope="row"
+                    sx={
+                      isSelected
+                        ? { boxShadow: `inset 3px 0 0 ${theme.palette.primary.main}` }
+                        : undefined
+                    }
+                  >
+                    <Typography variant="body2" fontWeight={700}>
                       {market.symbol}
                     </Typography>
                   </TableCell>
-                  <TableCell>{market.exchange}</TableCell>
+                  <TableCell>
+                    <Typography variant="body2" color="text.secondary">
+                      {market.exchange}
+                    </Typography>
+                  </TableCell>
                   <TableCell sx={{ display: compact ? 'none' : undefined }}>
                     {market.base_asset}
                   </TableCell>
                   <TableCell sx={{ display: compact ? 'none' : undefined }}>
                     {market.quote_asset}
                   </TableCell>
-                  <TableCell>{market.market_type}</TableCell>
+                  <TableCell sx={{ textTransform: 'capitalize' }}>{market.market_type}</TableCell>
                   <TableCell sx={{ display: compact ? 'none' : undefined }}>
                     <Chip
                       label={market.is_active ? 'Active' : 'Inactive'}
@@ -149,6 +232,7 @@ export function MarketsTable({
                     role="status"
                     aria-label="No markets match"
                   >
+                    <SearchOffIcon color="disabled" sx={{ fontSize: 40 }} aria-hidden />
                     <Typography variant="body1" color="text.secondary">
                       No markets match the current filters.
                     </Typography>
@@ -162,6 +246,7 @@ export function MarketsTable({
           </TableBody>
         </Table>
       </TableContainer>
+      <Divider />
       <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', px: 1 }}>
         <FormControl size="small" sx={{ mr: 1, minWidth: 80 }}>
           <Select
@@ -169,6 +254,7 @@ export function MarketsTable({
             onChange={(event) => onSizeChange(Number(event.target.value))}
             aria-label="Rows per page"
             inputProps={{ 'aria-label': 'Rows per page' }}
+            sx={{ height: 32 }}
           >
             {PAGE_SIZE_OPTIONS.map((option) => (
               <MenuItem key={option} value={option}>
@@ -185,6 +271,12 @@ export function MarketsTable({
           rowsPerPage={size}
           rowsPerPageOptions={[]}
           labelRowsPerPage=""
+          sx={{
+            '& .MuiTablePagination-toolbar': {
+              minHeight: 52,
+              pl: 1,
+            },
+          }}
         />
       </Box>
     </Paper>

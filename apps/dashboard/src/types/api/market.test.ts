@@ -4,6 +4,7 @@ import {
   CandleSchema,
   LatestCandleSchema,
   MarketListSchema,
+  MarketResearchSchema,
   MarketSchema,
   TimeframesSchema,
 } from './market';
@@ -12,10 +13,17 @@ const market = {
   id: '11111111-1111-4111-8111-111111111111',
   symbol: 'ETHUSD',
   exchange: 'Delta Exchange',
+  exchange_id: '6b698660-361c-4e09-80cb-79005d4c0a65',
   base_asset: 'ETH',
   quote_asset: 'USD',
   market_type: 'perpetual',
   is_active: true,
+  delta_product_id: 3136,
+  delta_contract_type: 'perpetual_futures',
+  tick_size: '0.05',
+  funding_method: 'mark_price',
+  funding_interval_seconds: 28800,
+  listing_date: '2024-02-05T12:04:17Z',
 };
 
 const candle = {
@@ -53,6 +61,47 @@ describe('MarketListSchema', () => {
 describe('TimeframesSchema', () => {
   it('accepts an empty timeframe list', () => {
     expect(TimeframesSchema.parse({ symbol: 'ETHUSD', timeframes: [] }).timeframes).toEqual([]);
+  });
+});
+
+describe('MarketResearchSchema', () => {
+  it('accepts research metrics with nullable timestamps', () => {
+    const research = {
+      symbol: 'ETHUSD',
+      oldest_candle_at: '2026-08-13T00:00:00Z',
+      newest_candle_at: '2026-08-20T17:00:00Z',
+      coverage_days: 7.7,
+      total_candles: 40000,
+      timeframes: [
+        {
+          timeframe: '1h',
+          stored_candles: 5000,
+          oldest_at: '2026-08-13T00:00:00Z',
+          newest_at: '2026-08-20T17:00:00Z',
+          coverage_days: 7.0,
+          expected_candles: 5000,
+          missing_candles: 0,
+          completeness: 100,
+          average_daily_candles: 714.3,
+        },
+      ],
+    };
+    const parsed = MarketResearchSchema.parse(research);
+    const first = parsed.timeframes[0];
+    expect(first?.missing_candles).toBe(0);
+    expect(parsed.coverage_days).toBe(7.7);
+  });
+
+  it('accepts an empty market with no timeframes', () => {
+    const parsed = MarketResearchSchema.parse({
+      symbol: 'ETHUSD',
+      oldest_candle_at: null,
+      newest_candle_at: null,
+      coverage_days: null,
+      total_candles: 0,
+      timeframes: [],
+    });
+    expect(parsed.total_candles).toBe(0);
   });
 });
 

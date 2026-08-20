@@ -319,6 +319,22 @@ uv run python scripts/ingest_candles.py \
 The market must already exist in the database (run the market sync first);
 ingestion fails with guidance otherwise.
 
+#### Catch-up synchronization
+
+The API process runs a periodic catch-up scheduler (`CANDLE_SYNC_ENABLED`)
+that keeps every configured symbol/timeframe current: each tick it fills the
+window from the newest stored candle to the last closed bucket, reusing the
+same idempotent ingestion path above. Markets with no stored candles are
+seeded from the `CANDLE_SYNC_BACKFILL_DAYS` window. A one-off pass can be
+run manually:
+
+```bash
+uv run python scripts/sync_candles.py
+```
+
+The scheduler is independent of `MARKET_DATA_LIVE`; it degrades to a no-op
+when no database is configured.
+
 #### Historical range behavior
 
 Delta returns up to 2000 candles per request and delivers them **newest
@@ -458,13 +474,14 @@ Interactive docs (Swagger UI) at `http://localhost:8000/docs`.
 
 All endpoints are versioned under `/api/v1`.
 
-| Method | Path                                     | Description                                                                                                       |
-| ------ | ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| GET    | `/api/v1/markets`                        | All available markets, ordered by symbol.                                                                         |
-| GET    | `/api/v1/markets/{symbol}/timeframes`    | Timeframes that have stored candle data for the market (empty list when none).                                    |
-| GET    | `/api/v1/markets/{symbol}/candles`       | Page of candles for a timeframe, ascending by `open_time`.                                                        |
-| GET    | `/api/v1/markets/{symbol}/candles/stats` | Aggregate stats for a timeframe over a range: count, highest/lowest price, average volume, first and last candle. |
-| GET    | `/api/v1/markets/{symbol}/latest`        | The candle with the newest `open_time` for a timeframe.                                                           |
+| Method | Path                                     | Description                                                                                                                                            |
+| ------ | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| GET    | `/api/v1/markets`                        | All available markets, ordered by symbol, including contract metadata (tick size, funding, listing date, Delta product id).                            |
+| GET    | `/api/v1/markets/{symbol}/timeframes`    | Timeframes that have stored candle data for the market (empty list when none).                                                                         |
+| GET    | `/api/v1/markets/{symbol}/research`      | Per-timeframe coverage metrics: oldest/newest candle, coverage span, expected vs stored candles, missing candles, completeness, average daily candles. |
+| GET    | `/api/v1/markets/{symbol}/candles`       | Page of candles for a timeframe, ascending by `open_time`.                                                                                             |
+| GET    | `/api/v1/markets/{symbol}/candles/stats` | Aggregate stats for a timeframe over a range: count, highest/lowest price, average volume, first and last candle.                                      |
+| GET    | `/api/v1/markets/{symbol}/latest`        | The candle with the newest `open_time` for a timeframe.                                                                                                |
 
 ### Query parameters (`/candles`)
 
@@ -590,10 +607,15 @@ HTTP 200; component states live in the response body.
 
 ### Environment variables
 
-| Variable               | Default         | Description                                              |
-| ---------------------- | --------------- | -------------------------------------------------------- |
-| `MARKET_DATA_LIVE`     | `false`         | Run the live WebSocket client + pipeline in this process |
-| `DELTA_MARKET_SYMBOLS` | `BTCUSD,ETHUSD` | Comma-separated symbols streamed in live mode            |
+| Variable                       | Default                  | Description                                               |
+| ------------------------------ | ------------------------ | --------------------------------------------------------- |
+| `MARKET_DATA_LIVE`             | `false`                  | Run the live WebSocket client + pipeline in this process  |
+| `DELTA_MARKET_SYMBOLS`         | `BTCUSD,ETHUSD`          | Comma-separated symbols streamed in live mode             |
+| `CANDLE_SYNC_ENABLED`          | `true`                   | Run the periodic candle catch-up scheduler                |
+| `CANDLE_SYNC_INTERVAL_SECONDS` | `300`                    | Seconds between catch-up ticks                            |
+| `CANDLE_SYNC_TIMEFRAMES`       | `1m,5m,15m,30m,1h,4h,1d` | Resolutions kept up to date                               |
+| `CANDLE_SYNC_SYMBOLS`          | `(delta_market_symbols)` | Symbols kept up to date (empty = configured live symbols) |
+| `CANDLE_SYNC_BACKFILL_DAYS`    | `7`                      | Seed window for markets with no stored candles            |
 
 When live mode is off, `delta_ws` reports `unavailable` and pipeline metrics
 are zero — the API still serves historical market data.

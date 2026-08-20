@@ -20,16 +20,33 @@ class MarketDTO(BaseModel):
     id: uuid.UUID
     symbol: str
     exchange: str
+    exchange_id: uuid.UUID
     base_asset: str
     quote_asset: str
     market_type: str
     is_active: bool
+    delta_product_id: int | None = None
+    delta_contract_type: str | None = None
+    tick_size: str | None = None
+    funding_method: str | None = None
+    funding_interval_seconds: int | None = None
+    listing_date: datetime | None = None
 
     @field_validator("exchange", mode="before")
     @classmethod
     def _exchange_name(cls, value: object) -> object:
         """Extract the exchange name from the ORM relationship."""
         return getattr(value, "name", value)
+
+    @field_validator("listing_date", mode="before")
+    @classmethod
+    def _ensure_utc(cls, value: datetime | None) -> datetime | None:
+        """Normalize datetimes to aware UTC for a stable JSON contract."""
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)
 
 
 class MarketListResponse(BaseModel):
@@ -44,6 +61,51 @@ class TimeframesResponse(BaseModel):
 
     symbol: str
     timeframes: list[str]
+
+
+class ResearchTimeframeMetrics(BaseModel):
+    """Data-coverage research metrics for one market/timeframe."""
+
+    timeframe: str
+    stored_candles: int
+    oldest_at: datetime | None = None
+    newest_at: datetime | None = None
+    coverage_days: float | None = None
+    expected_candles: int
+    missing_candles: int
+    completeness: float | None = None
+    average_daily_candles: float | None = None
+
+    @field_validator("oldest_at", "newest_at", mode="before")
+    @classmethod
+    def _ensure_utc(cls, value: datetime | None) -> datetime | None:
+        """Normalize datetimes to aware UTC for a stable JSON contract."""
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)
+
+
+class MarketResearchResponse(BaseModel):
+    """Research metrics describing stored candle coverage for a market."""
+
+    symbol: str
+    oldest_candle_at: datetime | None = None
+    newest_candle_at: datetime | None = None
+    coverage_days: float | None = None
+    total_candles: int
+    timeframes: list[ResearchTimeframeMetrics]
+
+    @field_validator("oldest_candle_at", "newest_candle_at", mode="before")
+    @classmethod
+    def _ensure_utc(cls, value: datetime | None) -> datetime | None:
+        """Normalize datetimes to aware UTC for a stable JSON contract."""
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)
 
 
 class CandleDTO(BaseModel):

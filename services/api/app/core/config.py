@@ -54,6 +54,12 @@ class Settings(BaseSettings):
     market_data_live: bool = False
     delta_market_symbols: str = "BTCUSD,ETHUSD"
 
+    candle_sync_enabled: bool = True
+    candle_sync_interval_seconds: int = 300
+    candle_sync_timeframes: str = "1m,5m,15m,30m,1h,4h,1d"
+    candle_sync_symbols: str = ""
+    candle_sync_backfill_days: int = 7
+
 
 @lru_cache
 def get_settings() -> Settings:

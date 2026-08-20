@@ -51,3 +51,21 @@ export function formatDateTime(iso: string | null | undefined): string {
     timeStyle: 'medium',
   }).format(new Date(iso));
 }
+
+export function formatDate(iso: string | null | undefined): string {
+  if (!iso) {
+    return '—';
+  }
+  return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' }).format(new Date(iso));
+}
+
+export function formatFundingInterval(seconds: number | null | undefined): string {
+  if (seconds === null || seconds === undefined) {
+    return '—';
+  }
+  const hours = seconds / 3_600;
+  if (Number.isInteger(hours)) {
+    return `Every ${hours}h`;
+  }
+  return `Every ${seconds}s`;
+}

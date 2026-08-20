@@ -10,6 +10,7 @@ import logging
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from time import perf_counter
 
 from pydantic import TypeAdapter
@@ -197,6 +198,7 @@ def _apply_products(
             continue
 
         current = existing.get(product.symbol)
+        metadata = _market_metadata(product)
         if current is None:
             session.add(
                 Market(
@@ -205,6 +207,7 @@ def _apply_products(
                     base_asset=base,
                     quote_asset=quote,
                     market_type=market_type,
+                    **metadata,
                 )
             )
             inserted += 1
@@ -214,6 +217,7 @@ def _apply_products(
             current.base_asset == base
             and current.quote_asset == quote
             and current.market_type == market_type
+            and _metadata_matches(current, metadata)
         ):
             skipped += 1
             continue
@@ -221,6 +225,47 @@ def _apply_products(
         current.base_asset = base
         current.quote_asset = quote
         current.market_type = market_type
+        _apply_metadata(current, metadata)
         updated += 1
 
     return inserted, updated, skipped
+
+
+def _market_metadata(product: Product) -> dict[str, object]:
+    """Extract persistable metadata from a Delta product listing."""
+    funding_interval = None
+    if product.product_specs is not None:
+        funding_interval = product.product_specs.rate_exchange_interval
+    return {
+        "delta_product_id": product.id,
+        "delta_contract_type": product.contract_type,
+        "tick_size": product.tick_size,
+        "funding_method": product.funding_method,
+        "funding_interval_seconds": funding_interval,
+        "listing_date": product.launch_time,
+    }
+
+
+def _metadata_matches(market: Market, metadata: Mapping[str, object]) -> bool:
+    """Return whether stored metadata already equals the upstream values."""
+    for field, value in metadata.items():
+        stored = getattr(market, field)
+        if isinstance(stored, datetime) and isinstance(value, datetime):
+            if _as_aware_utc(stored) != _as_aware_utc(value):
+                return False
+        elif stored != value:
+            return False
+    return True
+
+
+def _as_aware_utc(value: datetime) -> datetime:
+    """Treat naive datetimes as UTC for comparisons against aware values."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def _apply_metadata(market: Market, metadata: Mapping[str, object]) -> None:
+    """Write upstream metadata onto an existing market record."""
+    for field, value in metadata.items():
+        setattr(market, field, value)

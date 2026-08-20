@@ -4,10 +4,17 @@ export const MarketSchema = z.object({
   id: z.string().uuid(),
   symbol: z.string(),
   exchange: z.string(),
+  exchange_id: z.string().uuid(),
   base_asset: z.string(),
   quote_asset: z.string(),
   market_type: z.enum(['spot', 'perpetual', 'expiry']),
   is_active: z.boolean(),
+  delta_product_id: z.number().int().nullable(),
+  delta_contract_type: z.string().nullable(),
+  tick_size: z.string().nullable(),
+  funding_method: z.string().nullable(),
+  funding_interval_seconds: z.number().int().nullable(),
+  listing_date: z.string().datetime().nullable(),
 });
 
 export type Market = z.infer<typeof MarketSchema>;
@@ -82,3 +89,28 @@ export const CandleStatsSchema = z.object({
 });
 
 export type CandleStats = z.infer<typeof CandleStatsSchema>;
+
+export const ResearchTimeframeMetricsSchema = z.object({
+  timeframe: z.string(),
+  stored_candles: z.number().int().nonnegative(),
+  oldest_at: z.string().datetime().nullable(),
+  newest_at: z.string().datetime().nullable(),
+  coverage_days: z.number().nullable(),
+  expected_candles: z.number().int().nonnegative(),
+  missing_candles: z.number().int().nonnegative(),
+  completeness: z.number().nullable(),
+  average_daily_candles: z.number().nullable(),
+});
+
+export type ResearchTimeframeMetrics = z.infer<typeof ResearchTimeframeMetricsSchema>;
+
+export const MarketResearchSchema = z.object({
+  symbol: z.string(),
+  oldest_candle_at: z.string().datetime().nullable(),
+  newest_candle_at: z.string().datetime().nullable(),
+  coverage_days: z.number().nullable(),
+  total_candles: z.number().int().nonnegative(),
+  timeframes: z.array(ResearchTimeframeMetricsSchema),
+});
+
+export type MarketResearch = z.infer<typeof MarketResearchSchema>;

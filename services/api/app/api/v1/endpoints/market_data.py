@@ -16,6 +16,7 @@ from app.schemas.market_data import (
     CandleStatsResponse,
     LatestCandleResponse,
     MarketListResponse,
+    MarketResearchResponse,
     TimeframesResponse,
 )
 from app.services.market_data import MarketDataService
@@ -116,6 +117,27 @@ async def list_timeframes(
 ) -> TimeframesResponse:
     """Return the timeframes that have stored candles for a market."""
     return await service.get_timeframes(symbol)
+
+
+@router.get(
+    "/{symbol}/research",
+    response_model=MarketResearchResponse,
+    summary="Research metrics for stored candle coverage",
+    description=(
+        "Return per-timeframe coverage metrics for a market: stored candle "
+        "count, oldest/newest candle, covered span in days, expected bucket "
+        "count, missing candles, completeness percentage, and average daily "
+        "candles. Expected buckets are derived from the stored range of each "
+        "timeframe; empty when the market has no candles."
+    ),
+    responses=_ERROR_RESPONSES,
+)
+async def get_research(
+    symbol: SymbolPath,
+    service: MarketDataServiceDep,
+) -> MarketResearchResponse:
+    """Return data-coverage research metrics for a market."""
+    return await service.get_research(symbol)
 
 
 @router.get(

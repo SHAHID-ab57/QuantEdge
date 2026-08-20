@@ -1,5 +1,6 @@
 """Pydantic models for Delta Exchange API responses."""
 
+from datetime import datetime
 from decimal import Decimal
 
 from pydantic import BaseModel
@@ -32,6 +33,12 @@ class ProductAsset(BaseModel):
     precision: int | None = None
 
 
+class ProductSpecs(BaseModel):
+    """Product specifications block returned by ``GET /v2/products``."""
+
+    rate_exchange_interval: int | None = None
+
+
 class Product(BaseModel):
     """A tradeable product returned by ``GET /v2/products``.
 
@@ -45,6 +52,10 @@ class Product(BaseModel):
     state: str | None = None
     underlying_asset: ProductAsset | None = None
     quoting_asset: ProductAsset | None = None
+    tick_size: str | None = None
+    launch_time: datetime | None = None
+    funding_method: str | None = None
+    product_specs: ProductSpecs | None = None
 
 
 class CandleResponse(BaseModel):

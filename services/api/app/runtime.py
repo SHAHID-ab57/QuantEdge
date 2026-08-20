@@ -26,6 +26,7 @@ from app.integrations.delta.websocket.client import (
     get_delta_ws_client,
 )
 from app.marketdata import DeltaNormalizer, MarketDataPipeline
+from app.services.candle_sync import CandleSyncScheduler
 from app.state import MarketStateManager
 from app.ws.models import WSEvent
 
@@ -77,6 +78,7 @@ class Runtime:
         self.state_manager = MarketStateManager().attach(self.bus)
         self.pipeline: MarketDataPipeline | None = None
         self.delta_ws: DeltaWebSocketClient | None = None
+        self.candle_sync: CandleSyncScheduler | None = None
         self.last_ws_message_at: datetime | None = None
         self.last_rest_request_at: datetime | None = None
 
@@ -86,33 +88,49 @@ class Runtime:
         return self._market_data_live
 
     async def start(self) -> None:
-        """Start live components (pipeline + WebSocket client) when enabled."""
-        if not self._market_data_live:
+        """Start live components (pipeline + WebSocket) and the candle sync.
+
+        The WebSocket pipeline runs only in live mode; the candle sync
+        scheduler is independent and starts whenever the database is
+        configured (it no-ops otherwise).
+        """
+        if self._market_data_live:
+            self.pipeline = MarketDataPipeline(
+                normalizer=DeltaNormalizer(),
+                bus=self.bus,
+            )
+            self.delta_ws = get_delta_ws_client()
+            symbols = list(self._symbols) or None
+            for channel in LIVE_CHANNELS:
+                self.delta_ws.add_listener(channel, self.pipeline.handle)
+            self.delta_ws.add_listener("*", self._on_ws_event)
+            for channel in LIVE_CHANNELS:
+                await self.delta_ws.subscribe(channel, symbols)
+            self.delta_ws.start()
+            logger.info(
+                "Live market data started (symbols=%s, channels=%s)",
+                ",".join(self._symbols) or "*",
+                ",".join(LIVE_CHANNELS),
+            )
+        else:
             logger.info(
                 "Live market data disabled; WebSocket components report as not running"
             )
-            return
 
-        self.pipeline = MarketDataPipeline(
-            normalizer=DeltaNormalizer(),
-            bus=self.bus,
-        )
-        self.delta_ws = get_delta_ws_client()
-        symbols = list(self._symbols) or None
-        for channel in LIVE_CHANNELS:
-            self.delta_ws.add_listener(channel, self.pipeline.handle)
-        self.delta_ws.add_listener("*", self._on_ws_event)
-        for channel in LIVE_CHANNELS:
-            await self.delta_ws.subscribe(channel, symbols)
-        self.delta_ws.start()
-        logger.info(
-            "Live market data started (symbols=%s, channels=%s)",
-            ",".join(self._symbols) or "*",
-            ",".join(LIVE_CHANNELS),
-        )
+        settings = get_settings()
+        if settings.candle_sync_enabled:
+            self.candle_sync = CandleSyncScheduler(
+                interval_seconds=settings.candle_sync_interval_seconds,
+                backfill_days=settings.candle_sync_backfill_days,
+            )
+            await self.candle_sync.start()
 
     async def shutdown(self) -> None:
-        """Stop the WebSocket client and drain pending bus handlers."""
+        """Stop the WebSocket client, the candle sync loop, and drain handlers."""
+        candle_sync = self.candle_sync
+        if candle_sync is not None:
+            await candle_sync.stop()
+            self.candle_sync = None
         ws = self.delta_ws
         if ws is not None:
             await ws.close()

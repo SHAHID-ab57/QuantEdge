@@ -216,3 +216,25 @@ class CandleRepository:
             .order_by(Candle.timeframe.asc())
         )
         return list((await self._session.execute(query)).scalars())
+
+    async def get_research_metrics(
+        self,
+        market_id: uuid.UUID,
+    ) -> list[tuple[str, int, datetime, datetime]]:
+        """Return ``(timeframe, count, earliest open, latest open)`` per timeframe."""
+        query = (
+            select(
+                Candle.timeframe,
+                func.count().label("total"),
+                func.min(Candle.open_time).label("oldest"),
+                func.max(Candle.open_time).label("newest"),
+            )
+            .where(Candle.market_id == market_id)
+            .group_by(Candle.timeframe)
+            .order_by(Candle.timeframe.asc())
+        )
+        rows = await self._session.execute(query)
+        return [
+            (row.timeframe, int(row.total), row.oldest, row.newest)
+            for row in rows
+        ]

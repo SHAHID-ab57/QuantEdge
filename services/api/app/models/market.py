@@ -1,9 +1,18 @@
 """Market model — a tradeable instrument (trading pair) on an exchange."""
 
 import uuid
+from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, CheckConstraint, ForeignKey, String, UniqueConstraint
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    String,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import BaseModel, TimestampMixin
@@ -48,6 +57,31 @@ class Market(BaseModel, TimestampMixin):
         nullable=False,
         default=True,
         server_default="true",
+    )
+    delta_product_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        nullable=True,
+        index=True,
+    )
+    delta_contract_type: Mapped[str | None] = mapped_column(
+        String(32),
+        nullable=True,
+    )
+    tick_size: Mapped[str | None] = mapped_column(
+        String(32),
+        nullable=True,
+    )
+    funding_method: Mapped[str | None] = mapped_column(
+        String(32),
+        nullable=True,
+    )
+    funding_interval_seconds: Mapped[int | None] = mapped_column(
+        BigInteger,
+        nullable=True,
+    )
+    listing_date: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
     )
 
     __table_args__ = (

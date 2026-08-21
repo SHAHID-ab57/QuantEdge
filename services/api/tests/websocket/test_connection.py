@@ -1,6 +1,6 @@
 """Tests for the WebSocket connection manager.
 
-A scripted in-process server (see :mod:`tests.ws.server`) simulates the
+A scripted in-process server (see :mod:`tests.websocket.server`) simulates the
 remote end: reconnects, heartbeats, pings, and shutdown are all exercised
 against it without real network access.
 """
@@ -12,7 +12,7 @@ import pytest
 from app.ws.config import WebSocketSettings
 from app.ws.connection import ConnectionManager, backoff_delay
 from app.ws.exceptions import WebSocketError
-from tests.ws.server import MockWSServer, wait_until
+from tests.websocket.server import MockWSServer, wait_until
 
 HEARTBEAT = '{"type": "heartbeat"}'
 

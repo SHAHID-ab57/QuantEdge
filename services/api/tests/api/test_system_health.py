@@ -5,24 +5,22 @@ exercised through dependency overrides, and the unconfigured-database path
 is covered by the repo-wide empty ``DATABASE_URL``.
 """
 
-import asyncio
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import cast
 
+import httpx
 import pytest
-from fastapi.testclient import TestClient
+from fastapi import FastAPI
 
-from app.application import create_app
+from app.api.v1.endpoints.system import _overall
 from app.integrations.delta.websocket.client import (
     DeltaConnectionSnapshot,
     DeltaWebSocketClient,
 )
 from app.runtime import DeltaRestProbeResult, Runtime, get_runtime
-
-app = create_app()
-client = TestClient(app)
+from app.schemas.system import ComponentStatus, SystemHealthResponse
 
 
 class FakeWs:
@@ -75,19 +73,19 @@ class FakeRuntime(Runtime):
 
 
 @pytest.fixture(autouse=True)
-def override_runtime() -> Iterator[FakeRuntime]:
+def override_runtime(app: FastAPI) -> Iterator[None]:
     """Override the runtime dependency for every test in this module."""
     runtime = FakeRuntime(
         probe=DeltaRestProbeResult(ok=True, latency_ms=12.5, error=None)
     )
     app.dependency_overrides[get_runtime] = lambda: runtime
-    yield runtime
+    yield
     app.dependency_overrides.clear()
 
 
-def test_health_all_ok_shape() -> None:
+async def test_health_all_ok_shape(client: httpx.AsyncClient) -> None:
     """With a healthy fake runtime, every component reports its state."""
-    response = client.get("/api/v1/system/health")
+    response = await client.get("/api/v1/system/health")
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "unavailable"  # database is unavailable in tests
@@ -106,19 +104,23 @@ def test_health_all_ok_shape() -> None:
     assert "subscribers" in body["event_bus"]["detail"]
 
 
-def test_health_delta_rest_failure() -> None:
+async def test_health_delta_rest_failure(
+    client: httpx.AsyncClient, app: FastAPI
+) -> None:
     """A failing Delta probe marks the component and overall status."""
     runtime = FakeRuntime(
         probe=DeltaRestProbeResult(ok=False, latency_ms=250.0, error="Connection refused")
     )
     app.dependency_overrides[get_runtime] = lambda: runtime
-    body = client.get("/api/v1/system/health").json()
+    body = (await client.get("/api/v1/system/health")).json()
     assert body["status"] == "unavailable"
     assert body["delta_rest"]["status"] == "unavailable"
     assert body["delta_rest"]["detail"] == "Connection refused"
 
 
-def test_health_ws_connected() -> None:
+async def test_health_ws_connected(
+    client: httpx.AsyncClient, app: FastAPI
+) -> None:
     """A running, connected WebSocket client reports ok with live state."""
     runtime = FakeRuntime(
         probe=DeltaRestProbeResult(ok=True, latency_ms=10.0, error=None)
@@ -133,7 +135,7 @@ def test_health_ws_connected() -> None:
         ),
     )
     app.dependency_overrides[get_runtime] = lambda: runtime
-    body = client.get("/api/v1/system/health").json()
+    body = (await client.get("/api/v1/system/health")).json()
     assert body["status"] == "unavailable"  # database still unavailable
     assert body["delta_ws"]["status"] == "ok"
     assert body["delta_ws"]["state"] == "connected"
@@ -142,7 +144,9 @@ def test_health_ws_connected() -> None:
     assert "2 subscription(s)" in body["delta_ws"]["detail"]
 
 
-def test_health_ws_connected_staleness() -> None:
+async def test_health_ws_connected_staleness(
+    client: httpx.AsyncClient, app: FastAPI
+) -> None:
     """A connected socket with a recent message reports message staleness."""
     runtime = FakeRuntime(
         probe=DeltaRestProbeResult(ok=True, latency_ms=10.0, error=None)
@@ -158,29 +162,28 @@ def test_health_ws_connected_staleness() -> None:
         ),
     )
     app.dependency_overrides[get_runtime] = lambda: runtime
-    body = client.get("/api/v1/system/health").json()
+    body = (await client.get("/api/v1/system/health")).json()
     assert body["delta_ws"]["status"] == "ok"
     assert body["delta_ws"]["latency_ms"] >= 2000
     assert "last message" in body["delta_ws"]["detail"]
 
 
-def test_health_ws_disconnected_degrades() -> None:
+async def test_health_ws_disconnected_degrades(
+    client: httpx.AsyncClient, app: FastAPI
+) -> None:
     """A running but disconnected WebSocket reports degraded."""
     runtime = FakeRuntime(
         probe=DeltaRestProbeResult(ok=True, latency_ms=10.0, error=None)
     )
     runtime.delta_ws = cast(DeltaWebSocketClient, FakeWs(connected=False))
     app.dependency_overrides[get_runtime] = lambda: runtime
-    body = client.get("/api/v1/system/health").json()
+    body = (await client.get("/api/v1/system/health")).json()
     assert body["delta_ws"]["status"] == "degraded"
     assert body["delta_ws"]["state"] == "disconnected"
 
 
-def test_overall_aggregation() -> None:
+async def test_overall_aggregation() -> None:
     """The overall status follows the worst component state."""
-    from app.api.v1.endpoints.system import _overall
-    from app.schemas.system import ComponentStatus
-
     ok = ComponentStatus(name="a", status="ok")
     degraded = ComponentStatus(name="b", status="degraded")
     unavailable = ComponentStatus(name="c", status="unavailable")
@@ -189,9 +192,11 @@ def test_overall_aggregation() -> None:
     assert _overall(ok, degraded, unavailable) == "unavailable"
 
 
-def test_status_reports_uptime_and_freshness() -> None:
+async def test_status_reports_uptime_and_freshness(
+    client: httpx.AsyncClient,
+) -> None:
     """Status carries uptime, metadata, timeline, and null DB-derived fields."""
-    response = client.get("/api/v1/system/status")
+    response = await client.get("/api/v1/system/status")
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "degraded"  # no database in tests
@@ -208,7 +213,9 @@ def test_status_reports_uptime_and_freshness() -> None:
     assert body["symbols_tracked"] == 0
 
 
-def test_status_reports_delta_connection_state() -> None:
+async def test_status_reports_delta_connection_state(
+    client: httpx.AsyncClient, app: FastAPI
+) -> None:
     """Status embeds the live WebSocket connection snapshot when running."""
     runtime = FakeRuntime(
         probe=DeltaRestProbeResult(ok=True, latency_ms=10.0, error=None)
@@ -224,7 +231,7 @@ def test_status_reports_delta_connection_state() -> None:
         ),
     )
     app.dependency_overrides[get_runtime] = lambda: runtime
-    body = client.get("/api/v1/system/status").json()
+    body = (await client.get("/api/v1/system/status")).json()
     assert body["delta_ws_connected"] is True
     ws = body["delta_ws"]
     assert ws["state"] == "connected"
@@ -238,15 +245,17 @@ def test_status_reports_delta_connection_state() -> None:
     assert body["last_ws_reconnect_at"] == ws["connected_at"]
 
 
-def test_status_degraded_without_database() -> None:
+async def test_status_degraded_without_database(
+    client: httpx.AsyncClient,
+) -> None:
     """Without a database the overall status is degraded."""
-    body = client.get("/api/v1/system/status").json()
+    body = (await client.get("/api/v1/system/status")).json()
     assert body["status"] == "degraded"
 
 
-def test_metrics_offline_zeroes() -> None:
+async def test_metrics_offline_zeroes(client: httpx.AsyncClient) -> None:
     """Without live mode or a database, metrics are zeros and nulls."""
-    response = client.get("/api/v1/system/metrics")
+    response = await client.get("/api/v1/system/metrics")
     assert response.status_code == 200
     body = response.json()
     assert body["synchronized_markets"] is None
@@ -268,7 +277,9 @@ def test_metrics_offline_zeroes() -> None:
     assert "collected_at" in body
 
 
-def test_metrics_reports_bus_and_state_activity() -> None:
+async def test_metrics_reports_bus_and_state_activity(
+    client: httpx.AsyncClient, app: FastAPI
+) -> None:
     """Published events and state snapshots flow into the metrics response."""
     runtime = FakeRuntime(
         probe=DeltaRestProbeResult(ok=True, latency_ms=10.0, error=None)
@@ -287,9 +298,9 @@ def test_metrics_reports_bus_and_state_activity() -> None:
             last_price=Decimal("65000.5"),
         ),
     )
-    asyncio.run(runtime.bus.publish(event))
+    await runtime.bus.publish(event)
 
-    body = client.get("/api/v1/system/metrics").json()
+    body = (await client.get("/api/v1/system/metrics")).json()
     assert body["event_bus_published"] == 1
     assert body["state_symbols_tracked"] == 1  # handler completed synchronously
     assert "BTCUSD" in body["state_latest_prices"]
@@ -297,17 +308,17 @@ def test_metrics_reports_bus_and_state_activity() -> None:
     assert body["event_bus_average_handler_latency_ms"] is not None
 
 
-def test_system_endpoints_mounted_unversioned_too() -> None:
+async def test_system_endpoints_mounted_unversioned_too(
+    client: httpx.AsyncClient,
+) -> None:
     """The system router mirrors the legacy /health dual-mount pattern."""
     for path in ("/system/health", "/system/status", "/system/metrics"):
-        response = client.get(path)
+        response = await client.get(path)
         assert response.status_code == 200, path
 
 
-def test_system_schemas_validate() -> None:
+async def test_system_schemas_validate(client: httpx.AsyncClient) -> None:
     """Response models round-trip through pydantic."""
-    from app.schemas.system import SystemHealthResponse
-
-    body = client.get("/api/v1/system/health").json()
+    body = (await client.get("/api/v1/system/health")).json()
     parsed = SystemHealthResponse.model_validate(body)
     assert parsed.status == body["status"]

@@ -8,22 +8,18 @@ is covered by :mod:`tests.services.test_candle_ingest`).
 
 import asyncio
 import uuid
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
-import pytest_asyncio
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
     async_sessionmaker,
-    create_async_engine,
 )
-from sqlalchemy.pool import StaticPool
 
-from app.db.base import Base
 from app.models import Candle, Exchange, Market
 from app.services import candle_sync
 from app.services.candle_ingest import IngestReport
@@ -71,24 +67,6 @@ def fake_ingest(
     return ingest, calls
 
 
-@pytest_asyncio.fixture
-async def engine() -> AsyncGenerator[AsyncEngine]:
-    """In-memory SQLite engine with the market data schema applied."""
-    engine = create_async_engine(
-        "sqlite+aiosqlite:///:memory:",
-        poolclass=StaticPool,
-        connect_args={"check_same_thread": False},
-    )
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    yield engine
-    await engine.dispose()
-
-
-@pytest_asyncio.fixture
-async def session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
-    """Session factory bound to the test engine."""
-    return async_sessionmaker(bind=engine, expire_on_commit=False)
 
 
 async def seed_market(

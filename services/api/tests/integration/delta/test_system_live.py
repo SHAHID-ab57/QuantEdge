@@ -4,17 +4,13 @@ Requires ``--run-integration``: probes the real Delta REST API with a
 short timeout. No database or credentials are needed for these tests.
 """
 
-import asyncio
 from datetime import UTC, datetime
 
+import httpx
 import pytest
-from fastapi.testclient import TestClient
+from fastapi import FastAPI
 
-from app.application import create_app
 from app.runtime import Runtime, get_runtime
-
-app = create_app()
-client = TestClient(app)
 
 
 def _offline_runtime() -> Runtime:
@@ -27,11 +23,13 @@ def _offline_runtime() -> Runtime:
 
 
 @pytest.mark.integration
-def test_system_health_delta_rest_reachable() -> None:
+async def test_system_health_delta_rest_reachable(
+    client: httpx.AsyncClient, app: FastAPI
+) -> None:
     """The live Delta REST probe reports reachable with a latency."""
     app.dependency_overrides[get_runtime] = lambda: _offline_runtime()
     try:
-        response = client.get("/api/v1/system/health")
+        response = await client.get("/api/v1/system/health")
     finally:
         app.dependency_overrides.clear()
     assert response.status_code == 200
@@ -42,9 +40,9 @@ def test_system_health_delta_rest_reachable() -> None:
 
 
 @pytest.mark.integration
-def test_system_probe_direct() -> None:
+async def test_system_probe_direct() -> None:
     """The probe itself returns a structured, non-raising result."""
-    result = asyncio.run(_offline_runtime().probe_delta_rest())
+    result = await _offline_runtime().probe_delta_rest()
     assert result.ok is True
     assert result.error is None
     assert result.latency_ms is not None
@@ -52,13 +50,15 @@ def test_system_probe_direct() -> None:
 
 
 @pytest.mark.integration
-def test_system_status_tracks_rest_timeline() -> None:
+async def test_system_status_tracks_rest_timeline(
+    client: httpx.AsyncClient, app: FastAPI
+) -> None:
     """The status timeline records the last REST probe time."""
     runtime = _offline_runtime()
     app.dependency_overrides[get_runtime] = lambda: runtime
     try:
-        client.get("/api/v1/system/health")
-        body = client.get("/api/v1/system/status").json()
+        await client.get("/api/v1/system/health")
+        body = (await client.get("/api/v1/system/status")).json()
     finally:
         app.dependency_overrides.clear()
     assert body["last_rest_request_at"] is not None

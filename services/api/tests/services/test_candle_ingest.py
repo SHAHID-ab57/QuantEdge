@@ -5,24 +5,19 @@ exercised against an in-memory SQLite database.
 """
 
 import uuid
-from collections.abc import AsyncGenerator, Callable, Coroutine
+from collections.abc import Callable, Coroutine
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from urllib.parse import parse_qs, urlparse
 
 import httpx
 import pytest
-import pytest_asyncio
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import (
-    AsyncEngine,
     AsyncSession,
     async_sessionmaker,
-    create_async_engine,
 )
-from sqlalchemy.pool import StaticPool
 
-from app.db.base import Base
 from app.integrations.delta import APIError, DeltaClient
 from app.integrations.delta.config import DeltaConfig
 from app.models import Candle, Exchange, Market
@@ -72,24 +67,6 @@ def make_candle(
     }
 
 
-@pytest_asyncio.fixture
-async def engine() -> AsyncGenerator[AsyncEngine]:
-    """In-memory SQLite engine with the market data schema applied."""
-    engine = create_async_engine(
-        "sqlite+aiosqlite:///:memory:",
-        poolclass=StaticPool,
-        connect_args={"check_same_thread": False},
-    )
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    yield engine
-    await engine.dispose()
-
-
-@pytest_asyncio.fixture
-async def session_factory(engine: AsyncEngine) -> SessionFactory:
-    """Session factory bound to the test engine."""
-    return async_sessionmaker(bind=engine, expire_on_commit=False)
 
 
 async def seed_market(session_factory: SessionFactory, symbol: str = "ETHUSDT") -> uuid.UUID:

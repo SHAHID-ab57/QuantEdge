@@ -17,7 +17,7 @@ from app.integrations.delta.websocket.auth import sign_key_auth
 from app.integrations.delta.websocket.client import DeltaWebSocketClient
 from app.ws.config import WebSocketSettings
 from app.ws.models import UnknownWSEvent, WSEvent
-from tests.ws.server import MockWSServer, wait_until
+from tests.websocket.server import MockWSServer, wait_until
 
 API_KEY = "test-key"
 API_SECRET = "test-secret"

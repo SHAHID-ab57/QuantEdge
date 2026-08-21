@@ -50,10 +50,6 @@ async def engine() -> AsyncGenerator[AsyncEngine]:
     await engine.dispose()
 
 
-@pytest_asyncio.fixture
-async def session_factory(engine: AsyncEngine) -> SessionFactory:
-    return async_sessionmaker(bind=engine, expire_on_commit=False)
-
 
 @pytest_asyncio.fixture
 async def market_id(session_factory: SessionFactory) -> uuid.UUID:

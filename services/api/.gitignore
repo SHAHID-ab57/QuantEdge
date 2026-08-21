@@ -10,7 +10,9 @@ dist/
 .ruff_cache/
 .pytest_cache/
 .coverage
+coverage.xml
 htmlcov/
+*.db
 
 # Environment
 .env

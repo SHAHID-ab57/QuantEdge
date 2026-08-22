@@ -989,7 +989,7 @@ It uses only the public client API (`start`/`run`/`close`/`subscribe`/
 
 | Delta channel | Domain event (bus `event_type`) | Notes                                                             |
 | ------------- | ------------------------------- | ----------------------------------------------------------------- |
-| `trades`      | `TradeEventReceived`            | `side` is `"unknown"` (public feed carries no side)               |
+| `trades`      | `TradeEventReceived`            | `side` is the aggressor: `r="t"` -> `buy`, `r="m"` -> `sell`      |
 | `ticker`      | `TickerUpdated`                 | one event per product in the `d` array                            |
 | `ob_l1`       | `OrderBookUpdated`              | top of book, `kind="l1"`, always snapshot                         |
 | `ob_l2`       | `OrderBookUpdated`              | top-15 levels, `kind="l2"`, always snapshot                       |

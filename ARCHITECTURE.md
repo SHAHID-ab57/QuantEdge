@@ -30,13 +30,47 @@ TanStack Query (server state) and Zustand (local UI state). See
 [`FRONTEND.md`](FRONTEND.md) for the full breakdown of routes, the
 feature-module pattern, the API client, and the reusable candlestick chart
 module (`src/components/chart/`) that renders historical OHLCV data with
-TradingView's lightweight-charts. It talks to `services/api` exclusively
-over the read-only REST surface described in [`docs/api/API.md`](docs/api/API.md);
-there is no server-to-browser push channel yet.
+TradingView's lightweight-charts, and the Live Market Dashboard
+(`src/features/live-market/`) that renders real-time price/chart/trade-tape
+data over that gateway, resolving which market to show against the set the
+backend actually streams rather than assuming any catalogue entry has data. It talks to `services/api` over the read-only REST surface described
+in [`docs/api/API.md`](docs/api/API.md) for historical data, and over a
+single WebSocket gateway (below) for live data — never directly to Delta
+Exchange.
 
 ### Backend
 
-> To be completed in future tasks.
+`services/api` is a FastAPI service (async SQLAlchemy + PostgreSQL) — see
+[`services/api/README.md`](services/api/README.md) for its own detailed
+architecture. Two API surfaces exist:
+
+- **REST** (`app/api/v1/endpoints/`): read-only market data and platform
+  health/status/metrics, documented in
+  [`docs/api/API.md`](docs/api/API.md).
+- **WebSocket gateway** (`app/api/v1/endpoints/market_stream.py`, backed by
+  `app/marketdata/gateway.py`'s `MarketStreamGateway`): the platform's
+  first server-to-browser push channel, added for the Live Market
+  Dashboard. It relays `TradeEventReceived`/`TickerUpdated` events already
+  flowing through the in-process event bus (published by the Delta
+  WebSocket client + processing pipeline — see `app/runtime.py`) to
+  browser clients subscribed to a symbol. It does not add a new data
+  source; it exposes data the runtime already collects.
+
+Both surfaces are served by the same `Runtime` composition root
+(`app/runtime.py`), which now always constructs an `EventBus`, a
+`MarketStateManager`, and a `MarketStreamGateway` — the gateway simply has
+nothing to relay until live mode (`MARKET_DATA_LIVE=true`) starts
+publishing events.
+
+Only the symbols in `DELTA_MARKET_SYMBOLS` (default `BTCUSD,ETHUSD`) are
+streamed or candle-synced; the `/markets` catalogue lists every Delta
+product regardless. That asymmetry is a load-bearing architectural fact for
+clients, not an implementation detail — a UI that picks a market from the
+catalogue without checking it against the tracked set will render an empty
+view. `/system/metrics`'s `state_latest_prices` is the authoritative list of
+what is actually live, and the Live Market Dashboard resolves its market
+against it (see [`FRONTEND.md`](FRONTEND.md) § "Market selection,
+validation and fallback").
 
 ### Data Collection
 

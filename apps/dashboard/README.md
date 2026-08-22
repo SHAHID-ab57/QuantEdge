@@ -43,7 +43,7 @@ The API must allow the dashboard origin in `CORS_ORIGINS`, e.g.
 | `/dashboard`   | Overview (placeholder)                                      |
 | `/markets`     | Market directory (implemented)                              |
 | `/history`     | Candle history queries — Chart and Table tabs (implemented) |
-| `/live-market` | Real-time trades/tickers/order books (placeholder)          |
+| `/live-market` | Real-time price, chart, and trade tape (implemented)        |
 | `/research`    | AI workflows (placeholder)                                  |
 | `/settings`    | Preferences (placeholder)                                   |
 | `/health`      | Platform health dashboard (implemented)                     |

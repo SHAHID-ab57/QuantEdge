@@ -37,6 +37,15 @@ export interface CandlestickChartProps {
   onCrosshairMove?: (point: CrosshairPoint | null) => void;
   /** Bump this (e.g. on every button click) to force `timeScale().fitContent()` on demand. */
   fitContentToken?: number;
+  /**
+   * The currently-forming bar, pushed via `series.update()` instead of a
+   * full `setData()` (Live Market Dashboard: Objective "append new
+   * candles in real time... avoid full chart re-renders"). Must have a
+   * `time` at or after the last point in `candlesticks`; omit/pass `null`
+   * for a purely historical chart (e.g. the History page).
+   */
+  liveCandle?: CandlestickData | null;
+  liveVolume?: HistogramData | null;
   height?: number;
 }
 
@@ -86,6 +95,8 @@ function CandlestickChartInner({
   volume,
   onCrosshairMove,
   fitContentToken = 0,
+  liveCandle = null,
+  liveVolume = null,
   height = 480,
 }: CandlestickChartProps) {
   const theme = useTheme();
@@ -93,6 +104,8 @@ function CandlestickChartInner({
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
   const volumeSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null);
+  /** Newest time pushed into the series, guarding out-of-order live updates. */
+  const lastPushedTimeRef = useRef<number>(Number.NEGATIVE_INFINITY);
 
   // Create the chart once per mount. Theme changes are applied in-place by
   // the effect below rather than tearing the chart down and rebuilding it.
@@ -140,6 +153,7 @@ function CandlestickChartInner({
     }
     candleSeries.setData(candlesticks);
     volumeSeries.setData(volume);
+    lastPushedTimeRef.current = Number(candlesticks.at(-1)?.time ?? Number.NEGATIVE_INFINITY);
     if (candlesticks.length > 0) {
       chartRef.current?.timeScale().fitContent();
     }
@@ -150,6 +164,29 @@ function CandlestickChartInner({
   useEffect(() => {
     chartRef.current?.timeScale().fitContent();
   }, [fitContentToken]);
+
+  // Declared after the setData effect so a live update always wins the
+  // leading edge over a (possibly slightly stale) historical refetch that
+  // resolves in the same render pass.
+  //
+  // lightweight-charts throws if `update()` is called with a time before the
+  // series' last point, which is reachable in normal operation: a historical
+  // refetch can land while a forming bar for an *earlier* bucket is still on
+  // screen. Dropping those updates keeps the chart on its newest data instead
+  // of crashing the page.
+  useEffect(() => {
+    const liveTime = Number(liveCandle?.time ?? liveVolume?.time ?? Number.NEGATIVE_INFINITY);
+    if (liveTime < lastPushedTimeRef.current) {
+      return;
+    }
+    if (liveCandle) {
+      candleSeriesRef.current?.update(liveCandle);
+    }
+    if (liveVolume) {
+      volumeSeriesRef.current?.update(liveVolume);
+    }
+    lastPushedTimeRef.current = liveTime;
+  }, [liveCandle, liveVolume]);
 
   useEffect(() => {
     const chart = chartRef.current;

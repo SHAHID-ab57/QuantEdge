@@ -121,6 +121,11 @@ class MarketDataPipeline:
             self._metrics.events_published += 1
         self._metrics.messages_normalized += len(result.events)
         self._metrics.record_latency(time.perf_counter() - started)
+        logger.debug(
+            "Market data normalized and published: %s -> %d event(s)",
+            message.type,
+            len(result.events),
+        )
 
     def _to_bus_event(self, event: MarketDataEvent) -> Event:
         if isinstance(event, TradeEvent):

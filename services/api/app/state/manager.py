@@ -182,6 +182,7 @@ class MarketStateManager:
         if symbol not in self._updated:
             self._metrics.symbols_tracked += 1
         self._updated[symbol] = datetime.now(UTC)
+        logger.debug("Market state updated for %s", symbol)
 
     def _record(self, started: float) -> None:
         self._metrics.state_updates += 1

@@ -7,7 +7,7 @@ import Skeleton from '@mui/material/Skeleton';
 import Stack from '@mui/material/Stack';
 import Typography from '@mui/material/Typography';
 import { useTheme } from '@mui/material/styles';
-import type { UTCTimestamp } from 'lightweight-charts';
+import type { CandlestickData, HistogramData, UTCTimestamp } from 'lightweight-charts';
 import { useCallback, useMemo, useState } from 'react';
 import type { Market } from '@/types/api/market';
 import { CandlestickChart, type CrosshairPoint } from './candlestick-chart';
@@ -26,6 +26,9 @@ export interface ChartContainerProps {
   availableTimeframes?: string[];
   onSymbolChange?: (symbol: string) => void;
   onTimeframeChange?: (timeframe: string) => void;
+  /** See `CandlestickChartProps.liveCandle` — passed straight through. */
+  liveCandle?: CandlestickData | null;
+  liveVolume?: HistogramData | null;
 }
 
 function ChartSkeleton({ height }: { height: number }) {
@@ -55,6 +58,8 @@ export function ChartContainer({
   availableTimeframes,
   onSymbolChange,
   onTimeframeChange,
+  liveCandle = null,
+  liveVolume = null,
 }: ChartContainerProps) {
   const theme = useTheme();
   const [crosshair, setCrosshair] = useState<CrosshairPoint | null>(null);
@@ -80,11 +85,12 @@ export function ChartContainer({
     if (crosshair) {
       return crosshair;
     }
-    const last = series.candlesticks.at(-1);
+    // A live forming bar is more current than the last historical candle.
+    const last = liveCandle ?? series.candlesticks.at(-1);
     if (!last) {
       return null;
     }
-    const lastVolume = series.volume.at(-1);
+    const lastVolume = liveVolume ?? series.volume.at(-1);
     return {
       time: last.time as UTCTimestamp,
       open: last.open,
@@ -93,7 +99,7 @@ export function ChartContainer({
       close: last.close,
       volume: lastVolume?.value ?? null,
     };
-  }, [crosshair, series]);
+  }, [crosshair, series, liveCandle, liveVolume]);
 
   if (!symbol || !timeframe) {
     return (
@@ -125,7 +131,7 @@ export function ChartContainer({
     );
   }
 
-  if (series.candlesticks.length === 0) {
+  if (series.candlesticks.length === 0 && !liveCandle) {
     return (
       <Alert severity="info" role="status" aria-label="No chart data">
         No candles found for {symbol} on the {timeframe} timeframe in this range.
@@ -151,6 +157,8 @@ export function ChartContainer({
         volume={series.volume}
         onCrosshairMove={setCrosshair}
         fitContentToken={fitContentToken}
+        liveCandle={liveCandle}
+        liveVolume={liveVolume}
         height={height}
       />
       <ChartLegend point={legendPoint} />

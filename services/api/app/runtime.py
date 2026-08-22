@@ -1,14 +1,17 @@
 """Application runtime composition root.
 
 Owns the in-process market data stack shared by the API process: the
-event bus, the market state manager, and — when live mode is enabled —
-the Delta WebSocket client and the processing pipeline. The
-``/api/v1/system/*`` endpoints read component status and metrics from
-this container, so the dashboard observes the same stack the service
-actually runs.
+event bus, the market state manager, the browser-facing streaming gateway
+(``app.marketdata.gateway.MarketStreamGateway``, served at
+``/api/v1/ws/market``), and — when live mode is enabled — the Delta
+WebSocket client and the processing pipeline. The ``/api/v1/system/*``
+endpoints read component status and metrics from this container, so the
+dashboard observes the same stack the service actually runs.
 
-Live mode is opt-in via ``MARKET_DATA_LIVE``; the bus and state manager
-are always present because they are pure in-memory and free to run.
+Live mode is opt-in via ``MARKET_DATA_LIVE``; the bus, state manager, and
+gateway are always present because they are pure in-memory and free to
+run — the gateway simply has nothing to relay until live mode publishes
+events.
 """
 
 import logging
@@ -26,6 +29,7 @@ from app.integrations.delta.websocket.client import (
     get_delta_ws_client,
 )
 from app.marketdata import DeltaNormalizer, MarketDataPipeline
+from app.marketdata.gateway import MarketStreamGateway
 from app.services.candle_sync import CandleSyncScheduler
 from app.state import MarketStateManager
 from app.ws.models import WSEvent
@@ -76,6 +80,7 @@ class Runtime:
         self.started_at = started_at
         self.bus = EventBus()
         self.state_manager = MarketStateManager().attach(self.bus)
+        self.gateway = MarketStreamGateway(self.state_manager).attach(self.bus)
         self.pipeline: MarketDataPipeline | None = None
         self.delta_ws: DeltaWebSocketClient | None = None
         self.candle_sync: CandleSyncScheduler | None = None
@@ -113,9 +118,7 @@ class Runtime:
                 ",".join(LIVE_CHANNELS),
             )
         else:
-            logger.info(
-                "Live market data disabled; WebSocket components report as not running"
-            )
+            logger.info("Live market data disabled; WebSocket components report as not running")
 
         settings = get_settings()
         if settings.candle_sync_enabled:
@@ -190,9 +193,7 @@ def build_runtime() -> Runtime:
     if _runtime is None:
         settings = get_settings()
         symbols = tuple(
-            part.strip()
-            for part in settings.delta_market_symbols.split(",")
-            if part.strip()
+            part.strip() for part in settings.delta_market_symbols.split(",") if part.strip()
         )
         _runtime = Runtime(
             market_data_live=settings.market_data_live,

@@ -39,10 +39,26 @@ def test_trades_normalize_to_trade_event() -> None:
     assert trade.symbol == "BTCUSD"
     assert trade.price == Decimal("72141.5")
     assert trade.size == Decimal("1.5")
-    assert trade.side == "unknown"
+    assert trade.side == "buy"
     assert trade.event_time == utc_from_micros(1700000000005000)
     assert trade.trade_time == utc_from_micros(1700000000000000)
     assert trade.sequence is None
+
+
+def test_trade_side_follows_the_buyer_role() -> None:
+    """``r`` is the buyer's role, so a maker-buyer means the seller was the
+    aggressor. See ``_TRADE_SIDE_BY_BUYER_ROLE`` for how this was verified."""
+    message = TradesEvent(
+        type="trades",
+        p=Decimal("72141.5"),
+        r="m",
+        s=Decimal("1.5"),
+        sy="BTCUSD",
+        t=1700000000000000,
+        ts=1700000000005000,
+    )
+    trade = cast(TradeEvent, DeltaNormalizer().normalize(message).events[0])
+    assert trade.side == "sell"
 
 
 def test_ticker_d_array_expands_to_one_event_per_product() -> None:
@@ -212,8 +228,6 @@ def test_unsupported_market_price_message() -> None:
 
 
 def test_unknown_message_is_unsupported() -> None:
-    result = DeltaNormalizer().normalize(
-        UnknownWSEvent(type="brand_new_channel", payload={})
-    )
+    result = DeltaNormalizer().normalize(UnknownWSEvent(type="brand_new_channel", payload={}))
     assert result.status == "unsupported"
     assert result.events == ()

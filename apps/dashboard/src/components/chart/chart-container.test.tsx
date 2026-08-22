@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import { ThemeProvider } from '@mui/material/styles';
+import type { UTCTimestamp } from 'lightweight-charts';
 import type { ComponentProps } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as marketApi from '@/lib/api/market';
@@ -14,6 +15,7 @@ vi.mock('@/lib/api/market', () => ({
 
 const fakeSeries = () => ({
   setData: vi.fn(),
+  update: vi.fn(),
   applyOptions: vi.fn(),
   priceScale: vi.fn(() => ({ applyOptions: vi.fn() })),
 });
@@ -188,5 +190,38 @@ describe('ChartContainer', () => {
         expect.objectContaining({ dir: 'desc' }),
       ),
     );
+  });
+
+  it('passes a live candle/volume through to the chart via update(), not setData()', async () => {
+    mocked.fetchCandlePage.mockResolvedValue(candlePage([candle('2026-08-01T00:00:00Z')], 1));
+    const liveCandle = {
+      time: 1_785_895_200 as UTCTimestamp,
+      open: 108,
+      high: 112,
+      low: 104,
+      close: 110,
+    };
+    const liveVolume = { time: 1_785_895_200 as UTCTimestamp, value: 5 };
+    renderContainer({ liveCandle, liveVolume });
+
+    await waitFor(() => expect(candleSeries.update).toHaveBeenCalledWith(liveCandle));
+    expect(volumeSeries.update).toHaveBeenCalledWith(liveVolume);
+    // The live bar is also what the legend falls back to without a hover.
+    expect(screen.getByLabelText('Candle details at crosshair')).toHaveTextContent('110.00');
+  });
+
+  it('renders the chart when there is no historical data yet but a live candle exists', async () => {
+    mocked.fetchCandlePage.mockResolvedValue(candlePage([], 0));
+    const liveCandle = {
+      time: 1_785_895_200 as UTCTimestamp,
+      open: 100,
+      high: 100,
+      low: 100,
+      close: 100,
+    };
+    renderContainer({ liveCandle, liveVolume: { time: 1_785_895_200 as UTCTimestamp, value: 1 } });
+
+    await waitFor(() => expect(createChartMock).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole('status', { name: 'No chart data' })).not.toBeInTheDocument();
   });
 });

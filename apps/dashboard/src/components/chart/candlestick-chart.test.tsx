@@ -9,6 +9,7 @@ function utc(seconds: number): UTCTimestamp {
 
 const fakeSeries = () => ({
   setData: vi.fn(),
+  update: vi.fn(),
   applyOptions: vi.fn(),
   priceScale: vi.fn(() => ({ applyOptions: vi.fn() })),
 });
@@ -131,5 +132,48 @@ describe('CandlestickChart', () => {
     const { unmount } = render(<CandlestickChart candlesticks={candlesticks} volume={volume} />);
     unmount();
     expect(fakeChart.remove).toHaveBeenCalledTimes(1);
+  });
+
+  it('pushes a live candle/volume update via series.update(), not setData()', () => {
+    const liveBar = { time: utc(1_785_895_200), open: 108, high: 112, low: 104, close: 110 };
+    const liveVol = { time: utc(1_785_895_200), value: 5, color: '#22c55e' };
+    const { rerender } = render(<CandlestickChart candlesticks={candlesticks} volume={volume} />);
+    candleSeries.setData.mockClear();
+    volumeSeries.setData.mockClear();
+
+    rerender(
+      <CandlestickChart
+        candlesticks={candlesticks}
+        volume={volume}
+        liveCandle={liveBar}
+        liveVolume={liveVol}
+      />,
+    );
+
+    expect(candleSeries.update).toHaveBeenCalledWith(liveBar);
+    expect(volumeSeries.update).toHaveBeenCalledWith(liveVol);
+    expect(candleSeries.setData).not.toHaveBeenCalled();
+    expect(volumeSeries.setData).not.toHaveBeenCalled();
+  });
+
+  it('does not call update() when no live candle is provided', () => {
+    render(<CandlestickChart candlesticks={candlesticks} volume={volume} />);
+    expect(candleSeries.update).not.toHaveBeenCalled();
+    expect(volumeSeries.update).not.toHaveBeenCalled();
+  });
+
+  it('drops a live update older than the newest data already in the series', () => {
+    // Reachable in normal operation: a historical refetch can land while a
+    // forming bar for an earlier bucket is still on screen. lightweight-charts
+    // throws on an out-of-order update(), so it must be skipped, not passed on.
+    const staleBar = { time: utc(1_700_000_000), open: 1, high: 2, low: 0, close: 1 };
+    const { rerender } = render(<CandlestickChart candlesticks={candlesticks} volume={volume} />);
+    candleSeries.update.mockClear();
+
+    rerender(
+      <CandlestickChart candlesticks={candlesticks} volume={volume} liveCandle={staleBar} />,
+    );
+
+    expect(candleSeries.update).not.toHaveBeenCalled();
   });
 });

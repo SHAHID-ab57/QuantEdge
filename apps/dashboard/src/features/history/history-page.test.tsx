@@ -389,10 +389,13 @@ describe('HistoryPage', () => {
     expect(args.start).toBe(
       new Date(todayStart.getTime() - 6 * 86_400_000).toISOString().replace(/\.\d{3}Z$/, 'Z'),
     );
+    // `args.end` was captured when the query ran, which is necessarily at or
+    // before this `now`; both are truncated to whole seconds. Asserting the
+    // other direction only held while the two landed in the same second.
     const expectedEnd = now.toISOString().replace(/\.\d{3}Z$/, 'Z');
     const delta = Date.parse(args.end) - Date.parse(expectedEnd);
-    expect(delta).toBeGreaterThanOrEqual(0);
-    expect(delta).toBeLessThan(1000);
+    expect(delta).toBeLessThanOrEqual(0);
+    expect(delta).toBeGreaterThan(-5_000);
   });
 
   it('paginates with offset', async () => {

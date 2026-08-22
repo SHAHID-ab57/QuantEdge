@@ -50,12 +50,16 @@ The platform is implemented today as **two deployable units**:
   an in-memory market state manager, and a candle/market persistence layer on
   PostgreSQL.
 - **`apps/dashboard`** — a Next.js 15 / React 19 / MUI 7 frontend that
-  REST-polls the API to render health, markets, and history views.
+  REST-polls the API for health/markets/history and streams live price/trade
+  data over a WebSocket gateway for the Live Market Dashboard.
 
-There is currently **no server-to-browser push channel** — the dashboard polls
-REST endpoints on an interval; it does not open a WebSocket to the backend
-(see [WebSocket Flow](#websocket-flow) for the important nuance about what
-"WebSocket" means in this codebase). No worker/queue service, feature store,
+The platform's first server-to-browser push channel is
+`/api/v1/ws/market` (`services/api/app/api/v1/endpoints/market_stream.py` +
+`app/marketdata/gateway.py`'s `MarketStreamGateway`), added for the Live
+Market Dashboard — it relays events already flowing through the existing
+event bus to subscribed browser clients (see
+[WebSocket Flow](#websocket-flow)). Every other dashboard view still
+REST-polls on an interval. No worker/queue service, feature store,
 prediction engine, backtesting engine, or trading execution service exists yet
 — those are documented only as future bounded contexts in
 `docs/architecture/DomainModel.md` and `ContainerArchitecture.md`.
@@ -227,25 +231,39 @@ default** — they exist for documentation/testing purposes.
 
 ## WebSocket Flow
 
-**Important nuance verified during this pass:** `app/ws/` is **not** a
-server-side WebSocket endpoint for browser/dashboard clients — there is no
-`@router.websocket(...)` route anywhere in `app/api/`. It is a
-protocol-agnostic **outbound** WebSocket client toolkit (connection
-management with reconnect/heartbeat, message dispatch, parsing, subscription
-tracking), consumed exclusively by
-`app/integrations/delta/websocket/client.py` to talk **outward** to Delta
-Exchange's WebSocket API (auth via HMAC key-auth, channel
-subscribe/resubscribe on reconnect).
+There are now **two distinct WebSocket layers** in this codebase — do not
+conflate them:
 
-The dashboard has **no browser-side WebSocket client at all** — despite UI
-elements that look "live" (e.g. `live-status.tsx`'s connected chip, the health
-page's "WebSocket connected" indicator), these are derived purely from
+1. **`app/ws/`** — a protocol-agnostic **outbound** WebSocket client toolkit
+   (connection management with reconnect/heartbeat, message dispatch,
+   parsing, subscription tracking), consumed exclusively by
+   `app/integrations/delta/websocket/client.py` to talk **outward** to
+   Delta Exchange's WebSocket API (auth via HMAC key-auth, channel
+   subscribe/resubscribe on reconnect). This is not reachable by browsers.
+2. **`app/marketdata/gateway.py`'s `MarketStreamGateway`**, served at
+   `/api/v1/ws/market` (`app/api/v1/endpoints/market_stream.py`) — the
+   platform's first **inbound** WebSocket endpoint, for browser clients.
+   It does not talk to Delta at all; it subscribes to the same in-process
+   `EventBus` the pipeline already publishes to (`TradeEventReceived`,
+   `TickerUpdated`) and fans matching events out to every browser
+   connection subscribed to that symbol, over a bounded per-connection
+   queue (a slow client drops messages rather than blocking the bus or
+   other connections). Protocol: client sends
+   `{"action": "subscribe"|"unsubscribe"|"ping", "symbols": [...]}`; server
+   sends `{"type": "snapshot"|"trade"|"ticker"|"pong"|"error", ...}` — full
+   detail in the module docstrings.
+
+The dashboard's Live Market Dashboard (`/live-market`,
+`apps/dashboard/src/features/live-market/`) is the one browser-side
+WebSocket client, connecting to `/api/v1/ws/market` — derived from
+`NEXT_PUBLIC_API_URL` via `deriveMarketStreamUrl`, **never** from
+`NEXT_PUBLIC_WS_URL` (which still points at Delta's own public socket and
+remains unused/reserved — a misconfiguration of it can't accidentally
+route the frontend to the exchange, since nothing reads it). Every other
+dashboard view (`live-status.tsx`'s connected chip, the health page's
+"WebSocket connected" indicator) still derives its "live" look from
 REST-polled fields (`delta_ws`, `last_ws_message_at`) on
-`/api/v1/system/status`, refreshed every 10s. `NEXT_PUBLIC_WS_URL` is defined
-and Zod-validated in `src/config/env.ts` but referenced nowhere else in the
-frontend — it is reserved for future use, not currently consumed. If a future
-milestone adds real-time push to the browser, it will need a **new** FastAPI
-WebSocket route — none exists to reuse today.
+`/api/v1/system/status`, refreshed every 10s — those were not changed.
 
 ## API Structure
 
@@ -401,11 +419,20 @@ per `docs/architecture/EngineeringStandards.md`.
 - Market data processing pipeline (parse → normalize → validate → publish)
 - Read-only market data + system health/status/metrics REST API (mounted at
   both `/api/v1/*` and unversioned `/*`)
-- Next.js dashboard shell (sidebar/top-bar/theme/providers) with three fully
-  implemented feature pages: **Health**, **Markets**, **History** (with
-  CSV/JSON export)
-- Backend test suite (319 tests, 93.74% coverage) and frontend test suite (88
-  tests) — both passing as of this discovery pass
+- **Live market-stream WebSocket gateway** (`/api/v1/ws/market`) — the
+  platform's first server-to-browser push channel, relaying trade/ticker
+  events from the existing bus to subscribed browser clients (per-symbol
+  fan-out, bounded per-connection queues, immediate state snapshot on
+  subscribe)
+- Next.js dashboard shell (sidebar/top-bar/theme/providers) with four fully
+  implemented feature pages: **Health**, **Markets**, **History** (with a
+  candlestick chart and CSV/JSON export), and **Live Market** (real-time
+  price card, live-updating chart, trade tape)
+- Reusable candlestick chart module (`src/components/chart/`, TradingView
+  lightweight-charts) shared by History and Live Market
+- Backend and frontend test suites both passing, backend coverage 93.89%
+  (gate: 80%) — see `TESTING.md` for how the WebSocket layers on both sides
+  are tested
 
 ## Current Research Features
 
@@ -417,9 +444,24 @@ are unconnected (page renders a placeholder, not the research API).
 
 ## Known Limitations
 
-- No authentication/authorization on any API route.
-- No server→browser push channel; "live" UI indicators are REST-polled, not
-  real-time.
+- No authentication/authorization on any API route, including the
+  `/api/v1/ws/market` WebSocket gateway — anyone who can reach the API can
+  subscribe to any symbol's live data.
+- Only Health/Markets/History remain REST-poll-only "live" indicators
+  (`delta_ws`/`last_ws_message_at` on `/api/v1/system/status`); Live Market
+  is the one page with a true push channel — see WebSocket Flow.
+- No real-time candle-close detection on the backend — the Live Market
+  chart's forming bar is synthesized client-side from streamed trades
+  (`apps/dashboard/src/features/live-market/lib/aggregate-live-candle.ts`);
+  `CandleClosed` bus events remain reserved for a future milestone. The
+  forming bar is seeded from the last stored candle so it continues the
+  chart's history rather than restarting.
+- Only the symbols in `DELTA_MARKET_SYMBOLS` (default `BTCUSD,ETHUSD`) have
+  candles or a live feed; `/markets` lists all ~225 Delta products. Any UI
+  that picks a market from that catalogue must validate it against
+  `/system/metrics`'s `state_latest_prices` and the symbol's timeframes
+  first — the Live Market Dashboard does (see FRONTEND.md § "Market
+  selection, validation and fallback"); other views do not yet.
 - `redis` is a declared backend dependency with no wired usage anywhere.
 - No CI/CD pipeline — all quality gates are local-only (git hooks).
 - Formatting has drifted: both `pnpm format:check` (root, 81 files) and

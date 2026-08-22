@@ -97,7 +97,7 @@ async def test_valid_trade_reaches_bus() -> None:
     assert trade.symbol == "BTCUSD"
     assert trade.price == Decimal("72141.5")
     assert trade.size == Decimal("1.5")
-    assert trade.side == "unknown"
+    assert trade.side == "buy"
     metrics = pipeline.metrics.snapshot()
     assert metrics["messages_received"] == 1
     assert metrics["messages_normalized"] == 1

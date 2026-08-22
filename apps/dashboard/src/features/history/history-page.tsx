@@ -6,9 +6,12 @@ import Grid from '@mui/material/Grid';
 import Paper from '@mui/material/Paper';
 import Skeleton from '@mui/material/Skeleton';
 import Stack from '@mui/material/Stack';
+import Tab from '@mui/material/Tab';
+import Tabs from '@mui/material/Tabs';
 import Typography from '@mui/material/Typography';
 import { useSearchParams } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { ChartContainer } from '@/components/chart';
 import { resolveRange } from './lib/resolve-range';
 import { CandlesTable } from './components/candles-table';
 import { ExportButtons } from './components/export-buttons';
@@ -75,6 +78,7 @@ export function HistoryPage() {
   );
   const [query, setQuery] = useState<HistoryQuery | null>(initial?.query ?? null);
   const [page, setPage] = useState(initial?.page ?? 1);
+  const [view, setView] = useState<'chart' | 'table'>('table');
 
   useEffect(() => {
     if (query) {
@@ -165,21 +169,45 @@ export function HistoryPage() {
       {query && !candles.isError ? (
         <Grid container spacing={2}>
           <Grid size={{ xs: 12, lg: 8 }}>
-            <CandlesTable
-              data={pageData}
-              isLoading={candles.isLoading}
-              page={page}
-              limit={query.limit}
-              sort={query.sort}
-              dir={query.dir}
-              onPageChange={handlePageChange}
-              onLimitChange={handleLimitChange}
-              onSortChange={handleSortChange}
-            />
-            {filtersLoading ? (
-              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
-                Loading page {page}…
-              </Typography>
+            <Tabs
+              value={view}
+              onChange={(_, next: 'chart' | 'table') => setView(next)}
+              sx={{ mb: 1, minHeight: 36 }}
+            >
+              <Tab label="Chart" value="chart" sx={{ minHeight: 36, py: 0 }} />
+              <Tab label="Table" value="table" sx={{ minHeight: 36, py: 0 }} />
+            </Tabs>
+            {view === 'chart' ? (
+              <ChartContainer
+                symbol={query.symbol}
+                timeframe={query.timeframe}
+                start={query.start}
+                end={query.end}
+              />
+            ) : null}
+            {view === 'table' ? (
+              <>
+                <CandlesTable
+                  data={pageData}
+                  isLoading={candles.isLoading}
+                  page={page}
+                  limit={query.limit}
+                  sort={query.sort}
+                  dir={query.dir}
+                  onPageChange={handlePageChange}
+                  onLimitChange={handleLimitChange}
+                  onSortChange={handleSortChange}
+                />
+                {filtersLoading ? (
+                  <Typography
+                    variant="caption"
+                    color="text.secondary"
+                    sx={{ display: 'block', mt: 1 }}
+                  >
+                    Loading page {page}…
+                  </Typography>
+                ) : null}
+              </>
             ) : null}
           </Grid>
           <Grid size={{ xs: 12, lg: 4 }}>

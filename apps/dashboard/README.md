@@ -1,8 +1,7 @@
 # Research Dashboard
 
 Next.js frontend for the AI Ethereum Market Analysis Platform — the operational
-dashboard served from `apps/dashboard`. Architecture only: no charts, no AI,
-no trading, no mock data.
+dashboard served from `apps/dashboard`. No AI, no trading, no mock data.
 
 ## Stack
 
@@ -39,15 +38,15 @@ The API must allow the dashboard origin in `CORS_ORIGINS`, e.g.
 
 ## Pages
 
-| Route          | Purpose                                            |
-| -------------- | -------------------------------------------------- |
-| `/dashboard`   | Overview (placeholder)                             |
-| `/markets`     | Market directory (placeholder)                     |
-| `/historical`  | Candle history queries (placeholder)               |
-| `/live-market` | Real-time trades/tickers/order books (placeholder) |
-| `/research`    | AI workflows (placeholder)                         |
-| `/settings`    | Preferences (placeholder)                          |
-| `/health`      | Platform health dashboard (implemented)            |
+| Route          | Purpose                                                     |
+| -------------- | ----------------------------------------------------------- |
+| `/dashboard`   | Overview (placeholder)                                      |
+| `/markets`     | Market directory (implemented)                              |
+| `/history`     | Candle history queries — Chart and Table tabs (implemented) |
+| `/live-market` | Real-time trades/tickers/order books (placeholder)          |
+| `/research`    | AI workflows (placeholder)                                  |
+| `/settings`    | Preferences (placeholder)                                   |
+| `/health`      | Platform health dashboard (implemented)                     |
 
 ### Health page
 

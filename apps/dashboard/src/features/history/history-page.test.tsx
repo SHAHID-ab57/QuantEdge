@@ -5,6 +5,24 @@ import * as marketApi from '@/lib/api/market';
 import type { Market } from '@/types/api/market';
 import { HistoryPage } from './history-page';
 
+const fakeChart = vi.hoisted(() => ({
+  addSeries: vi.fn(() => ({
+    setData: vi.fn(),
+    applyOptions: vi.fn(),
+    priceScale: vi.fn(() => ({ applyOptions: vi.fn() })),
+  })),
+  applyOptions: vi.fn(),
+  remove: vi.fn(),
+  timeScale: vi.fn(() => ({ fitContent: vi.fn() })),
+  subscribeCrosshairMove: vi.fn(),
+  unsubscribeCrosshairMove: vi.fn(),
+}));
+
+vi.mock('lightweight-charts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('lightweight-charts')>();
+  return { ...actual, createChart: vi.fn(() => fakeChart) };
+});
+
 const markets: Market[] = [
   {
     id: '11111111-1111-4111-8111-111111111111',
@@ -309,6 +327,25 @@ describe('HistoryPage', () => {
     expect(screen.getAllByText('100.0 of 100').length).toBe(3);
     expect(screen.getByText('4.2 ms')).toBeInTheDocument();
     expect(screen.getByText(/ETHUSD · 1h · all history/i)).toBeInTheDocument();
+  });
+
+  it('defaults to the table view and switches to the candlestick chart on demand', async () => {
+    renderPage();
+    await submitQuery();
+    await screen.findAllByText('3,055.25');
+
+    // Table view is active by default, so existing table assertions above
+    // keep working without a click; the chart is one tab away.
+    expect(screen.getByRole('columnheader', { name: 'Volume' })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Chart' }));
+
+    await waitFor(() => expect(fakeChart.addSeries).toHaveBeenCalled());
+    expect(screen.getByText('ETHUSD · 1h')).toBeInTheDocument();
+    expect(screen.queryByRole('columnheader', { name: 'Volume' })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Table' }));
+    expect(screen.getByRole('columnheader', { name: 'Volume' })).toBeInTheDocument();
   });
 
   it('converts the custom date range into exclusive UTC bounds', async () => {

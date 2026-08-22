@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  LiveOrderBookDataSchema,
   LiveTickerDataSchema,
   LiveTradeDataSchema,
   MarketStreamMessageSchema,
@@ -10,6 +11,13 @@ const trade = {
   size: '100.0',
   side: 'buy',
   event_time: '2026-08-22T15:26:05.504024Z',
+};
+
+const orderbook = {
+  bids: [{ price: '2405.9', size: '100.0' }],
+  asks: [{ price: '2406.0', size: '50.0' }],
+  event_time: '2026-08-22T15:26:05.504024Z',
+  sequence: 15591781,
 };
 
 const ticker = {
@@ -71,22 +79,43 @@ describe('MarketStreamMessageSchema', () => {
     expect(result.success).toBe(true);
   });
 
-  it('accepts a real snapshot frame with both trade and ticker', () => {
+  it('accepts a real snapshot frame with trade, ticker, and order book', () => {
     const result = MarketStreamMessageSchema.safeParse({
       type: 'snapshot',
       symbol: 'ETHUSD',
       trade,
       ticker,
+      orderbook,
     });
     expect(result.success).toBe(true);
   });
 
-  it('accepts a snapshot with null trade/ticker (fresh state)', () => {
+  it('accepts a snapshot with null trade/ticker/orderbook (fresh state)', () => {
     const result = MarketStreamMessageSchema.safeParse({
       type: 'snapshot',
       symbol: 'ETHUSD',
       trade: null,
       ticker: null,
+      orderbook: null,
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it('accepts a real order book update frame', () => {
+    const result = MarketStreamMessageSchema.safeParse({
+      type: 'orderbook',
+      symbol: 'ETHUSD',
+      data: orderbook,
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it('accepts an order book with a null sequence and event_time', () => {
+    const result = LiveOrderBookDataSchema.safeParse({
+      bids: [],
+      asks: [],
+      event_time: null,
+      sequence: null,
     });
     expect(result.success).toBe(true);
   });

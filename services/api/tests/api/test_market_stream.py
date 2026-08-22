@@ -46,6 +46,7 @@ def test_subscribe_with_no_prior_state_returns_an_empty_snapshot(app: FastAPI) -
             "symbol": "ETHUSD",
             "trade": None,
             "ticker": None,
+            "orderbook": None,
         }
 
 

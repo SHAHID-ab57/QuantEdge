@@ -52,19 +52,24 @@ function latestSocket(): FakeWebSocket {
   return socket;
 }
 
-/** Matches `FLUSH_INTERVAL_MS` in the hook. */
-const FLUSH_MS = 100;
+/**
+ * The hook batches via `requestAnimationFrame`, not a fixed timer — Vitest's
+ * fake timers fake `requestAnimationFrame` too, so advancing by one frame's
+ * worth of time is enough to flush a pending commit deterministically,
+ * without any real waiting.
+ */
+const ONE_FRAME_MS = 20;
 
 /**
  * Delivers a frame and drains the hook's update buffer. Stream updates are
- * batched rather than committed per message (see `FLUSH_INTERVAL_MS`), so a
- * test that asserts immediately after `triggerMessage` would be racing the
- * flush rather than testing anything.
+ * batched rather than committed per message (see the hook's own docstring),
+ * so a test that asserts immediately after `triggerMessage` would be
+ * racing the flush rather than testing anything.
  */
 function deliver(payload: unknown) {
   act(() => {
     latestSocket().triggerMessage(payload);
-    vi.advanceTimersByTime(FLUSH_MS);
+    vi.advanceTimersByTime(ONE_FRAME_MS);
   });
 }
 
@@ -165,6 +170,7 @@ describe('useMarketStream', () => {
       symbol: 'ETHUSD',
       trade: { price: '100', size: '1', side: 'unknown', event_time: '2026-01-01T00:00:00Z' },
       ticker: null,
+      orderbook: null,
     });
 
     expect(result.current.latestTrade?.price).toBe('100');
@@ -305,7 +311,7 @@ describe('useMarketStream', () => {
           },
         });
       }
-      vi.advanceTimersByTime(FLUSH_MS);
+      vi.advanceTimersByTime(ONE_FRAME_MS);
     });
 
     // All 20 prints land, but as one commit rather than twenty.
@@ -327,7 +333,7 @@ describe('useMarketStream', () => {
           data: { price, size: '1', side: 'buy', event_time: '2026-01-01T00:00:00Z' },
         });
       }
-      vi.advanceTimersByTime(FLUSH_MS);
+      vi.advanceTimersByTime(ONE_FRAME_MS);
     });
 
     expect(result.current.trades.map((trade) => trade.price)).toEqual(['102', '101', '100']);
@@ -345,7 +351,7 @@ describe('useMarketStream', () => {
     act(() => {
       vi.advanceTimersByTime(40); // server think time
       latestSocket().triggerMessage({ type: 'pong' });
-      vi.advanceTimersByTime(FLUSH_MS);
+      vi.advanceTimersByTime(ONE_FRAME_MS);
     });
 
     expect(result.current.latencyMs).toBe(40);
@@ -403,5 +409,260 @@ describe('useMarketStream', () => {
     // Every attempt should have produced exactly one new socket per 30s tick
     // once the delay is capped — i.e. no runaway/instant reconnect storm.
     expect(FakeWebSocket.instances.length).toBeLessThanOrEqual(7);
+  });
+
+  it('exposes the latest order book from an orderbook message', () => {
+    const { result } = renderHook(() =>
+      useMarketStream('ETHUSD', { streamUrl: 'ws://test/ws/market' }),
+    );
+    act(() => latestSocket().triggerOpen());
+
+    deliver({
+      type: 'orderbook',
+      symbol: 'ETHUSD',
+      data: {
+        bids: [{ price: '100', size: '1' }],
+        asks: [{ price: '101', size: '2' }],
+        event_time: '2026-01-01T00:00:00Z',
+        sequence: 42,
+      },
+    });
+
+    expect(result.current.latestOrderBook?.bids).toEqual([{ price: '100', size: '1' }]);
+    expect(result.current.latestOrderBook?.sequence).toBe(42);
+  });
+
+  it('takes the order book from a snapshot when no update has streamed yet', () => {
+    const { result } = renderHook(() =>
+      useMarketStream('ETHUSD', { streamUrl: 'ws://test/ws/market' }),
+    );
+    act(() => latestSocket().triggerOpen());
+
+    deliver({
+      type: 'snapshot',
+      symbol: 'ETHUSD',
+      trade: null,
+      ticker: null,
+      orderbook: {
+        bids: [{ price: '100', size: '1' }],
+        asks: [],
+        event_time: '2026-01-01T00:00:00Z',
+        sequence: 1,
+      },
+    });
+
+    expect(result.current.latestOrderBook?.bids).toEqual([{ price: '100', size: '1' }]);
+  });
+
+  it('resets the order book to null when the symbol changes', () => {
+    const { result, rerender } = renderHook(
+      ({ symbol }) => useMarketStream(symbol, { streamUrl: 'ws://test/ws/market' }),
+      { initialProps: { symbol: 'ETHUSD' } },
+    );
+    act(() => latestSocket().triggerOpen());
+    deliver({
+      type: 'orderbook',
+      symbol: 'ETHUSD',
+      data: { bids: [{ price: '100', size: '1' }], asks: [], event_time: null, sequence: null },
+    });
+    expect(result.current.latestOrderBook).not.toBeNull();
+
+    rerender({ symbol: 'BTCUSD' });
+    expect(result.current.latestOrderBook).toBeNull();
+  });
+});
+
+describe('useMarketStream batching (requestAnimationFrame)', () => {
+  it('schedules the commit via requestAnimationFrame, not a fixed timer', () => {
+    const rafSpy = vi.spyOn(globalThis, 'requestAnimationFrame');
+    renderHook(() => useMarketStream('ETHUSD', { streamUrl: 'ws://test/ws/market' }));
+    act(() => latestSocket().triggerOpen());
+    rafSpy.mockClear();
+
+    act(() => {
+      latestSocket().triggerMessage({
+        type: 'trade',
+        symbol: 'ETHUSD',
+        data: { price: '100', size: '1', side: 'buy', event_time: '2026-01-01T00:00:00Z' },
+      });
+    });
+
+    expect(rafSpy).toHaveBeenCalledTimes(1);
+    rafSpy.mockRestore();
+  });
+
+  it('coalesces a burst within one frame into a single requestAnimationFrame call', () => {
+    const rafSpy = vi.spyOn(globalThis, 'requestAnimationFrame');
+    renderHook(() => useMarketStream('ETHUSD', { streamUrl: 'ws://test/ws/market' }));
+    act(() => latestSocket().triggerOpen());
+    rafSpy.mockClear();
+
+    act(() => {
+      for (let i = 0; i < 10; i += 1) {
+        latestSocket().triggerMessage({
+          type: 'trade',
+          symbol: 'ETHUSD',
+          data: {
+            price: String(100 + i),
+            size: '1',
+            side: 'buy',
+            event_time: '2026-01-01T00:00:00Z',
+          },
+        });
+      }
+    });
+
+    // Ten messages before the frame fires still schedule only one commit.
+    expect(rafSpy).toHaveBeenCalledTimes(1);
+    rafSpy.mockRestore();
+  });
+
+  it('cancels a pending frame on unmount rather than leaking it', () => {
+    const cancelSpy = vi.spyOn(globalThis, 'cancelAnimationFrame');
+    const { unmount } = renderHook(() =>
+      useMarketStream('ETHUSD', { streamUrl: 'ws://test/ws/market' }),
+    );
+    act(() => latestSocket().triggerOpen());
+    act(() => {
+      latestSocket().triggerMessage({
+        type: 'trade',
+        symbol: 'ETHUSD',
+        data: { price: '100', size: '1', side: 'buy', event_time: '2026-01-01T00:00:00Z' },
+      });
+    });
+
+    unmount();
+
+    expect(cancelSpy).toHaveBeenCalled();
+    cancelSpy.mockRestore();
+  });
+});
+
+describe('useMarketStream channels option', () => {
+  it('defaults to tracking every channel', () => {
+    const { result } = renderHook(() =>
+      useMarketStream('ETHUSD', { streamUrl: 'ws://test/ws/market' }),
+    );
+    act(() => latestSocket().triggerOpen());
+    deliver({
+      type: 'trade',
+      symbol: 'ETHUSD',
+      data: { price: '100', size: '1', side: 'buy', event_time: '2026-01-01T00:00:00Z' },
+    });
+    expect(result.current.latestTrade?.price).toBe('100');
+  });
+
+  it('drops a trade message entirely when the trades channel is disabled', () => {
+    const { result } = renderHook(() =>
+      useMarketStream('ETHUSD', {
+        streamUrl: 'ws://test/ws/market',
+        channels: { trades: false, ticker: false, orderBook: true },
+      }),
+    );
+    act(() => latestSocket().triggerOpen());
+    deliver({
+      type: 'trade',
+      symbol: 'ETHUSD',
+      data: { price: '100', size: '1', side: 'buy', event_time: '2026-01-01T00:00:00Z' },
+    });
+
+    expect(result.current.latestTrade).toBeNull();
+    expect(result.current.trades).toEqual([]);
+    // No tracked channel fired, so this frame never even committed.
+    expect(result.current.lastMessageAt).toBeNull();
+  });
+
+  it('drops a ticker message when the ticker channel is disabled', () => {
+    const { result } = renderHook(() =>
+      useMarketStream('ETHUSD', {
+        streamUrl: 'ws://test/ws/market',
+        channels: { trades: false, ticker: false, orderBook: true },
+      }),
+    );
+    act(() => latestSocket().triggerOpen());
+    deliver({
+      type: 'ticker',
+      symbol: 'ETHUSD',
+      data: {
+        last_price: '1900',
+        bid: '1899',
+        ask: '1901',
+        mark_price: '1900.5',
+        price_change_24h: '3.2',
+        event_time: '2026-01-01T00:00:00Z',
+      },
+    });
+
+    expect(result.current.latestTicker).toBeNull();
+  });
+
+  it('still tracks the enabled order-book channel while trades/ticker are disabled', () => {
+    const { result } = renderHook(() =>
+      useMarketStream('ETHUSD', {
+        streamUrl: 'ws://test/ws/market',
+        channels: { trades: false, ticker: false, orderBook: true },
+      }),
+    );
+    act(() => latestSocket().triggerOpen());
+    deliver({
+      type: 'orderbook',
+      symbol: 'ETHUSD',
+      data: {
+        bids: [{ price: '100', size: '1' }],
+        asks: [{ price: '101', size: '1' }],
+        event_time: '2026-01-01T00:00:00Z',
+        sequence: 1,
+      },
+    });
+
+    expect(result.current.latestOrderBook?.bids).toEqual([{ price: '100', size: '1' }]);
+    expect(result.current.lastMessageAt).not.toBeNull();
+  });
+
+  it('applies only the tracked fields of a snapshot, ignoring the rest', () => {
+    const { result } = renderHook(() =>
+      useMarketStream('ETHUSD', {
+        streamUrl: 'ws://test/ws/market',
+        channels: { trades: false, ticker: false, orderBook: true },
+      }),
+    );
+    act(() => latestSocket().triggerOpen());
+    deliver({
+      type: 'snapshot',
+      symbol: 'ETHUSD',
+      trade: { price: '100', size: '1', side: 'buy', event_time: '2026-01-01T00:00:00Z' },
+      ticker: {
+        last_price: '1900',
+        bid: '1899',
+        ask: '1901',
+        mark_price: '1900.5',
+        price_change_24h: '3.2',
+        event_time: '2026-01-01T00:00:00Z',
+      },
+      orderbook: {
+        bids: [{ price: '99', size: '2' }],
+        asks: [],
+        event_time: '2026-01-01T00:00:00Z',
+        sequence: 1,
+      },
+    });
+
+    expect(result.current.latestTrade).toBeNull();
+    expect(result.current.latestTicker).toBeNull();
+    expect(result.current.latestOrderBook?.bids).toEqual([{ price: '99', size: '2' }]);
+  });
+
+  it('a pong still flushes and updates latency even with trades/ticker disabled', () => {
+    const { result } = renderHook(() =>
+      useMarketStream('ETHUSD', {
+        streamUrl: 'ws://test/ws/market',
+        channels: { trades: false, ticker: false, orderBook: true },
+      }),
+    );
+    act(() => latestSocket().triggerOpen());
+    act(() => vi.advanceTimersByTime(15_000)); // fires the heartbeat ping
+    deliver({ type: 'pong' });
+
+    expect(result.current.latencyMs).not.toBeNull();
   });
 });

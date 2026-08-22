@@ -33,7 +33,10 @@ module (`src/components/chart/`) that renders historical OHLCV data with
 TradingView's lightweight-charts, and the Live Market Dashboard
 (`src/features/live-market/`) that renders real-time price/chart/trade-tape
 data over that gateway, resolving which market to show against the set the
-backend actually streams rather than assuming any catalogue entry has data. It talks to `services/api` over the read-only REST surface described
+backend actually streams rather than assuming any catalogue entry has data,
+and the Order Book viewer (`src/features/order-book/`) that renders live
+depth tables and a spread summary over the same gateway's reconstructed
+order-book messages. It talks to `services/api` over the read-only REST surface described
 in [`docs/api/API.md`](docs/api/API.md) for historical data, and over a
 single WebSocket gateway (below) for live data — never directly to Delta
 Exchange.
@@ -53,8 +56,18 @@ architecture. Two API surfaces exist:
   Dashboard. It relays `TradeEventReceived`/`TickerUpdated` events already
   flowing through the in-process event bus (published by the Delta
   WebSocket client + processing pipeline — see `app/runtime.py`) to
-  browser clients subscribed to a symbol. It does not add a new data
+  browser clients subscribed to a symbol, plus a reconstructed order-book
+  view for the Order Book viewer (below). It does not add a new data
   source; it exposes data the runtime already collects.
+- **Order book reconstruction** (`app/marketdata/orderbook.py`'s
+  `OrderBookAggregator`): `MarketStateManager` deliberately does not
+  reconstruct a coherent order book from Delta's snapshot + incremental-diff
+  stream (its own docstring: "order book reconstruction ... is a consumer
+  concern") — this component is that consumer. It subscribes to the same
+  `OrderBookUpdated` bus event, replaces the book on a snapshot, and merges
+  diffs (upsert non-zero sizes, drop zero-size levels) on an update, so the
+  gateway always has a coherent, correctly-sorted book to relay rather than
+  a single raw diff of a handful of changed price levels.
 
 Both surfaces are served by the same `Runtime` composition root
 (`app/runtime.py`), which now always constructs an `EventBus`, a

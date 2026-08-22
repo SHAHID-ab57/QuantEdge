@@ -7,9 +7,10 @@ from decimal import Decimal
 import pytest
 
 from app.events.bus import EventBus
-from app.marketdata.bus_events import TickerUpdated, TradeEventReceived
+from app.marketdata.bus_events import OrderBookUpdated, TickerUpdated, TradeEventReceived
 from app.marketdata.gateway import MarketStreamGateway, _ticker_payload, _trade_payload
-from app.marketdata.models import TickerEvent, TradeEvent
+from app.marketdata.models import OrderBookEvent, OrderBookLevel, TickerEvent, TradeEvent
+from app.marketdata.orderbook import OrderBookAggregator
 from app.state.manager import MarketStateManager
 
 
@@ -45,8 +46,34 @@ def bus() -> EventBus:
 
 
 @pytest.fixture
-def gateway(state_manager: MarketStateManager, bus: EventBus) -> MarketStreamGateway:
-    return MarketStreamGateway(state_manager).attach(bus)
+def order_book(bus: EventBus) -> OrderBookAggregator:
+    return OrderBookAggregator().attach(bus)
+
+
+@pytest.fixture
+def gateway(
+    state_manager: MarketStateManager, order_book: OrderBookAggregator, bus: EventBus
+) -> MarketStreamGateway:
+    return MarketStreamGateway(state_manager, order_book).attach(bus)
+
+
+def make_book_event(
+    symbol: str = "ETHUSD",
+    *,
+    kind: str = "full",
+    is_snapshot: bool = True,
+    bids: list[OrderBookLevel] | None = None,
+    asks: list[OrderBookLevel] | None = None,
+) -> OrderBookEvent:
+    return OrderBookEvent(
+        exchange="delta",
+        symbol=symbol,
+        event_time=datetime.now(UTC),
+        kind=kind,  # type: ignore[arg-type]
+        bids=bids or [],
+        asks=asks or [],
+        is_snapshot=is_snapshot,
+    )
 
 
 class TestRegistration:
@@ -88,7 +115,13 @@ class TestSubscribe:
         handle = gateway.register()
         gateway.subscribe(handle, ["ETHUSD"])
         message = handle.queue.get_nowait()
-        assert message == {"type": "snapshot", "symbol": "ETHUSD", "trade": None, "ticker": None}
+        assert message == {
+            "type": "snapshot",
+            "symbol": "ETHUSD",
+            "trade": None,
+            "ticker": None,
+            "orderbook": None,
+        }
 
     def test_subscribe_queues_a_populated_snapshot_when_state_exists(
         self,
@@ -231,3 +264,110 @@ class TestWireTimestampFormat:
         payload = _trade_payload(shifted)
         assert payload["event_time"].endswith("Z")  # type: ignore[union-attr]
         assert "+05:30" not in payload["event_time"]  # type: ignore[operator]
+
+
+class TestOrderBookRelay:
+    """The gateway relays the *aggregator's reconstructed* book, not the raw
+    bus event — see `orderbook.py` for why a raw incremental diff can't be
+    shown to a browser client on its own."""
+
+    def test_subscribe_snapshot_includes_no_book_before_any_order_book_event(
+        self, gateway: MarketStreamGateway
+    ) -> None:
+        handle = gateway.register()
+        gateway.subscribe(handle, ["ETHUSD"])
+        message = handle.queue.get_nowait()
+        assert message["orderbook"] is None
+
+    def test_subscribe_snapshot_includes_the_reconstructed_book(
+        self, gateway: MarketStreamGateway, order_book: OrderBookAggregator
+    ) -> None:
+        # Feeds the aggregator directly (bypassing the bus's fire-and-forget
+        # scheduling — see `test_orderbook.py`'s `publish()` docstring for why).
+        asyncio.run(
+            order_book._on_order_book(
+                OrderBookUpdated(
+                    source="test",
+                    order_book=make_book_event(
+                        bids=[OrderBookLevel(price=Decimal("100"), size=Decimal("1"))],
+                        asks=[OrderBookLevel(price=Decimal("101"), size=Decimal("2"))],
+                    ),
+                )
+            )
+        )
+        handle = gateway.register()
+        gateway.subscribe(handle, ["ETHUSD"])
+        message = handle.queue.get_nowait()
+        assert message["orderbook"]["bids"] == [{"price": "100", "size": "1"}]
+        assert message["orderbook"]["asks"] == [{"price": "101", "size": "2"}]
+
+    def test_an_order_book_update_is_fanned_out_as_the_reconstructed_book(
+        self, gateway: MarketStreamGateway, order_book: OrderBookAggregator
+    ) -> None:
+        handle = gateway.register()
+        gateway.subscribe(handle, ["ETHUSD"])
+        handle.queue.get_nowait()  # drain the initial (empty) snapshot
+
+        # In production both the aggregator and the gateway are independently
+        # subscribed to the same bus event; driving both handlers in order
+        # reproduces that without depending on the bus's async scheduling.
+        event = OrderBookUpdated(
+            source="test",
+            order_book=make_book_event(
+                bids=[OrderBookLevel(price=Decimal("100"), size=Decimal("1"))],
+                asks=[],
+            ),
+        )
+        asyncio.run(order_book._on_order_book(event))
+        asyncio.run(gateway._on_order_book(event))
+        message = handle.queue.get_nowait()
+        assert message["type"] == "orderbook"
+        assert message["symbol"] == "ETHUSD"
+        assert message["data"]["bids"] == [{"price": "100", "size": "1"}]
+
+    def test_only_subscribers_of_the_affected_symbol_receive_the_update(
+        self, gateway: MarketStreamGateway, order_book: OrderBookAggregator
+    ) -> None:
+        eth_handle = gateway.register()
+        gateway.subscribe(eth_handle, ["ETHUSD"])
+        eth_handle.queue.get_nowait()
+        btc_handle = gateway.register()
+        gateway.subscribe(btc_handle, ["BTCUSD"])
+        btc_handle.queue.get_nowait()
+
+        event = OrderBookUpdated(
+            source="test",
+            order_book=make_book_event(
+                symbol="ETHUSD",
+                bids=[OrderBookLevel(price=Decimal("100"), size=Decimal("1"))],
+                asks=[],
+            ),
+        )
+        asyncio.run(order_book._on_order_book(event))
+        asyncio.run(gateway._on_order_book(event))
+        assert eth_handle.queue.qsize() == 1
+        assert btc_handle.queue.empty()
+
+    def test_a_gateway_without_an_order_book_aggregator_reports_no_book(
+        self, state_manager: MarketStateManager, bus: EventBus
+    ) -> None:
+        # Matches the constructor's optional `order_book` parameter — a
+        # gateway can still be built without one (e.g. in an older test),
+        # and must degrade to "no book" rather than raising.
+        bare_gateway = MarketStreamGateway(state_manager).attach(bus)
+        handle = bare_gateway.register()
+        bare_gateway.subscribe(handle, ["ETHUSD"])
+        message = handle.queue.get_nowait()
+        assert message["orderbook"] is None
+
+        asyncio.run(
+            bare_gateway._on_order_book(
+                OrderBookUpdated(
+                    source="test",
+                    order_book=make_book_event(
+                        bids=[OrderBookLevel(price=Decimal("100"), size=Decimal("1"))], asks=[]
+                    ),
+                )
+            )
+        )
+        assert handle.queue.empty()

@@ -27,11 +27,35 @@ export const LiveTickerDataSchema = z.object({
 
 export type LiveTickerData = z.infer<typeof LiveTickerDataSchema>;
 
+export const OrderBookLevelSchema = z.object({
+  price: z.string(),
+  size: z.string(),
+});
+
+export type OrderBookLevelData = z.infer<typeof OrderBookLevelSchema>;
+
+/**
+ * Already sorted (bids descending, asks ascending) and depth-limited by the
+ * gateway — see `services/api/app/marketdata/gateway.py`'s
+ * `_ORDERBOOK_DEPTH` — and reconstructed from a snapshot + merged
+ * incremental diffs (`app/marketdata/orderbook.py`'s `OrderBookAggregator`),
+ * never a single raw exchange message.
+ */
+export const LiveOrderBookDataSchema = z.object({
+  bids: z.array(OrderBookLevelSchema),
+  asks: z.array(OrderBookLevelSchema),
+  event_time: z.string().datetime().nullable(),
+  sequence: z.number().int().nullable(),
+});
+
+export type LiveOrderBookData = z.infer<typeof LiveOrderBookDataSchema>;
+
 export const MarketStreamSnapshotSchema = z.object({
   type: z.literal('snapshot'),
   symbol: z.string(),
   trade: LiveTradeDataSchema.nullable(),
   ticker: LiveTickerDataSchema.nullable(),
+  orderbook: LiveOrderBookDataSchema.nullable(),
 });
 
 export const MarketStreamTradeSchema = z.object({
@@ -44,6 +68,12 @@ export const MarketStreamTickerSchema = z.object({
   type: z.literal('ticker'),
   symbol: z.string(),
   data: LiveTickerDataSchema,
+});
+
+export const MarketStreamOrderBookSchema = z.object({
+  type: z.literal('orderbook'),
+  symbol: z.string(),
+  data: LiveOrderBookDataSchema,
 });
 
 export const MarketStreamPongSchema = z.object({
@@ -59,6 +89,7 @@ export const MarketStreamMessageSchema = z.discriminatedUnion('type', [
   MarketStreamSnapshotSchema,
   MarketStreamTradeSchema,
   MarketStreamTickerSchema,
+  MarketStreamOrderBookSchema,
   MarketStreamPongSchema,
   MarketStreamErrorSchema,
 ]);

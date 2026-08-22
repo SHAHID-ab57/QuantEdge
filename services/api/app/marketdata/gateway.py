@@ -12,6 +12,14 @@ connection subscribed to the affected symbol. Each connection gets its own
 bounded outbound queue so one slow browser client can never block delivery
 to the others, or block the event bus's publish path — a full queue drops
 the message and counts it rather than backing up.
+
+Order book messages are read from :class:`~app.marketdata.orderbook.OrderBookAggregator`,
+not relayed straight from the bus event — a single ``OrderBookUpdated``
+event can be an incremental diff of only a handful of changed price
+levels, not something a browser could render as a coherent book on its
+own. The aggregator does that reconstruction; this gateway just asks it
+for the current top-of-book view on every update and on every new
+subscription.
 """
 
 import asyncio
@@ -22,8 +30,9 @@ from datetime import UTC, datetime
 
 from app.events.bus import EventBus
 from app.events.event import Event
-from app.marketdata.bus_events import TickerUpdated, TradeEventReceived
-from app.marketdata.models import TickerEvent, TradeEvent
+from app.marketdata.bus_events import OrderBookUpdated, TickerUpdated, TradeEventReceived
+from app.marketdata.models import OrderBookLevel, TickerEvent, TradeEvent
+from app.marketdata.orderbook import OrderBookAggregator, OrderBookSnapshot
 from app.state.manager import MarketStateManager
 
 __all__ = ["ConnectionHandle", "GatewayMetrics", "MarketStreamGateway"]
@@ -33,6 +42,11 @@ logger = logging.getLogger("app.marketdata.gateway")
 Message = dict[str, object]
 
 _DEFAULT_QUEUE_SIZE = 1000
+
+#: Deepest book relayed to a browser connection — matches the largest depth
+#: the frontend's depth selector offers (10/25/50/100), so the wire payload
+#: never carries more than a client could ever choose to display.
+_ORDERBOOK_DEPTH = 100
 
 
 @dataclass
@@ -67,14 +81,16 @@ class ConnectionHandle:
 
 
 class MarketStreamGateway:
-    """Fans out live trade/ticker events to subscribed connections."""
+    """Fans out live trade/ticker/order-book events to subscribed connections."""
 
     def __init__(
         self,
         state_manager: MarketStateManager,
+        order_book: OrderBookAggregator | None = None,
         metrics: GatewayMetrics | None = None,
     ) -> None:
         self._state_manager = state_manager
+        self._order_book = order_book
         self._connections: set[ConnectionHandle] = set()
         self._by_symbol: dict[str, set[ConnectionHandle]] = defaultdict(set)
         self.metrics = metrics if metrics is not None else GatewayMetrics()
@@ -83,6 +99,7 @@ class MarketStreamGateway:
         """Subscribe the fan-out handlers to the live event types."""
         bus.subscribe("TradeEventReceived", self._on_trade)
         bus.subscribe("TickerUpdated", self._on_ticker)
+        bus.subscribe("OrderBookUpdated", self._on_order_book)
         return self
 
     def connection_count(self) -> int:
@@ -142,11 +159,15 @@ class MarketStreamGateway:
         state = self._state_manager.get_market_state(symbol)
         trade = state.trade if state is not None else None
         ticker = state.ticker if state is not None else None
+        book = (
+            self._order_book.get_book(symbol, depth=_ORDERBOOK_DEPTH) if self._order_book else None
+        )
         return {
             "type": "snapshot",
             "symbol": symbol,
             "trade": _trade_payload(trade) if trade is not None else None,
             "ticker": _ticker_payload(ticker) if ticker is not None else None,
+            "orderbook": _orderbook_payload(book) if book is not None else None,
         }
 
     async def _on_trade(self, event: Event) -> None:
@@ -165,6 +186,22 @@ class MarketStreamGateway:
         await self._fanout(
             ticker.symbol,
             {"type": "ticker", "symbol": ticker.symbol, "data": _ticker_payload(ticker)},
+        )
+
+    async def _on_order_book(self, event: Event) -> None:
+        if not isinstance(event, OrderBookUpdated) or self._order_book is None:
+            return
+        symbol = event.order_book.symbol
+        # Read the *reconstructed* book back out of the aggregator rather than
+        # relaying this one raw event — a single incremental diff is only a
+        # few changed levels, not something a browser client could render as
+        # a coherent order book on its own (see `orderbook.py`).
+        book = self._order_book.get_book(symbol, depth=_ORDERBOOK_DEPTH)
+        if book is None:
+            return
+        await self._fanout(
+            symbol,
+            {"type": "orderbook", "symbol": symbol, "data": _orderbook_payload(book)},
         )
 
     async def _fanout(self, symbol: str, message: Message) -> None:
@@ -206,6 +243,19 @@ def _ticker_payload(ticker: TickerEvent) -> dict[str, object]:
         "price_change_24h": _decimal_str(ticker.price_change_24h),
         "event_time": _isoformat_utc(ticker.event_time),
     }
+
+
+def _orderbook_payload(book: OrderBookSnapshot) -> dict[str, object]:
+    return {
+        "bids": [_level_payload(level) for level in book.bids],
+        "asks": [_level_payload(level) for level in book.asks],
+        "event_time": _isoformat_utc(book.event_time) if book.event_time is not None else None,
+        "sequence": book.sequence,
+    }
+
+
+def _level_payload(level: OrderBookLevel) -> dict[str, object]:
+    return {"price": str(level.price), "size": str(level.size)}
 
 
 def _decimal_str(value: object) -> str | None:

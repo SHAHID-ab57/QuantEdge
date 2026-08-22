@@ -13,6 +13,7 @@ import DashboardIcon from '@mui/icons-material/Dashboard';
 import CandlestickChartIcon from '@mui/icons-material/CandlestickChart';
 import HistoryIcon from '@mui/icons-material/History';
 import BoltIcon from '@mui/icons-material/Bolt';
+import TableChartIcon from '@mui/icons-material/TableChart';
 import ScienceIcon from '@mui/icons-material/Science';
 import SettingsIcon from '@mui/icons-material/Settings';
 import HealthAndSafetyIcon from '@mui/icons-material/HealthAndSafety';
@@ -28,6 +29,7 @@ const NAV_ITEMS: NavItem[] = [
   { label: 'Markets', href: '/markets', icon: CandlestickChartIcon },
   { label: 'History', href: '/history', icon: HistoryIcon },
   { label: 'Live Market', href: '/live-market', icon: BoltIcon },
+  { label: 'Order Book', href: '/orderbook', icon: TableChartIcon },
   { label: 'Research', href: '/research', icon: ScienceIcon },
   { label: 'Settings', href: '/settings', icon: SettingsIcon },
   { label: 'Health', href: '/health', icon: HealthAndSafetyIcon },

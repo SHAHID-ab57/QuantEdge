@@ -25,6 +25,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   market/timeframe selectors in standalone mode, and the existing
   `/candles/stats` endpoint for 24h high/low/volume. See `FRONTEND.md` §
   "Live Market Dashboard" and `ARCHITECTURE.md` § "Backend".
+- Live Order Book Viewer (`/orderbook`) — synchronized bid/ask depth
+  tables with cumulative-depth bars, a spread summary (best bid/ask,
+  spread, spread %, mid price), and a 10/25/50/100 depth selector for one
+  symbol. Required a new backend component,
+  `services/api/app/marketdata/orderbook.py`'s `OrderBookAggregator`,
+  which reconstructs a coherent per-symbol L2 book from the event bus's
+  snapshot + incremental-diff stream — `MarketStateManager` deliberately
+  doesn't do this (its own docstring: "order book reconstruction ... is a
+  consumer concern"), and naively relaying the raw stream would have
+  wiped a multi-thousand-level book down to a single level roughly ten
+  times a second (verified against the real exchange feed). The existing
+  `/api/v1/ws/market` gateway was extended with a new `orderbook` message
+  type rather than adding a second WebSocket endpoint. The frontend reuses
+  the Live Market Dashboard's `useMarketStream` (extended with a
+  `latestOrderBook` field), `MarketSelector`, `ConnectionStatus`, and
+  market-candidate-ordering policy rather than duplicating any of them.
+  See `FRONTEND.md` § "Live Order Book Viewer" and `ARCHITECTURE.md` §
+  "Backend".
 
 ### Changed
 
@@ -42,6 +60,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   (~10 commits/second) and the forming candle is seeded from the last
   historical bar, so history loads first and the live bar continues it.
   See `FRONTEND.md` § "Live Market Dashboard".
+- Order Book viewer performance pass: `useMarketStream` (shared with the
+  Live Market Dashboard) now batches via `requestAnimationFrame` instead
+  of a fixed 100ms timer, and gained a `channels` option so a consumer
+  can opt out of message types it doesn't use — the Order Book page
+  disables `trades`/`ticker` entirely, since it was previously re-rendering
+  on every trade tick despite never reading trade data. Each order book
+  row is now its own `React.memo`-wrapped component with a value-based
+  comparator (`orderBookRowPropsAreEqual`), so a row whose price/size/
+  total/depth-ratio are unchanged skips re-rendering even though its
+  parent table re-rendered. See `FRONTEND.md` § "Live Order Book Viewer →
+  Performance considerations" for the full before/after reasoning and the
+  known scalability limits.
 
 ### Deprecated
 

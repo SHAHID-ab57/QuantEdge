@@ -42,7 +42,18 @@ caused the frontend's `z.string().datetime()` schemas to silently reject
 every trade/ticker/snapshot frame while heartbeat pongs kept the connection
 looking healthy; see `src/types/api/market-stream.test.ts` for the matching
 frontend-side pin, and `FRONTEND.md` § "Live Market Dashboard" for the full
-story.
+story. Order-book reconstruction is unit-tested the same way, purely
+against the event bus — `services/api/tests/unit/marketdata/test_orderbook.py`
+exercises `OrderBookAggregator` directly: snapshot-replaces-book,
+incremental-diffs-merge (upsert and zero-size-removes-a-level), `kind="l1"`
+events never touching the reconstructed depth (regression coverage for the
+exact corruption described above), sorting (bids descending/asks
+ascending), depth limiting, and multi-symbol isolation. `TestOrderBookRelay`
+in `test_gateway.py` covers the gateway's side: the fan-out relays the
+_aggregator's_ reconstructed book (not a raw bus event), the snapshot
+includes it, only subscribers of the affected symbol receive an update, and
+a gateway built without an aggregator degrades to "no book" rather than
+raising.
 
 **Frontend**: pure functions and Zod schemas are tested directly (no
 rendering) — e.g. `src/types/api/market.test.ts`,
@@ -150,6 +161,70 @@ fake is subscription-backed via `useSyncExternalStore` rather than a plain
 getter, so a `router.replace` re-renders the page the way the real router
 does; with a plain getter a market switch would write the URL and nothing
 downstream would react to it.
+
+### Testing the Order Book viewer (frontend)
+
+`useMarketStream`'s order-book handling (the new `latestOrderBook` field,
+the `orderbook` message type, and a snapshot's `orderbook` field) is
+covered in the same `use-market-stream.test.ts` with the same
+fake-WebSocket/`deliver()` pattern, plus a reset-on-symbol-change case
+specific to the order book.
+
+The depth/spread math is pure and tested with no rendering at all
+(`lib/order-book-depth.test.ts`): cumulative-total accumulation,
+`depthRatio` scaled against the deepest row _in the visible slice_ (not
+the whole book), a 100+ level book truncated without artifacts, and
+every spread field reporting `null` — never a misleading zero — when
+either side of the book is empty. Component tests
+(`components/order-book-table.test.tsx`, `spread-panel.test.tsx`,
+`depth-selector.test.tsx`, `order-book-empty-state.test.tsx`) cover
+column order (bids: Total/Size/Price; asks: Price/Size/Total), a 100-row
+render, every `Unavailable` branch, and the retry action.
+
+#### Testing the performance pass
+
+Three mechanisms were added when the Order Book viewer was optimized for
+high-frequency streaming, and each is tested at the level that actually
+proves it, rather than through a full rendered page (which cannot
+distinguish "the row's render function was skipped" from "it re-ran and
+happened to produce identical output" — React reuses the same DOM node
+either way):
+
+- **`requestAnimationFrame` batching** — `use-market-stream.test.ts` spies
+  on `globalThis.requestAnimationFrame`/`cancelAnimationFrame` directly
+  (Vitest's fake timers fake both, so no real waiting is needed) to assert
+  a single incoming message schedules exactly one frame, a ten-message
+  burst still schedules only one, and a pending frame is cancelled on
+  unmount rather than firing after teardown.
+- **The `channels` option** — same file: a message on a disabled channel
+  never updates the corresponding field _and_ never touches
+  `lastMessageAt`/triggers a commit at all (verified by asserting the
+  hook's state is untouched after delivering a disabled-channel message),
+  while the enabled channel and heartbeat pongs still flow through
+  normally.
+- **Per-row memoization** — `order-book-table.test.tsx` unit-tests the
+  exported `orderBookRowPropsAreEqual` comparator directly: two `DepthRow`
+  objects with identical values but different references compare equal
+  (the case that matters, since `computeDepthRows` never returns the same
+  object twice), and a change to any one of price/size/total/depthRatio/
+  side/color compares unequal. `React.memo`'s skip-the-render-when-equal
+  behavior is a framework guarantee once this comparator is correct, so
+  this is the precise, sufficient unit to test — not a render-count spy
+  bolted onto the production component purely for testability.
+
+`order-book-page.test.tsx` mirrors `live-market-page.test.tsx`'s
+integration-test shape (same `next/navigation`/`FakeWebSocket` fakes) and
+additionally asserts: bids render highest-to-lowest and asks
+lowest-to-highest from a real (already-sorted, matching the gateway's
+actual contract) fixture, the spread panel derives its numbers from the
+streamed book, switching the depth selector re-slices without losing the
+underlying 30-level book, an untracked explicitly-requested symbol is
+honoured with an explanatory notice rather than silently substituted, and
+a malformed `orderbook` payload is dropped without crashing the page.
+Assertions that depend on a value arriving through the batched flush are
+wrapped in `waitFor` rather than asserted immediately after `act()` —
+the same real-timer-vs-flush-interval race the live-market stream tests
+guard against.
 
 ## End-to-End Tests
 

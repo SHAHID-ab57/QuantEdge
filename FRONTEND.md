@@ -12,8 +12,9 @@ backend surface the frontend consumes).
 ## Status
 
 Active — `apps/dashboard` implements Health, Markets, History (with a
-candlestick chart), and Live Market (resolved market selection, real-time
-price/chart/trade tape, and an operational connection panel);
+candlestick chart), Live Market (resolved market selection, real-time
+price/chart/trade tape, and an operational connection panel), and Order
+Book (live depth tables, spread, and cumulative-depth visualization).
 Dashboard, Research, and Settings remain placeholders.
 
 ## Stack
@@ -30,15 +31,16 @@ All real pages live under the `(dashboard)` route group
 (`src/app/(dashboard)/`), wrapped by `AppShell` (sidebar + top bar,
 `src/components/layout/`). `/` redirects to `/dashboard`.
 
-| Route          | Status                                                                |
-| -------------- | --------------------------------------------------------------------- |
-| `/health`      | Implemented — platform/DB/bus/state health, polled REST               |
-| `/markets`     | Implemented — filterable/sortable market table + detail panel         |
-| `/history`     | Implemented — historical candle browser, **Chart** and **Table** tabs |
-| `/live-market` | Implemented — real-time price, chart, and trade tape (see below)      |
-| `/dashboard`   | Placeholder                                                           |
-| `/research`    | Placeholder                                                           |
-| `/settings`    | Placeholder                                                           |
+| Route          | Status                                                                  |
+| -------------- | ----------------------------------------------------------------------- |
+| `/health`      | Implemented — platform/DB/bus/state health, polled REST                 |
+| `/markets`     | Implemented — filterable/sortable market table + detail panel           |
+| `/history`     | Implemented — historical candle browser, **Chart** and **Table** tabs   |
+| `/live-market` | Implemented — real-time price, chart, and trade tape (see below)        |
+| `/orderbook`   | Implemented — live depth tables, spread, and depth selector (see below) |
+| `/dashboard`   | Placeholder                                                             |
+| `/research`    | Placeholder                                                             |
+| `/settings`    | Placeholder                                                             |
 
 ## Feature module pattern
 
@@ -436,17 +438,33 @@ they read low if candle sync has fallen behind.
 ### Performance considerations
 
 - **Batched stream commits**: incoming frames are buffered and committed to
-  React state on a ~100ms interval (`FLUSH_INTERVAL_MS`) rather than one
-  `setState` per message. A busy market prints many trades per second, and
-  a commit per print would re-render the price card, chart and tape on
-  every one; ~10 commits/second stays well under the threshold where a
-  human perceives lag. A burst of 20 prints lands as one commit, which is
-  asserted in `use-market-stream.test.ts`.
+  React state at most once per animation frame (`requestAnimationFrame`)
+  rather than one `setState` per message. A busy market prints many trades
+  per second, and a commit per print would re-render the price card, chart
+  and tape on every one; batching to the paint cycle keeps a whole burst
+  within one frame down to a single commit, self-limits to the display's
+  own refresh rate, and pauses entirely while the tab is backgrounded (rAF
+  callbacks don't run for hidden tabs). A burst of 20 prints landing as one
+  commit is asserted in `use-market-stream.test.ts`, which also confirms
+  the scheduling call is `requestAnimationFrame` itself (not a fixed
+  timer) and that a pending frame is cancelled on unmount. This was
+  originally a fixed 100ms `setTimeout`; switched to rAF during the Order
+  Book viewer's performance pass — see FRONTEND.md § "Live Order Book
+  Viewer → Performance considerations" for the full reasoning, which
+  applies to this page too since they share the hook.
+- **Per-consumer channel tracking**: `useMarketStream`'s `channels` option
+  (`{ trades, ticker, orderBook }`, all on by default here) lets a caller
+  that doesn't need every message type opt out — a message on a disabled
+  channel is dropped before it touches the pending buffer or schedules a
+  commit. The Live Market Dashboard tracks everything (it uses all three),
+  but the Order Book viewer disables trades/ticker entirely; see that
+  page's docs for why this mattered in practice.
 - **No new WebSocket per re-render**: `useMarketStream`'s connection
   lifecycle lives in a single `useEffect` keyed on `[symbol, streamUrl]`.
   A symbol change tears down and reopens the connection deliberately;
-  nothing else re-rendering the page does. `maxTrades` is read through a
-  ref precisely so changing it can't force a reconnect.
+  nothing else re-rendering the page does. `maxTrades` and `channels` are
+  both read through refs precisely so changing either can't force a
+  reconnect.
 - **Memoized widgets**: the four panels are `React.memo`-wrapped and the
   page passes memoized `liveCandle`/`liveVolume` objects, so an update that
   changes only one of them doesn't re-render the rest.
@@ -465,6 +483,300 @@ they read low if candle sync has fallen behind.
   connection's outbound queue is bounded (`MarketStreamGateway`); a full
   queue drops the message and increments a metric instead of backing up
   the event bus's publish path for every other connection.
+
+## Live Order Book Viewer
+
+`/orderbook` (`src/features/order-book/`) is a live depth-table view for
+one symbol — synchronized bid/ask tables with cumulative-depth bars, a
+spread summary, and a depth selector (10/25/50/100 levels) — sourced from
+the same backend gateway the Live Market Dashboard uses.
+
+### Why this needed a new backend component, not just a new endpoint
+
+The event bus already carried order-book data (`OrderBookUpdated` /
+`OrderBookEvent`) before this feature — the Delta pipeline normalizes
+`ob_l1`/`ob_l2`/`ob_updates` channel messages into it, and
+`MarketStateManager` already stored the latest one per symbol. But
+`MarketStateManager`'s own docstring is explicit that it does _not_
+reconstruct a coherent order book — "order book reconstruction from
+seq/checksum is a consumer concern" — and Delta's live `ob_updates`
+channel is a snapshot **followed by incremental diffs of only the changed
+price levels** (`action: "update"`, where a `size: 0` level means "remove
+it," not "size is now zero"). Storing the latest message verbatim, as the
+state manager does, would replace the whole reconstructed book with just
+the handful of levels in the most recent diff on every tick — a real,
+verified defect: `ob_l1` alone was observed firing ~10 times/second with
+only the top bid/ask level, which would have wiped a multi-thousand-level
+book down to one level ten times a second had it been relayed naively.
+
+The fix was a new backend component,
+`services/api/app/marketdata/orderbook.py`'s `OrderBookAggregator` — the
+missing "consumer" the state manager's docstring pointed at. It subscribes
+to the same `OrderBookUpdated` bus event, replaces the book on a snapshot,
+and merges diffs (upsert non-zero sizes, drop zero-size levels) on an
+update, deliberately ignoring `kind == "l1"` events since they'd corrupt
+the reconstructed depth the same way. `MarketStreamGateway` was extended
+to read the aggregator's current top-100-per-side view (not the raw bus
+event) on every update and relay it as a new `orderbook` message type —
+`services/api/app/api/v1/endpoints/market_stream.py`'s protocol docstring
+has the exact wire shape. No new WebSocket endpoint was added; this is the
+same `/api/v1/ws/market` gateway, extended.
+
+### Streaming flow
+
+```mermaid
+flowchart LR
+    A["Delta ob_updates channel
+(snapshot + incremental diffs)"] --> B["MarketDataPipeline
+(normalizes to OrderBookEvent)"]
+    B --> C["EventBus
+(OrderBookUpdated)"]
+    C --> D["OrderBookAggregator
+(app/marketdata/orderbook.py)
+replaces on snapshot, merges on diff"]
+    D --> E["MarketStreamGateway
+(reads the aggregator's current book)"]
+    E -->|"sorted, top-100/side,
+per-symbol fan-out"| F["/api/v1/ws/market"]
+    F --> G["useMarketStream
+(latestOrderBook — reused from Live Market)"]
+    G --> H["computeDepthRows / computeSpread
+(order-book-depth.ts, pure)"]
+    H --> I["OrderBookTable × 2 / SpreadPanel"]
+```
+
+### Reuse over duplication
+
+This feature deliberately shares infrastructure with the Live Market
+Dashboard rather than standing up parallel plumbing:
+
+- **`useMarketStream`** (`src/features/live-market/hooks/`) is the exact
+  same hook, extended with a `latestOrderBook` field rather than forked —
+  it already owns the one WebSocket connection/reconnect/batching
+  lifecycle this page needs, for the same gateway and the same per-symbol
+  subscription model. This page passes `maxTrades: 0` since it has no
+  trade tape.
+- **`MarketSelector`** (`src/components/chart/market-selector.tsx`) is
+  reused as-is, the same "standalone" component the chart module exports.
+- **`ConnectionStatus`** (`src/features/live-market/components/`) is
+  imported directly rather than copied — it already reports every
+  dependency this page has too (backend API, WebSocket, historical sync,
+  market state, last message, reconnects, heartbeat latency).
+- **`buildCandidateSymbols`** (`src/features/live-market/lib/market-selection.ts`)
+  is reused for candidate _ordering_ (URL → remembered → `ETHUSD` →
+  live-tracked → any active), but **not** the Live Market Dashboard's
+  candle-aware readiness/fallback machinery (`assessMarket`/
+  `selectResearchMarket`) — an order book has no notion of stored candles,
+  so `hooks/use-order-book-market.ts` implements its own, simpler
+  readiness rule (is the symbol in `/system/metrics`'s
+  `state_latest_prices`?) on top of the shared ordering policy. Forcing
+  the candle-aware version would have gated an order-book-ready market on
+  an irrelevant check.
+- **`remembered-market.ts`** (`src/features/live-market/lib/`) is reused
+  as-is — the "last market I was looking at" preference is shared across
+  Live Market and Order Book by design, not a coupling accident.
+
+One deliberate behavioral difference from Live Market: an **explicitly
+requested** symbol (`?symbol=` present right now) is always honoured
+verbatim here, even if it turns out to be untracked — `OrderBookEmptyState`
+explains why rather than the page silently substituting a different
+market. A merely _remembered_ symbol from a previous visit gets no such
+guarantee and falls back to a live-tracked candidate if it's stale.
+
+### Component hierarchy
+
+```text
+OrderBookPage                  resolves symbol; owns the depth selection
+├── ConnectionStatus           reused from Live Market, unmodified
+├── MarketSelector             reused from the chart module
+├── DepthSelector               10/25/50/100, same ToggleButtonGroup pattern
+│                              as the chart module's TimeframeSelector
+├── OrderBookEmptyState        untracked / no snapshot yet / empty book
+├── SpreadPanel                 best bid/ask, spread, spread %, mid price
+└── OrderBookTable × 2           "bids" and "asks" — one component, mirrored
+```
+
+`OrderBookTable` is one `React.memo`-wrapped component parameterized by
+`side`, not two near-duplicate components — sort order, bar-growth edge,
+and color are the only differences and all three already follow from
+`side`.
+
+### Depth visualization
+
+Each row's cumulative `total` (running sum of size from the best price
+outward) and a `depthRatio` (that row's total as a fraction of the
+deepest visible row) are computed once per update in
+`lib/order-book-depth.ts`'s `computeDepthRows` — pure, unit-tested, and
+re-sliced (not re-sorted: the gateway already sorts) whenever the depth
+selector changes. The bar itself is a CSS `linear-gradient` background on
+the table row, not an extra absolutely-positioned element — bids grow
+from the right edge, asks from the left, so the two tables read as a
+mirrored pair when placed side by side.
+
+### Why spread/mid-price can go entirely `Unavailable`
+
+`computeSpread` requires _both_ sides to have at least one level; a
+one-sided book (e.g. momentarily during a resync) reports every field —
+best bid, best ask, spread, spread %, mid price — that depends on the
+missing side as `Unavailable`, never a misleading zero spread synthesized
+from a partial book.
+
+### Performance considerations
+
+This page went through a dedicated optimization pass after the initial
+implementation, once it was flagged as functionally complete but not yet
+production-ready for high-frequency streaming. The concrete findings and
+fixes:
+
+**Finding: the page re-rendered on every trade and ticker tick, not just
+order-book ticks.** `useMarketStream` is one hook shared with the Live
+Market Dashboard, and subscribing to a symbol means the gateway sends
+trade, ticker, _and_ order-book messages together — there's no
+server-side channel filter. Before this pass, every trade print (the
+highest-frequency message type observed against the real feed) still
+pushed into an internal buffer and triggered a commit, even though this
+page never reads `latestTrade`/`latestTicker`/`trades` at all. Fixed with
+a new `channels` option on `useMarketStream` (`{ trades, ticker,
+orderBook }`, all on by default for the Live Market Dashboard): a message
+on a disabled channel is dropped before it touches the pending buffer _or_
+schedules a commit — no array push, no new object reference, no
+`setState`. This page passes `channels: { trades: false, ticker: false,
+orderBook: true }`. `lastMessageAt` is scoped to the channels an instance
+actually tracks as a direct consequence (documented on the option itself)
+— flushing purely to bump a timestamp nobody reads would be the very
+re-render this option exists to prevent; a heartbeat pong (every 15s)
+still bounds how stale it can get.
+
+**Finding: batching was on a fixed 100ms timer, not tied to the browser's
+own paint cycle.** `useMarketStream` used to coalesce updates via
+`setTimeout(flush, 100)`. Switched to `requestAnimationFrame`: a burst of
+messages within one frame still coalesces into a single commit exactly as
+before, but the commit now lands right before the browser's next paint
+(never wasted between frames), the effective rate self-limits to the
+display's own refresh rate rather than an arbitrary interval, and —
+without any extra code — the entire pipeline pauses itself whenever the
+tab is backgrounded, since browsers don't run rAF callbacks for hidden
+tabs. This is a real, verified CPU saving for a tab left open in the
+background, not just a smoothness tweak.
+
+**Finding: no row-level memoization — every row re-rendered on every
+update, even unaffected ones.** `computeDepthRows` legitimately returns a
+brand-new array of brand-new row objects on every call (the book really
+did change), so a plain `OrderBookTable` mapping `rows` inline gave React
+no way to skip re-rendering (and re-diffing three `<TableCell>`s' worth of
+formatting calls) for a row whose values hadn't actually moved. Fixed by
+extracting `OrderBookRow` as its own component wrapped in
+`React.memo(OrderBookRowInner, orderBookRowPropsAreEqual)`, where the
+comparator (exported, unit-tested directly in
+`order-book-table.test.tsx`) compares the four values that reach the DOM
+— `price`, `size`, `total`, `depthRatio` — **by value**, not by object
+reference. This is the mechanism behind "only changed price levels
+update": a row above the point of change in the book, or every row on the
+side of the book the update didn't touch (the gateway always resends both
+sides together — see below), now genuinely skips re-rendering, keyed
+stably by `row.price` (a level's natural, unique identity) so React
+matches the right row across updates regardless of it being a new object.
+One caveat inherent to the feature, not fixable by memoization: cumulative
+`total` is a running sum from the best price outward, so a change at
+price level _N_ still invalidates every row below it — no memoization
+scheme can avoid that without changing what "cumulative depth" means.
+
+- **No second WebSocket connection**: reusing `useMarketStream` means this
+  page still gets the Live Market Dashboard's reconnect backoff and
+  symbol-filtering for free — see FRONTEND.md § "Live Market Dashboard →
+  Performance considerations" for those details, unchanged by this pass.
+- **Backend does the sort and the depth cap**: `OrderBookAggregator`
+  maintains the full book internally (bounded by the market's own price
+  granularity — a few thousand levels, trivial memory) but the gateway
+  only ever relays the top 100 per side
+  (`app/marketdata/gateway.py`'s `_ORDERBOOK_DEPTH`), and always resends
+  **both** sides on any update (it doesn't track which side changed) —
+  the frontend never re-sorts (the backend's order is trusted verbatim;
+  `lib/order-book-depth.test.ts` pins this by asserting on unsorted mock
+  input) and never receives more than a client could ever choose to
+  display.
+- **Depth-selector changes never refetch**: switching 10/25/50/100 just
+  re-slices the already-received `latestOrderBook` array
+  (`computeDepthRows`), a synchronous, memoized (`useMemo`) operation with
+  no network round-trip. Note that a depth change _does_ legitimately
+  re-render every row — `depthRatio` is normalized against the deepest row
+  in the new slice, so the denominator itself changes for every row; this
+  is real, necessary work, not something left unoptimized.
+- **Memoized panels and callbacks**: `SpreadPanel`, `OrderBookTable`, and
+  `OrderBookEmptyState` are all `React.memo`-wrapped, the page passes
+  memoized `bidRows`/`askRows`/`spread` (`useMemo` keyed on the raw levels
+  and selected depth) and memoized `handleSymbolChange`/`handleRetry`
+  (`useCallback`), and `EMPTY_LEVELS`/`ORDER_BOOK_CHANNELS` are stable
+  module-level constants rather than fresh literals on every render — so
+  an unrelated re-render (e.g. the connection panel's clock tick) never
+  cascades into recomputing or re-rendering the tables.
+- **No unbounded growth**: nothing in this page's state accumulates over
+  time. `latestOrderBook` is _replaced_, never appended to; the disabled
+  `trades` channel means the trade buffer stays permanently empty rather
+  than growing and being trimmed; the backend's `OrderBookAggregator`
+  is bounded by the market's own distinct price count, not by how long the
+  connection has been open. A multi-hour session should show flat memory,
+  though verifying that empirically requires a real browser session this
+  environment has no way to drive (see "Known scalability limits" below).
+
+### Error handling
+
+`OrderBookEmptyState` covers: an untracked market (explicitly requested or
+not), no snapshot received yet (split into "connected, just quiet" vs.
+"reconnecting" vs. "not connected") with a retry, and a genuinely empty
+reconstructed book (both sides empty — a valid, if unusual, state,
+distinct from "no book yet"). An invalid payload (fails
+`LiveOrderBookDataSchema`) is dropped by `useMarketStream`'s existing
+Zod-validation gate — the same silent-drop-and-keep-the-old-value
+behavior as every other message type on this gateway, verified with a
+malformed `orderbook` frame in `order-book-page.test.tsx`.
+
+### Extension points
+
+- **Depth beyond 100**: raise `_ORDERBOOK_DEPTH` in
+  `app/marketdata/gateway.py` and `DEPTH_OPTIONS` in
+  `lib/order-book-depth.ts` together — both already scale to it, this is a
+  constant change, not a redesign.
+- **Sequence/checksum validation**: `OrderBookAggregator` trusts stream
+  order and does not validate Delta's per-message sequence number or
+  checksum (`cs`) — documented, not fixed, in its module docstring. A
+  dropped connection self-heals (resubscribe always re-triggers a fresh
+  snapshot); a gap _within_ a connected session would not be caught today.
+- **A combined center-book view**: the two-table layout was chosen to
+  match the task's explicit "two synchronized tables" requirement; nothing
+  about `computeDepthRows`/`computeSpread` assumes two separate tables — a
+  future single merged-ladder view could reuse both unchanged.
+
+### Known scalability limits
+
+- **No per-connection channel filtering on the wire.** The `channels`
+  option (above) is a frontend-only filter — the backend still sends
+  trade and ticker frames to every subscriber of a symbol regardless of
+  what any given browser tab actually tracks, so the _network_ cost of an
+  unused channel isn't eliminated, only the client-side processing/render
+  cost of it. Fixing the wire cost too would need a gateway protocol
+  change (e.g. a `channels` field on the `subscribe` action) — a
+  reasonable next step if profiling ever shows inbound bandwidth, not
+  render cost, as the bottleneck.
+- **Row memoization's benefit shrinks for changes near the best price.**
+  Because `total` is a cumulative running sum, a change to the
+  best-priced level invalidates every row below it in the same slice — on
+  a very actively-traded book where changes cluster at the top, most rows
+  in a 100-level view may still re-render on a given tick. The two
+  documented full wins are: a row above wherever the change occurred, and
+  the entire opposite side of the book when only one side actually moved.
+- **No empirical, multi-hour browser verification.** This optimization
+  pass was verified by (a) unit-testing the actual mechanisms directly —
+  the `React.memo` comparator, the `requestAnimationFrame` scheduling, and
+  the channel-gating behavior — and (b) code-level inspection confirming
+  no state accumulates over time (see "Performance considerations"
+  above), rather than by driving a real browser for 15+ minutes and
+  watching DevTools' Performance/Memory panels, since no browser
+  automation tool is available in this environment. The reasoning is
+  sound and the mechanisms are directly tested, but a real long-running
+  session (React DevTools Profiler flame graphs, an actual heap snapshot
+  diff) has not been captured and would be the natural next validation
+  step before a production rollout at real trading-desk scale.
 
 ## State management
 

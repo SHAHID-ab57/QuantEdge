@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { env } from '@/config/env';
 import {
   MarketStreamMessageSchema,
+  type LiveOrderBookData,
   type LiveTickerData,
   type LiveTradeData,
 } from '@/types/api/market-stream';
@@ -16,17 +17,33 @@ const PING_INTERVAL_MS = 15_000;
 const BASE_RECONNECT_DELAY_MS = 1_000;
 const MAX_RECONNECT_DELAY_MS = 30_000;
 
-/**
- * How often buffered stream updates are committed to React state. A busy
- * market can print many trades per second, and one `setState` per frame
- * would re-render the price card, chart and tape on every single print.
- * Coalescing into ~10 commits/second keeps the UI responsive under bursts
- * while staying far below the threshold where a human perceives lag.
- */
-const FLUSH_INTERVAL_MS = 100;
+export interface StreamChannels {
+  trades?: boolean;
+  ticker?: boolean;
+  orderBook?: boolean;
+}
+
+const DEFAULT_CHANNELS: Required<StreamChannels> = {
+  trades: true,
+  ticker: true,
+  orderBook: true,
+};
 
 export interface UseMarketStreamOptions {
   maxTrades?: number;
+  /**
+   * Which message types this instance actually tracks — everything is on
+   * by default (the Live Market Dashboard needs all three). A frame for a
+   * disabled channel is dropped before it touches the pending buffer *or*
+   * schedules a commit, so a consumer that only cares about the order book
+   * (the Order Book viewer) never re-renders on a trade or ticker tick it
+   * would just discard anyway. `lastMessageAt` reflects the channels this
+   * instance actually tracks, not literally every byte the socket
+   * receives — a message that's skipped for being on a disabled channel
+   * correctly never touches it, since flushing just to update a timestamp
+   * nobody reads would be the very re-render this option exists to avoid.
+   */
+  channels?: StreamChannels;
   /** Overridable for tests; defaults to deriving from `NEXT_PUBLIC_API_URL`. */
   streamUrl?: string;
 }
@@ -47,12 +64,15 @@ export interface UseMarketStreamResult {
   latestTicker: LiveTickerData | null;
   /** Newest first, capped at `maxTrades`. */
   trades: LiveTradeData[];
+  /** Already sorted and depth-limited by the gateway — see `market-stream.ts`. */
+  latestOrderBook: LiveOrderBookData | null;
 }
 
 interface StreamData {
   latestTrade: LiveTradeData | null;
   latestTicker: LiveTickerData | null;
   trades: LiveTradeData[];
+  latestOrderBook: LiveOrderBookData | null;
   lastMessageAt: number | null;
   lastTradeAt: number | null;
   latencyMs: number | null;
@@ -62,6 +82,7 @@ const EMPTY_DATA: StreamData = {
   latestTrade: null,
   latestTicker: null,
   trades: [],
+  latestOrderBook: null,
   lastMessageAt: null,
   lastTradeAt: null,
   latencyMs: null,
@@ -72,6 +93,7 @@ interface PendingUpdate {
   trades: LiveTradeData[];
   ticker: LiveTickerData | null;
   snapshotTrade: LiveTradeData | null;
+  orderBook: LiveOrderBookData | null;
   lastMessageAt: number | null;
   lastTradeAt: number | null;
   latencyMs: number | null;
@@ -82,6 +104,7 @@ function emptyPending(): PendingUpdate {
     trades: [],
     ticker: null,
     snapshotTrade: null,
+    orderBook: null,
     lastMessageAt: null,
     lastTradeAt: null,
     latencyMs: null,
@@ -89,17 +112,26 @@ function emptyPending(): PendingUpdate {
 }
 
 /**
- * Subscribes to live trade/ticker updates for one symbol over the
- * backend's market-stream gateway (`/api/v1/ws/market`) — never the
+ * Subscribes to live trade/ticker/order-book updates for one symbol over
+ * the backend's market-stream gateway (`/api/v1/ws/market`) — never the
  * exchange directly. Reconnects with exponential backoff (capped at
  * `MAX_RECONNECT_DELAY_MS`) and re-subscribes on every (re)connect;
  * switching `symbol` tears down and reopens the connection.
  *
- * Incoming frames are buffered and committed on a fixed interval rather
- * than one-state-update-per-message (see `FLUSH_INTERVAL_MS`), and every
- * frame is checked against the requested symbol so a message still in
- * flight when the user switches markets can never be attributed to the new
- * one.
+ * Incoming frames are buffered and committed at most once per animation
+ * frame (`requestAnimationFrame`) rather than one `setState` per message —
+ * a busy market can print many updates a second, and a commit per message
+ * would re-render every consumer on every single one. rAF batching (over a
+ * fixed timer) means a burst within one frame coalesces into the single
+ * commit that frame can actually show, the commit lands right before the
+ * browser's own paint so it can never land wastefully between frames, and
+ * — for free — the whole pipeline pauses itself whenever the tab is
+ * backgrounded, since browsers don't run rAF callbacks for hidden tabs.
+ * Every frame is also checked against the requested symbol so a message
+ * still in flight when the user switches markets can never be attributed
+ * to the new one, and against `options.channels` (see there) so a
+ * consumer that doesn't track a given message type pays nothing for it —
+ * not a wasted array push, not a wasted commit.
  */
 export function useMarketStream(
   symbol: string | null,
@@ -107,12 +139,15 @@ export function useMarketStream(
 ): UseMarketStreamResult {
   const maxTrades = options.maxTrades ?? DEFAULT_MAX_TRADES;
   const streamUrl = options.streamUrl ?? deriveMarketStreamUrl(env.NEXT_PUBLIC_API_URL);
+  const channels = { ...DEFAULT_CHANNELS, ...options.channels };
 
   const [connectionState, setConnectionState] = useState<ConnectionState>('connecting');
   const [reconnectAttempt, setReconnectAttempt] = useState(0);
   const [data, setData] = useState<StreamData>(EMPTY_DATA);
   const maxTradesRef = useRef(maxTrades);
   maxTradesRef.current = maxTrades;
+  const channelsRef = useRef(channels);
+  channelsRef.current = channels;
 
   useEffect(() => {
     if (!symbol) {
@@ -132,12 +167,12 @@ export function useMarketStream(
     let socket: WebSocket | null = null;
     let pingTimer: ReturnType<typeof setInterval> | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-    let flushTimer: ReturnType<typeof setTimeout> | null = null;
+    let flushHandle: number | null = null;
     let pending = emptyPending();
     let pingSentAt: number | null = null;
 
     function flush() {
-      flushTimer = null;
+      flushHandle = null;
       if (cancelled) {
         return;
       }
@@ -154,6 +189,7 @@ export function useMarketStream(
           latestTrade: update.trades.at(-1) ?? update.snapshotTrade ?? previous.latestTrade,
           latestTicker: update.ticker ?? previous.latestTicker,
           trades: nextTrades,
+          latestOrderBook: update.orderBook ?? previous.latestOrderBook,
           lastMessageAt: update.lastMessageAt ?? previous.lastMessageAt,
           lastTradeAt: update.lastTradeAt ?? previous.lastTradeAt,
           latencyMs: update.latencyMs ?? previous.latencyMs,
@@ -162,8 +198,8 @@ export function useMarketStream(
     }
 
     function scheduleFlush() {
-      if (flushTimer === null) {
-        flushTimer = setTimeout(flush, FLUSH_INTERVAL_MS);
+      if (flushHandle === null) {
+        flushHandle = requestAnimationFrame(flush);
       }
     }
 
@@ -176,9 +212,9 @@ export function useMarketStream(
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
       }
-      if (flushTimer !== null) {
-        clearTimeout(flushTimer);
-        flushTimer = null;
+      if (flushHandle !== null) {
+        cancelAnimationFrame(flushHandle);
+        flushHandle = null;
       }
     }
 
@@ -225,17 +261,41 @@ export function useMarketStream(
       if (message.symbol !== symbol) {
         return;
       }
+      const active = channelsRef.current;
       if (message.type === 'trade') {
+        if (!active.trades) {
+          return;
+        }
         pending.trades.push(message.data);
         pending.lastTradeAt = now;
       } else if (message.type === 'ticker') {
-        pending.ticker = message.data;
-      } else {
-        if (message.trade) {
-          pending.snapshotTrade = message.trade;
+        if (!active.ticker) {
+          return;
         }
-        if (message.ticker) {
+        pending.ticker = message.data;
+      } else if (message.type === 'orderbook') {
+        if (!active.orderBook) {
+          return;
+        }
+        pending.orderBook = message.data;
+      } else {
+        let sawTrackedField = false;
+        if (message.trade && active.trades) {
+          pending.snapshotTrade = message.trade;
+          sawTrackedField = true;
+        }
+        if (message.ticker && active.ticker) {
           pending.ticker = message.ticker;
+          sawTrackedField = true;
+        }
+        if (message.orderbook && active.orderBook) {
+          pending.orderBook = message.orderbook;
+          sawTrackedField = true;
+        }
+        // A snapshot with only untracked fields (or none at all) has
+        // nothing this instance needs to commit.
+        if (!sawTrackedField) {
+          return;
         }
       }
       scheduleFlush();
@@ -303,5 +363,6 @@ export function useMarketStream(
     latestTrade: data.latestTrade,
     latestTicker: data.latestTicker,
     trades: data.trades,
+    latestOrderBook: data.latestOrderBook,
   };
 }

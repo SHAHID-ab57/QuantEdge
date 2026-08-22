@@ -1,10 +1,11 @@
 """Live market data WebSocket gateway for browser clients.
 
-This is the only real-time channel the dashboard uses: it relays trade and
-ticker events already flowing through the in-process event bus (published
-by the Delta WebSocket client + processing pipeline, see ``app.runtime``)
-to subscribed browser connections. The frontend never opens a connection
-to the exchange itself.
+This is the only real-time channel the dashboard uses: it relays trade,
+ticker, and reconstructed order-book events already flowing through the
+in-process event bus (published by the Delta WebSocket client +
+processing pipeline, see ``app.runtime``) to subscribed browser
+connections. The frontend never opens a connection to the exchange
+itself.
 
 Protocol (JSON text frames):
 
@@ -14,14 +15,25 @@ Client -> server:
     ``{"action": "ping"}``
 
 Server -> client:
-    ``{"type": "snapshot", "symbol": "ETHUSD", "trade": {...}|null, "ticker": {...}|null}``
+    ``{"type": "snapshot", "symbol": "ETHUSD",
+    "trade": {...}|null, "ticker": {...}|null, "orderbook": {...}|null}``
     ``{"type": "trade", "symbol": "ETHUSD", "data": {...}}``
     ``{"type": "ticker", "symbol": "ETHUSD", "data": {...}}``
+    ``{"type": "orderbook", "symbol": "ETHUSD",
+    "data": {"bids": [...], "asks": [...], "event_time", "sequence"}}``
     ``{"type": "pong"}``
     ``{"type": "error", "detail": "..."}``
 
-No authentication, no trading, no order data — read-only market data
-relay, matching the rest of the v1 API surface.
+``orderbook.bids``/``asks`` are already sorted (bids descending, asks
+ascending) and depth-limited by the gateway — see
+``app.marketdata.gateway``'s ``_ORDERBOOK_DEPTH`` — and reflect a
+*reconstructed* book (snapshot + merged incremental diffs via
+``app.marketdata.orderbook.OrderBookAggregator``), not a single raw
+exchange message.
+
+No authentication, no trading, no order *execution* data — this is a
+read-only market-data relay (order *book* depth included), matching the
+rest of the v1 API surface.
 """
 
 import asyncio

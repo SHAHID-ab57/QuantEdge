@@ -51,6 +51,26 @@ subscriptions, message counts, reconnects, heartbeats, and uptime in
 `/system/status`), never the configured mode. DB-derived metric fields are
 `null` when no database is configured.
 
+### WebSocket (live market stream)
+
+| Method | Path                | Purpose                                                           |
+| ------ | ------------------- | ----------------------------------------------------------------- |
+| WS     | `/api/v1/ws/market` | Live trade, ticker, and order-book updates for subscribed symbols |
+
+The platform's one server-to-browser push channel — the frontend never
+connects to Delta Exchange directly. A client sends
+`{"action": "subscribe", "symbols": [...]}` to receive anything (no symbol
+is implicit); the server replies with an immediate `snapshot` and then
+`trade`/`ticker`/`orderbook` messages as they occur, plus `pong` for a
+client `ping`. Order-book messages carry an already-sorted (bids
+descending, asks ascending), depth-limited (100 levels/side) _reconstructed_
+book — snapshot merged with incremental diffs, not a single raw exchange
+message — built by `app/marketdata/orderbook.py`'s `OrderBookAggregator`.
+Full wire format is documented at the top of
+`app/api/v1/endpoints/market_stream.py`; see `FRONTEND.md` § "Live Market
+Dashboard" and § "Live Order Book Viewer" for how the two implemented pages
+consume it.
+
 ## Authentication
 
 None — the current surface is read-only and public. Private endpoints will

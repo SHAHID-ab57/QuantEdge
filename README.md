@@ -93,11 +93,27 @@ Scripts are orchestrated with Turbo; tasks run across all workspace packages
 
 ## Development Status
 
-**Planning Phase** — The repository is in the early planning and documentation
-stage. Architecture, requirements, and engineering standards are being established.
-The workspace foundation is in place; no application code has been created yet.
+**Active Development** — Beyond the initial architecture/documentation phase.
+Two workspaces are implemented and functional today:
 
-Progress is tracked in `TASKBOOK.md`; decisions are recorded in `DECISIONS.md`.
+- `services/api` — a FastAPI backend with async PostgreSQL persistence,
+  Alembic migrations, a Delta Exchange REST/WebSocket integration, an
+  in-process event bus, an in-memory market state manager, a market data
+  processing pipeline, and a read-only market data + system health/status/
+  metrics API. 319 tests passing at 93.74% coverage.
+- `apps/dashboard` — a Next.js/React/MUI dashboard with fully implemented
+  Health, Markets, and History pages (REST-polled, not real-time); Dashboard,
+  Research, Live Market, and Settings pages are still placeholders. 88 tests
+  passing.
+
+No feature store, prediction engine, backtesting, or trading execution
+capability exists yet — see `CLAUDE.md` for a full breakdown of what is
+implemented versus target-state, and `docs/architecture/` for the intended
+full system design.
+
+Progress is tracked in `TASKBOOK.md` (note: its progress tables currently lag
+behind actual implementation and are being brought up to date); decisions are
+recorded in `DECISIONS.md`.
 
 ## License
 

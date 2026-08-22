@@ -85,7 +85,7 @@ Priority is reassessed at the beginning of each milestone.
 
 Every micro-task follows a consistent workflow:
 
-1. **Prompt** — One focused OpenCode prompt that defines the scope of the micro-task.
+1. **Prompt** — One focused Claude Code prompt that defines the scope of the micro-task.
 2. **Commit** — One Git commit containing only the changes for that micro-task.
 3. **Review** — The commit is reviewed before being merged.
 
@@ -135,7 +135,7 @@ one review per task.
 
 ## Working Rules
 
-1. **One micro-task per prompt.** Each OpenCode prompt addresses exactly one micro-task
+1. **One micro-task per prompt.** Each Claude Code prompt addresses exactly one micro-task
    from the backlog. No scope creep within a single prompt.
 
 2. **One commit per micro-task.** Every completed micro-task produces exactly one Git

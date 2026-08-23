@@ -4,13 +4,15 @@ import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { useCallback } from 'react';
 
 /**
- * Keeps the selected symbol in the URL (`?symbol=`), mirroring the Live
- * Market Dashboard's `use-live-market-url-state.ts` — but symbol-only,
- * since an order book has no timeframe concept. Kept as its own small hook
- * rather than reusing the live-market one directly: reusing it would mean
- * writing a meaningless `timeframe` param into this page's URL.
+ * Keeps the selected symbol in the URL (`?symbol=`) for a page that has no
+ * other query-string state — originally built for the Order Book viewer,
+ * promoted here once the Live Trade Analytics dashboard needed the exact
+ * same behavior. Symbol-only, unlike the Live Market Dashboard's own
+ * `use-live-market-url-state.ts` (which also tracks `timeframe`) — reusing
+ * that one instead would mean writing a meaningless `timeframe` param into
+ * a URL for a page that has no timeframe concept.
  */
-export function useOrderBookUrlState() {
+export function useSymbolUrlState() {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();

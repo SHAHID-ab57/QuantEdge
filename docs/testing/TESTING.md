@@ -226,6 +226,131 @@ wrapped in `waitFor` rather than asserted immediately after `act()` —
 the same real-timer-vs-flush-interval race the live-market stream tests
 guard against.
 
+### Testing the Live Trade Analytics dashboard (frontend)
+
+The math is exhaustively covered with no rendering and no timers at all:
+`lib/session-stats.test.ts` (the O(1) accumulator folds correctly, is
+pure — folding never mutates the accumulator passed in — and never
+attributes an "unknown"-side trade to either side), `lib/rolling-window.test.ts`
+(1m/5m/15m VWAP are independently correct re-filters of one buffer, a
+record older than 15 minutes is excluded even if the underlying buffer
+still holds it, and buy/sell imbalance is bounded to `[-1, 1]`),
+`lib/ring-buffer.test.ts` (capacity is respected — the oldest entry is
+overwritten, never silently grown past — and iteration order matches
+insertion order across many wraps), `lib/sentiment.test.ts` (every
+threshold boundary), `lib/trade-highlight.test.ts` (the large-trade
+multiplier boundary), and `lib/metric-history.test.ts` (flattening
+samples into per-metric arrays for the sparklines).
+
+`engine/trade-analytics-engine.test.ts` tests `TradeAnalyticsEngine`
+directly — no React, no rendering, no timers — proving `ingest`/`snapshot`
+wire the pure functions above together correctly (an unparseable trade is
+silently dropped, `reset()` clears every accumulator including the sample
+history, sentiment is derived from the same rolling imbalance the numeric
+tiles show, and a trade older than 15 minutes never leaks into the 15m
+VWAP no matter how long the engine has run). Being framework-agnostic is
+what makes this level of direct testing possible — see `FRONTEND.md` §
+"Trade Analytics Engine."
+
+`hooks/use-trade-analytics.test.ts` proves the hook _wires the engine up
+correctly_ — every trade reaches it via `onTrade` (including a burst of
+ten delivered in one tick), a symbol change resets it, sentiment and
+sparkline history both update from streamed trades, and the tape stays
+capped at `maxTapeRows` independent of the session count. This file
+deliberately uses **real timers with `waitFor`**, not `vi.useFakeTimers()` —
+`use-market-stream.test.ts` uses fake timers successfully, but this hook
+additionally layers a real 1-second `useNow` tick on top of the rAF-batched
+flush, and driving both mechanisms through `vi.advanceTimersByTime` in the
+same test proved unreliable in practice (a scheduled commit would
+intermittently not have landed before the next assertion despite `act()`
+wrapping the advance, with the specific test affected varying run to run —
+a genuine flakiness discovered and fixed during this feature, not a defect
+in the hook itself, which a fully-isolated single-test run confirmed was
+already correct). The one test that needs the wall clock to move without a
+new trade arriving (rolling figures aging out during a quiet market) mocks
+`useNow` directly and forces a re-render, rather than waiting on any timer
+at all — deterministic, with no real waiting.
+
+The quant-workstation pass (2026-08-23) added matching coverage for the
+metrics it introduced: `lib/vwap-distance.test.ts` (null rather than
+infinity for a zero VWAP, correct sign either side of it),
+`lib/size-distribution.test.ts` (every trade lands in exactly one bucket,
+shares sum to 1, an outsized print reaches the open-ended top bucket, and —
+the property the design rests on — the same _shape_ of flow buckets
+identically at any magnitude, so the panel needs no per-symbol
+configuration), `lib/tape-export.test.ts` (metadata block, CSV quote
+escaping, a blank rather than `NaN` value for an unparseable trade), and
+`lib/metric-help.test.ts`, which asserts every entry in the contextual-help
+dictionary is complete, written as full sentences (so a screen reader
+announces prose), and short enough for a tooltip.
+
+Component tests cover the dashboard's visual-hierarchy pass individually:
+`sparkline.test.tsx` (a placeholder line with fewer than two known values,
+`null` gaps skipped rather than plotted as zero), `buy-sell-pressure-bar.test.tsx`
+and `market-sentiment-panel.test.tsx` (percentage split and chip color per
+sentiment label), `largest-trade-card.test.tsx` (Time/Side/Price/Quantity/
+Value all rendered, `Unavailable` before the first trade), and
+`trade-tape-filters.test.tsx` (side toggle and minimum-size field). The
+trade tape's own extensions are covered in `trade-tape.test.tsx`: a large
+trade is marked at or above `largeTradeThreshold` and left alone below it,
+and — the one test worth calling out — a pre-existing row's actual DOM
+node (captured before a re-render, compared with `toBe` after) survives a
+new trade being unshifted onto the front of the array, proving the
+stable-per-trade-object key fix actually stops the whole table body from
+remounting on every trade (the previous `${event_time}-${index}` key
+scheme would have failed this test, since every row's index — and
+therefore key — shifted on every new trade).
+
+### Asserting render cost, not just render output
+
+`trade-tape.render.test.tsx` is the unusual one: it measures **how many
+components actually re-rendered**, which neither the DOM nor Testing
+Library exposes — React reuses DOM nodes whether or not a component's body
+re-ran, so node-identity assertions (above) catch remounts but say nothing
+about wasted renders.
+
+The technique is to spy on a formatter every row render calls a fixed
+number of times (`formatDecimal`, mocked through to its real
+implementation), turning call count into an exact row-render count. The
+suite pins four properties: prepending one trade to a 100-row tape renders
+**one** row rather than 101; a parent re-render with identical props
+renders **zero**; a threshold change that newly flags a single row renders
+**one**; and a virtualized 400-row tape renders a bounded window rather
+than scaling with the list.
+
+This is worth the indirection because it found a real bug that reads as
+obviously correct in source: zebra-striping rows from their array index.
+Prepending a trade shifts every index, flipping that prop for every row and
+forcing a full re-render on each trade — 101 renders where one was
+intended. Striping from the stable per-trade key instead fixed it. No
+output-based test could have detected that, since the rendered stripes
+looked identical either way.
+
+`trades-page.test.tsx` mirrors the Order Book viewer's integration-test
+shape and additionally asserts: the tape's Trade Value column
+(price × quantity), statistics/VWAP/rolling analytics updating from
+streamed trades, a market switch resetting every accumulator, the
+max-rows selector changing the tape's cap, a Bullish sentiment chip
+derived from one-sided buying, both Largest Trade cards showing the same
+qualifying trade in full detail, the Buy filter narrowing the tape without
+touching session statistics, the minimum-size filter, and the large-trade
+highlight appearing only once a session baseline exists. The quant-
+workstation pass added: current price / session high / session low /
+VWAP distance in the primary band, the four labelled `region` landmarks
+(Order Flow, VWAP, Session Statistics, Connection) proving the page is
+grouped rather than flat, a representative Info button from every section
+proving contextual help reaches each one, the size distribution rendering
+over streamed trades, the "showing N of M rows" readout responding to a
+filter, and the CSV export enabling only once rows exist.
+
+Assertions read a specific `StatTile`'s value by walking from its
+(unambiguous) label up to the nearest ancestor holding a value node,
+rather than a bare `getByText` on the numeral — several tiles can
+legitimately show the same number (e.g. buy volume and trade count both
+being `2`), which a naive query would report as an ambiguous match. The
+walk-up (rather than a single `parentElement` hop) is what keeps the
+helper working now that each label shares a row with its Info button.
+
 ## End-to-End Tests
 
 Not implemented. `tests/` at the repo root is reserved for this; no browser
@@ -235,11 +360,29 @@ automation (Playwright/Cypress) is configured yet.
 
 **Backend**: `services/api/tests/performance/` (opt-in, `--run-performance`).
 
-**Frontend**: no dedicated performance/benchmark suite. The chart module's
-10,000-candle unit test (`data-adapter.test.ts`) verifies correctness at
-that scale, not wall-clock render performance — see `FRONTEND.md` § "Chart
-module → Performance considerations" for how large datasets are kept
-smooth.
+**Frontend**: two dedicated performance suites, both fast enough to run in
+the normal test pass rather than behind a flag.
+
+`src/features/live-market/components/trade-tape.render.test.tsx` asserts
+render counts directly — see "Asserting render cost, not just render
+output" above.
+
+`src/features/trades/engine/trade-analytics-engine.test.ts`'s sibling,
+`trade-analytics-engine.stress.test.ts`, simulates a ~30-minute,
+~12,000-trade sustained session by feeding synthetic timestamps to
+`TradeAnalyticsEngine` in a tight loop (no real waiting — it runs in under
+half a second) and asserts `ingest`/`snapshot` cost stays roughly flat
+across the session rather than growing, which is exactly the property the
+pre-ring-buffer implementation's O(n)-per-trade array copy would have
+failed. This is a disclosed proxy for verifying stability over a long
+streaming session, not a substitute for one: this environment has no
+browser automation available to actually leave a tab open for 30 real
+minutes and measure heap growth or paint timing, so that verification
+remains outstanding — see `FRONTEND.md` § "Performance verification and
+its limits." The chart module's 10,000-candle unit test
+(`data-adapter.test.ts`) similarly verifies correctness at scale, not
+wall-clock render performance — see `FRONTEND.md` § "Chart module →
+Performance considerations" for how large datasets are kept smooth.
 
 ## Test Automation
 

@@ -13,8 +13,9 @@ backend surface the frontend consumes).
 
 Active — `apps/dashboard` implements Health, Markets, History (with a
 candlestick chart), Live Market (resolved market selection, real-time
-price/chart/trade tape, and an operational connection panel), and Order
-Book (live depth tables, spread, and cumulative-depth visualization).
+price/chart/trade tape, and an operational connection panel), Order Book
+(live depth tables, spread, and cumulative-depth visualization), and Trade
+Analytics (live trade tape, session/rolling statistics, and VWAP).
 Dashboard, Research, and Settings remain placeholders.
 
 ## Stack
@@ -777,6 +778,454 @@ malformed `orderbook` frame in `order-book-page.test.tsx`.
   session (React DevTools Profiler flame graphs, an actual heap snapshot
   diff) has not been captured and would be the natural next validation
   step before a production rollout at real trading-desk scale.
+
+## Live Trade Analytics Dashboard
+
+`/trades` (`src/features/trades/`) is a quantitative research workstation
+for the executed trades of one symbol: a primary price band (current price,
+session high/low, distance from VWAP, live trades-per-second), order-flow
+analytics (market sentiment, buy/sell pressure gauges, rolling per-minute
+figures with sparkline trends, a trade size distribution), session and
+rolling (1m/5m/15m) VWAP, session-wide buy/sell statistics with dedicated
+Largest Trade cards, and a live trade tape (Trade Value column,
+incoming-row animation, unusually-large-trade highlight, zebra striping,
+sticky header and timestamp column, Buy/Sell/All + minimum-size filters,
+and CSV export of the visible rows) — all derived from the same `trade`
+messages the backend gateway already relays, never a new data source or a
+new connection type. Everything shown is a rule-based transformation of
+data this platform already computes (a threshold table over an existing
+imbalance figure, a fixed multiplier over an existing average) —
+deliberately not AI, a model, or a trading signal; see "Market sentiment is
+a label, not a prediction" below.
+
+### Information hierarchy
+
+A quant-UI review (2026-08-23) restructured the page around descending
+visual weight, replacing a flat run of same-weight `Paper`s separated by
+rules — which gave a reader no entry point and spent a lot of vertical
+space on separators:
+
+1. **`PriceHeader`** — the primary band. Current price at the top of the
+   type scale (coloured by the last trade's aggressor side), with session
+   high/low, distance from VWAP, and a live activity indicator beside it.
+   Its top border turns green while trades are actually printing, so a
+   frozen feed looks frozen rather than pulsing reassuringly at a stale
+   number.
+2. **`Section`s** — Order Flow, VWAP, Session Statistics, Connection. Each
+   is one bordered surface with its heading and scope subtitle built in,
+   wired as `<section aria-labelledby>` so a screen reader can navigate the
+   page by landmark. Related metrics read as one block, and the gap
+   _between_ sections (rather than a rule plus two margins) separates them.
+3. **The trade tape** — filters, export, and table, last because it is
+   detail rather than summary.
+
+Panels that used to render their own `Paper` (`StatsCards`, `VwapPanel`,
+`RollingAnalyticsPanel`, `MarketSentimentPanel`) now render bare tiles and
+let their `Section` supply the single border, so the page no longer nests
+borders inside borders.
+
+### Contextual help on every metric
+
+Every metric carries an Info button (`components/metric-info.tsx`) whose
+tooltip answers four questions in a fixed order — what it is, why it
+matters, how it's calculated (where that isn't self-evident), and how to
+read a typical value. All copy lives in one dictionary,
+`lib/metric-help.ts`, so a metric appearing in two panels cannot drift into
+two different explanations; a test asserts every entry is complete, written
+as full sentences, and short enough for a tooltip.
+
+The affordance is a real `IconButton`, not a decorative icon: it is in the
+tab order, MUI opens its tooltip on focus as well as hover, and its
+`aria-label` names the metric ("About Session VWAP") rather than repeating
+a bare "info button" a dozen times down the page. The icon itself is
+`aria-hidden`, and `enterTouchDelay={0}` makes it usable where there is no
+hover state at all.
+
+### Trade Analytics Engine
+
+A follow-up quant-UI/performance review (2026-08-23) moved every
+calculation behind a single framework-agnostic class,
+`engine/trade-analytics-engine.ts`'s `TradeAnalyticsEngine`, so
+`hooks/use-trade-analytics.ts` — and every component below it — only ever
+consumes already-computed state:
+
+- **`ingest(trade)`** folds one trade into the session accumulator and the
+  rolling window. **`snapshot(nowMs)`** computes everything derived from
+  current state — session stats, VWAP, rolling analytics, sentiment, and
+  the sparkline history — in one call.
+- The hook owns exactly one engine instance per mount (in a `useRef`),
+  discarded and rebuilt on a symbol change, and does nothing else with
+  trade data itself: `onTrade` calls `engine.ingest`, and a `useMemo` calls
+  `engine.snapshot`. No component, and no other hook code, calls a pure
+  calculation function or touches an accumulator directly.
+- Being plain TypeScript with no React import, the engine is unit-tested
+  directly (`trade-analytics-engine.test.ts`) with no rendering, timers, or
+  React Testing Library involved — see `TESTING.md`.
+
+### Reuse over duplication
+
+This is the third page built on the `/api/v1/ws/market` gateway, and the
+third time market resolution and the connection panel were needed — rather
+than a third implementation of either:
+
+- **`useMarketStream`** is reused via a new wrapper hook,
+  `hooks/use-trade-analytics.ts`, with `channels: { trades: true, ticker:
+false, orderBook: false }` — this page never reads ticker or order-book
+  data, so both are dropped by the gateway-agnostic channel option before
+  they touch a buffer or schedule a commit (see "Live Order Book Viewer →
+  Performance considerations" for why that option exists).
+- **`useLiveTrackedMarket`** and **`useSymbolUrlState`** — originally
+  written for the Order Book viewer as `useOrderBookMarket`/
+  `useOrderBookUrlState` — were promoted to `src/features/live-market/hooks/`
+  and renamed once this page needed the exact same behavior, rather than
+  becoming a third copy-paste. Both are genuinely name-appropriate now:
+  neither is order-book-specific, and both are reused here unmodified.
+- **`ConnectionStatus`**, **`MarketSelector`**, and **`remembered-market.ts`**
+  are imported directly, exactly as the Order Book viewer already does.
+- **`TradeTape`** (from the Live Market Dashboard) is reused, extended with
+  an optional `showTradeValue` prop (default `false`, so the Live Market
+  Dashboard's existing four-column tape is unchanged) rather than forked
+  into a near-duplicate component.
+- **`StatTile`** (`src/components/stat-tile.tsx`) is a new shared
+  component, extracted once a _third_ page needed the same "label + big
+  value" tile the Live Market price card and the Order Book spread panel
+  had each implemented locally. The existing two call sites were left
+  as-is (no regression risk taken for a pure refactor); new stat displays
+  should use the shared component going forward.
+- **Depth/rolling-window math has no backend dependency**: everything here
+  is computed client-side from the trade stream the platform already
+  relays — no new endpoint, no new bus event, no backend change of any
+  kind was needed for this feature.
+
+### Why the analytics can't be derived from the trade tape's own array
+
+`useMarketStream`'s `trades` array exists for _display_ and is capped at
+`maxTrades` (the tape's configurable row limit — 25 to 200 here via
+`MaxRowsSelector`). A 15-minute rolling VWAP, or a session-wide statistic
+that must never forget a trade's contribution, cannot be correctly derived
+from an array that intentionally forgets old entries once it's full. Two
+things make this page's numbers exact regardless of the tape's cap:
+
+- **`onTrade`**, a new option on `useMarketStream` (see its own docstring):
+  called synchronously for every genuine trade message that passes the
+  symbol/channel filters, _before_ rAF batching or the `maxTrades` cap
+  apply. `use-trade-analytics.ts` folds each one into two `useRef`-held
+  accumulators that the tape's own capping never touches.
+- **A session accumulator** (`lib/session-stats.ts`) — O(1) running sums
+  (buy/sell/total volume and notional, count, largest trade) folded in one
+  trade at a time. It holds a handful of numbers, not a list, so it can't
+  grow unbounded regardless of how long the session runs — a deliberate
+  design choice, not an afterthought, given the Order Book performance
+  pass's lesson about unnecessary re-renders and unbounded state earlier
+  in this project.
+- **A rolling window backed by a `RingBuffer`** (`lib/ring-buffer.ts`,
+  used by the engine at a fixed 20,000-entry capacity — generously above
+  any real market's plausible 15-minute trade count). `RingBuffer.push` is
+  O(1) and never copies existing entries, unlike the array-based
+  `[...records, trade].slice()` approach this replaced, which re-copied
+  the whole buffer on every single trade. Because the buffer is
+  capacity-bounded rather than time-bounded, every window calculation
+  (`computeVwapSet`, `computeRollingAnalytics` in `lib/rolling-window.ts`)
+  filters by timestamp at _read_ time via a binary search over the
+  buffer's time-sorted contents (O(log n), not the O(n) `.filter()` this
+  replaced) — a trade merely being _retained_ can never leak into a
+  window it has actually aged out of. 1m/5m/15m VWAP and the "per minute"
+  rolling analytics are cheap re-filters of that one buffer, not three
+  separately-maintained ones.
+- **A separate, much smaller metric-history ring buffer**
+  (`lib/metric-history.ts`, 150 entries, sampled at most once every 2
+  seconds) feeds the sparklines below — a trail of already-computed
+  rolling figures over time, not raw trades. It piggybacks on the same
+  `snapshot()` calls the hook already makes rather than running a second
+  timer.
+
+### Data flow
+
+```mermaid
+flowchart LR
+    A["/api/v1/ws/market
+(trade messages only — ticker/orderbook disabled)"] --> B["useMarketStream
+(onTrade fires per trade, before batching/capping)"]
+    B --> C["TradeAnalyticsEngine.ingest()
+(engine/trade-analytics-engine.ts, useRef)"]
+    C --> D["SessionAccumulator
+(O(1) running totals)"]
+    C --> E["RingBuffer<TradeRecord>
+(rolling window, capacity-bounded)"]
+    D --> F["engine.snapshot(now)"]
+    E --> F
+    F --> G["sessionStats / vwap / rolling / sentiment /
+history / vwapDistance / sizeDistribution"]
+    G --> H["PriceHeader / StatsCards / VwapPanel / RollingAnalyticsPanel /
+MarketSentimentPanel / TradeSizeDistribution / LargestTradeCard × 2"]
+    B --> I["TradeTape
+(filters + animation + large-trade highlight)"]
+```
+
+### Component hierarchy
+
+```text
+TradesPage                     resolves symbol; owns max-rows/side/min-size filter state
+├── MarketSelector             reused from the chart module
+├── MaxRowsSelector             25/50/100/200, same ToggleButtonGroup pattern
+│                              as the Order Book's DepthSelector
+├── PriceHeader                 PRIMARY BAND — current price, session high/low,
+│                              distance from VWAP, live trades/second
+├── TradeAnalyticsEmptyState   untracked / no trade yet / reconnecting
+├── Section "Order Flow"
+│   ├── MarketSentimentPanel    sentiment chip + buy/sell pressure gauge
+│   ├── RollingAnalyticsPanel   trades/min, volume/min, avg size — each with
+│   │                          a sparkline — plus buy/sell imbalance
+│   └── TradeSizeDistribution   5-bucket histogram, relative to window average
+├── Section "VWAP"
+│   └── VwapPanel               session + 1m/5m/15m VWAP, 1m VWAP sparkline
+├── Section "Session Statistics"
+│   ├── StatsCards              buy/sell/total volume, ratio + pressure bar,
+│   │                          avg size, trade count
+│   └── LargestTradeCard × 2     session and last-minute, each showing
+│                              Time/Side/Price/Quantity/Value explicitly
+├── Section "Connection"
+│   └── ConnectionStatus        reused from Live Market, unmodified
+├── TradeTapeFilters             Buy/Sell/All toggle, minimum-size field,
+│                              "showing N of M" readout, CSV export
+│                              (display-only — never touches the engine)
+└── TradeTape                   reused from Live Market, showTradeValue,
+                                largeTradeThreshold, virtualize, stable keys
+```
+
+Every metric-bearing component above renders a `MetricInfo` button beside
+its label — see "Contextual help on every metric".
+
+### Recomputation cadence
+
+The engine's `snapshot()` recomputes only when `stream.lastTradeAt`
+changes (a new trade genuinely arrived) or on a 1-second wall-clock tick
+(`useNow`, already used elsewhere in this codebase for the same purpose) —
+the latter is what lets the rolling window and sparklines visibly age out
+during a quiet market instead of freezing on stale data. Every panel
+component (`StatsCards`, `VwapPanel`, `RollingAnalyticsPanel`,
+`MarketSentimentPanel`, `LargestTradeCard`, `Sparkline`,
+`BuySellPressureBar`) is `React.memo`-wrapped, so a re-render triggered by
+one recomputed slice of the snapshot does not touch a sibling whose own
+props are unchanged (React's shallow prop comparison short-circuits it).
+
+### Sparklines are plain, dependency-free SVG
+
+`components/sparkline.tsx`'s `Sparkline` renders one `<path>` from a
+`(number | null)[]`, memoized on that array's reference — deliberately not
+a `lightweight-charts` instance. That library is the right tool for the
+full candlestick chart elsewhere in this codebase; recreating it per stat
+tile would be actively wasteful for a few dozen points. A plain SVG
+re-render on new data _is_ the "incremental update" a sparkline needs:
+there is no persistent chart-engine instance to tear down, so the usual
+"don't recreate the chart" concern for a heavier library doesn't apply
+here in the first place. Points are spaced by index, not by real time
+gaps — the right simplification when "is it trending up or down" matters
+far more than exact spacing.
+
+### Market sentiment is a label, not a prediction
+
+`lib/sentiment.ts`'s `deriveSentiment` is a fixed threshold table
+(`±0.5` "strongly" one-sided, `±0.15` a mild lean, otherwise neutral) over
+`RollingAnalytics.buySellImbalance` — a number this dashboard already
+computed for the imbalance stat tile. It classifies what already happened
+in the trailing minute; it recommends nothing and predicts nothing about
+what happens next, so it is not AI, a model, or a trading signal.
+`MarketSentimentPanel` pairs the resulting chip with `BuySellPressureBar`
+(also reused by `StatsCards` at the session level) — a compact split bar
+showing buy volume's share vs. sell volume's, a proportional-width
+alternative to reading "Buy/Sell Ratio" as a bare number.
+
+### Trade tape: stable keys, animation, highlighting, and filters
+
+- **Stable per-trade row identity**: `TradeTape` previously keyed rows by
+  `${event_time}-${index}`. Since `trades` is newest-first and a new trade
+  is unshifted onto the front, _every_ existing row's index — and
+  therefore its key — changed on _every_ new trade, so React discarded and
+  remounted the entire table body each time. `useTradeKeys` (in
+  `trade-tape.tsx`) fixes this by assigning each trade object a stable id
+  the first time it's seen, in a `WeakMap` keyed by object identity (every
+  trade the socket delivers is a distinct object, created once and never
+  mutated — see `use-market-stream.ts`). Only a genuinely new trade now
+  mounts a fresh row; the `WeakMap` needs no manual cleanup, since entries
+  for trades that fall out of `maxTrades` are reclaimed once nothing else
+  references them.
+- **Enter animation**: a new row plays a brief highlight-fade
+  (`@keyframes tradeRowEnter`, 900ms) — which only fires correctly _because_
+  of the stable-key fix above (a CSS animation on mount fires once per
+  mount, and now only the truly new row mounts).
+- **Large-trade highlight**: `TradeTape`'s new `largeTradeThreshold` prop
+  (a notional value) tints a qualifying row and adds a "Large" marker.
+  `TradesPage` computes it as the session average trade notional
+  (`SessionStats.avgTradeValue`) times a fixed multiplier
+  (`lib/trade-highlight.ts`'s `LARGE_TRADE_MULTIPLIER = 5`) — both props
+  default to `undefined`/off, so the Live Market Dashboard's tape is
+  unchanged.
+- **Buy/Sell/All and minimum-size filters** (`components/trade-tape-filters.tsx`):
+  filter the tape's _display_ only. `TradesPage` filters `analytics.trades`
+  before passing it to `TradeTape`; the underlying session/rolling
+  accumulators inside the engine keep seeing every trade regardless of
+  what the user is currently filtering for, so switching filters can never
+  make a statistic look like it lost data. A "showing N of M rows" readout
+  makes that distinction visible, so a filtered tape is never mistaken for
+  a market that went quiet. When no filter is active the page hands back
+  the _same array reference_, letting the memoized `TradeTape` skip
+  re-rendering entirely.
+- **Memoized rows**: each row is its own `React.memo` component. Its props
+  are all primitives except `trade`, which is a stable, never-mutated
+  object, so React's default shallow comparison is exactly right — no
+  custom comparator needed (unlike the Order Book's rows, whose props are
+  recomputed numbers).
+- **Zebra striping by stable key, not by index**: striping from the array
+  index looked obvious and was measurably wrong. Prepending a trade shifts
+  every index by one, flipping the stripe prop for _every_ row and forcing
+  a full re-render on each trade — measured at 101 row renders per trade.
+  Striping from the row's stable per-trade key instead keeps rows'
+  props unchanged, cutting that to 1. The trade-off: a filtered-out or
+  capped-off trade leaves a gap in the key sequence, which can put two
+  same-shade rows together. A cosmetic imperfection in a filtered view is
+  a fair price for not re-rendering a hundred rows several times a second.
+- **Sticky header and sticky timestamp column**: the header uses MUI's
+  `stickyHeader`; the Time cell is `position: sticky; left: 0` so the one
+  column that identifies a row survives horizontal scroll on a narrow
+  viewport. Sticky cells restate their row's effective background as a
+  solid colour, or rows scrolling beneath would show through them.
+- **Virtualization** (opt-in via `virtualize`, and only above
+  `VIRTUALIZE_THRESHOLD = 60` rows): renders only the rows near the
+  viewport, replacing the rest with two spacer rows that reserve their
+  exact height so the scrollbar behaves normally. The spacers are
+  `aria-hidden`, so assistive tech — and `getAllByRole('row')` — see only
+  real trades, while `aria-rowcount` still announces the true total. Off by
+  default, so the Live Market Dashboard's short tape is unchanged.
+
+### Performance verification and its limits
+
+Three layers, in increasing distance from the real thing:
+
+1. **Render-cost assertions** (`trade-tape.render.test.tsx`) — the
+   "profile rendering, eliminate unnecessary re-renders" work expressed as
+   a regression guard rather than a one-off profiler session nothing would
+   keep honest. Every row render calls the shared `formatDecimal` a fixed
+   number of times, so spying on that formatter yields an exact count of
+   _how many rows actually re-rendered_ — something neither the DOM nor
+   Testing Library exposes, since React reuses DOM nodes whether or not a
+   component body re-ran. The suite pins: one row render when a trade is
+   prepended to a 100-row tape (not 101), zero when the parent re-renders
+   with identical props, one when a threshold change newly flags a single
+   row, and a bounded window when virtualized. The zebra-striping bug above
+   was found by this test, not by inspection.
+2. **A sustained-load stress test**
+   (`engine/trade-analytics-engine.stress.test.ts`) simulates a
+   ~30-minute, ~12,000-trade session by feeding synthetic timestamps to the
+   engine in a tight loop (no real waiting) and asserts `ingest`+`snapshot`
+   cost stays roughly flat across the session rather than growing — the
+   property that would have caught the pre-ring-buffer implementation's
+   O(n) per-trade cost.
+3. **What is still not verified**: this environment has no browser
+   automation, so nothing here measures real paint timing or heap growth
+   over a genuinely long live session. Layers 1 and 2 establish that
+   neither the computational core nor the render path _can_ degrade with
+   session length; an actual multi-hour soak in a browser remains
+   outstanding, and is stated as outstanding rather than assumed away.
+
+### Cleanup
+
+Every subscription and timer on this page is owned by a hook that tears it
+down: `useMarketStream` closes its socket, stops reconnecting, and cancels
+any pending animation frame on unmount (covered by its own tests, plus one
+at the `useTradeAnalytics` level for the composed behaviour); `useNow`
+clears its interval; the engine holds no timer at all, sampling instead on
+the recompute calls the hook already makes. The tape's `WeakMap` of row
+keys needs no cleanup by construction.
+
+### VWAP is "since this page connected," not the exchange's trading session
+
+Same limitation as the Live Market Dashboard's synthesized candle: the
+platform stores OHLCV candles, not a historical trade log, so there is no
+way to reconstruct VWAP from the start of the exchange's own trading
+session. "Session VWAP" here means "volume-weighted average of every
+trade this browser tab has observed since subscribing" — documented on
+the stat's own tooltip, not left as an unstated assumption.
+
+### The "largest trade" is by notional value, not by quantity
+
+`LargestTradeCard` (used once for the session-wide figure and once for
+the trailing one-minute figure) defines "largest" as the trade with the
+highest `price × quantity` (see `TradeRecord.value`, `lib/trade-record.ts`),
+since a large quantity of a cheap asset and a small quantity of an
+expensive one aren't comparable by quantity alone — notional value is what
+matters for market-impact analysis. Each card shows Time, Side, Price,
+Quantity, and Value explicitly, rather than the single value-plus-caption
+`StatTile` `StatsCards`/`RollingAnalyticsPanel` used before this dashboard's
+quant-UI review.
+
+### Trade size distribution is bucketed relative to the window average
+
+`lib/size-distribution.ts` buckets the last minute's trades by size as a
+_multiple of that minute's own average_ (`<0.5×`, `0.5–1×`, `1–2×`,
+`2–5×`, `≥5×`) rather than by absolute quantity. Relative bucketing is what
+makes the panel readable across wildly different markets with no
+per-symbol configuration: "most trades under half the average, with a thin
+5×+ tail" means the same thing on a $2 asset and a $70,000 one, whereas
+fixed absolute buckets would be meaningless on one of them. A test pins
+that scale-invariance directly.
+
+It exists because the average trade size alone hides the shape of the
+flow — the ≥5× bucket is exactly what pulls that average around, and it is
+drawn in the warning colour for that reason. Bars are scaled against the
+tallest bucket rather than against 100%, so the shape stays legible when
+every bucket holds a small share.
+
+### Accessibility
+
+- **Keyboard**: every control is a real button or input — the Info
+  affordances, side filters, minimum-size field, row-cap toggles, market
+  selector, and CSV export are all in the tab order, and MUI opens
+  tooltips on focus as well as hover.
+- **Structure**: each `Section` is a `<section aria-labelledby>` landmark;
+  the tape's column headers carry `scope="col"` and the table carries
+  `aria-rowcount` (correct even while virtualized).
+- **Announcements**: metric panels are `role="status"` regions with names
+  (`"ETHUSD price summary"`, `"Trade statistics"`, `"Rolling analytics
+(last minute)"`). Bars and gauges are `role="meter"` with
+  `aria-valuenow`/`aria-valuetext`, so the size-distribution histogram
+  announces both a percentage and a raw count ("10% of trades, 1 of 10")
+  rather than a bare number. Decorative elements — the activity pulse dot,
+  the virtualization spacer rows, the info glyphs — are `aria-hidden`.
+- **Contrast**: figures use the theme's `success.main` / `error.main` /
+  `warning.main` against the dark `background.paper`, and colour is never
+  the only channel: the sentiment chip carries a text label, VWAP distance
+  carries an explicit sign, and large trades carry a "Large" text marker
+  alongside their tint.
+
+### Error handling
+
+`TradeAnalyticsEmptyState` covers: an untracked market (explicitly
+requested or not), no trade printed yet (split into "connected, just
+quiet" vs. "reconnecting" vs. "not connected") with a retry, mirroring the
+Order Book viewer's `OrderBookEmptyState` in shape but with trade-specific
+copy (the two aren't merged, for the same reason `OrderBookEmptyState`
+wasn't merged with `MarketDataNotice`). An invalid trade payload (fails
+`LiveTradeDataSchema`) is dropped by `useMarketStream`'s existing
+Zod-validation gate before it ever reaches `onTrade` — the same
+silent-drop-and-keep-the-old-value behavior as every other message type on
+this gateway.
+
+### Extension points
+
+- **Depth/rolling windows beyond what's here**: `MASTER_WINDOW_MS` in
+  `lib/rolling-window.ts` is the only constant governing how far back the
+  buffer reaches; a longer rolling window (e.g. 30m/1h) is a constant
+  change, not a redesign. The `RingBuffer`'s capacity
+  (`ROLLING_WINDOW_CAPACITY` in `engine/trade-analytics-engine.ts`, 20,000)
+  would need to grow alongside it — it must always comfortably exceed the
+  most trades a real market could produce within the new window, or the
+  oldest still-relevant trades would be silently overwritten before their
+  window naturally expired.
+- **Reconstructing the true exchange trading-session VWAP** would need a
+  backend historical trade log — out of scope today (see "VWAP is 'since
+  this page connected'" above) and would be a backend project of its own,
+  not a frontend change.
 
 ## State management
 

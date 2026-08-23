@@ -13,6 +13,8 @@ import {
   type StreamChannels,
 } from '@/features/live-market/hooks/use-market-stream';
 import { readRememberedMarket, rememberMarket } from '@/features/live-market/lib/remembered-market';
+import { useLiveTrackedMarket } from '@/features/live-market/hooks/use-live-tracked-market';
+import { useSymbolUrlState } from '@/features/live-market/hooks/use-symbol-url-state';
 import { useSystemHealth, useSystemStatus } from '@/features/health/hooks/use-system-data';
 import { useMarkets } from '@/features/markets/hooks/use-markets-data';
 import { useNow } from '@/features/markets/hooks/use-now';
@@ -20,8 +22,6 @@ import { DepthSelector } from './components/depth-selector';
 import { OrderBookEmptyState } from './components/order-book-empty-state';
 import { OrderBookTable } from './components/order-book-table';
 import { SpreadPanel } from './components/spread-panel';
-import { useOrderBookMarket } from './hooks/use-order-book-market';
-import { useOrderBookUrlState } from './hooks/use-order-book-url-state';
 import {
   computeDepthRows,
   computeSpread,
@@ -52,13 +52,13 @@ const ORDER_BOOK_CHANNELS: StreamChannels = { trades: false, ticker: false, orde
  */
 export function OrderBookPage() {
   const now = useNow();
-  const { requestedSymbol, apply } = useOrderBookUrlState();
+  const { requestedSymbol, apply } = useSymbolUrlState();
   const [remembered] = useState(readRememberedMarket);
 
   const markets = useMarkets();
   const health = useSystemHealth();
   const status = useSystemStatus();
-  const market = useOrderBookMarket(requestedSymbol, remembered.symbol);
+  const market = useLiveTrackedMarket(requestedSymbol, remembered.symbol);
   const symbol = market.symbol;
 
   useEffect(() => {

@@ -44,6 +44,24 @@ export interface UseMarketStreamOptions {
    * nobody reads would be the very re-render this option exists to avoid.
    */
   channels?: StreamChannels;
+  /**
+   * Called synchronously for every genuine `trade` message that passes the
+   * symbol and channel filters — once per trade, exactly once, regardless
+   * of rAF batching or `maxTrades`. Two things make this necessary rather
+   * than just watching `latestTrade`/`trades`: `latestTrade` only reflects
+   * the last trade of whatever batch a given animation frame coalesced, so
+   * a burst within one frame would silently drop every trade but the final
+   * one from anything only watching that field; and `trades` is capped at
+   * `maxTrades` for *display*, so a consumer accumulating something
+   * session-wide (a running sum, a rolling window) would lose data once
+   * older entries age out of that cap. `onTrade` sees every trade before
+   * either of those apply, so a caller can fold it into its own
+   * accumulator (e.g. a `useRef`) with no risk of missing one. Not called
+   * for a snapshot's `trade` field — that's a replay of already-known
+   * state at subscribe time, not a new live print, so counting it here
+   * would double-count the first real trade of a session's contribution.
+   */
+  onTrade?: (trade: LiveTradeData) => void;
   /** Overridable for tests; defaults to deriving from `NEXT_PUBLIC_API_URL`. */
   streamUrl?: string;
 }
@@ -131,7 +149,11 @@ function emptyPending(): PendingUpdate {
  * still in flight when the user switches markets can never be attributed
  * to the new one, and against `options.channels` (see there) so a
  * consumer that doesn't track a given message type pays nothing for it —
- * not a wasted array push, not a wasted commit.
+ * not a wasted array push, not a wasted commit. `options.onTrade` (see
+ * there) is the escape hatch for a caller that needs to see *every* trade
+ * exactly once regardless of that batching or of `maxTrades`' display cap
+ * — the Live Trade Analytics dashboard's session/rolling-window
+ * accumulation is built on it.
  */
 export function useMarketStream(
   symbol: string | null,
@@ -148,6 +170,8 @@ export function useMarketStream(
   maxTradesRef.current = maxTrades;
   const channelsRef = useRef(channels);
   channelsRef.current = channels;
+  const onTradeRef = useRef(options.onTrade);
+  onTradeRef.current = options.onTrade;
 
   useEffect(() => {
     if (!symbol) {
@@ -268,6 +292,7 @@ export function useMarketStream(
         }
         pending.trades.push(message.data);
         pending.lastTradeAt = now;
+        onTradeRef.current?.(message.data);
       } else if (message.type === 'ticker') {
         if (!active.ticker) {
           return;

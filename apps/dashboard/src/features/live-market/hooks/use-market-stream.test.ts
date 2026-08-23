@@ -666,3 +666,114 @@ describe('useMarketStream channels option', () => {
     expect(result.current.latencyMs).not.toBeNull();
   });
 });
+
+describe('useMarketStream onTrade callback', () => {
+  it('calls onTrade synchronously for every trade, not batched by the frame', () => {
+    const onTrade = vi.fn();
+    renderHook(() => useMarketStream('ETHUSD', { streamUrl: 'ws://test/ws/market', onTrade }));
+    act(() => latestSocket().triggerOpen());
+
+    act(() => {
+      for (let i = 0; i < 5; i += 1) {
+        latestSocket().triggerMessage({
+          type: 'trade',
+          symbol: 'ETHUSD',
+          data: {
+            price: String(100 + i),
+            size: '1',
+            side: 'buy',
+            event_time: '2026-01-01T00:00:00Z',
+          },
+        });
+      }
+    });
+
+    // All five, even though they land in a single rAF-batched commit.
+    expect(onTrade).toHaveBeenCalledTimes(5);
+    expect(onTrade.mock.calls.map((call) => call[0].price)).toEqual([
+      '100',
+      '101',
+      '102',
+      '103',
+      '104',
+    ]);
+  });
+
+  it('never calls onTrade for a snapshot trade — only genuine live prints', () => {
+    const onTrade = vi.fn();
+    renderHook(() => useMarketStream('ETHUSD', { streamUrl: 'ws://test/ws/market', onTrade }));
+    act(() => latestSocket().triggerOpen());
+
+    deliver({
+      type: 'snapshot',
+      symbol: 'ETHUSD',
+      trade: { price: '100', size: '1', side: 'buy', event_time: '2026-01-01T00:00:00Z' },
+      ticker: null,
+      orderbook: null,
+    });
+
+    expect(onTrade).not.toHaveBeenCalled();
+  });
+
+  it('never calls onTrade when the trades channel is disabled', () => {
+    const onTrade = vi.fn();
+    renderHook(() =>
+      useMarketStream('ETHUSD', {
+        streamUrl: 'ws://test/ws/market',
+        channels: { trades: false, ticker: false, orderBook: true },
+        onTrade,
+      }),
+    );
+    act(() => latestSocket().triggerOpen());
+
+    deliver({
+      type: 'trade',
+      symbol: 'ETHUSD',
+      data: { price: '100', size: '1', side: 'buy', event_time: '2026-01-01T00:00:00Z' },
+    });
+
+    expect(onTrade).not.toHaveBeenCalled();
+  });
+
+  it('never calls onTrade for a trade on a different symbol', () => {
+    const onTrade = vi.fn();
+    renderHook(() => useMarketStream('ETHUSD', { streamUrl: 'ws://test/ws/market', onTrade }));
+    act(() => latestSocket().triggerOpen());
+
+    act(() => {
+      latestSocket().triggerMessage({
+        type: 'trade',
+        symbol: 'BTCUSD',
+        data: { price: '70000', size: '1', side: 'buy', event_time: '2026-01-01T00:00:00Z' },
+      });
+    });
+
+    expect(onTrade).not.toHaveBeenCalled();
+  });
+
+  it('picks up a changed onTrade callback without reconnecting', () => {
+    const first = vi.fn();
+    const second = vi.fn();
+    const { rerender } = renderHook(
+      ({ cb }) =>
+        useMarketStream('ETHUSD', {
+          streamUrl: 'ws://test/ws/market',
+          onTrade: cb,
+        }),
+      { initialProps: { cb: first } },
+    );
+    act(() => latestSocket().triggerOpen());
+    const socketCountBefore = FakeWebSocket.instances.length;
+
+    rerender({ cb: second });
+    deliver({
+      type: 'trade',
+      symbol: 'ETHUSD',
+      data: { price: '100', size: '1', side: 'buy', event_time: '2026-01-01T00:00:00Z' },
+    });
+
+    expect(FakeWebSocket.instances.length).toBe(socketCountBefore); // no reconnect
+    expect(first).not.toHaveBeenCalled();
+    expect(second).toHaveBeenCalledTimes(1);
+  });
+});

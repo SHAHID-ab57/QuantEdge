@@ -6,7 +6,7 @@ import * as marketApi from '@/lib/api/market';
 import * as systemApi from '@/lib/api/system';
 import type { Market, MarketList } from '@/types/api/market';
 import type { SystemMetrics } from '@/types/api/system';
-import { useOrderBookMarket } from './use-order-book-market';
+import { useLiveTrackedMarket } from './use-live-tracked-market';
 
 vi.mock('@/lib/api/market', () => ({ fetchMarkets: vi.fn() }));
 vi.mock('@/lib/api/system', () => ({ fetchSystemMetrics: vi.fn() }));
@@ -73,12 +73,12 @@ function wrapper({ children }: { children: ReactNode }) {
   return <QueryClientProvider client={client}>{children}</QueryClientProvider>;
 }
 
-describe('useOrderBookMarket', () => {
+describe('useLiveTrackedMarket', () => {
   it('resolves to ETHUSD rather than the alphabetically-first untracked market', async () => {
     mockedMarket.fetchMarkets.mockResolvedValue(markets(['1000BONKUSD', 'ETHUSD', 'BTCUSD']));
     mockedSystem.fetchSystemMetrics.mockResolvedValue(metrics({ ETHUSD: '1900', BTCUSD: '70000' }));
 
-    const { result } = renderHook(() => useOrderBookMarket(null, null), { wrapper });
+    const { result } = renderHook(() => useLiveTrackedMarket(null, null), { wrapper });
 
     await waitFor(() => expect(result.current.symbol).toBe('ETHUSD'));
     expect(result.current.isUntracked).toBe(false);
@@ -88,7 +88,7 @@ describe('useOrderBookMarket', () => {
     mockedMarket.fetchMarkets.mockResolvedValue(markets(['1000BONKUSD', 'ETHUSD']));
     mockedSystem.fetchSystemMetrics.mockResolvedValue(metrics({ ETHUSD: '1900' }));
 
-    const { result } = renderHook(() => useOrderBookMarket('1000BONKUSD', null), { wrapper });
+    const { result } = renderHook(() => useLiveTrackedMarket('1000BONKUSD', null), { wrapper });
 
     await waitFor(() => expect(result.current.symbol).toBe('1000BONKUSD'));
     expect(result.current.isUntracked).toBe(true);
@@ -98,7 +98,7 @@ describe('useOrderBookMarket', () => {
     mockedMarket.fetchMarkets.mockResolvedValue(markets(['ETHUSD', 'BTCUSD']));
     mockedSystem.fetchSystemMetrics.mockResolvedValue(metrics({ ETHUSD: '1900', BTCUSD: '70000' }));
 
-    const { result } = renderHook(() => useOrderBookMarket(null, 'BTCUSD'), { wrapper });
+    const { result } = renderHook(() => useLiveTrackedMarket(null, 'BTCUSD'), { wrapper });
 
     await waitFor(() => expect(result.current.symbol).toBe('BTCUSD'));
   });
@@ -107,7 +107,7 @@ describe('useOrderBookMarket', () => {
     mockedMarket.fetchMarkets.mockReturnValue(new Promise(() => undefined));
     mockedSystem.fetchSystemMetrics.mockResolvedValue(metrics({}));
 
-    const { result } = renderHook(() => useOrderBookMarket(null, null), { wrapper });
+    const { result } = renderHook(() => useLiveTrackedMarket(null, null), { wrapper });
     expect(result.current.isResolving).toBe(true);
   });
 
@@ -115,7 +115,7 @@ describe('useOrderBookMarket', () => {
     mockedMarket.fetchMarkets.mockRejectedValue(new Error('network down'));
     mockedSystem.fetchSystemMetrics.mockResolvedValue(metrics({}));
 
-    const { result } = renderHook(() => useOrderBookMarket(null, null), { wrapper });
+    const { result } = renderHook(() => useLiveTrackedMarket(null, null), { wrapper });
 
     await waitFor(() => expect(result.current.isError).toBe(true));
     expect(result.current.error?.message).toBe('network down');

@@ -34,9 +34,20 @@ TradingView's lightweight-charts, and the Live Market Dashboard
 (`src/features/live-market/`) that renders real-time price/chart/trade-tape
 data over that gateway, resolving which market to show against the set the
 backend actually streams rather than assuming any catalogue entry has data,
-and the Order Book viewer (`src/features/order-book/`) that renders live
+the Order Book viewer (`src/features/order-book/`) that renders live
 depth tables and a spread summary over the same gateway's reconstructed
-order-book messages. It talks to `services/api` over the read-only REST surface described
+order-book messages, and the Live Trade Analytics dashboard
+(`src/features/trades/`) that derives a live trade tape, session/rolling
+statistics, VWAP and distance from it, sparkline trends, a trade size
+distribution, and a market-sentiment summary from the same gateway's trade
+messages — no backend change was needed for it; everything is computed
+client-side from data the gateway already relays, behind a dedicated
+`TradeAnalyticsEngine`
+(`src/features/trades/engine/trade-analytics-engine.ts`) that owns every
+accumulator (a capacity-bounded ring buffer for the rolling trade window,
+an O(1) session accumulator, a small sampled history for sparklines) so
+components only ever consume an already-computed snapshot. It talks to
+`services/api` over the read-only REST surface described
 in [`docs/api/API.md`](docs/api/API.md) for historical data, and over a
 single WebSocket gateway (below) for live data — never directly to Delta
 Exchange.

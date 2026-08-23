@@ -43,6 +43,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   market-candidate-ordering policy rather than duplicating any of them.
   See `FRONTEND.md` § "Live Order Book Viewer" and `ARCHITECTURE.md` §
   "Backend".
+- Live Trade Analytics dashboard (`/trades`) — a live trade tape (with a
+  new Trade Value column), session-wide buy/sell statistics (volumes,
+  ratio, average trade size, largest trade by notional value, trade
+  count), session and rolling 1m/5m/15m VWAP, and rolling-window analytics
+  (trades/minute, volume/minute, average trade size, largest trade,
+  buy/sell imbalance) for one symbol — no backend change required;
+  everything is derived client-side from the existing `trade` messages the
+  gateway already relays. Session statistics are O(1) running accumulators
+  (`lib/session-stats.ts`), not a re-summed trade list, so they stay
+  bounded in memory regardless of session length; rolling figures come
+  from a single 15-minute time-pruned buffer. Neither can be derived from
+  `useMarketStream`'s own display-capped trade array, which motivated a
+  new `onTrade` option on that hook — called for every trade exactly once,
+  before rAF batching or the tape's row cap apply. Reuses
+  `useMarketStream` (trades-only via its `channels` option),
+  `ConnectionStatus`, `MarketSelector`, and `TradeTape` (extended with an
+  optional Trade Value column). `useOrderBookMarket`/`useOrderBookUrlState`
+  were promoted and renamed to `useLiveTrackedMarket`/`useSymbolUrlState`
+  once this page needed the exact same market-resolution behavior, rather
+  than a third copy. A new shared `StatTile` component
+  (`src/components/stat-tile.tsx`) replaces what would have been a third
+  local reimplementation of the "label + big value" tile already
+  duplicated between the Live Market price card and the Order Book spread
+  panel. See `FRONTEND.md` § "Live Trade Analytics Dashboard".
 
 ### Changed
 
@@ -60,6 +84,65 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   (~10 commits/second) and the forming candle is seeded from the last
   historical bar, so history loads first and the live bar continues it.
   See `FRONTEND.md` § "Live Market Dashboard".
+- Live Trade Analytics dashboard reworked into a quantitative research
+  workstation. **Information hierarchy**: a new dominant `PriceHeader` band
+  (current price coloured by aggressor side, session high/low, distance
+  from VWAP, live trades-per-second with an activity pulse) sits above four
+  labelled `Section` landmarks — Order Flow, VWAP, Session Statistics,
+  Connection — replacing a flat run of same-weight panels separated by
+  rules; panels no longer render their own `Paper`, so borders are not
+  nested inside borders. **Contextual help**: every metric now carries a
+  keyboard-reachable Info button whose tooltip explains what it is, why it
+  matters, how it is calculated, and how to read it, all sourced from one
+  dictionary (`lib/metric-help.ts`) so the same metric cannot be explained
+  two different ways in two panels. **New analytics**: distance from VWAP,
+  session high/low, trades-per-second (measured over ten seconds, not a
+  scaled-down minute), and a trade size distribution bucketed relative to
+  the window's own average so it reads identically on a $2 asset and a
+  $70,000 one. **Trade tape**: zebra striping, a sticky timestamp column,
+  memoized rows, CSV export of the visible rows with the active filters
+  recorded in the file, a "showing N of M rows" readout so a filtered tape
+  is never mistaken for a quiet market, and opt-in virtualization above 60
+  rows (spacers `aria-hidden`, `aria-rowcount` still correct).
+  **Performance**: a new render-cost suite
+  (`trade-tape.render.test.tsx`) asserts how many rows actually re-render,
+  by spying on a formatter each row calls a fixed number of times. It
+  immediately caught a real bug that reads as obviously correct in source —
+  zebra-striping rows by array index flipped every row's props whenever a
+  trade was prepended, forcing 101 row renders per trade; striping by the
+  stable per-trade key instead brought that to 1. **Accessibility**:
+  `region` landmarks per section, `scope="col"` headers, `role="meter"`
+  gauges with `aria-valuetext` giving both a percentage and a raw count,
+  decorative elements `aria-hidden`, and colour never used as the only
+  channel. No backend change; still no AI, model, or trading signal
+  anywhere on the page. See `FRONTEND.md` § "Live Trade Analytics
+  Dashboard" and `TESTING.md` § "Asserting render cost, not just render
+  output".
+- Live Trade Analytics dashboard quant-UI and performance pass: every
+  calculation now lives behind a dedicated `TradeAnalyticsEngine`
+  (`src/features/trades/engine/trade-analytics-engine.ts`) so
+  `useTradeAnalytics` and every component only consume an already-computed
+  snapshot; the rolling trade window moved from an array copied on every
+  insert to a capacity-bounded `RingBuffer` (O(1) push, no per-trade copy),
+  with every window calculation now filtering by timestamp at read time via
+  binary search rather than assuming pre-pruned input. Adds sparkline trends
+  (Buy vs Sell Volume, Trades/Minute, Volume/Minute, Rolling VWAP, Average
+  Trade Size) from a new, separately-sampled metric-history ring buffer; a
+  Market Sentiment summary and Buy/Sell pressure gauge derived from the
+  existing rolling imbalance figure (a fixed threshold table, not a
+  prediction); dedicated session and last-minute Largest Trade cards
+  showing Time/Side/Price/Quantity/Value explicitly, replacing a
+  value-plus-caption stat tile; and trade tape enhancements — an
+  incoming-row animation and an unusually-large-trade highlight (both
+  enabled by fixing the tape's row keys to a stable per-trade identity
+  instead of an array index that shifted on every new trade, which had
+  been causing the entire table body to remount on every trade), plus
+  Buy/Sell/All and minimum-trade-size display filters that never touch the
+  underlying accumulators. A stress test simulates a ~30-minute sustained
+  session to verify calculation cost stays flat with session length — see
+  `FRONTEND.md` § "Live Trade Analytics Dashboard" and `TESTING.md` for the
+  disclosed limits of that verification (no browser automation is
+  available to measure real heap/paint behavior over 30 actual minutes).
 - Order Book viewer performance pass: `useMarketStream` (shared with the
   Live Market Dashboard) now batches via `requestAnimationFrame` instead
   of a fixed 100ms timer, and gained a `channels` option so a consumer

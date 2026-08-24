@@ -7,13 +7,10 @@ import Paper from '@mui/material/Paper';
 import Stack from '@mui/material/Stack';
 import Typography from '@mui/material/Typography';
 import { useState } from 'react';
-import { fetchCandlePage } from '@/lib/api/market';
-import type { Candle, CandlePage } from '@/types/api/market';
+import { fetchAllCandles } from '@/lib/api/paginate-candles';
 import type { HistoryQuery } from '../hooks/use-history-data';
 import { buildEnvelope, envelopeToCsv, exportFileName } from '../lib/export';
 import { formatNumber } from '../lib/format';
-
-const MAX_EXPORT_PAGES = 250;
 
 function download(blob: Blob, filename: string) {
   const url = URL.createObjectURL(blob);
@@ -24,35 +21,6 @@ function download(blob: Blob, filename: string) {
   anchor.click();
   anchor.remove();
   URL.revokeObjectURL(url);
-}
-
-async function fetchAllCandles(
-  query: HistoryQuery,
-  onProgress: (fetched: number, total: number) => void,
-): Promise<{ candles: Candle[]; page: CandlePage }> {
-  const candles: Candle[] = [];
-  let firstPage: CandlePage | null = null;
-  let offset = 0;
-  let total = Infinity;
-  while (offset < total && candles.length < MAX_EXPORT_PAGES * query.limit) {
-    const page = await fetchCandlePage(query.symbol, query.timeframe, {
-      limit: query.limit,
-      offset,
-      start: query.start ?? undefined,
-      end: query.end ?? undefined,
-      sort: query.sort,
-      dir: query.dir,
-    });
-    firstPage ??= page;
-    candles.push(...page.items);
-    total = page.pagination.total;
-    offset += page.items.length;
-    onProgress(candles.length, total);
-    if (page.items.length === 0) {
-      break;
-    }
-  }
-  return { candles, page: firstPage as CandlePage };
 }
 
 interface ExportButtonsProps {
@@ -68,10 +36,10 @@ export function ExportButtons({ query, disabled }: ExportButtonsProps) {
     setExporting(kind);
     setProgress(null);
     try {
-      const { candles, page } = await fetchAllCandles(query, (fetched, total) =>
+      const { candles, firstPage } = await fetchAllCandles(query, (fetched, total) =>
         setProgress({ fetched, total }),
       );
-      const envelope = buildEnvelope(query, candles, page);
+      const envelope = buildEnvelope(query, candles, firstPage);
       const blob =
         kind === 'csv'
           ? new Blob([envelopeToCsv(envelope)], { type: 'text/csv;charset=utf-8' })

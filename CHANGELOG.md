@@ -8,6 +8,70 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Historical Market Replay Engine (`/replay`,
+  `apps/dashboard/src/features/replay/`) — configure a market, timeframe,
+  and date range, load the whole session's candles once up front, then
+  step or auto-play through them: Play/Pause/Resume/Stop/Restart/Next/
+  Previous, six speed multipliers (0.25x–10x, changeable mid-session
+  without restarting), and a seekable timeline (drag, jump ±20 candles, or
+  seek by progress percentage). Reuses the existing candlestick chart
+  module (`CandlestickChart`/`ChartLegend`) unmodified — a new
+  `useReplayChartSync` hook translates replay position into that
+  component's existing `candlesticks`/`liveCandle` props, so a session can
+  auto-play through thousands of candles calling `series.update()` once
+  per candle without ever calling `setData()` again after the initial
+  seed, only reseeding on a genuine discontinuity (seek, previous,
+  restart, stop). The replay state machine (`engine/replay-state-machine.ts`)
+  and scheduler (`engine/replay-scheduler.ts`) are pure, framework-agnostic,
+  and unit-tested with no React involved (47 and 9 tests respectively),
+  matching this codebase's established "engine in a ref, hook as thin
+  adapter" pattern. No backend change was needed: the existing
+  `GET /markets/{symbol}/candles` endpoint already supports everything a
+  replay session needs, loaded via `fetchAllCandles`
+  (`apps/dashboard/src/lib/api/paginate-candles.ts`), promoted from a
+  private helper in the History page's CSV/JSON export once Replay needed
+  the identical "fetch every page of a query" behavior. Only OHLCV candles
+  are replayed — `services/api/app/models/` persists no historical
+  tick-level trade log or order-book snapshot store to replay instead;
+  documented (currently unused) extension-point interfaces
+  (`extension-points.ts`) exist for historical trades, historical order
+  books, technical indicators, AI prediction playback, and paper trading,
+  for whenever backend support for any of them exists. A stress test
+  simulates a 24-hour, 1,440-candle session (and a 6-hour, 360-candle one
+  driven through the scheduler) to verify per-tick cost stays flat rather
+  than growing. See `FRONTEND.md` § "Historical Market Replay Engine" and
+  `TESTING.md` § "Testing the Historical Market Replay Engine".
+- Historical Market Replay Engine senior-level review pass: a new
+  centralized `ReplayClock` (`engine/replay-clock.ts`, a small in-process
+  publish/subscribe primitive mirroring the backend's own broker-free
+  `EventBus`) is now the single source every replay-synchronized module
+  reads its position from — `useReplayEngine` broadcasts one
+  `ReplayClockTick` (phase, candle, timestamp, speed, discontinuity) after
+  every dispatch, and `ReplayChart` reads it via a new
+  `useSyncExternalStore`-backed hook, `useReplayClockTick`, instead of
+  receiving `currentIndex`/`revealEpoch` as raw props — proving the
+  synchronization guarantee is real today rather than only documented for
+  later. `extension-points.ts`'s interfaces for future Trade Tape/Order
+  Book/indicator/AI-prediction/paper-trading/backtesting modules now each
+  carry a `clock: ReplayClock` field for the same reason. Adds a redesigned
+  status panel (replay time, current/loaded/remaining candles, speed, and
+  an estimated time to completion, built from the shared `StatTile`),
+  timeline improvements (elapsed/remaining duration, jump-to-start/end,
+  a live percentage shown while dragging the seek slider), full keyboard
+  shortcuts (Space, ←/→, Home/End, +/-, via a new
+  `useReplayKeyboardShortcuts` hook that skips typing targets and a
+  focused slider), and a tooltip on every control naming its keyboard
+  shortcut where one exists. Fixes a real state-machine gap found during
+  this pass: seeking (or jumping to end) directly onto the last candle
+  previously left replay `paused` with nothing left to advance to, rather
+  than `completed`. Fixes a real, previously-missing `React.memo` on
+  `ReplayConfigForm`, which had been re-rendering on every playback tick
+  despite its own props never changing — caught and proven by a new
+  render-cost test (`replay-page.render.test.tsx`) that spies on
+  `useTimeframes` and fails immediately if the wrapper is removed. See
+  `FRONTEND.md` § "Historical Market Replay Engine" (now covering "The
+  Replay Clock" and "Keyboard shortcuts") and `TESTING.md` for the full
+  test breakdown.
 - Historical candlestick chart (TradingView lightweight-charts) as a
   reusable module (`apps/dashboard/src/components/chart/`), integrated as a
   new **Chart** tab on the History page alongside the existing candle

@@ -6,6 +6,7 @@ import Stack from '@mui/material/Stack';
 import Skeleton from '@mui/material/Skeleton';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { MarketSelector } from '@/components/chart/market-selector';
+import { Section } from '@/components/section';
 import { ConnectionStatus } from '@/features/live-market/components/connection-status';
 import { TradeTape } from '@/features/live-market/components/trade-tape';
 import { useLiveTrackedMarket } from '@/features/live-market/hooks/use-live-tracked-market';
@@ -24,7 +25,6 @@ import {
 } from './components/max-rows-selector';
 import { PriceHeader } from './components/price-header';
 import { RollingAnalyticsPanel } from './components/rolling-analytics-panel';
-import { Section } from './components/section';
 import { StatsCards } from './components/stats-cards';
 import { TapeExportButton } from './components/tape-export-button';
 import { TradeAnalyticsEmptyState } from './components/trade-analytics-empty-state';

@@ -46,7 +46,23 @@ client-side from data the gateway already relays, behind a dedicated
 (`src/features/trades/engine/trade-analytics-engine.ts`) that owns every
 accumulator (a capacity-bounded ring buffer for the rolling trade window,
 an O(1) session accumulator, a small sampled history for sparklines) so
-components only ever consume an already-computed snapshot. It talks to
+components only ever consume an already-computed snapshot, and the
+Historical Market Replay Engine (`src/features/replay/`) that loads a
+configured market/timeframe/date-range session's candles once up front and
+steps or auto-plays through them, reusing the same candlestick chart
+module rather than a second chart implementation. Its own
+`ReplayScheduler`/`replayReducer`/`ReplayClock` (`src/features/replay/engine/`)
+are pure, framework-agnostic, and unit-tested independent of React — the
+clock, added in a later review, is a small in-process publish/subscribe
+primitive (mirroring the backend's own broker-free `EventBus`) that
+broadcasts one synchronized "current candle/timestamp/phase/speed" tick so
+the chart, and any future replay-synchronized module, read the identical
+position rather than each deriving it separately. No backend change was
+needed for any of this; only OHLCV candles are replayed, since
+`services/api/app/models/` persists no historical tick-level trade log or
+order-book snapshot store to replay instead (documented extension points
+exist for both, in `src/features/replay/extension-points.ts`, for whenever
+that becomes a real backend feature). It talks to
 `services/api` over the read-only REST surface described
 in [`docs/api/API.md`](docs/api/API.md) for historical data, and over a
 single WebSocket gateway (below) for live data — never directly to Delta

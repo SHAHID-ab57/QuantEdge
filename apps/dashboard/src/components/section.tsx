@@ -16,10 +16,12 @@ export interface SectionProps {
 }
 
 /**
- * One titled group of related panels. Replaces this page's previous pattern
- * of many sibling `Paper`s separated by `Divider`s and bare `overline`
- * labels, which spent a lot of vertical space on separators and left every
- * metric at the same visual weight regardless of importance.
+ * One titled group of related panels. Originally written for the Live
+ * Trade Analytics dashboard to replace a flat run of sibling `Paper`s
+ * separated by `Divider`s and bare `overline` labels, which spent a lot of
+ * vertical space on separators and left every metric at the same visual
+ * weight regardless of importance. Promoted here once the Replay engine
+ * needed the identical grouping pattern, rather than a second local copy.
  *
  * A section is a single bordered surface with its heading built in, so
  * related metrics read as one block, and the gap *between* sections

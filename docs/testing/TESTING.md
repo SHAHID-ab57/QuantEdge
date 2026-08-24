@@ -351,6 +351,155 @@ being `2`), which a naive query would report as an ambiguous match. The
 walk-up (rather than a single `parentElement` hop) is what keeps the
 helper working now that each label shares a row with its Info button.
 
+### Testing the Historical Market Replay Engine (frontend)
+
+The engine layer has no React in it at all, so it is tested the same way
+`TradeAnalyticsEngine` is — directly, with plain function calls and (for
+the one piece with a timer) fake timers:
+
+- `engine/replay-state-machine.test.ts` (47 tests) exhaustively covers
+  every phase transition table entry, including the negative cases (an
+  action that is a no-op for the current phase returns the exact same
+  state reference, asserted with `toBe`) and the two behaviors this
+  feature's own integration testing caught as genuine gaps during
+  development, not anticipated up front: seeking onto the last candle now
+  completes replay rather than leaving it paused with nothing left to
+  advance to, and a retry after a failed load reuses the same request id
+  and must be accepted from the `error` phase, not just `loading` —
+  without that, a successful retry's `LOAD_SUCCESS` was silently ignored
+  by the reducer's own phase guard and the page stayed stuck on the error
+  screen forever, exactly the kind of bug a state machine's exhaustive
+  transition tests exist to catch before a page-level test ever would.
+- `engine/replay-scheduler.test.ts` (9 tests, fake timers) covers the
+  self-rescheduling `setTimeout` chain directly: repeated ticks at a fixed
+  interval, `setIntervalMs` changing the _next_ tick's timing without
+  losing progress already made, idempotent `start()`, and a tick callback
+  that stops the scheduler from inside itself without scheduling another.
+- `engine/replay-timeline.test.ts` (17 tests) and `engine/replay-speed.test.ts`
+  (6 tests) cover the pure timeline math (progress percentage, index ↔
+  timestamp ↔ progress-percentage conversions, clamping) and the speed
+  table respectively — both used directly by the reducer/hook and by the
+  timeline/controls components, so a bug here would otherwise surface only
+  indirectly through several component tests instead of one focused suite.
+
+`hooks/use-replay-engine.test.ts` (17 tests) proves the React-facing hook
+wires the reducer and scheduler together correctly — using fake timers
+successfully and reliably, unlike `use-trade-analytics.test.ts`'s
+real-timer workaround (see above): this hook has exactly one timer
+mechanism (`ReplayScheduler`), not a rAF-batched stream layered under a
+second wall-clock tick, which is what made fake timers unreliable there.
+Covers: the full load lifecycle (including an empty result set and a
+failed request), every control (play/pause/resume/stop/restart/next/
+previous), speed changes not resetting the current index, seeking (both
+directly by index and by progress percentage, including resuming playback
+after a mid-playback seek), and that switching configuration (a new
+request id) resets and reloads cleanly.
+
+`hooks/use-replay-chart-sync.test.ts` (5 tests) proves the seed-vs-live-
+candle split in isolation — a forward step at the same `revealEpoch`
+leaves the seeded `candlesticks` array reference untouched (`toBe`), while
+a `revealEpoch` bump produces a new one — and `replay-chart.test.tsx`
+proves the same property end-to-end through the _real_ `CandlestickChart`
+component (mocking only `lightweight-charts`, the same mocking pattern as
+`candlestick-chart.test.tsx` itself): a forward step calls `series.update()`
+without a second `setData()` call, while a restart calls `setData()`
+again. `ReplayChart` reads its position from a `ReplayClockTick` prop
+rather than raw `currentIndex`/`revealEpoch` fields (see below), so this
+suite's fixtures build a tick object rather than passing those two values
+directly — a mechanical change from an earlier version of this test file,
+not a change in what's actually being verified.
+
+#### Testing the Replay Clock and keyboard shortcuts
+
+`engine/replay-clock.test.ts` (6 tests) tests `ReplayClock` directly — no
+React — covering `getSnapshot`/`subscribe`/`publish` and, notably, that a
+throwing subscriber is isolated: the clock's `publish()` catches and logs
+a listener's exception rather than letting it stop the remaining
+subscribers from being notified, mirroring the backend `EventBus`'s own
+"handler failures never propagate" guarantee. `hooks/use-replay-clock.test.ts`
+(3 tests) proves the thin `useSyncExternalStore` wrapper re-renders a
+subscribed component on publish and unsubscribes on unmount.
+`use-replay-engine.test.ts`'s "clock synchronization" block (5 additional
+tests, 22 total in that file) proves the engine actually publishes to
+this clock — the same instance across renders, a tick reflecting the
+current candle after every advance, `isDiscontinuity` correctly `false`
+for a plain forward step and `true` for a seek, and a live subscriber
+notified on every scheduler-driven tick during auto-play, not just on
+read.
+
+`hooks/use-replay-keyboard-shortcuts.test.ts` (12 tests) covers every
+shortcut in isolation with synthetic `KeyboardEvent`s: Space's three-way
+branch (pause while playing, resume while paused, restart-via-play once
+completed), Arrow/Home/End/+/- dispatching the right engine call, doing
+nothing while `enabled` is `false` (no listener attached at all, not a
+no-op handler), being skipped while focus is in a text field or inside a
+focused `role="slider"` element, ignoring a modifier-held chord (e.g.
+Cmd+Space), `preventDefault` on a handled key, and listener removal on
+unmount.
+
+`replay-page.test.tsx` (17 tests) is the integration suite: loading a
+session end to end, an empty-result and a failed-request error state (the
+latter with a working Retry action), playing/pausing/stepping, restarting,
+seeking via the jump-forward control to completion, changing speed
+mid-session without resetting position, switching market/timeframe/range
+resetting to a fresh session, the enriched status panel's figures, the
+timeline's jump-to-start/end buttons, and — driven through real
+`fireEvent.keyDown(window, ...)` dispatches rather than calling engine
+methods directly — every keyboard shortcut end-to-end, including that
+typing in the config form does not trigger one. `replay-config-form.test.tsx`
+(5 tests) separately covers the session-configuration form's Zod
+validation (end before start, end in the future, all-fields-required)
+using the same click-driven MUI `Select`/`Autocomplete` interaction
+pattern as `HistoryForm`'s own tests — a MUI `TextField select`'s
+interactive combobox element takes its accessible name from its
+associated `<label>` via `aria-labelledby`, not from an `aria-label`
+passed through `slotProps.select`, which only ever lands on a non-
+interactive wrapper `div`; querying by the visible label text is what
+actually resolves the right element.
+
+`replay-controls.test.tsx`, `replay-timeline.test.tsx`, and
+`replay-status.test.tsx` cover each control component in isolation —
+notably that the Play/Resume toggle button shows "Resume" (not "Play")
+whenever `phase === 'paused'`, since the two dispatch different actions
+(`RESUME` only ever applies from `paused`; `PLAY` also applies from
+`completed`, restarting at zero) even though their effect from `paused` is
+identical — a subtlety the page-level integration tests must respect too
+(clicking "Play" right after a fresh load fails, since the button reads
+"Resume" at that point). `replay-controls.test.tsx` additionally proves a
+MUI footgun did _not_ regress this feature: wrapping each speed
+`ToggleButton` in its own `Tooltip` (added so every control has a tooltip)
+risks the group's injected `selected`/`onChange` props landing on the
+`Tooltip` wrapper instead of the button — a test asserts the correct
+button still shows `aria-pressed="true"` and that clicking still fires
+`onSpeedChange`, so a future MUI upgrade that changes this behavior would
+be caught here rather than silently breaking speed selection.
+`replay-status.test.tsx` (13 tests, up from 6) covers every new status-
+panel figure — current/loaded/remaining candle counts, replay time,
+speed, and estimated completion (including the boundary where it reads
+"Unavailable" once `completed` versus "0s" once out of candles but still
+`paused`/`playing`).
+
+#### Asserting render cost with a targeted hook spy (Replay Engine)
+
+`replay-page.render.test.tsx` proves the `ReplayConfigForm` memoization
+fix precisely rather than by inference, using a variant of the "Asserting
+render cost" technique above: it spies on `useTimeframes`
+(`@/features/history/hooks/use-history-data`), which the form calls
+unconditionally in its own render body. If `React.memo` bails out because
+the form's props are unchanged, React does not invoke the component
+function at all — so it does not call `useTimeframes()` again either,
+turning "did the memo actually prevent wasted render work" into an exact,
+assertable call count rather than an inference from DOM output that could
+look identical whether or not the component actually re-ran. Three tests
+cover: no additional calls across several manual `Next candle` clicks, no
+additional calls during auto-play, and — proving the memo isn't
+over-suppressing updates the form genuinely needs — a new call once the
+form's own `disabled` prop actually changes. Removing the `React.memo`
+wrapper during this review's own verification made the first two tests
+fail immediately (11 expected calls vs. 17 and 13 observed), confirming
+these are real regression guards rather than checks that would pass
+either way.
+
 ## End-to-End Tests
 
 Not implemented. `tests/` at the repo root is reserved for this; no browser
@@ -360,8 +509,19 @@ automation (Playwright/Cypress) is configured yet.
 
 **Backend**: `services/api/tests/performance/` (opt-in, `--run-performance`).
 
-**Frontend**: two dedicated performance suites, both fast enough to run in
+**Frontend**: three dedicated performance suites, all fast enough to run in
 the normal test pass rather than behind a flag.
+
+`src/features/replay/engine/replay-engine.stress.test.ts` directly answers
+the Replay Engine's "support 1/6/24 hours of replay data without freezing
+the UI" requirement: it drives `replayReducer` through a simulated 1,440-
+tick (24-hour, 1-minute-candle) session — plus `computeTimeline`'s own
+per-tick recompute — and asserts the cost per tick stays flat rather than
+growing, then separately confirms a 360-tick (6-hour) session completes
+cleanly via the scheduler-driven `TICK` action. Building the candle array
+once outside the loop (matching how a real session holds one stable
+loaded array) rather than per iteration is what keeps this test itself
+fast (~6ms) instead of accidentally measuring its own O(n²) setup cost.
 
 `src/features/live-market/components/trade-tape.render.test.tsx` asserts
 render counts directly — see "Asserting render cost, not just render

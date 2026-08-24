@@ -15,6 +15,7 @@ import HistoryIcon from '@mui/icons-material/History';
 import BoltIcon from '@mui/icons-material/Bolt';
 import TableChartIcon from '@mui/icons-material/TableChart';
 import ReceiptLongIcon from '@mui/icons-material/ReceiptLong';
+import ReplayIcon from '@mui/icons-material/Replay';
 import ScienceIcon from '@mui/icons-material/Science';
 import SettingsIcon from '@mui/icons-material/Settings';
 import HealthAndSafetyIcon from '@mui/icons-material/HealthAndSafety';
@@ -32,6 +33,7 @@ const NAV_ITEMS: NavItem[] = [
   { label: 'Live Market', href: '/live-market', icon: BoltIcon },
   { label: 'Order Book', href: '/orderbook', icon: TableChartIcon },
   { label: 'Trade Analytics', href: '/trades', icon: ReceiptLongIcon },
+  { label: 'Replay', href: '/replay', icon: ReplayIcon },
   { label: 'Research', href: '/research', icon: ScienceIcon },
   { label: 'Settings', href: '/settings', icon: SettingsIcon },
   { label: 'Health', href: '/health', icon: HealthAndSafetyIcon },

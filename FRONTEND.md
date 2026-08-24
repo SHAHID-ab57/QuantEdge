@@ -1227,6 +1227,337 @@ this gateway.
   this page connected'" above) and would be a backend project of its own,
   not a frontend change.
 
+## Historical Market Replay Engine
+
+`/replay` (`src/features/replay/`) lets a researcher configure a market,
+timeframe, and date range, load every candle in that range up front, and
+then step or auto-play through them — Play/Pause/Resume/Stop/Restart/Next/
+Previous, six speed multipliers (0.25x–10x), a seekable timeline with
+jump-to-start/end, keyboard shortcuts, and a status panel showing replay
+time, position, and an estimated completion — reusing the platform's
+existing candlestick chart module rather than a second chart
+implementation. Everything replayed comes from the existing read-only
+`GET /markets/{symbol}/candles` REST endpoint; **no backend change was
+made or needed** — see "Backend API evaluation" below for why.
+
+A follow-up senior-level review (2026-08-23) restructured the page's
+visual hierarchy, added the richer status panel, keyboard shortcuts, and a
+centralized `ReplayClock` synchronization primitive (see "The Replay
+Clock" below) that future modules will subscribe to instead of each
+re-deriving replay position independently — and, in the course of that
+work, found and fixed a real correctness gap where seeking directly onto
+the last candle left replay `paused` instead of `completed` (see "Replay
+state machine" below).
+
+### Why only candles are replayed
+
+`services/api/app/models/` was read directly (not assumed) while designing
+this feature: it defines exactly three persisted tables — `Exchange`,
+`Market`, `Candle`. There is no historical tick-level trade log and no
+historical order-book snapshot store anywhere in the backend. This is the
+same limitation the Live Trade Analytics dashboard's "Session VWAP" caption
+already discloses (`docs/domain/MarketDataDomain.md` confirms only OHLCV
+is stored), just encountered again here from the replay side.
+
+Given that, this feature replays exactly the data the backend actually
+persisted — OHLCV candles — rather than synthesizing fake individual
+trades from candle closes to make the page _look_ like it replays tick
+data. A fabricated trade print that renders identically to a real one is
+the wrong trade-off for a research tool whose entire value proposition is
+trustworthy historical data. `extension-points.ts` documents the exact
+seam a future historical trade log or order-book snapshot store would
+plug into — `HistoricalTradeSource`/`HistoricalOrderBookSource` interfaces,
+unused today, shaped so `TradeTape` and the Order Book viewer's existing
+components would need no changes to render replayed data of either kind
+once a backend source exists. The same file also documents the seam for
+future technical indicators, AI prediction playback, and paper trading —
+see "Extension points" below.
+
+### Backend API evaluation
+
+Existing `GET /markets/{symbol}/candles` (`docs/api/API.md`) already
+supports everything a replay session needs: a symbol, a timeframe, a
+`start`/`end` range, and offset-based pagination up to
+`candles_max_limit` (1,000) per page. Loading an entire session up front —
+rather than requesting one candle at a time as replay advances — needs
+nothing beyond walking that pagination, which `fetchAllCandles`
+(`src/lib/api/paginate-candles.ts`) already did for the History page's
+CSV/JSON export. That function was promoted from
+`history/components/export-buttons.tsx` (previously a private, unexported
+helper there) into this shared location once Replay needed the identical
+"fetch every page of a query" behavior, rather than a second
+implementation — `export-buttons.tsx` was updated to import the shared
+version, and both call sites are covered by tests. No new endpoint, no
+new bus event, and no backend code change of any kind was required.
+
+### Replay state machine
+
+`engine/replay-state-machine.ts`'s `replayReducer` is a pure function —
+no React, no timers, no data fetching — over seven phases:
+
+```text
+idle → loading → paused ⇄ playing → completed
+                    ↕                  ↓
+                 seeking ←—————————————┘
+                    ↓
+                  error (from loading, or a retry from error)
+```
+
+- **`idle`** — nothing configured yet.
+- **`loading`** — a session's candles are being fetched.
+- **`paused`** — loaded, not advancing; the entry point after a successful
+  load, and where `PREVIOUS`/`NEXT`/seeking are valid.
+- **`playing`** — the scheduler is auto-advancing one candle per tick.
+- **`seeking`** — genuinely transient: `useReplayEngine`'s `seekToIndex`/
+  `seekToProgress` dispatch `SEEK_START` immediately followed by
+  `SEEK_COMPLETE` in the same call, so React's automatic batching means it
+  is never actually painted — but it is a real, dispatched, unit-tested
+  state, not a cosmetic label, satisfying the state list as specified
+  rather than approximating it.
+- **`completed`** — the last candle has been reached, whether by playing
+  to the end, stepping to it manually, or seeking directly onto it (a fix
+  from this feature's most recent review: `SEEK_COMPLETE` previously only
+  checked the target index against `NEXT`/`TICK`'s own end-of-session
+  logic, not its own — landing exactly on the last candle via a seek, or
+  a jump-to-end, left the phase `paused` with nothing left to advance to.
+  the `atEnd` check inside `SEEK_COMPLETE` now applies the same rule
+  regardless of which action reached the last candle).
+- **`error`** — the load failed, or resolved to zero candles (an "empty
+  replay" is treated as an error state with an explanatory message, not a
+  silently-blank chart). A retry reuses the same request id rather than a
+  fresh `LOAD_START`, which is why `LOAD_SUCCESS`/`LOAD_ERROR` are accepted
+  from `error` as well as `loading` — a real bug caught by this feature's
+  own integration test, where a retry that actually succeeded never left
+  the error phase until that guard was widened.
+
+Every transition is exhaustively unit-tested (`replay-state-machine.test.ts`,
+47 tests) with no rendering, no timers, and no mounted component — this is
+what "keep replay logic independent from UI" means concretely here. An
+action invalid for the current phase is a no-op (returns the same state
+reference) rather than throwing, since a race between a disabled button and
+a phase change must never crash a research session.
+
+### Event scheduling
+
+`engine/replay-scheduler.ts`'s `ReplayScheduler` is a small framework-
+agnostic class driving a self-rescheduling `setTimeout` chain (chosen over
+`setInterval` so a speed change can rewrite the pending wait rather than
+tearing down and recreating a running interval, and so a browser hiccup can
+never let two ticks queue back-to-back the way a fast `setInterval` can).
+`useReplayEngine` owns exactly one instance per mount in a `useRef`, starts
+it whenever `phase === 'playing'`, and stops it — via the effect's own
+cleanup — for every other phase and on unmount, so nothing keeps ticking
+after the page navigates away.
+
+**Replay tick semantics** (a deliberate design decision, stated explicitly
+since nothing in the requirements defines it): one candle advances every
+`BASE_TICK_MS` (1 second) at 1x, scaled by the speed multiplier — 100ms at
+10x, 4 seconds at 0.25x. This is a playback-pacing rate, not a wall-clock
+simulation of market time: replaying 24 hours of 1-minute candles at "1x"
+takes minutes, not 24 hours, the same way scrubbing a video at 1x isn't
+tied to the video's own frame rate. A 1-minute candle and a 1-day candle
+both advance once per `BASE_TICK_MS` at a given speed.
+
+**Changing speed never restarts replay**: `ReplayScheduler.setIntervalMs`
+rewrites the pending timer's interval in place; `useReplayEngine`'s speed
+effect calls it whenever `speed` changes, and `SET_SPEED` in the reducer
+only ever updates the `speed` field, never `currentIndex` or `phase` —
+verified directly by a reducer test and an integration test that changes
+speed mid-session and asserts the candle position is unaffected.
+
+### The Replay Clock — centralized synchronization
+
+`engine/replay-clock.ts`'s `ReplayClock` is the single source every
+replay-synchronized module reads "what is replay doing right now" from,
+rather than each deriving its own notion of position from `currentIndex`/
+`revealEpoch` independently. `useReplayEngine` owns one instance per mount
+and, after every dispatch, broadcasts one `ReplayClockTick` — phase,
+index, the candle itself, its timestamp, speed, and whether this tick is a
+discontinuity (mirrors `revealEpoch` bumping) — through it. This
+deliberately mirrors the backend's own broker-free in-process `EventBus`
+(`services/api/app/events/bus.py`): one publisher, many independent
+subscribers, and a listener that throws is isolated (logged, never
+allowed to stop the remaining subscribers from being notified) rather than
+breaking the fan-out — the same guarantee the bus gives its handlers,
+applied here as a synchronous try/catch per listener instead of that bus's
+`asyncio.Task`-per-handler mechanism.
+
+`hooks/use-replay-clock.ts`'s `useReplayClockTick(clock)` is how a React
+component reads it — built on `useSyncExternalStore` (the React-idiomatic
+way to read an external store that publishes its own updates, correct
+under concurrent rendering, rather than a hand-rolled `useEffect` +
+`useState` mirror) instead of subscribing manually. `ReplayPage` calls it
+once, `useReplayClockTick(engine.clock)`, and passes the resulting tick to
+`ReplayChart` — the reducer remains the sole source of truth for replay
+state; the clock is purely a fan-out of its result, and `ReplayChart`
+reading from the clock instead of from `engine.currentIndex`/
+`engine.revealEpoch` directly is what makes the synchronization guarantee
+real today, not just documented for later.
+
+A future Trade Tape/Order Book/indicator/AI-prediction/paper-trading/
+backtesting module (`extension-points.ts`) would call
+`useReplayClockTick(engine.clock)` with that exact same instance — not a
+new clock, not a second position-tracking mechanism — guaranteeing it can
+never drift out of sync with what the chart is showing, by construction
+rather than by convention.
+
+### Keyboard shortcuts
+
+`hooks/use-replay-keyboard-shortcuts.ts` attaches one global `keydown`
+listener (on `window`, so a shortcut works regardless of which part of the
+page has focus, the way a media player's shortcuts typically are) while a
+session is loaded: **Space** toggles play/pause (or restarts from zero if
+`completed` — the same `PLAY`-vs-`RESUME` distinction `ReplayControls`'
+own toggle button already makes); **→**/**←** step one candle forward/
+back; **Home**/**End** jump to the first/last loaded candle; **+**/**-**
+step through `REPLAY_SPEEDS` (`fasterSpeed`/`slowerSpeed`, new pure
+helpers alongside the existing speed table). Every shortcut's tooltip in
+`ReplayControls`/`ReplayTimeline` names the key, and the Controls
+section's header carries a small keyboard-icon tooltip listing all of them
+together, so the shortcuts are discoverable rather than a hidden feature.
+
+Shortcuts are skipped — the listener checks, not just disables — while
+focus is in a text field (including the config form's date/time inputs),
+a contentEditable region, or the timeline `Slider`'s thumb, which MUI
+already makes independently arrow-key-adjustable; without that guard,
+Space would toggle playback while typing a date, and the global Left/
+Right handlers would fight the focused slider's own.
+
+### Time synchronization / chart sync
+
+`hooks/use-replay-chart-sync.ts` turns a clock tick into exactly the props
+`CandlestickChart` (`src/components/chart/candlestick-chart.tsx`) already
+accepts — no new chart implementation, and that component was not
+modified. This mirrors the Live Market Dashboard's own established split:
+
+- **`candlesticks`/`volume`** — a seeded historical baseline, pushed via a
+  full `setData()` only when it changes reference.
+- **`liveCandle`/`liveVolume`** — the one bar currently being revealed,
+  pushed via `series.update()`.
+
+The engine exposes a `revealEpoch` counter that increments only on a
+_discontinuous_ jump — seek, previous, restart, stop — and is left
+untouched by a plain forward `NEXT`/`TICK`. The chart-sync hook reseeds
+(`candlesticks` gets a new array reference, triggering `setData()`) only
+when `revealEpoch` changes; every candle revealed between reseeds is
+pushed through `liveCandle` alone. This is not an optimization detail —
+it's why a session can auto-play through thousands of candles calling
+`series.update()` once each without ever calling `setData()` again after
+the initial seed, which is what the reducer's own `revealEpoch` field is
+in service of. `revealEpoch` bumps precisely where `lightweight-charts`'
+`update()` genuinely cannot help — it can only append a bar newer than
+everything already drawn or replace the single most recent one, never
+remove already-drawn history, which any backward or jump move requires.
+
+A dedicated test suite proves this end-to-end through the _real_
+`CandlestickChart` component (`replay-chart.test.tsx`, mocking only
+`lightweight-charts` itself): a forward step calls `series.update()`
+without a second `setData()`, while a restart calls `setData()` again.
+
+### Component hierarchy
+
+```text
+ReplayPage                    owns the loaded config; wires the data hook, the engine hook, and
+│                             the keyboard-shortcuts hook together; reads engine.clock via
+│                             useReplayClockTick for the chart
+├── ReplayConfigForm           market/timeframe/start/end, react-hook-form + Zod, same
+│                             pattern as HistoryForm adapted to datetime-local inputs
+│                             (React.memo — see "Performance" below)
+├── ReplayStatus                phase chip, replay time, current/loaded/remaining candles,
+│                             speed, estimated completion (StatTile grid), error/retry,
+│                             truncation notice
+├── ReplayChart                 reuses CandlestickChart + ChartLegend via useReplayChartSync,
+│                             reading its position from a ReplayClockTick
+├── ReplayControls               Play/Resume/Pause/Stop/Restart/Next/Previous (grouped, with
+│                             the primary Play/Pause sized up) + a divider + a labelled speed
+│                             ToggleButtonGroup, every button individually tooltipped
+└── ReplayTimeline               start/current/end labels, elapsed/remaining duration,
+                                progress %, seek slider (live percentage on drag), jump ±20
+                                candles, and jump-to-start/end
+```
+
+### Performance
+
+Loading is O(pages), not O(candles) round-trips: an entire session (up to
+`MAX_REPLAY_CANDLES` = 20,000 — generous headroom over 24h of 1-minute
+candles, 1,440) is fetched once via `fetchAllCandles`'s pagination, then
+held in memory for the whole session — no further network request as
+replay advances. Stepping forward is O(1) per candle (a `useMemo` keyed on
+`currentIndex`/`candleCount`, a scheduler tick, and one `series.update()`
+call — no `setData()`, no re-fetch). `ReplayControls`/`ReplayTimeline`/
+`ReplayStatus`/`ReplayChart`/`ReplayConfigForm` are all `React.memo`-
+wrapped, so a tick that only changes `currentIndex` re-renders `ReplayChart`
+and the timeline/status panel's progress text, not the control buttons' or
+config form's own internals. `MAX_REPLAY_CANDLES` being exceeded is
+surfaced as a `truncated` notice (`ReplayStatus`) rather than silently
+replaying a shorter session than requested.
+
+**A real regression this review found and fixed**: `ReplayConfigForm` had
+no `React.memo` wrapper at all. Since `ReplayPage` re-renders on every
+playback tick (`engine.currentIndex` lives there), every tick was re-
+running the entire config form — a fresh `useForm`/`useMarkets`/
+`useTimeframes` cycle for a component whose own props never change during
+playback. `replay-page.render.test.tsx` proves the fix precisely rather
+than by inference: it spies on `useTimeframes` (called unconditionally in
+the form's render body) and asserts the call count does not grow across
+several ticks — a `React.memo` bailout means React does not invoke the
+component function at all, so it does not call that hook again either.
+Removing the `memo` wrapper was verified to make this test fail
+immediately (11 calls expected vs. 17 observed after three ticks), so the
+test is a genuine regression guard, not a check that would pass either
+way.
+
+### Error handling
+
+`ReplayStatus` covers: invalid dates (caught by the config form's Zod
+schema before any request is made — end must be after start and not in the
+future), an empty result set (zero candles for the given configuration,
+surfaced as the `error` phase with an explanatory message rather than a
+blank chart), a failed request (network/backend unavailable, with a Retry
+action wired to the underlying query's `refetch`), and a truncated session
+(the range exceeded `MAX_REPLAY_CANDLES`, shown as a warning alongside
+whatever did load rather than blocking the page). A market/timeframe/range
+change while a session is active tears down and reloads cleanly — the
+engine's `requestId`-keyed effect resets every accumulator, the same
+pattern `useTradeAnalytics` uses for a symbol change.
+
+### Extension points
+
+None of the following are implemented — see `extension-points.ts` for the
+concrete (currently unused) interfaces each of these would plug into,
+chosen so none of them require re-architecting `useReplayEngine`,
+`useReplayChartSync`, or (new in this review) the `ReplayClock`. Every
+interface below carries a `clock: ReplayClock` field: a future module
+would call `useReplayClockTick(engine.clock)` with the exact same instance
+`ReplayChart` already reads, rather than re-deriving its own notion of
+"where is replay right now" — which is what guarantees it can never drift
+out of sync with the chart, by construction rather than by convention.
+
+- **Technical indicators** (`ReplayIndicatorInput`): would consume the
+  clock plus `revealedCandles` (the exact candles shown so far,
+  `candles.slice(0, currentIndex + 1)`) — never the full loaded set — so
+  an indicator can never peek at future candles it hasn't been "shown" yet
+  during replay.
+- **AI prediction playback** (`ReplayPredictionInput`): the same clock and
+  revealed-candles view, plus the actual next candle exposed only once
+  replay has advanced past it, so a prediction made at a point in time can
+  be graded against what actually happened next. This platform has no
+  prediction model to plug in yet (`PROJECT.md`).
+- **Paper trading** (`ReplayPaperTradingInput`): would consume the clock
+  (for the current candle, the simulated execution price) plus the
+  engine's own `pause`/`resume`, so a simulated order can pause replay
+  while open rather than introducing a second, competing playback
+  mechanism.
+- **Backtesting** (`ReplayBacktestInput`): the clock plus every candle
+  revealed so far — a backtest run subscribing here gets the same "never
+  see the future" guarantee the indicator/prediction interfaces document,
+  for free, since it reads from the identical source.
+- **Historical trade replay** (`ReplayTradeSyncInput`) / **historical
+  order-book replay** (`ReplayOrderBookSyncInput`): both also carry the
+  clock; blocked on a real backend historical trade log / order-book
+  snapshot store existing at all, not on anything in this frontend
+  architecture — see "Why only candles are replayed" above.
+
 ## State management
 
 - Server state: TanStack Query (`src/lib/query/queryClient.ts`).

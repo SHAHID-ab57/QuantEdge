@@ -43,6 +43,7 @@ The API exposes historical market data and operational monitoring:
 | GET    | `/api/v1/indicators`                         | Catalogue of every registered indicator, with parameter specs |
 | GET    | `/api/v1/indicators/{indicator}`             | One indicator's metadata, parameters, and output series       |
 | GET    | `/api/v1/markets/{symbol}/indicators/{name}` | Run one indicator over the market's stored candles            |
+| POST   | `/api/v1/markets/{symbol}/indicators/batch`  | Run several indicators over one shared candle load            |
 
 Registered today: the **Trend Indicator Package** — `sma`, `ema`, `wma`
 (all `category: "trend"`) — plus `rsi` (`category: "momentum"`). The set
@@ -67,6 +68,11 @@ parameters, e.g. "Equal to the period parameter"). "Output type" and
 already derivable from `outputs` and from the `source` parameter's
 `choices`, and a client should derive them rather than assume a second,
 possibly-drifting source of the same fact.
+
+Each entry also carries `aliases: string[]` (default `[]`) — alternate
+names a client's search should also match, e.g. `["MA", "Moving Average",
+"Simple MA"]` for `sma`. Purely a discoverability aid: an indicator with no
+aliases is unaffected, and a client is free to ignore the field entirely.
 
 **Calculation parameters are ordinary query parameters.** Beyond the
 reserved `timeframe`, `start`, `end`, and `limit`, every query key is
@@ -132,6 +138,89 @@ is shorter than the indicator's warmup), and `indicator_execution_failed`
 (500 — a bug inside one indicator, named so it is obvious which). The
 shared `market_not_found`, `candle_not_found`, `invalid_timeframe`,
 `invalid_range`, and `limit_exceeded` codes apply here too.
+
+**Batch calculation — the chart overlay API.** `POST
+/api/v1/markets/{symbol}/indicators/batch` runs up to 50 indicators over the
+same shared candle load — the backend behind the dashboard's Indicator
+Management & Chart Overlay System (`ARCHITECTURE.md` § "Indicator
+Management & Chart Overlay System"). Request body:
+
+```jsonc
+{
+  "timeframe": "1h",
+  "start": "2026-01-01T00:00:00Z", // optional, same semantics as the single-indicator endpoint
+  "end": "2026-01-02T00:00:00Z", // optional
+  "limit": 500, // optional
+  "requests": [
+    { "indicator": "sma", "params": { "period": "20" } },
+    { "indicator": "ema", "params": { "period": "20" } },
+    { "indicator": "nope" }, // an unknown indicator — see below
+  ],
+}
+```
+
+The candles are loaded **once** for the whole batch, not once per requested
+indicator. The response shares one `timestamps` array across every result,
+and each entry in `results` succeeds or fails **independently**:
+
+```jsonc
+{
+  "symbol": "ETHUSD",
+  "timeframe": "1h",
+  "timestamps": ["2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z"],
+  "results": [
+    {
+      "indicator": "sma",
+      "success": true,
+      "label": "Simple Moving Average",
+      "parameters": { "period": 20 },
+      "series": [{ "name": "sma", "label": "SMA(20)", "values": [null, 3055.25] }],
+      "cache_status": "miss",
+      "warmup_candles": 19,
+      "execution_time_ms": 0.06,
+      "error_code": null,
+      "error_detail": null,
+    },
+    {
+      "indicator": "nope",
+      "success": false,
+      "label": null,
+      "parameters": null,
+      "series": null,
+      "cache_status": null,
+      "warmup_candles": null,
+      "execution_time_ms": null,
+      "error_code": "indicator_not_found",
+      "error_detail": "No indicator registered as 'nope'.",
+    },
+  ],
+  // Shared by every result in the batch (one candle load, one engine):
+  "candles_analyzed": 2,
+  "database_time_ms": 1.4,
+  "engine_version": "1.0.0",
+  "generated_at": "2026-01-01T02:00:00Z",
+}
+```
+
+`warmup_candles`/`execution_time_ms` are per-item (present only on
+success, like `cache_status`) since each indicator in a batch still runs,
+warms up, and is cached independently. `candles_analyzed`,
+`database_time_ms`, `engine_version`, and `generated_at` are reported once
+for the whole batch, the same "share what's shared" convention
+`timestamps` already follows — `engine_version` versions the _execution
+pipeline itself_, independent of any individual indicator's own `version`.
+
+One bad indicator name or an out-of-range parameter in one request item
+never fails the other items — this is deliberate, since a research UI
+managing several overlays must not lose every other correctly-configured
+overlay because of one mistake. A failure that means there is no candle
+data to compute _anything_ from (unknown market, invalid timeframe/range/
+limit — the same `market_not_found`/`invalid_timeframe`/`invalid_range`/
+`limit_exceeded` codes as every other endpoint here) still fails the whole
+request with a 404/400, since no per-item result would be meaningful
+without candles to compute over. This endpoint is purely additive: `GET
+/markets/{symbol}/indicators/{name}` and every other indicator route are
+unchanged.
 
 ### Platform health
 

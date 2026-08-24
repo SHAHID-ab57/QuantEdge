@@ -8,6 +8,134 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Indicator Management & Chart Overlay System — production-readiness
+  review** — a UX/scalability pass adding researcher-facing polish and one
+  real caching improvement on top of the system below, with **zero
+  breaking changes** to the batch endpoint, the store's existing actions,
+  or any existing indicator.
+
+  - **Category grouping**: the Indicator Panel's Available Indicators list
+    is now grouped under `ListSubheader`s in a canonical order (Trend,
+    Momentum, Volatility, Volume, Oscillators, Statistical, then any
+    uncurated category) via a new, UI-only `groupIndicatorsByCategory` —
+    the backend's `category` field remains a free-form string, so a future
+    indicator's brand-new category still renders correctly with no schema
+    change.
+  - **Upgraded search**: `matchesIndicatorSearch` now matches name, label,
+    category, every declared alias, and the description — not
+    label/name/category alone. A new, additive `aliases: string[]` field
+    was added to `IndicatorMetadata`/the catalogue API and populated for
+    SMA, EMA, WMA, and RSI (e.g. `sma` → `["MA", "Moving Average", "Simple
+MA"]`).
+  - **Comprehensive per-indicator tooltips**: every entry in the Available
+    Indicators list now carries an `InfoTooltip` with Purpose, Formula,
+    Interpretation, Typical Parameters, Advantages, Limitations, and
+    Common Use Cases — reusing the exact curated `IndicatorKnowledge` the
+    standalone `/indicators` page's Information Panel already renders,
+    via a new `toTooltipSections` helper, never a second copy of it.
+  - **Manual color customization**: a new `OverlayColorSwatch` (shared by
+    the panel and legend) turns the previously-static color dot into a
+    picker — choose from a wider palette or reset to the automatic
+    rotation — backed by a new, optional `OverlayConfig.colorOverride`
+    field and a `setOverlayColor` store action. `resolveOverlayColor`
+    resolves the override when present, the automatic rotation otherwise.
+  - **Drag-and-drop + keyboard reordering**: the Indicator Legend's rows
+    are now reorderable via native drag-and-drop or up/down icon buttons
+    (kept for keyboard-only users), backed by a new `moveOverlayToIndex`
+    store action. Render order — both the legend's list order and the
+    chart's line paint order — follows this array's order directly:
+    `CandlestickChart`'s Overlay Engine now detects a pure reorder (same
+    overlay ids, new sequence) and recreates every series in the new
+    order, since lightweight-charts paints series in creation order; an
+    unrelated add/remove/toggle is unaffected and still only touches what
+    actually changed.
+  - **Improved loading/empty states**: the panel's catalogue loading state
+    is now `Skeleton` rows instead of plain text, with a one-click "Clear
+    search" on a no-match state; the legend's empty state adds an icon and
+    points a researcher at the panel.
+  - **Expanded calculation metadata**: the batch endpoint now reports
+    Calculation Time, Cache Status, Dataset Size, Warmup Period, Engine
+    Version, and Source Price — `IndicatorBatchResponse` gained
+    `candles_analyzed`/`database_time_ms`/`engine_version`/`generated_at`
+    (shared by the whole batch), `IndicatorBatchItemResult` gained
+    `warmup_candles`/`execution_time_ms` (per item). A new
+    `ENGINE_VERSION` constant versions the execution pipeline itself,
+    independent of any indicator's own version. Surfaced per overlay via a
+    "Details" `InfoTooltip` in both the panel and legend.
+  - **Overlay-set export**: a new `OverlayExportMenu` offers CSV, JSON, and
+    copy-to-clipboard for the _current_ overlay set (not just one
+    indicator at a time), unioning overlays with different warmup lengths
+    into one aligned table.
+  - **Frontend-side result reuse**: a new `createOverlaySeriesCache` closes
+    a redraw-layer gap — TanStack Query's structural sharing already kept
+    an unchanged batch result's reference stable across refetches, but the
+    existing `toOverlaySeries` rebuilt every overlay's data array on every
+    call regardless, defeating the chart's own reference-equality
+    redraw-skip. The new cache returns the same series object (and
+    `data` array) for an overlay whose result reference and color are both
+    unchanged, so "only modified indicators are recalculated" (engine
+    layer) now also holds as "only modified overlays are redrawn" (chart
+    layer). `toOverlaySeries` itself is unchanged and still independently
+    tested.
+  - 5 new backend tests (aliases, batch-level and per-item metadata) and
+    over 60 new/updated frontend tests across the store, library, and
+    component layers — full suites still pass (backend 558, frontend
+    1094).
+  - See `ARCHITECTURE.md` § "Indicator Management & Chart Overlay System —
+    Production-Readiness Review", the updated `FRONTEND.md` § "Indicator
+    Management & Chart Overlay System", and `docs/api/API.md` § "Technical
+    indicators" for the full write-up.
+
+- **Indicator Management & Chart Overlay System** — infrastructure for
+  running several already-registered indicators as simultaneous chart
+  overlays, built so the system scales to dozens of indicators without
+  another chart-architecture change. Backend and frontend both purely
+  additive; the full pre-existing backend and frontend suites pass
+  unchanged.
+
+  - **Batch calculation endpoint**: `POST
+/api/v1/markets/{symbol}/indicators/batch` loads a market's candles
+    **once** and runs up to 50 requested indicators against that single
+    in-memory list, instead of one request per indicator each repeating the
+    same candle query. Each requested indicator succeeds or fails
+    independently — one bad indicator name or out-of-range parameter never
+    blanks out every other correctly-configured overlay. `IndicatorService`
+    gained a private `_load_points` helper shared by both the existing
+    `calculate` and the new `calculate_batch`, with zero change to
+    `calculate`'s external behavior.
+  - **Overlay Engine**: `CandlestickChart` — the same primitive History,
+    Live Market, and Replay already render — gained an optional
+    `overlays` prop and a reconciliation effect that creates/removes
+    `lightweight-charts` line series by overlay id and skips `setData()`
+    entirely when an overlay's data reference is unchanged from the last
+    push, avoiding unnecessary redraws (verified by a dedicated test).
+  - **Indicator Panel** (`src/features/indicator-overlays/components/indicator-panel.tsx`):
+    search, add, remove, enable/disable, and configure — with no
+    indicator-specific code of its own, reusing the existing
+    `useIndicatorCatalog` hook and `ParameterForm` component from the
+    standalone `/indicators` page rather than duplicating either.
+  - **Indicator Legend**: Name, resolved parameters, a visibility toggle,
+    and a remove action per overlay, reading directly from the overlay
+    store, independent of the panel.
+  - **Session-scoped state**: a new Zustand store
+    (`use-overlay-store.ts`) using the `persist` middleware against
+    `sessionStorage` — the first persisted store in this codebase (the
+    existing `ui-store.ts` is unpersisted) — chosen specifically because
+    the requirement is "the current session," not indefinite persistence.
+    Deliberately flat and plain-JSON-serializable so a future saved-
+    workspace feature is a persistence-backend swap, not a redesign.
+  - **Replay compatibility**: `ReplayChart` accepts the same `overlays`
+    prop and reveals each overlay progressively by slicing to the current
+    replay tick, mirroring the existing candle-reveal pattern exactly —
+    verified with dedicated tests, and backward compatible by default
+    (`overlays` defaults to `[]`).
+  - Wired into `HistoryPage` today (panel, chart overlays, and legend all
+    present); Replay and Live Market already accept the same `overlays`
+    prop end-to-end but are not yet wired to the panel/store.
+  - See `ARCHITECTURE.md` § "Indicator Management & Chart Overlay System",
+    `FRONTEND.md` § "Indicator Management & Chart Overlay System", and
+    `docs/api/API.md` § "Technical indicators" for the full write-up.
+
 - Trend Indicator Package production-readiness review — a hardening pass
   over SMA/EMA/WMA before more indicator families are built on top of this
   engine, with **zero breaking API changes** and the existing architecture

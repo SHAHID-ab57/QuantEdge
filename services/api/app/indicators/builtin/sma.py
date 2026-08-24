@@ -54,6 +54,7 @@ class SimpleMovingAverage(Indicator):
         author="Eth AI Platform",
         complexity="O(n) — one running-sum pass over the candle range.",
         warmup_description="Equal to the period parameter.",
+        aliases=("MA", "Moving Average", "Simple MA"),
     )
 
     def warmup(self, params: Mapping[str, Any]) -> int:

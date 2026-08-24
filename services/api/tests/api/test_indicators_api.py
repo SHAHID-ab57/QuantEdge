@@ -57,6 +57,10 @@ class TestCatalogueEndpoint:
         assert response.status_code == 404
         assert response.json()["code"] == "indicator_not_found"
 
+    async def test_publishes_search_aliases(self, client: httpx.AsyncClient) -> None:
+        response = await client.get("/api/v1/indicators/sma")
+        assert "MA" in response.json()["aliases"]
+
     async def test_is_mounted_unversioned_too(self, client: httpx.AsyncClient) -> None:
         # Every route on this platform is served at both prefixes.
         assert (await client.get("/indicators")).status_code == 200
@@ -244,3 +248,92 @@ class TestCalculationErrors:
     ) -> None:
         response = await client.get("/api/v1/markets/ETCUSD/indicators/sma")
         assert response.status_code == 422
+
+
+class TestBatchCalculationEndpoint:
+    """The chart overlay API: several indicators, one request."""
+
+    async def test_calculates_every_requested_indicator(
+        self, client: httpx.AsyncClient, seeded_varied: None
+    ) -> None:
+        response = await client.post(
+            "/api/v1/markets/ETCUSD/indicators/batch",
+            json={
+                "timeframe": "1h",
+                "requests": [
+                    {"indicator": "sma", "params": {"period": "2"}},
+                    {"indicator": "ema", "params": {"period": "2"}},
+                ],
+            },
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body["timestamps"]) == 3
+        assert len(body["results"]) == 2
+        assert all(item["success"] for item in body["results"])
+        assert body["results"][0]["series"][0]["values"] == [None, 17.5, 28.0]
+
+    async def test_reports_expanded_calculation_metadata(
+        self, client: httpx.AsyncClient, seeded_varied: None
+    ) -> None:
+        response = await client.post(
+            "/api/v1/markets/ETCUSD/indicators/batch",
+            json={
+                "timeframe": "1h",
+                "requests": [{"indicator": "sma", "params": {"period": "2"}}],
+            },
+        )
+        body = response.json()
+        assert body["candles_analyzed"] == 3
+        assert body["database_time_ms"] >= 0.0
+        assert body["engine_version"]
+        assert body["generated_at"].endswith("Z")
+        item = body["results"][0]
+        assert item["warmup_candles"] == 2
+        assert item["execution_time_ms"] >= 0.0
+
+    async def test_one_bad_indicator_does_not_fail_the_batch(
+        self, client: httpx.AsyncClient, seeded_varied: None
+    ) -> None:
+        response = await client.post(
+            "/api/v1/markets/ETCUSD/indicators/batch",
+            json={
+                "timeframe": "1h",
+                "requests": [
+                    {"indicator": "sma", "params": {"period": "2"}},
+                    {"indicator": "nope", "params": {}},
+                ],
+            },
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["results"][0]["success"] is True
+        assert body["results"][1]["success"] is False
+        assert body["results"][1]["error_code"] == "indicator_not_found"
+        assert body["results"][1]["series"] is None
+
+    async def test_returns_404_for_an_unknown_market(self, client: httpx.AsyncClient) -> None:
+        response = await client.post(
+            "/api/v1/markets/NOPE/indicators/batch",
+            json={"timeframe": "1h", "requests": [{"indicator": "sma"}]},
+        )
+        assert response.status_code == 404
+        assert response.json()["code"] == "market_not_found"
+
+    async def test_rejects_an_empty_requests_list(
+        self, client: httpx.AsyncClient, seeded_varied: None
+    ) -> None:
+        response = await client.post(
+            "/api/v1/markets/ETCUSD/indicators/batch",
+            json={"timeframe": "1h", "requests": []},
+        )
+        assert response.status_code == 422
+
+    async def test_is_mounted_unversioned_too(
+        self, client: httpx.AsyncClient, seeded_varied: None
+    ) -> None:
+        response = await client.post(
+            "/markets/ETCUSD/indicators/batch",
+            json={"timeframe": "1h", "requests": [{"indicator": "sma", "params": {"period": "2"}}]},
+        )
+        assert response.status_code == 200

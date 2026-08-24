@@ -10,7 +10,11 @@ import { useTheme } from '@mui/material/styles';
 import type { CandlestickData, HistogramData, UTCTimestamp } from 'lightweight-charts';
 import { useCallback, useMemo, useState } from 'react';
 import type { Market } from '@/types/api/market';
-import { CandlestickChart, type CrosshairPoint } from './candlestick-chart';
+import {
+  CandlestickChart,
+  type CrosshairPoint,
+  type OverlaySeriesInput,
+} from './candlestick-chart';
 import { ChartLegend, type ChartLegendPoint } from './chart-legend';
 import { ChartToolbar } from './chart-toolbar';
 import { toChartSeries } from './data-adapter';
@@ -29,6 +33,8 @@ export interface ChartContainerProps {
   /** See `CandlestickChartProps.liveCandle` — passed straight through. */
   liveCandle?: CandlestickData | null;
   liveVolume?: HistogramData | null;
+  /** See `CandlestickChartProps.overlays` — passed straight through. */
+  overlays?: OverlaySeriesInput[];
 }
 
 function ChartSkeleton({ height }: { height: number }) {
@@ -60,6 +66,7 @@ export function ChartContainer({
   onTimeframeChange,
   liveCandle = null,
   liveVolume = null,
+  overlays = [],
 }: ChartContainerProps) {
   const theme = useTheme();
   const [crosshair, setCrosshair] = useState<CrosshairPoint | null>(null);
@@ -159,6 +166,7 @@ export function ChartContainer({
         fitContentToken={fitContentToken}
         liveCandle={liveCandle}
         liveVolume={liveVolume}
+        overlays={overlays}
         height={height}
       />
       <ChartLegend point={legendPoint} />

@@ -16,6 +16,7 @@ const fakeSeries = () => ({
 
 const fakeChart = vi.hoisted(() => ({
   addSeries: vi.fn(),
+  removeSeries: vi.fn(),
   applyOptions: vi.fn(),
   remove: vi.fn(),
   timeScale: vi.fn(),
@@ -34,17 +35,25 @@ let candleSeries: ReturnType<typeof fakeSeries>;
 let volumeSeries: ReturnType<typeof fakeSeries>;
 let fitContent: ReturnType<typeof vi.fn>;
 
+let overlaySeriesInstances: ReturnType<typeof fakeSeries>[];
+
 beforeEach(() => {
   vi.clearAllMocks();
   candleSeries = fakeSeries();
   volumeSeries = fakeSeries();
+  overlaySeriesInstances = [];
   fitContent = vi.fn();
   fakeChart.timeScale.mockReturnValue({ fitContent });
-  // The component always adds the candlestick series first, then volume.
+  // The component always adds the candlestick series first, then volume;
+  // any series requested after that is an overlay line, one per call.
   let call = 0;
   fakeChart.addSeries.mockImplementation(() => {
     call += 1;
-    return call === 1 ? candleSeries : volumeSeries;
+    if (call === 1) return candleSeries;
+    if (call === 2) return volumeSeries;
+    const overlay = fakeSeries();
+    overlaySeriesInstances.push(overlay);
+    return overlay;
   });
 });
 
@@ -175,5 +184,149 @@ describe('CandlestickChart', () => {
     );
 
     expect(candleSeries.update).not.toHaveBeenCalled();
+  });
+
+  describe('overlays (Overlay Engine)', () => {
+    const overlayA = {
+      id: 'sma-20',
+      label: 'SMA(20)',
+      color: '#2196f3',
+      data: [{ time: utc(1_785_888_000), value: 101 }],
+    };
+    const overlayB = {
+      id: 'ema-20',
+      label: 'EMA(20)',
+      color: '#ff9800',
+      data: [{ time: utc(1_785_888_000), value: 102 }],
+    };
+
+    it('adds one line series per overlay and pushes its data', () => {
+      render(
+        <CandlestickChart candlesticks={candlesticks} volume={volume} overlays={[overlayA]} />,
+      );
+      expect(fakeChart.addSeries).toHaveBeenCalledTimes(3); // candle + volume + one overlay
+      expect(overlaySeriesInstances[0]!.setData).toHaveBeenCalledWith(overlayA.data);
+    });
+
+    it('adds a second overlay without touching the first', () => {
+      const { rerender } = render(
+        <CandlestickChart candlesticks={candlesticks} volume={volume} overlays={[overlayA]} />,
+      );
+      const firstOverlaySeries = overlaySeriesInstances[0]!;
+      firstOverlaySeries.setData.mockClear();
+
+      rerender(
+        <CandlestickChart
+          candlesticks={candlesticks}
+          volume={volume}
+          overlays={[overlayA, overlayB]}
+        />,
+      );
+
+      expect(overlaySeriesInstances).toHaveLength(2);
+      // The existing overlay's series must not be recreated or re-pushed
+      // just because a sibling was added.
+      expect(fakeChart.removeSeries).not.toHaveBeenCalled();
+      expect(firstOverlaySeries.setData).not.toHaveBeenCalled();
+    });
+
+    it('removes a series when its overlay is no longer present', () => {
+      const { rerender } = render(
+        <CandlestickChart
+          candlesticks={candlesticks}
+          volume={volume}
+          overlays={[overlayA, overlayB]}
+        />,
+      );
+      const removedSeries = overlaySeriesInstances[0]!;
+
+      rerender(
+        <CandlestickChart candlesticks={candlesticks} volume={volume} overlays={[overlayB]} />,
+      );
+
+      expect(fakeChart.removeSeries).toHaveBeenCalledWith(removedSeries);
+    });
+
+    it('updates an existing overlay in place when its data reference changes', () => {
+      const { rerender } = render(
+        <CandlestickChart candlesticks={candlesticks} volume={volume} overlays={[overlayA]} />,
+      );
+      const series = overlaySeriesInstances[0]!;
+      const updated = { ...overlayA, data: [{ time: utc(1_785_888_000), value: 999 }] };
+
+      rerender(
+        <CandlestickChart candlesticks={candlesticks} volume={volume} overlays={[updated]} />,
+      );
+
+      expect(fakeChart.addSeries).toHaveBeenCalledTimes(3); // no new series created
+      expect(series.setData).toHaveBeenCalledWith(updated.data);
+    });
+
+    it('does not re-push an overlay whose data reference is unchanged', () => {
+      const { rerender } = render(
+        <CandlestickChart candlesticks={candlesticks} volume={volume} overlays={[overlayA]} />,
+      );
+      const series = overlaySeriesInstances[0]!;
+      series.setData.mockClear();
+
+      // Same overlay, same `data` reference — re-render for an unrelated reason.
+      rerender(
+        <CandlestickChart candlesticks={candlesticks} volume={volume} overlays={[overlayA]} />,
+      );
+
+      expect(series.setData).not.toHaveBeenCalled();
+    });
+
+    it('applies a color change to an existing series via applyOptions, not a new series', () => {
+      const { rerender } = render(
+        <CandlestickChart candlesticks={candlesticks} volume={volume} overlays={[overlayA]} />,
+      );
+      const series = overlaySeriesInstances[0]!;
+      const recolored = { ...overlayA, color: '#ff0000' };
+
+      rerender(
+        <CandlestickChart candlesticks={candlesticks} volume={volume} overlays={[recolored]} />,
+      );
+
+      expect(fakeChart.addSeries).toHaveBeenCalledTimes(3);
+      expect(series.applyOptions).toHaveBeenCalledWith(
+        expect.objectContaining({ color: '#ff0000' }),
+      );
+    });
+
+    it('renders with no overlays by default', () => {
+      render(<CandlestickChart candlesticks={candlesticks} volume={volume} />);
+      expect(fakeChart.addSeries).toHaveBeenCalledTimes(2);
+    });
+
+    it('recreates every series in the new order when overlays are reordered, so paint order follows it', () => {
+      const { rerender } = render(
+        <CandlestickChart
+          candlesticks={candlesticks}
+          volume={volume}
+          overlays={[overlayA, overlayB]}
+        />,
+      );
+      const [firstSeries, secondSeries] = overlaySeriesInstances;
+      expect(fakeChart.removeSeries).not.toHaveBeenCalled();
+
+      // Same two overlays, reversed order — nothing added or removed.
+      rerender(
+        <CandlestickChart
+          candlesticks={candlesticks}
+          volume={volume}
+          overlays={[overlayB, overlayA]}
+        />,
+      );
+
+      // Both previous series are torn down and replaced so the new series
+      // are added to the chart in the new (B, A) order.
+      expect(fakeChart.removeSeries).toHaveBeenCalledWith(firstSeries);
+      expect(fakeChart.removeSeries).toHaveBeenCalledWith(secondSeries);
+      expect(overlaySeriesInstances).toHaveLength(4);
+      const [, , thirdSeries, fourthSeries] = overlaySeriesInstances;
+      expect(thirdSeries!.setData).toHaveBeenCalledWith(overlayB.data);
+      expect(fourthSeries!.setData).toHaveBeenCalledWith(overlayA.data);
+    });
   });
 });

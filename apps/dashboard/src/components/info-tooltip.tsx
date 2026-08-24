@@ -63,7 +63,11 @@ function InfoTooltipInner({ label, sections, maxWidth = 300 }: InfoTooltipProps)
               >
                 {section.heading}
               </Typography>
-              <Typography variant="caption" component="p" sx={{ lineHeight: 1.5 }}>
+              <Typography
+                variant="caption"
+                component="p"
+                sx={{ lineHeight: 1.5, whiteSpace: 'pre-line' }}
+              >
                 {section.body}
               </Typography>
             </Box>

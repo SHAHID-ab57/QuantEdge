@@ -1,6 +1,7 @@
 'use client';
 
 import Alert from '@mui/material/Alert';
+import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
 import Grid from '@mui/material/Grid';
 import Paper from '@mui/material/Paper';
@@ -12,6 +13,13 @@ import Typography from '@mui/material/Typography';
 import { useSearchParams } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { ChartContainer } from '@/components/chart';
+import {
+  IndicatorLegend,
+  IndicatorPanel,
+  useChartOverlays,
+  useOverlayStore,
+} from '@/features/indicator-overlays';
+import { useIndicatorCatalog } from '@/features/indicators/hooks/use-indicator-data';
 import { resolveRange } from './lib/resolve-range';
 import { CandlesTable } from './components/candles-table';
 import { ExportButtons } from './components/export-buttons';
@@ -87,6 +95,14 @@ export function HistoryPage() {
   }, [apply, page, query]);
 
   const candles = useCandles(query, page);
+  const catalog = useIndicatorCatalog();
+  const storeOverlays = useOverlayStore((state) => state.overlays);
+  const chartOverlays = useChartOverlays({
+    symbol: query?.symbol ?? null,
+    timeframe: query?.timeframe ?? null,
+    start: query?.start ?? undefined,
+    end: query?.end ?? undefined,
+  });
 
   const handleSubmitted = useCallback((values: HistoryFormValues) => {
     setQuery(convertToQuery(values));
@@ -178,12 +194,24 @@ export function HistoryPage() {
               <Tab label="Table" value="table" sx={{ minHeight: 36, py: 0 }} />
             </Tabs>
             {view === 'chart' ? (
-              <ChartContainer
-                symbol={query.symbol}
-                timeframe={query.timeframe}
-                start={query.start}
-                end={query.end}
-              />
+              <>
+                <ChartContainer
+                  symbol={query.symbol}
+                  timeframe={query.timeframe}
+                  start={query.start}
+                  end={query.end}
+                  overlays={chartOverlays.chartOverlays}
+                />
+                <Box sx={{ mt: 1 }}>
+                  <IndicatorLegend
+                    overlays={storeOverlays}
+                    overlaySeries={chartOverlays.overlaySeries}
+                    isLoading={chartOverlays.isLoading}
+                    symbol={query.symbol}
+                    timeframe={query.timeframe}
+                  />
+                </Box>
+              </>
             ) : null}
             {view === 'table' ? (
               <>
@@ -212,6 +240,15 @@ export function HistoryPage() {
           </Grid>
           <Grid size={{ xs: 12, lg: 4 }}>
             <Stack spacing={2}>
+              <Paper variant="outlined" sx={{ p: { xs: 1.5, sm: 2 } }}>
+                <Typography variant="subtitle2" component="h3" sx={{ fontWeight: 700, mb: 1.5 }}>
+                  Indicators
+                </Typography>
+                <IndicatorPanel
+                  indicators={catalog.data?.indicators ?? []}
+                  loading={catalog.isLoading}
+                />
+              </Paper>
               <StatsCard
                 statistics={pageData?.statistics}
                 isLoading={candles.isLoading && !candles.data}

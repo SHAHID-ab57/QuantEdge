@@ -34,6 +34,15 @@ from app.indicators.registry import IndicatorRegistry
 
 logger = logging.getLogger("app.indicators.engine")
 
+#: The execution pipeline's own version, independent of any indicator's
+#: `IndicatorMetadata.version` — bump it when the *pipeline* (resolve →
+#: validate → warmup check → cache → calculate → verify → cache store)
+#: changes in a way that could affect any indicator's result, not when a
+#: single indicator changes. Surfaced to clients via the batch calculation
+#: endpoint so a researcher comparing results across time can tell whether
+#: the engine itself, not just an indicator, changed underneath them.
+ENGINE_VERSION = "1.0.0"
+
 
 @dataclass(frozen=True, slots=True)
 class IndicatorRun:

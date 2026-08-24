@@ -15,6 +15,7 @@ const fakeSeries = () => ({
 
 const fakeChart = vi.hoisted(() => ({
   addSeries: vi.fn(),
+  removeSeries: vi.fn(),
   applyOptions: vi.fn(),
   remove: vi.fn(),
   timeScale: vi.fn(),
@@ -31,16 +32,22 @@ vi.mock('lightweight-charts', async (importOriginal) => {
 
 let candleSeries: ReturnType<typeof fakeSeries>;
 let volumeSeries: ReturnType<typeof fakeSeries>;
+let overlaySeriesInstances: ReturnType<typeof fakeSeries>[];
 
 beforeEach(() => {
   vi.clearAllMocks();
   candleSeries = fakeSeries();
   volumeSeries = fakeSeries();
+  overlaySeriesInstances = [];
   fakeChart.timeScale.mockReturnValue({ fitContent: vi.fn() });
   let call = 0;
   fakeChart.addSeries.mockImplementation(() => {
     call += 1;
-    return call === 1 ? candleSeries : volumeSeries;
+    if (call === 1) return candleSeries;
+    if (call === 2) return volumeSeries;
+    const series = fakeSeries();
+    overlaySeriesInstances.push(series);
+    return series;
   });
 });
 
@@ -141,5 +148,79 @@ describe('ReplayChart', () => {
     );
 
     expect(candleSeries.setData).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('ReplayChart — overlay reveal (replay compatibility)', () => {
+  function overlay(id: string, length = 5) {
+    return {
+      id,
+      label: id.toUpperCase(),
+      color: '#2196f3',
+      data: Array.from({ length }, (_, i) => ({
+        time: Date.parse(`2026-01-01T00:0${i}:00Z`) / 1000,
+        value: 100 + i,
+      })) as { time: number; value: number }[],
+    };
+  }
+
+  it('reveals only the overlay data up to the current tick index, not the full session', () => {
+    renderChart({ tick: tick({ index: 2 }), overlays: [overlay('sma')] as never });
+    expect(overlaySeriesInstances).toHaveLength(1);
+    expect(overlaySeriesInstances[0]!.setData).toHaveBeenCalledWith([
+      { time: expect.any(Number), value: 100 },
+      { time: expect.any(Number), value: 101 },
+      { time: expect.any(Number), value: 102 },
+    ]);
+  });
+
+  it('reveals more of the overlay as the tick advances, mirroring candle reveal', () => {
+    const { rerender } = renderChart({
+      tick: tick({ index: 1, revealEpoch: 1 }),
+      overlays: [overlay('sma')] as never,
+    });
+    expect(overlaySeriesInstances[0]!.setData).toHaveBeenLastCalledWith([
+      { time: expect.any(Number), value: 100 },
+      { time: expect.any(Number), value: 101 },
+    ]);
+
+    rerender(
+      <ThemeProvider theme={theme}>
+        <ReplayChart
+          candles={CANDLES}
+          tick={tick({ index: 3, revealEpoch: 1 })}
+          isLoading={false}
+          overlays={[overlay('sma')] as never}
+        />
+      </ThemeProvider>,
+    );
+
+    expect(overlaySeriesInstances[0]!.setData).toHaveBeenLastCalledWith([
+      { time: expect.any(Number), value: 100 },
+      { time: expect.any(Number), value: 101 },
+      { time: expect.any(Number), value: 102 },
+      { time: expect.any(Number), value: 103 },
+    ]);
+  });
+
+  it('renders with no overlays when none are supplied, unaffected by replay position', () => {
+    renderChart({ tick: tick({ index: 4 }) });
+    expect(overlaySeriesInstances).toHaveLength(0);
+  });
+
+  it('reveals multiple overlays independently at the same tick', () => {
+    renderChart({
+      tick: tick({ index: 1 }),
+      overlays: [overlay('sma'), overlay('ema')] as never,
+    });
+    expect(overlaySeriesInstances).toHaveLength(2);
+    expect(overlaySeriesInstances[0]!.setData).toHaveBeenCalledWith([
+      { time: expect.any(Number), value: 100 },
+      { time: expect.any(Number), value: 101 },
+    ]);
+    expect(overlaySeriesInstances[1]!.setData).toHaveBeenCalledWith([
+      { time: expect.any(Number), value: 100 },
+      { time: expect.any(Number), value: 101 },
+    ]);
   });
 });

@@ -5,7 +5,7 @@ import Stack from '@mui/material/Stack';
 import { useTheme } from '@mui/material/styles';
 import type { UTCTimestamp } from 'lightweight-charts';
 import { memo, useMemo } from 'react';
-import { CandlestickChart } from '@/components/chart/candlestick-chart';
+import { CandlestickChart, type OverlaySeriesInput } from '@/components/chart/candlestick-chart';
 import { ChartLegend, type ChartLegendPoint } from '@/components/chart/chart-legend';
 import type { Candle } from '@/types/api/market';
 import type { ReplayClockTick } from '../engine/replay-clock';
@@ -16,6 +16,14 @@ export interface ReplayChartProps {
   /** The synchronized position to render — see `engine/replay-clock.ts`. */
   tick: ReplayClockTick;
   isLoading: boolean;
+  /**
+   * Indicator overlays calculated once over the *entire* loaded session
+   * (the same "compute once up front" contract `candles` already
+   * follows) — each one's `data` is revealed only up to `tick.index`
+   * below, so an overlay never shows a researcher a value from beyond the
+   * current replay position.
+   */
+  overlays?: OverlaySeriesInput[];
   height?: number;
 }
 
@@ -36,13 +44,28 @@ export interface ReplayChartProps {
  * does re-render every tick — correctly, since the chart genuinely has new
  * data to show.
  */
-function ReplayChartInner({ candles, tick, isLoading, height = 420 }: ReplayChartProps) {
+function ReplayChartInner({
+  candles,
+  tick,
+  isLoading,
+  overlays = [],
+  height = 420,
+}: ReplayChartProps) {
   const theme = useTheme();
   const chartTheme = useMemo(
     () => ({ upColor: theme.palette.success.main, downColor: theme.palette.error.main }),
     [theme.palette.success.main, theme.palette.error.main],
   );
   const sync = useReplayChartSync(candles, tick.index, tick.revealEpoch, chartTheme);
+
+  // Reveal each overlay's line only up to the current replay position,
+  // mirroring exactly how `useReplayChartSync` reveals `candles` above —
+  // an overlay was calculated once over the whole session, but must never
+  // show a value from beyond "now" in the replay.
+  const revealedOverlays = useMemo(
+    () => overlays.map((overlay) => ({ ...overlay, data: overlay.data.slice(0, tick.index + 1) })),
+    [overlays, tick.index],
+  );
 
   const legendPoint: ChartLegendPoint | null = useMemo(() => {
     const bar = sync.liveCandle ?? sync.candlesticks.at(-1);
@@ -75,6 +98,7 @@ function ReplayChartInner({ candles, tick, isLoading, height = 420 }: ReplayChar
         volume={sync.volume}
         liveCandle={sync.liveCandle}
         liveVolume={sync.liveVolume}
+        overlays={revealedOverlays}
         height={height}
       />
       <ChartLegend point={legendPoint} />

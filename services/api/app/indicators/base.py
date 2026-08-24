@@ -139,6 +139,11 @@ class IndicatorMetadata:
     author: str = "Eth AI Platform"
     complexity: str = "Not documented"
     warmup_description: str = ""
+    #: Alternate names a researcher might search for (e.g. "MA", "Moving
+    #: Average" for `sma`). Additive and optional — an indicator that
+    #: doesn't declare any is simply matched on name/label/category/
+    #: description alone, the same as before this field existed.
+    aliases: tuple[str, ...] = field(default_factory=tuple)
 
 
 class Indicator(ABC):

@@ -57,6 +57,7 @@ class WeightedMovingAverage(Indicator):
         author="Eth AI Platform",
         complexity="O(n) — one incremental pass over the candle range after an O(period) seed.",
         warmup_description="Equal to the period parameter.",
+        aliases=("Weighted MA", "Linear Weighted Moving Average", "LWMA"),
     )
 
     def warmup(self, params: Mapping[str, Any]) -> int:

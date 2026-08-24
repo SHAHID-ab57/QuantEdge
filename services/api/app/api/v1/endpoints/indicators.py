@@ -26,6 +26,8 @@ from fastapi import APIRouter, Depends, Path, Query, Request, status
 
 from app.dependencies.indicators import get_indicator_service
 from app.schemas.indicators import (
+    IndicatorBatchRequest,
+    IndicatorBatchResponse,
     IndicatorCalculationResponse,
     IndicatorCatalogResponse,
     IndicatorDTO,
@@ -184,4 +186,41 @@ async def calculate_indicator(
         start=start,
         end=end,
         limit=limit,
+    )
+
+
+@router.post(
+    "/markets/{symbol}/indicators/batch",
+    response_model=IndicatorBatchResponse,
+    summary="Calculate several indicators over one shared candle load",
+    description=(
+        "Run multiple indicators over the same market/timeframe/range in a single "
+        "request, loading the underlying candles exactly once — the chart overlay "
+        "API. Each entry in `requests` succeeds or fails independently: a "
+        "misconfigured indicator reports its own `error_code`/`error_detail` "
+        "in `results` without preventing the other requested indicators from "
+        "calculating. `timestamps` is reported once and shared by every "
+        "successful result, since they were all computed over the identical "
+        "candle range."
+    ),
+    responses={
+        status.HTTP_404_NOT_FOUND: _ERROR_RESPONSES[status.HTTP_404_NOT_FOUND],
+        status.HTTP_400_BAD_REQUEST: {
+            "description": "Invalid timeframe, range, or limit for the shared candle load",
+        },
+    },
+)
+async def calculate_indicator_batch(
+    symbol: SymbolPath,
+    body: IndicatorBatchRequest,
+    service: IndicatorServiceDep,
+) -> IndicatorBatchResponse:
+    """Calculate several indicators over one market/timeframe in one request."""
+    return await service.calculate_batch(
+        symbol,
+        timeframe=body.timeframe,
+        requests=body.requests,
+        start=body.start,
+        end=body.end,
+        limit=body.limit,
     )

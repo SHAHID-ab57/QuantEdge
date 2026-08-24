@@ -5,6 +5,7 @@ import Stack from '@mui/material/Stack';
 import Typography from '@mui/material/Typography';
 import { useTheme, type Theme } from '@mui/material/styles';
 import { memo, useMemo } from 'react';
+import { overlayColor } from '@/components/chart/overlay-colors';
 import { buildLinePath, computeDomain, yForValue } from '@/lib/svg-line-path';
 import type { IndicatorSeries } from '@/types/api/indicators';
 import type { ChartConfig } from '../lib/indicator-knowledge';
@@ -17,12 +18,6 @@ export interface IndicatorChartProps {
 
 const WIDTH = 640;
 const DEFAULT_HEIGHT = 160;
-const SERIES_COLOR_KEYS = ['primary', 'secondary', 'warning', 'success'] as const;
-
-function seriesColor(theme: Theme, index: number): string {
-  const key = SERIES_COLOR_KEYS[index % SERIES_COLOR_KEYS.length]!;
-  return theme.palette[key].main;
-}
 
 /**
  * Neutral, non-evaluative colors for a reference line's band position —
@@ -70,7 +65,7 @@ function IndicatorChartInner({ series, config, height = DEFAULT_HEIGHT }: Indica
       series.map((entry, index) => ({
         name: entry.name,
         label: entry.label,
-        color: seriesColor(theme, index),
+        color: overlayColor(theme, index),
         path: buildLinePath(entry.values, WIDTH, height, domain),
       })),
     [series, domain, height, theme],

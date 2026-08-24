@@ -1782,19 +1782,241 @@ conventions exist to prevent.
   `MenuItem`), so keyboard navigation and MUI's default focus-visible
   ring apply with no custom wiring.
 
-### No chart overlays onto the candlestick module
+### Chart overlays onto the candlestick module
 
-Scoped out of this task deliberately. The calculation response's shape — a
-`timestamps` array with every series aligned index-for-index against it —
-is chosen so overlaying an indicator onto the existing candlestick chart
-module is a later addition rather than a rework; `IndicatorChart` is this
-task's lightweight, standalone visualization instead.
+Originally scoped out of the Technical Indicator Engine task (the
+calculation response's shape — a `timestamps` array with every series
+aligned index-for-index against it — was chosen specifically so this would
+be a later addition, not a rework). That later addition is the **Indicator
+Management & Chart Overlay System**, covered in full in its own section
+below. `IndicatorChart` remains this page's own lightweight, standalone
+visualization and is unaffected by it.
+
+## Indicator Management & Chart Overlay System
+
+Infrastructure for running _several_ indicators as simultaneous chart
+overlays — searchable, addable, configurable, removable — without the chart
+architecture changing as more indicators are registered. Full backend and
+data-flow detail lives in [`ARCHITECTURE.md`](ARCHITECTURE.md) § "Indicator
+Management & Chart Overlay System"; this section covers the frontend
+module, `src/features/indicator-overlays/`.
+
+### Module layout
+
+```text
+src/features/indicator-overlays/
+├── store/
+│   └── use-overlay-store.ts        Zustand + sessionStorage — see "State management" below
+├── hooks/
+│   ├── use-overlay-calculations.ts  batches enabled overlays into one TanStack Query
+│   └── use-chart-overlays.ts        composes the above + a memoizing series cache into chart-ready input
+├── lib/
+│   ├── overlay-series.ts            batch response → per-overlay LineData[] + calc metadata, plus the memoizing cache
+│   ├── overlay-export.ts            CSV/JSON/clipboard builders for the current overlay set
+│   ├── categorize.ts                groups the catalogue by a canonical category taxonomy
+│   └── search-indicators.ts         name/label/category/alias/description search matcher
+├── components/
+│   ├── indicator-panel.tsx          search, category groups, add, remove, enable/disable, configure
+│   ├── indicator-legend.tsx         Name / Parameters / Visibility / Remove / reorder / export, store-driven
+│   ├── overlay-color-swatch.tsx     shared color picker (auto rotation + manual override)
+│   └── overlay-export-menu.tsx      CSV / JSON / copy-to-clipboard for the overlay set
+└── index.ts                         barrel export
+```
+
+Everything here is indicator-agnostic — none of these files import a
+specific indicator name — which is what lets a newly-registered backend
+indicator become an overlay with no frontend change beyond the catalogue it
+already reads from `useIndicatorCatalog`.
+
+### Indicator Panel
+
+`IndicatorPanel` (`components/indicator-panel.tsx`) has no indicator-specific
+code of its own: it reuses `useIndicatorCatalog` (the same catalogue fetch
+`/indicators` already performs — not a second one) and `ParameterForm` (the
+same parameter-form component `/indicators` already renders). Its own
+contribution is purely the management surface:
+
+- **Search** — `matchesIndicatorSearch` (`lib/search-indicators.ts`) matches
+  name, label, category, every declared alias
+  (`Indicator.aliases`), and the description — not label/name/category
+  alone — so "MA" finds the SMA/EMA/WMA family and a researcher who only
+  remembers what an indicator _does_ can find it by description. No
+  separate search endpoint; this runs client-side over the already-fetched
+  catalogue.
+- **Available Indicators** — an `Accordion` (a genuine, literal
+  `defaultExpanded` — deriving it from `overlays.length` was tried first and
+  reverted; MUI warns when an uncontrolled `Accordion`'s default changes
+  after mount, and `overlays.length` changes constantly by design) whose
+  contents are grouped by category (`groupIndicatorsByCategory`,
+  `lib/categorize.ts`) under `ListSubheader`s in a fixed order — Trend,
+  Momentum, Volatility, Volume, Oscillators, Statistical, then any
+  uncurated category — with an "Added" `Chip` for indicators already
+  overlaid. Extracted into a separate `AvailableIndicatorsList` component
+  with three flat early returns (loading / no matches / grouped list) to
+  avoid a `no-nested-ternary` lint violation; the loading state renders
+  `Skeleton` rows rather than plain text, and the no-match state offers a
+  one-click "Clear search". Each row carries an `InfoTooltip` built by
+  `toTooltipSections` (`features/indicators/lib/indicator-knowledge.ts`) —
+  Purpose, Formula, Interpretation, Typical Parameters, Advantages,
+  Limitations, and Common Use Cases, reusing the exact same curated
+  `IndicatorKnowledge` the standalone `/indicators` page's
+  `IndicatorInfoPanel` already renders, just in a denser hover/focus form.
+- **Add** — click the row or its icon button; `useOverlayStore.addOverlay`
+  seeds default parameter values from the indicator's own published specs
+  (`defaultValuesFor`, reused from `/indicators`).
+- **Configure** — expands a `ParameterForm` bound to local draft state; a
+  parameter change is validated locally (`validateValues`) and committed to
+  the store — and therefore sent to the chart — only once the whole draft
+  passes validation, so an in-progress edit never flashes a broken chart
+  series.
+- **Color** — each overlay row's color dot is an `OverlayColorSwatch`
+  (shared with the legend): click it to pick a manual color from
+  `overlayColorPalette` or reset to the automatic rotation, via the store's
+  `setOverlayColor(id, color | null)`.
+- **Remove / enable-disable** — call the store directly; a disabled overlay
+  is dropped from the next batch request entirely (see "Fetching" below),
+  not fetched-and-hidden.
+
+### Indicator Legend
+
+`IndicatorLegend` (`components/indicator-legend.tsx`) renders Name, resolved
+Parameters, a Visibility toggle, and a Remove action per overlay — plus
+color customization, reordering, and calculation-detail/export affordances
+— reading straight from the overlay store — deliberately independent of the
+panel, so either surface's remove/toggle/color action is sufficient on its
+own and the legend can be reused wherever an overlay list needs to be shown
+without the full management UI.
+
+- **Reorder** — each row is HTML5-draggable, and also carries "Move up"/
+  "Move down" icon buttons (disabled at the respective end of the list) for
+  keyboard-only users, since drag-and-drop alone would exclude them. Both
+  paths call the store's `moveOverlayToIndex(id, toIndex)`. Render order —
+  both the legend's own list order and the chart's line paint order — is
+  this array's order, full stop (see "Overlay Engine" below for how the
+  chart honors a reorder).
+- **Calculation details** — an `InfoTooltip` per row surfaces Calculation
+  Time, Cache Status, Dataset Size, Warmup Period, Engine Version, and
+  Source Price, sourced from that overlay's `OverlayChartSeries.meta`
+  (populated in `toOverlaySeries` from the batch response's expanded
+  metadata — see `ARCHITECTURE.md` § "Indicator Management & Chart Overlay
+  System — Production-Readiness Review"). A per-row `CircularProgress`
+  appears while a batch recalculation is in flight; a failed overlay shows
+  an "Error" label (tooltip-explained) instead of being silently dropped.
+- **Export** — `OverlayExportMenu` (CSV / JSON / copy-to-clipboard for the
+  whole current overlay set) appears once the page supplies a `symbol` and
+  `timeframe`; see `lib/overlay-export.ts`.
+
+### Overlay Engine (chart integration)
+
+`CandlestickChart` (`src/components/chart/candlestick-chart.tsx`) — the same
+primitive History, Live Market, and Replay already render — gained one new
+optional prop, `overlays?: OverlaySeriesInput[]` (`{id, label, color, data}`),
+and one reconciliation `useEffect` keyed on it. Two refs track live state:
+a `Map<string, ISeriesApi<'Line'>>` of created series and a parallel
+`Map<string, LineData[]>` of each series' last-pushed data, both keyed by
+overlay `id`:
+
+- a new id → `chart.addSeries(LineSeries, ...)`;
+- a disappeared id → `chart.removeSeries()`, then dropped from both maps;
+- an existing id whose `data` array **reference** is unchanged from last
+  time → no `setData()` call at all — this is the "avoid unnecessary
+  redraws" mechanism, and is asserted directly by a test rather than merely
+  implied (`does not re-push an overlay whose data reference is unchanged`,
+  in `candlestick-chart.test.tsx`);
+- a color/label change on an existing series goes through
+  `series.applyOptions()`, never a recreation.
+
+A **pure reorder** (the same set of overlay ids as last time, just in a
+different sequence — the Indicator Legend's drag-and-drop/up-down actions)
+is detected separately and handled by recreating every series in the new
+order: lightweight-charts paints series in the order they were _added_ to
+the chart, so there is no other way to make paint order follow the legend's
+order. This is the one case where a redraw is unavoidable; an unrelated
+add/remove/toggle still only touches the series that actually changed.
+Verified in `candlestick-chart.test.tsx`
+(`recreates every series in the new order when overlays are reordered...`).
+
+`ChartContainer` and `ReplayChart` both forward the same `overlays` prop
+straight through — no duplicate reconciliation logic exists at either
+level.
+
+### Fetching: one batched request per chart
+
+`useOverlayCalculations` calls the batch endpoint (`calculateIndicatorBatch`,
+`src/lib/api/indicators.ts`) with only the **enabled** overlays, sorted by
+`id` before being folded into the TanStack Query key — reordering the
+overlay list must never change the cache key. Disabling and re-enabling an
+overlay re-issues one batch request, which either serves instantly from the
+backend's own `IndicatorCache` or triggers one fresh calculation.
+
+`useChartOverlays` composes this with `createOverlaySeriesCache()`
+(`lib/overlay-series.ts`) — one instance per mounted chart, created once via
+`useRef` — instead of calling the underlying `toOverlaySeries` directly.
+`toOverlaySeries` itself is unchanged and still fully unit-tested on its
+own; the cache wraps it with a `Map<overlayId, {result, color, series}>` so
+an overlay whose batch-result **object reference** and resolved color are
+both unchanged from the previous call returns the exact same
+`OverlayChartSeries` — `data` array included — rather than a new one. This
+matters because TanStack Query's default structural sharing already keeps
+an _unchanged_ result's reference stable across refetches when its content
+is deep-equal; without this cache, every overlay's `data` would still get a
+new array reference on every refetch regardless (defeating
+`CandlestickChart`'s reference-equality redraw-skip), even though the
+engine itself never recomputed the unaffected indicator. With it, "only
+modified indicators are recalculated" (engine/cache layer) and "only
+modified overlays are redrawn" (chart layer) hold end-to-end. The cache
+prunes a disabled/removed overlay's entry immediately, so it never grows
+across a long session.
+
+`toOverlaySeries` converts the batch response into
+`{id, label, color, data, ok, error, meta}` per overlay: a `null` (warmup)
+value is dropped from the plotted series rather than plotted as zero, a
+failed or missing-from-the-response item is reported as `{ok: false,
+error}` rather than plotted, `meta` carries the expanded calculation
+metadata the Legend/Panel display (see above), and colors are resolved via
+`resolveOverlayColor` (`src/components/chart/overlay-colors.ts` — an
+override-aware wrapper around the original `overlayColor` rotation, itself
+promoted from `IndicatorChart`'s previously-inline color logic) so every
+overlay's line, legend swatch, and panel swatch always agree.
+
+### Replay compatibility
+
+`ReplayChart` accepts the identical `overlays` prop and slices each
+overlay's `data` to `tick.index + 1` inside a `useMemo`, mirroring exactly
+how `useReplayChartSync` already reveals `candles`: an overlay is computed
+once over the whole loaded session and only _revealed_ progressively as the
+replay clock advances, so it can never show a value from beyond the current
+replay position. Verified directly in `replay-chart.test.tsx` (a dedicated
+`describe('ReplayChart — overlay reveal (replay compatibility)', ...)`
+block): reveals only up to the current index, reveals more as the tick
+advances, and reveals multiple overlays independently. `overlays` defaults
+to `[]`, so this is fully backward compatible with the existing Replay page,
+which does not yet pass any.
+
+### Where this is wired in today
+
+`HistoryPage` is the integration point: the Indicator Panel is rendered
+alongside the existing Stats/Quality/Performance cards, `useChartOverlays`
+feeds `ChartContainer`'s `overlays` prop, and the Legend renders under the
+chart view. Verified end-to-end in `history-page.test.tsx` ("adds an
+indicator overlay via the panel and shows it on the chart and in the
+legend"): adding an overlay from the panel triggers the batch request,
+creates a line series on the reused chart, and appears in the legend; the
+Replay and Live Market charts accept the same `overlays` prop (proven by
+their own tests) but are not yet wired to the panel/store — a future
+extension, not an engine change.
 
 ## State management
 
 - Server state: TanStack Query (`src/lib/query/queryClient.ts`).
-- Local UI state: Zustand (`src/store/ui-store.ts` — sidebar state only
-  today).
+- Local UI state: Zustand (`src/store/ui-store.ts` — sidebar state,
+  unpersisted). A second Zustand store,
+  `src/features/indicator-overlays/store/use-overlay-store.ts`, holds
+  session-scoped indicator overlay configuration; unlike `ui-store.ts` it
+  uses the `persist` middleware with `createJSONStorage(() => sessionStorage)`
+  — `sessionStorage`, not `localStorage`, because the requirement is "the
+  current session," not indefinite persistence. See "Indicator Management &
+  Chart Overlay System" above.
 - The chart module keeps its own crosshair-hover state
   (`useState` in `ChartContainer`) — it is presentation-only and does not
   belong in Zustand.

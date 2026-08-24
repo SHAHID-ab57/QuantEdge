@@ -55,6 +55,13 @@ export const IndicatorSchema = z.object({
   complexity: z.string(),
   /** How the warmup candle count relates to this indicator's parameters. */
   warmup_description: z.string(),
+  /**
+   * Alternate names a search should also match, e.g. "MA" for "sma".
+   * Optional (rather than defaulted) so existing fixtures/tests built
+   * before this field existed keep compiling unchanged; read as
+   * `indicator.aliases ?? []`.
+   */
+  aliases: z.array(z.string()).optional(),
 });
 
 export type Indicator = z.infer<typeof IndicatorSchema>;
@@ -103,3 +110,47 @@ export const IndicatorCalculationSchema = z.object({
 });
 
 export type IndicatorCalculation = z.infer<typeof IndicatorCalculationSchema>;
+
+/**
+ * One indicator's outcome within a batch — either a result or a domain
+ * error, never both. `series`/`cache_status` are present only when
+ * `success` is true; `error_code`/`error_detail` only when it's false.
+ */
+export const IndicatorBatchItemResultSchema = z.object({
+  indicator: z.string(),
+  success: z.boolean(),
+  label: z.string().nullable(),
+  parameters: z.record(z.string(), z.unknown()).nullable(),
+  series: z.array(IndicatorSeriesSchema).nullable(),
+  cache_status: z.string().nullable(),
+  /** Present only when `success` is true. */
+  warmup_candles: z.number().int().nonnegative().nullable(),
+  /** This item's own indicator calculation time; present only when `success` is true. */
+  execution_time_ms: z.number().nullable(),
+  error_code: z.string().nullable(),
+  error_detail: z.string().nullable(),
+});
+
+export type IndicatorBatchItemResult = z.infer<typeof IndicatorBatchItemResultSchema>;
+
+/**
+ * Several indicators calculated together over one shared candle load — the
+ * chart overlay API. `timestamps` is shared by every successful result
+ * rather than repeated per item, since they were all computed over the
+ * identical candle range.
+ */
+export const IndicatorBatchResponseSchema = z.object({
+  symbol: z.string(),
+  timeframe: z.string(),
+  timestamps: z.array(z.string().datetime()),
+  results: z.array(IndicatorBatchItemResultSchema),
+  /** Candle count shared by every result — one candle load for the whole batch. */
+  candles_analyzed: z.number().int().nonnegative(),
+  /** Time spent loading candles once for the whole batch. */
+  database_time_ms: z.number(),
+  /** The execution pipeline's own version, shared by every result. */
+  engine_version: z.string(),
+  generated_at: z.string().datetime(),
+});
+
+export type IndicatorBatchResponse = z.infer<typeof IndicatorBatchResponseSchema>;

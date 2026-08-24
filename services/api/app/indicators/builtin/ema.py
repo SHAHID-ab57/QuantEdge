@@ -55,6 +55,7 @@ class ExponentialMovingAverage(Indicator):
         author="Eth AI Platform",
         complexity="O(n) — one recursive pass over the candle range after an O(period) seed.",
         warmup_description="Equal to the period parameter.",
+        aliases=("Exponential MA", "Exponentially Weighted Moving Average"),
     )
 
     def warmup(self, params: Mapping[str, Any]) -> int:

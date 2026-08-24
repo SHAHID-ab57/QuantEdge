@@ -60,6 +60,7 @@ class RelativeStrengthIndex(Indicator):
         warmup_description=(
             "One more than the period parameter — its first candle produces no change to measure."
         ),
+        aliases=("Relative Strength", "Wilder RSI", "Momentum Oscillator"),
     )
 
     def warmup(self, params: Mapping[str, Any]) -> int:

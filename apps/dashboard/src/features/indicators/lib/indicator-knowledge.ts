@@ -1,3 +1,4 @@
+import type { InfoTooltipSection } from '@/components/info-tooltip';
 import type { Indicator } from '@/types/api/indicators';
 
 /** Purely visual band positioning for a reference line — where it sits on the oscillator's scale, not a reading of price. */
@@ -267,4 +268,46 @@ export function getIndicatorKnowledge(indicator: Indicator): IndicatorKnowledge 
     parameters: {},
     chart: { kind: 'line' },
   };
+}
+
+function bulletBody(items: string[]): string {
+  return items.length > 0 ? items.map((item) => `• ${item}`).join('\n') : 'Not yet documented.';
+}
+
+function typicalParametersBody(knowledge: IndicatorKnowledge): string {
+  const entries = Object.entries(knowledge.parameters);
+  if (entries.length === 0) {
+    return 'Not yet documented.';
+  }
+  return entries
+    .map(([name, parameter]) => {
+      const values =
+        parameter.recommended && parameter.recommended.length > 0
+          ? parameter.recommended.join(', ')
+          : 'no common presets documented';
+      return `${name}: ${values}`;
+    })
+    .join('\n');
+}
+
+/**
+ * Renders one indicator's full research content — Purpose, Formula,
+ * Interpretation, Typical Parameters, Advantages, Limitations, and Common
+ * Use Cases — as `InfoTooltip` sections, for a compact hover/focus
+ * explanation everywhere a full `IndicatorInfoPanel` would be too heavy
+ * (e.g. one row in a searchable indicator list). Reuses the exact same
+ * `IndicatorKnowledge` the standalone `/indicators` page's Information
+ * Panel already renders — this is a second, denser presentation of the
+ * same curated content, never a second copy of it.
+ */
+export function toTooltipSections(knowledge: IndicatorKnowledge): InfoTooltipSection[] {
+  return [
+    { heading: 'Purpose', body: knowledge.purpose },
+    { heading: 'Formula', body: knowledge.formula },
+    { heading: 'Interpretation', body: knowledge.interpretation },
+    { heading: 'Typical parameters', body: typicalParametersBody(knowledge) },
+    { heading: 'Advantages', body: bulletBody(knowledge.advantages) },
+    { heading: 'Limitations', body: bulletBody(knowledge.limitations) },
+    { heading: 'Common use cases', body: bulletBody(knowledge.useCases) },
+  ];
 }

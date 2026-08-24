@@ -1,10 +1,12 @@
 import type { z } from 'zod';
 import { apiClient } from './client';
 import {
+  IndicatorBatchResponseSchema,
   IndicatorCalculationSchema,
   IndicatorCatalogSchema,
   IndicatorSchema,
   type Indicator,
+  type IndicatorBatchResponse,
   type IndicatorCalculation,
   type IndicatorCatalog,
 } from '@/types/api/indicators';
@@ -56,4 +58,35 @@ export function calculateIndicator(
     IndicatorCalculationSchema,
     search.toString(),
   );
+}
+
+export interface IndicatorBatchItemRequestBody {
+  indicator: string;
+  params?: Record<string, string>;
+}
+
+export interface CalculateIndicatorBatchParams {
+  timeframe: string;
+  start?: string;
+  end?: string;
+  limit?: number;
+  requests: IndicatorBatchItemRequestBody[];
+}
+
+/**
+ * Run several indicators over one market's stored candles in a single
+ * request — the chart overlay API. Loads the underlying candles exactly
+ * once on the backend rather than once per indicator, which is the entire
+ * reason to prefer this over calling `calculateIndicator` in a loop when
+ * rendering multiple overlays on the same chart.
+ */
+export async function calculateIndicatorBatch(
+  symbol: string,
+  { timeframe, start, end, limit, requests }: CalculateIndicatorBatchParams,
+): Promise<IndicatorBatchResponse> {
+  const { data } = await apiClient.post(
+    `/api/v1/markets/${encodeURIComponent(symbol)}/indicators/batch`,
+    { timeframe, start, end, limit, requests },
+  );
+  return IndicatorBatchResponseSchema.parse(data);
 }

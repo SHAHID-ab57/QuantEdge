@@ -1,7 +1,9 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as indicatorsApi from '@/lib/api/indicators';
 import * as marketApi from '@/lib/api/market';
+import { useOverlayStore } from '@/features/indicator-overlays';
 import type { Market } from '@/types/api/market';
 import { HistoryPage } from './history-page';
 
@@ -11,6 +13,7 @@ const fakeChart = vi.hoisted(() => ({
     applyOptions: vi.fn(),
     priceScale: vi.fn(() => ({ applyOptions: vi.fn() })),
   })),
+  removeSeries: vi.fn(),
   applyOptions: vi.fn(),
   remove: vi.fn(),
   timeScale: vi.fn(() => ({ fitContent: vi.fn() })),
@@ -171,6 +174,62 @@ vi.mock('@/lib/api/market', () => ({
   fetchCandlePage: vi.fn(),
 }));
 
+vi.mock('@/lib/api/indicators', () => ({
+  fetchIndicators: vi.fn(),
+  calculateIndicatorBatch: vi.fn(),
+}));
+
+const smaIndicator = {
+  name: 'sma',
+  label: 'Simple Moving Average',
+  description: 'The unweighted mean of the last N values.',
+  category: 'trend',
+  version: '1.0.0',
+  author: 'Eth AI Platform',
+  complexity: 'O(n)',
+  warmup_description: 'Equal to the period parameter.',
+  parameters: [
+    {
+      name: 'period',
+      type: 'int',
+      label: 'Period',
+      description: 'Window size.',
+      default: 20,
+      required: false,
+      minimum: 1,
+      maximum: 1000,
+      choices: [],
+    },
+  ],
+  outputs: [{ name: 'sma', label: 'SMA', description: '' }],
+};
+
+const indicatorBatchResponse = {
+  symbol: 'ETHUSD',
+  timeframe: '1h',
+  timestamps: ['2026-08-01T00:00:00Z', '2026-08-01T01:00:00Z'],
+  results: [
+    {
+      indicator: 'sma',
+      success: true,
+      label: 'Simple Moving Average',
+      parameters: { period: 20 },
+      series: [{ name: 'sma', label: 'SMA(20)', values: [null, 3100] }],
+      cache_status: 'miss',
+      warmup_candles: 1,
+      execution_time_ms: 0.05,
+      error_code: null,
+      error_detail: null,
+    },
+  ],
+  candles_analyzed: 2,
+  database_time_ms: 1.1,
+  engine_version: '1.0.0',
+  generated_at: '2026-08-21T12:00:00Z',
+};
+
+const mockedIndicators = vi.mocked(indicatorsApi);
+
 vi.mock('next/navigation', () => ({
   useSearchParams: () => navigationMock.getSearchParams(),
   usePathname: () => '/history',
@@ -248,11 +307,15 @@ beforeEach(() => {
   mocked.fetchMarkets.mockResolvedValue({ markets, total: markets.length });
   mocked.fetchTimeframes.mockResolvedValue({ symbol: 'ETHUSD', timeframes: ['1h', '4h'] });
   mocked.fetchCandlePage.mockResolvedValue(pageResponse);
+  mockedIndicators.fetchIndicators.mockResolvedValue({ indicators: [smaIndicator] } as never);
+  mockedIndicators.calculateIndicatorBatch.mockResolvedValue(indicatorBatchResponse as never);
 });
 
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  act(() => useOverlayStore.getState().clearOverlays());
+  sessionStorage.clear();
 });
 
 function readBlob(blob: Blob): Promise<string> {
@@ -573,5 +636,48 @@ describe('HistoryPage', () => {
     expect(parsed.candles).toHaveLength(6);
     expect(parsed.statistics.total_candles).toBe(5);
     expect(parsed.quality.overall_quality_score).toBe(100.0);
+  });
+
+  it('adds an indicator overlay via the panel and shows it on the chart and in the legend', async () => {
+    renderPage();
+    await submitQuery();
+    await screen.findAllByText('3,055.25');
+
+    expect(await screen.findByText('Simple Moving Average')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add Simple Moving Average' }));
+
+    // The panel reflects the new overlay immediately (store update).
+    expect(screen.getByText('Added')).toBeInTheDocument();
+
+    // The legend only mounts alongside the chart view.
+    fireEvent.click(screen.getByRole('tab', { name: 'Chart' }));
+    expect(screen.queryByText(/No indicator overlays added/)).not.toBeInTheDocument();
+
+    await waitFor(() => {
+      expect(mockedIndicators.calculateIndicatorBatch).toHaveBeenCalledWith(
+        'ETHUSD',
+        expect.objectContaining({
+          timeframe: '1h',
+          requests: [{ indicator: 'sma', params: { period: '20' } }],
+        }),
+      );
+    });
+
+    // The Overlay Engine created a line series on the reused candlestick chart.
+    await waitFor(() => {
+      expect(fakeChart.addSeries).toHaveBeenCalledTimes(3); // candles + volume + one overlay
+    });
+
+    // The legend lists it by name and parameters, independent of the chart tab.
+    expect(screen.queryByText(/No indicator overlays added/)).not.toBeInTheDocument();
+    expect(screen.getAllByText('Simple Moving Average').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('period=20').length).toBeGreaterThan(0);
+
+    // Both the panel's overlay row and the legend expose a "Remove" action
+    // for the same overlay — either is sufficient to remove it.
+    const removeButtons = screen.getAllByRole('button', { name: 'Remove Simple Moving Average' });
+    fireEvent.click(removeButtons[0] as HTMLElement);
+    expect(screen.getByText(/No indicator overlays added/)).toBeInTheDocument();
   });
 });

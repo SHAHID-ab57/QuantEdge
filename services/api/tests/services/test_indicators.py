@@ -15,6 +15,7 @@ from app.indicators.errors import IndicatorNotFoundError, InsufficientDataError
 from app.indicators.registry import default_registry
 from app.repositories.candles import CandleRepository
 from app.repositories.markets import MarketRepository
+from app.schemas.indicators import IndicatorBatchItemRequest
 from app.services.indicators import IndicatorService
 from app.services.market_query import (
     CandleNotFoundError,
@@ -74,6 +75,12 @@ class TestCatalogue:
         assert sma.author
         assert sma.complexity
         assert sma.warmup_description == "Equal to the period parameter."
+
+    def test_publishes_search_aliases(self, session_factory: SessionFactory) -> None:
+        sma = build_service(session_factory).get_indicator("sma")
+        assert "MA" in sma.aliases
+        rsi = build_service(session_factory).get_indicator("rsi")
+        assert "Relative Strength" in rsi.aliases
 
 
 class TestCalculation:
@@ -204,3 +211,135 @@ class TestValidation:
             )
         assert exc_info.value.required == 20
         assert exc_info.value.available == 3
+
+
+class TestBatchCalculation:
+    """The chart overlay API: several indicators, one shared candle load."""
+
+    async def test_calculates_every_requested_indicator(
+        self, session_factory: SessionFactory, seeded_varied: None
+    ) -> None:
+        service = build_service(session_factory)
+        response = await service.calculate_batch(
+            "ETCUSD",
+            timeframe="1h",
+            requests=[
+                IndicatorBatchItemRequest(indicator="sma", params={"period": "2"}),
+                IndicatorBatchItemRequest(indicator="ema", params={"period": "2"}),
+            ],
+        )
+        assert response.symbol == "ETCUSD"
+        assert len(response.results) == 2
+        assert all(item.success for item in response.results)
+        assert response.results[0].series[0].values == [
+            None,
+            pytest.approx(17.5),
+            pytest.approx(28.0),
+        ]
+
+    async def test_reports_batch_level_metadata(
+        self, session_factory: SessionFactory, seeded_varied: None
+    ) -> None:
+        service = build_service(session_factory)
+        response = await service.calculate_batch(
+            "ETCUSD",
+            timeframe="1h",
+            requests=[IndicatorBatchItemRequest(indicator="sma", params={"period": "2"})],
+        )
+        assert response.candles_analyzed == 3
+        assert response.database_time_ms >= 0.0
+        assert response.engine_version
+        assert response.generated_at is not None
+
+    async def test_reports_per_item_warmup_and_execution_time(
+        self, session_factory: SessionFactory, seeded_varied: None
+    ) -> None:
+        service = build_service(session_factory)
+        response = await service.calculate_batch(
+            "ETCUSD",
+            timeframe="1h",
+            requests=[IndicatorBatchItemRequest(indicator="sma", params={"period": "2"})],
+        )
+        item = response.results[0]
+        assert item.warmup_candles == 2
+        assert item.execution_time_ms is not None
+        assert item.execution_time_ms >= 0.0
+
+    async def test_shares_one_timestamps_array_across_every_result(
+        self, session_factory: SessionFactory, seeded_varied: None
+    ) -> None:
+        service = build_service(session_factory)
+        response = await service.calculate_batch(
+            "ETCUSD",
+            timeframe="1h",
+            requests=[
+                IndicatorBatchItemRequest(indicator="sma", params={"period": "2"}),
+                IndicatorBatchItemRequest(indicator="ema", params={"period": "2"}),
+            ],
+        )
+        assert len(response.timestamps) == 3
+        for item in response.results:
+            assert len(item.series[0].values) == len(response.timestamps)
+
+    async def test_one_bad_indicator_does_not_fail_the_others(
+        self, session_factory: SessionFactory, seeded_varied: None
+    ) -> None:
+        service = build_service(session_factory)
+        response = await service.calculate_batch(
+            "ETCUSD",
+            timeframe="1h",
+            requests=[
+                IndicatorBatchItemRequest(indicator="sma", params={"period": "2"}),
+                IndicatorBatchItemRequest(indicator="nope", params={}),
+                IndicatorBatchItemRequest(indicator="sma", params={"period": "0"}),
+            ],
+        )
+        assert response.results[0].success is True
+        assert response.results[1].success is False
+        assert response.results[1].error_code == "indicator_not_found"
+        assert response.results[2].success is False
+        assert response.results[2].error_code == "invalid_indicator_parameter"
+
+    async def test_reports_a_cache_hit_on_a_repeated_batch(
+        self, session_factory: SessionFactory, seeded_varied: None
+    ) -> None:
+        # Batching doesn't bypass the engine's own result cache: an
+        # identical second batch must report a hit per item, the same
+        # guarantee the single-indicator endpoint gives.
+        service = build_service(session_factory, cached=True)
+        item = IndicatorBatchItemRequest(indicator="sma", params={"period": "2"})
+        first = await service.calculate_batch("ETCUSD", timeframe="1h", requests=[item])
+        second = await service.calculate_batch("ETCUSD", timeframe="1h", requests=[item])
+        assert first.results[0].cache_status == "miss"
+        assert second.results[0].cache_status == "hit"
+        assert second.results[0].series == first.results[0].series
+
+    async def test_raises_for_an_unknown_market_before_running_anything(
+        self, session_factory: SessionFactory
+    ) -> None:
+        with pytest.raises(MarketNotFoundError):
+            await build_service(session_factory).calculate_batch(
+                "NOPE",
+                timeframe="1h",
+                requests=[IndicatorBatchItemRequest(indicator="sma", params={})],
+            )
+
+    async def test_raises_for_an_unsupported_timeframe_before_running_anything(
+        self, session_factory: SessionFactory, seeded_varied: None
+    ) -> None:
+        with pytest.raises(InvalidTimeframeError):
+            await build_service(session_factory).calculate_batch(
+                "ETCUSD",
+                timeframe="7d",
+                requests=[IndicatorBatchItemRequest(indicator="sma", params={})],
+            )
+
+    async def test_raises_when_no_candles_are_stored(
+        self, session_factory: SessionFactory, seeded_varied: None
+    ) -> None:
+        with pytest.raises(CandleNotFoundError):
+            await build_service(session_factory).calculate_batch(
+                "ETCUSD",
+                timeframe="1d",
+                requests=[IndicatorBatchItemRequest(indicator="sma", params={})],
+            )

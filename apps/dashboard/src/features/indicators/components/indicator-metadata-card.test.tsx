@@ -15,6 +15,10 @@ function sma(overrides: Partial<Indicator> = {}): Indicator {
     label: 'Simple Moving Average',
     description: 'Stub.',
     category: 'trend',
+    version: '1.0.0',
+    author: 'Eth AI Platform',
+    complexity: 'O(n)',
+    warmup_description: 'Equal to the period parameter.',
     parameters: [],
     outputs: [{ name: 'sma', label: 'SMA', description: '' }],
     ...overrides,
@@ -72,9 +76,9 @@ describe('IndicatorMetadataCard', () => {
     expect(screen.getByText('2 series (Upper, Lower)')).toBeInTheDocument();
   });
 
-  it('shows a placeholder warmup requirement before any calculation has run', () => {
+  it('shows the indicator-published warmup description before any calculation has run', () => {
     renderCard(sma());
-    expect(screen.getByText('Depends on parameters')).toBeInTheDocument();
+    expect(screen.getByText('Equal to the period parameter.')).toBeInTheDocument();
   });
 
   it('shows the actual warmup candle count once a calculation exists', () => {
@@ -92,9 +96,36 @@ describe('IndicatorMetadataCard', () => {
     expect(screen.getByText('—')).toBeInTheDocument();
   });
 
-  it('states plainly that no engine version is exposed, rather than fabricating one', () => {
+  it('shows the indicator-published version and author, sourced from the backend', () => {
     renderCard(sma());
-    expect(screen.getByText('Not exposed by the API')).toBeInTheDocument();
+    expect(screen.getByText('1.0.0')).toBeInTheDocument();
+    expect(screen.getByText('Eth AI Platform')).toBeInTheDocument();
+  });
+
+  it('shows the indicator-published time complexity rather than a hardcoded string', () => {
+    renderCard(sma({ complexity: 'O(n log n) — a hypothetical future indicator.' }));
+    expect(screen.getByText('O(n log n) — a hypothetical future indicator.')).toBeInTheDocument();
+  });
+
+  it('derives supported price sources from the source parameter, not a hardcoded list', () => {
+    renderCard(
+      sma({
+        parameters: [
+          {
+            name: 'source',
+            type: 'string',
+            label: 'Source',
+            description: '',
+            default: 'close',
+            required: false,
+            minimum: null,
+            maximum: null,
+            choices: ['open', 'high', 'low', 'close'],
+          },
+        ],
+      }),
+    );
+    expect(screen.getByText('open, high, low, close')).toBeInTheDocument();
   });
 
   it('claims replay/backtesting/feature-engineering support as an architectural fact', () => {

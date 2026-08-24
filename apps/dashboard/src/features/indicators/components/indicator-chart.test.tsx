@@ -55,8 +55,8 @@ describe('IndicatorChart', () => {
       kind: 'oscillator',
       domain: [0, 100],
       referenceLines: [
-        { value: 30, label: 'Oversold (30)', tone: 'bullish' },
-        { value: 70, label: 'Overbought (70)', tone: 'bearish' },
+        { value: 30, label: 'Oversold (30)', band: 'low' },
+        { value: 70, label: 'Overbought (70)', band: 'high' },
       ],
     });
     const svg = screen.getByRole('img');

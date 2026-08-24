@@ -525,12 +525,17 @@ tested directly — plain function calls, no fixtures, no ASGI:
   fingerprint, including the one genuinely mutable case a naive fingerprint
   would miss: a still-forming final candle whose close changes while its
   open time does not.
-- `tests/unit/indicators/test_builtin.py` (16 tests) covers discovery and
+- `tests/unit/indicators/test_builtin.py` (40 tests) covers discovery and
   correctness separately. Discovery asserts `load_builtin_indicators()` is
   idempotent (any entry point may call it defensively) and that every
   builtin publishes usable metadata — an indicator declaring no outputs
   would render an empty, unusable form on the frontend. Correctness checks
   each indicator against hand-computed values.
+- `tests/unit/indicators/test_common.py` (8 tests) covers the shared
+  moving-average utilities (`period_parameter`, `source_parameter`,
+  `period_warmup`, `single_series_output`) independently of any indicator
+  that calls them — so a bug in the shared factory can't hide behind
+  SMA/EMA/WMA's own tests passing for unrelated reasons.
 
 One RSI test is worth calling out because the **first version of it was
 wrong**: an alternating +1/−1 series was asserted to sit at exactly 50.
@@ -540,16 +545,70 @@ real properties (`the seed is exactly fifty` and `smoothing leans toward
 the most recent change`), which is strictly more informative than the
 original assertion would have been had it happened to pass.
 
-`tests/services/test_indicators.py` (17 tests) exercises the service
+**WMA's test class** (`TestWeightedMovingAverage`, 12 tests) is the
+Trend Indicator Package's completeness check, covering every category the
+task asked for: a hand-computed value against manually-weighted arithmetic
+(not just "close to an SMA"), the warmup boundary, the `source` parameter,
+a faster-than-SMA reaction after a price jump, a constant-price series
+(every weighted combination of the same value must equal that value
+exactly), an **empty dataset** (`InsufficientDataError` with the correct
+required/available counts), an **invalid period** (zero and negative,
+both `InvalidIndicatorParameterError`), and a **large dataset** — 5,000
+candles cross-checked at four points against an independent, from-scratch
+weighted-average computation written directly in the test (not just "it
+didn't crash"). This test earned its keep immediately: a later
+production-readiness review replaced WMA's O(n · period) naive
+implementation with a true O(n) incremental one (see `ARCHITECTURE.md` §
+"Complexity analysis"), and this exact cross-check is what verified the
+faster algorithm still produces the same numbers — the two floating-point
+paths agree to roughly 1e-9 relative error, well inside `pytest.approx`'s
+default tolerance and irrelevant at the platform's six-significant-digit
+display precision.
+
+**The production-readiness review** added five more test classes to
+`test_builtin.py`:
+
+- `TestLargeDatasets` extends the same "not just fast, also correct at
+  scale" discipline to SMA (cross-checked against a naive average at four
+  points in a 5,000-candle series) and EMA (verified to stay finite and
+  within the input data's own range over the same 5,000 points — the one
+  indicator whose recursive formula could in principle drift or diverge).
+- `TestRepeatedCalculationIsDeterministic` runs SMA, EMA, WMA, and RSI
+  twice each on identical input and asserts bit-for-bit identical output —
+  not a tautology: it would catch mutable shared state, a non-deterministic
+  iteration order, or a cache bug that mutated a cached array in place. A
+  dedicated test runs WMA once through a real `IndicatorCache` (a miss,
+  then a hit) and confirms the cached path returns values identical to the
+  freshly-computed ones — determinism has to survive the cache, not just a
+  bare `calculate()` call.
+- `test_every_builtin_publishes_complete_engineering_metadata` and
+  `test_rejects_an_unsupported_price_source` close out the "every builtin,
+  not just one" pattern the file already used for parameters/outputs.
+
+`tests/unit/indicators/test_params.py` gained two tests for the new
+"recommended default" bound-violation message: that it appears with the
+spec's own declared default, and that it's omitted entirely for a
+required parameter (which has no default to recommend).
+
+`tests/services/test_indicators.py` (19 tests) exercises the service
 against the in-memory SQLite database, so the ORM → `OHLCVPoint`
 projection and the shared market/timeframe/range/limit validation are
-covered against real rows. `tests/api/test_indicators_api.py` (21 tests)
-covers the REST surface end to end over ASGI, including that indicator
-parameters really are collected from the raw query string, that timestamps
+covered against real rows — including
+`test_calculates_correctly_when_optional_candle_fields_are_null`, which
+pins that a candle's nullable `quote_volume`/`trade_count` fields (never
+read by the projection) can't affect a calculation, and
+`test_publishes_engineering_metadata_for_every_indicator`, which checks
+the new `version`/`author`/`complexity`/`warmup_description` fields
+reach the service layer's DTOs. `tests/api/test_indicators_api.py`
+(24 tests) covers the REST surface end to end over ASGI, including that
+indicator parameters really are collected from the raw query string,
+that the new metadata fields serialize correctly, that an out-of-range
+parameter's error message recommends the declared default, that timestamps
 serialize with a literal `Z` suffix (the frontend's
 `z.string().datetime()` rejects a `+00:00` offset — the same bug the
-market-stream gateway once shipped), and every error code the endpoint can
-produce.
+market-stream gateway once shipped), a full WMA calculation against
+hand-computed weighted values over real stored candles, and every error
+code the endpoint can produce.
 
 **Frontend.** `lib/parameter-values.test.ts` (19 tests) covers the pure
 form helpers, including the two decisions most likely to be "simplified"
@@ -569,32 +628,59 @@ field on click.
 
 **The indicator knowledge base and result analysis are both pure and
 independently tested**, deliberately separate from any component:
-`lib/indicator-knowledge.test.ts` (10 tests) pins the curated content for
-`sma`/`ema`/`rsi` (formula, chart config, RSI's 30/50/70 thresholds and
-classifier) and — the more load-bearing half — that an indicator the
+`lib/indicator-knowledge.test.ts` (11 tests) pins the curated content for
+`sma`/`ema`/`wma`/`rsi` (formula, chart config, RSI's 30/50/70 thresholds
+and classifier) and — the more load-bearing half — that an indicator the
 knowledge base has never seen still gets a complete, honest fallback
 (a real purpose from the catalogue description, an explicit "not yet
 documented" for the formula/advantages/limitations, never a fabricated
-one). `lib/result-analysis.test.ts` (19 tests) covers `summarizeSeries`:
+one). `lib/result-analysis.test.ts` (21 tests) covers `summarizeSeries`:
 latest/previous extraction across trailing nulls, absolute/percentage
 change (including a zero-previous guard against dividing by zero), trend
-direction, and signal classification — an indicator with its own
-thresholds (RSI above 70 reads bearish _even while still rising_, proving
-the threshold wins over the trend fallback) versus the generic
-trend-based fallback every other indicator gets.
+direction, and — since a production-readiness review corrected an
+earlier design mistake here — the deliberate **absence** of a fabricated
+state for a plain trend indicator (`summary.state` is `null` for SMA/EMA/
+WMA; only RSI's own threshold-based classifier produces one), plus
+`summary.status` (`'computed'` vs. `'warming-up'`). The review's own
+before/after: `classifySignal` returning generic `'bullish'`/`'bearish'`
+labels synthesized from mere trend direction was renamed to
+`classifyState`, which now only ever returns a value when the indicator
+itself defines one (RSI: `"Overbought"`/`"Oversold"`/`"Neutral"`,
+describing where the oscillator sits, not a reading of what to do about
+it) — this platform displays analytical information, never a trading
+signal, and the test suite pins that distinction explicitly rather than
+leaving it to a docstring.
 
 `components/indicator-chart.test.tsx` (6 tests) covers the SVG
 visualization: one path per series, legend swatches, oscillator reference
 lines, and the "not enough data" placeholder when nothing can be drawn.
-`lib/svg-line-path.test.ts` (14 tests) covers the underlying domain/path
-math shared with the Trade Analytics `Sparkline` — including that a
-`null` mid-series is skipped rather than plotted as a zero-value point,
-and that a zero-range domain centers its line instead of dividing by zero.
-`components/result-summary.test.tsx` (8 tests) and
-`components/indicator-metadata-card.test.tsx` (9 tests) cover the
-expanded results summary (change/trend/signal badges) and the engineering
-metadata card respectively — the latter pinning that an unavailable fact
-(no engine version endpoint) is stated plainly rather than fabricated.
+Reference-line coloring uses a purely positional `band` (`'low'`/`'mid'`/
+`'high'`) rather than the removed bullish/bearish `tone`, mapped to
+neutral `info`/`warning`/`divider` colors instead of this codebase's
+"good/bad" success/error green/red — a chart threshold line is not a buy/
+sell cue. `lib/svg-line-path.test.ts` (14 tests) covers the underlying
+domain/path math shared with the Trade Analytics `Sparkline` — including
+that a `null` mid-series is skipped rather than plotted as a zero-value
+point, and that a zero-range domain centers its line instead of dividing
+by zero.
+
+`components/result-summary.test.tsx` (12 tests) covers the expanded
+results summary: change/trend, that a plain trend indicator shows **no**
+state badge at all (the corrected behavior above), RSI's Overbought/
+Oversold badges, the `Status: Computed`/`Status: Warming up` line, and —
+new in this review — Current Price and Distance-from-Current-Price rows
+that only render once a `currentPrice` prop is supplied. `lib/current-
+price.test.ts` (4 tests) covers `extractCurrentPrice`'s field selection
+(matching the indicator's own resolved `source` parameter, falling back to
+`close` for an indicator with none or an unrecognized value) — kept as a
+pure function so the "which field did we compare against" logic is
+tested without a network mock. `components/indicator-metadata-card.test.tsx`
+(11 tests) covers the engineering metadata card, now sourcing category,
+time complexity, warmup description, version, and author straight from
+the backend's own `IndicatorMetadata` fields rather than the hardcoded
+`"O(n)"` / `"Not exposed by the API"` placeholders an earlier version of
+this card used — and that "Supported Price Sources" is derived from the
+`source` parameter's `choices`, not a second hardcoded list.
 `components/indicator-info-panel.test.tsx` (9 tests) covers the
 collapsible research card, including its own graceful degradation for an
 uncurated indicator. `components/field-info.test.tsx` (3 tests) covers
@@ -604,11 +690,15 @@ the shared ⓘ tooltip affordance.
 mocked `URL.createObjectURL`/`revokeObjectURL`), clipboard copy for both
 values and the literal API request URL (mocked `navigator.clipboard`),
 and a clipboard failure reporting itself rather than failing silently.
-`lib/export.test.ts` (11 tests) and `lib/recent-calculations.test.ts`
-(10 tests) cover the pure builders and localStorage persistence
-respectively — the latter including a corrupted-JSON value, a
-non-array value, and a throwing `Storage` (private browsing, quota), all
-tolerated without surfacing an error to the researcher.
+`lib/export.test.ts` (15 tests, up from 11) adds coverage for the
+knowledge-base-enriched export: a CSV/JSON export without a `knowledge`
+argument says the formula is "Not available" rather than omitting the
+field silently, and one with it includes the formula and purpose inline —
+additive to the raw calculation response, never replacing a field it
+already carries. `lib/recent-calculations.test.ts` (10 tests) covers
+localStorage persistence, including a corrupted-JSON value, a non-array
+value, and a throwing `Storage` (private browsing, quota), all tolerated
+without surfacing an error to the researcher.
 `components/recent-calculations-panel.test.tsx` (6 tests) covers the list
 UI, including both of its two independent rerun triggers (the row itself
 and its dedicated button).
@@ -619,13 +709,16 @@ including that trailing nulls are skipped when reporting the latest value
 and that a fully-null series renders an em dash rather than a misleading
 zero.
 
-`indicators-page.test.tsx` (25 tests) is the integration suite: catalogue
+`indicators-page.test.tsx` (26 tests) is the integration suite: catalogue
 loading and error states with a working retry, the form rebuilding from
 the selected indicator's specs, **reseeding when the indicator changes**
 (carrying SMA's period 20 into RSI would silently calculate something the
 researcher never asked for), that a calculation fires only on submit and
 not on every keystroke, that client-side validation blocks a bad value
-without calling the backend at all, the calculating/error states, the
+without calling the backend at all, the calculating/error states, that
+Current Price and Distance resolve once the market's latest-candle lookup
+(mocked `fetchLatestCandle`, reused from the History feature's existing
+endpoint rather than a new one) completes, the
 information panel appearing (and degrading gracefully for an uncurated
 indicator), the metadata card's live cache status, the export menu
 appearing only once a result exists, and recent-calculation recording plus

@@ -16,6 +16,10 @@ function smaIndicator(): Indicator {
     label: 'Simple Moving Average',
     description: 'Unweighted mean.',
     category: 'trend',
+    version: '1.0.0',
+    author: 'Eth AI Platform',
+    complexity: 'O(n)',
+    warmup_description: 'Equal to the period parameter.',
     parameters: [],
     outputs: [{ name: 'sma', label: 'SMA', description: '' }],
   };

@@ -8,6 +8,10 @@ function catalogueEntry(overrides: Partial<Indicator> = {}): Indicator {
     label: 'Simple Moving Average',
     description: 'The unweighted mean of the last N values.',
     category: 'trend',
+    version: '1.0.0',
+    author: 'Eth AI Platform',
+    complexity: 'O(n)',
+    warmup_description: 'Equal to the period parameter.',
     parameters: [],
     outputs: [],
     ...overrides,
@@ -34,9 +38,9 @@ describe('getIndicatorKnowledge — curated entries', () => {
 
   it('classifies rsi using its own thresholds, not a generic fallback', () => {
     const knowledge = getIndicatorKnowledge(catalogueEntry({ name: 'rsi' }));
-    expect(knowledge.classifySignal?.(80)).toBe('bearish');
-    expect(knowledge.classifySignal?.(20)).toBe('bullish');
-    expect(knowledge.classifySignal?.(50)).toBe('neutral');
+    expect(knowledge.classifyState?.(80)).toEqual({ label: 'Overbought', tone: 'notable' });
+    expect(knowledge.classifyState?.(20)).toEqual({ label: 'Oversold', tone: 'notable' });
+    expect(knowledge.classifyState?.(50)).toEqual({ label: 'Neutral', tone: 'neutral' });
   });
 
   it('gives ema a recursive-formula description distinct from sma', () => {
@@ -44,8 +48,15 @@ describe('getIndicatorKnowledge — curated entries', () => {
     expect(knowledge.formula).toContain('EMA(t-1)');
   });
 
+  it('gives wma a linear-weighting formula distinct from sma and ema', () => {
+    const knowledge = getIndicatorKnowledge(catalogueEntry({ name: 'wma' }));
+    expect(knowledge.formula).toContain('1+2+...+N');
+    expect(knowledge.chart.kind).toBe('line');
+    expect(knowledge.parameters.period?.recommended).toEqual([9, 20, 50, 100, 200]);
+  });
+
   it('every curated entry declares a source parameter with price choices', () => {
-    for (const name of ['sma', 'ema', 'rsi']) {
+    for (const name of ['sma', 'ema', 'wma', 'rsi']) {
       const knowledge = getIndicatorKnowledge(catalogueEntry({ name }));
       expect(knowledge.parameters.source?.recommended).toEqual(['close', 'open', 'high', 'low']);
     }
@@ -83,8 +94,8 @@ describe('getIndicatorKnowledge — generic fallback', () => {
     expect(knowledge.chart).toEqual({ kind: 'line' });
   });
 
-  it('has no signal classifier, deferring to the generic trend-based fallback', () => {
+  it('has no state classifier — an uncurated indicator gets no fabricated reading', () => {
     const knowledge = getIndicatorKnowledge(catalogueEntry({ name: 'macd' }));
-    expect(knowledge.classifySignal).toBeUndefined();
+    expect(knowledge.classifyState).toBeUndefined();
   });
 });

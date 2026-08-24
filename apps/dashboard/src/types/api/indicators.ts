@@ -48,6 +48,13 @@ export const IndicatorSchema = z.object({
   category: z.string(),
   parameters: z.array(IndicatorParameterSpecSchema),
   outputs: z.array(IndicatorOutputSpecSchema),
+  /** Indicator-level semver, independent of the platform's own release version. */
+  version: z.string(),
+  author: z.string(),
+  /** Free-form Big-O / performance note. */
+  complexity: z.string(),
+  /** How the warmup candle count relates to this indicator's parameters. */
+  warmup_description: z.string(),
 });
 
 export type Indicator = z.infer<typeof IndicatorSchema>;

@@ -74,6 +74,18 @@ class TestBounds:
         with pytest.raises(InvalidIndicatorParameterError, match=r"must be >= 0, got -1"):
             parameter.coerce("-1")
 
+    def test_appends_the_declared_default_as_a_recommendation(self) -> None:
+        # spec()'s default is 14 — the one value the spec itself already
+        # vouches for as sane, so it's free to surface in the error.
+        with pytest.raises(InvalidIndicatorParameterError, match=r"\(recommended: 14\)"):
+            spec().coerce("1")
+
+    def test_appends_no_recommendation_for_a_required_parameter(self) -> None:
+        # A required parameter has no default to recommend.
+        with pytest.raises(InvalidIndicatorParameterError) as exc_info:
+            spec(default=None).coerce("1")
+        assert "recommended" not in exc_info.value.message
+
 
 class TestChoices:
     def test_accepts_a_declared_choice(self) -> None:

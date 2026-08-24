@@ -26,7 +26,9 @@ import {
   useIndicatorCatalog,
   type IndicatorRequest,
 } from './hooks/use-indicator-data';
+import { useCurrentPrice } from './hooks/use-current-price';
 import { useRecentCalculations } from './hooks/use-recent-calculations';
+import { extractCurrentPrice } from './lib/current-price';
 import { getIndicatorKnowledge } from './lib/indicator-knowledge';
 import {
   defaultValuesFor,
@@ -179,6 +181,21 @@ export function IndicatorsPage() {
   const metadataResult =
     selected && calculation.data?.indicator.name === selected.name ? calculation.data : undefined;
 
+  // Current Price / Distance from Current Price need the market's raw
+  // price, which the indicator calculation response never carries (it
+  // returns indicator values, not candles) — reused here from the
+  // existing latest-candle endpoint instead of growing that response.
+  const latestCandle = useCurrentPrice(
+    calculation.data?.symbol ?? null,
+    calculation.data?.timeframe ?? '',
+  );
+  const currentPrice = useMemo(() => {
+    if (!latestCandle.data || !calculation.data) {
+      return undefined;
+    }
+    return extractCurrentPrice(latestCandle.data.candle, calculation.data.parameters.source);
+  }, [latestCandle.data, calculation.data]);
+
   if (catalog.isLoading) {
     return (
       <Stack spacing={2} role="status" aria-label="Loading indicators">
@@ -295,7 +312,11 @@ export function IndicatorsPage() {
           <Section
             title="Results"
             subtitle="Values align with candle open times; nulls are warmup"
-            action={calculation.data ? <ExportMenu result={calculation.data} /> : undefined}
+            action={
+              calculation.data ? (
+                <ExportMenu result={calculation.data} knowledge={resultKnowledge} />
+              ) : undefined
+            }
           >
             <ResultsPanel
               requested={request !== null}
@@ -304,6 +325,7 @@ export function IndicatorsPage() {
               error={calculation.error}
               result={calculation.data}
               knowledge={resultKnowledge}
+              currentPrice={currentPrice}
               onRetry={() => calculation.refetch()}
             />
           </Section>

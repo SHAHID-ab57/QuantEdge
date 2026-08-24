@@ -44,6 +44,12 @@ The API exposes historical market data and operational monitoring:
 | GET    | `/api/v1/indicators/{indicator}`             | One indicator's metadata, parameters, and output series       |
 | GET    | `/api/v1/markets/{symbol}/indicators/{name}` | Run one indicator over the market's stored candles            |
 
+Registered today: the **Trend Indicator Package** — `sma`, `ema`, `wma`
+(all `category: "trend"`) — plus `rsi` (`category: "momentum"`). The set
+is queried from `GET /api/v1/indicators` at runtime, never hardcoded by a
+client; see `ARCHITECTURE.md` § "Technical Indicator Engine" for how a new
+indicator joins this list with no API change.
+
 **The catalogue is the contract.** Each entry publishes every parameter's
 type, label, description, default, required-ness, inclusive `minimum`/
 `maximum`, and permitted `choices` — enough for a client to build a
@@ -51,6 +57,16 @@ complete, correctly-constrained input form without hardcoding anything
 about any particular indicator. That is deliberate: registering a new
 indicator on the backend must not require a frontend change (the dashboard's
 `/indicators` page generates its whole parameter form from this response).
+
+Each entry also carries engineering metadata: `version` (an
+indicator-level semver, independent of the platform's own release
+version), `author`, `complexity` (a free-form Big-O note), and
+`warmup_description` (how the warmup relates to this indicator's
+parameters, e.g. "Equal to the period parameter"). "Output type" and
+"supported price sources" are deliberately not separate fields — they are
+already derivable from `outputs` and from the `source` parameter's
+`choices`, and a client should derive them rather than assume a second,
+possibly-drifting source of the same fact.
 
 **Calculation parameters are ordinary query parameters.** Beyond the
 reserved `timeframe`, `start`, `end`, and `limit`, every query key is
@@ -73,7 +89,15 @@ calculation failure, which arrives as an error response instead:
 {
   "symbol": "ETHUSD",
   "timeframe": "1h",
-  "indicator": { "name": "sma", "label": "Simple Moving Average", "...": "..." },
+  "indicator": {
+    "name": "sma",
+    "label": "Simple Moving Average",
+    "version": "1.0.0",
+    "author": "Eth AI Platform",
+    "complexity": "O(n) — one running-sum pass over the candle range.",
+    "warmup_description": "Equal to the period parameter.",
+    "...": "...",
+  },
   "parameters": { "period": 20, "source": "close" }, // fully resolved, defaults applied
   "timestamps": ["2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z"],
   "series": [{ "name": "sma", "label": "SMA(20)", "values": [null, 3055.25] }],
@@ -91,7 +115,16 @@ calculation failure, which arrives as an error response instead:
 Indicator values serialize as JSON **numbers**, not the decimal-as-string
 convention the candle endpoints use. An EMA or RSI is a float
 approximation by construction, and a lossless decimal string would imply a
-precision the calculation does not have.
+precision the calculation does not have. No rounding is applied
+server-side — every value is the raw float the calculation produced;
+display-only rounding is strictly a frontend concern.
+
+An `invalid_indicator_parameter` for an out-of-range value recommends the
+parameter's own declared default, e.g.
+`"Parameter 'period' must be >= 1, got 0 (recommended: 20)"` — reusing the
+one value the spec already vouches for as sane, never a fabricated
+suggestion. No recommendation is offered for a required parameter (it has
+no default to recommend).
 
 Indicator-specific error codes: `indicator_not_found` (404),
 `invalid_indicator_parameter` (400), `insufficient_data` (400 — the range

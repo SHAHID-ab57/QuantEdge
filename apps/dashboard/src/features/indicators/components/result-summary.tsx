@@ -16,6 +16,14 @@ import type { IndicatorSeries } from '@/types/api/indicators';
 export interface ResultSummaryProps {
   series: readonly IndicatorSeries[];
   knowledge: IndicatorKnowledge;
+  /**
+   * The current market price, in the same units as the indicator's own
+   * `source` — sourced from the market's latest stored candle, entirely
+   * independent of the calculation response (which carries no raw price
+   * data). Omitted while that lookup hasn't resolved yet; the Current
+   * Price / Distance rows simply don't render without it.
+   */
+  currentPrice?: number;
 }
 
 /** Six significant digits: enough to read an indicator, without implying false precision. */
@@ -45,21 +53,70 @@ const TREND_COLOR = {
   flat: 'text.secondary',
 } as const;
 
-const SIGNAL_COLOR = {
-  bullish: 'success',
-  bearish: 'error',
+const STATE_COLOR = {
+  notable: 'warning',
   neutral: 'default',
 } as const;
 
-const SIGNAL_LABEL = {
-  bullish: 'Bullish',
-  bearish: 'Bearish',
-  neutral: 'Neutral',
+const STATUS_LABEL = {
+  computed: 'Computed',
+  'warming-up': 'Warming up',
 } as const;
 
-function SeriesSummaryCard({ summary }: { summary: SeriesSummary }) {
+function ChangeRow({ summary }: { summary: SeriesSummary }) {
   const trendColor = summary.trend ? TREND_COLOR[summary.trend] : 'text.secondary';
+  if (summary.absoluteChange === null) {
+    return null;
+  }
+  return (
+    <Stack direction="row" spacing={0.25} alignItems="center" sx={{ color: trendColor }}>
+      {summary.trend ? TREND_ICON[summary.trend] : null}
+      <Typography variant="caption" sx={{ fontVariantNumeric: 'tabular-nums' }}>
+        {changeFormatter.format(summary.absoluteChange)}
+        {summary.percentChange !== null
+          ? ` (${percentFormatter.format(summary.percentChange)}%)`
+          : ''}
+      </Typography>
+    </Stack>
+  );
+}
 
+function DistanceFromPrice({
+  latest,
+  currentPrice,
+}: {
+  latest: number | null;
+  currentPrice: number;
+}) {
+  if (latest === null) {
+    return null;
+  }
+  const distance = latest - currentPrice;
+  const percent = currentPrice !== 0 ? (distance / Math.abs(currentPrice)) * 100 : null;
+  return (
+    <Stack direction="row" spacing={1.5} flexWrap="wrap" alignItems="center">
+      <Typography variant="caption" color="text.secondary">
+        Current Price: {valueFormatter.format(currentPrice)}
+      </Typography>
+      <Typography
+        variant="caption"
+        color="text.secondary"
+        sx={{ fontVariantNumeric: 'tabular-nums' }}
+      >
+        Distance: {changeFormatter.format(distance)}
+        {percent !== null ? ` (${percentFormatter.format(percent)}%)` : ''}
+      </Typography>
+    </Stack>
+  );
+}
+
+function SeriesSummaryCard({
+  summary,
+  currentPrice,
+}: {
+  summary: SeriesSummary;
+  currentPrice?: number;
+}) {
   return (
     <Box sx={{ minWidth: 220 }}>
       <Stack direction="row" spacing={0.5} alignItems="center">
@@ -77,12 +134,8 @@ function SeriesSummaryCard({ summary }: { summary: SeriesSummary }) {
         >
           {formatValue(summary.latest)}
         </Typography>
-        {summary.signal ? (
-          <Chip
-            size="small"
-            color={SIGNAL_COLOR[summary.signal]}
-            label={SIGNAL_LABEL[summary.signal]}
-          />
+        {summary.state ? (
+          <Chip size="small" color={STATE_COLOR[summary.state.tone]} label={summary.state.label} />
         ) : null}
       </Stack>
 
@@ -90,32 +143,35 @@ function SeriesSummaryCard({ summary }: { summary: SeriesSummary }) {
         <Typography variant="caption" color="text.secondary">
           Previous: {formatValue(summary.previous)}
         </Typography>
-        {summary.absoluteChange !== null ? (
-          <Stack direction="row" spacing={0.25} alignItems="center" sx={{ color: trendColor }}>
-            {summary.trend ? TREND_ICON[summary.trend] : null}
-            <Typography variant="caption" sx={{ fontVariantNumeric: 'tabular-nums' }}>
-              {changeFormatter.format(summary.absoluteChange)}
-              {summary.percentChange !== null
-                ? ` (${percentFormatter.format(summary.percentChange)}%)`
-                : ''}
-            </Typography>
-          </Stack>
-        ) : null}
+        <ChangeRow summary={summary} />
       </Stack>
+
+      {currentPrice !== undefined ? (
+        <Box sx={{ mt: 0.5 }}>
+          <DistanceFromPrice latest={summary.latest} currentPrice={currentPrice} />
+        </Box>
+      ) : null}
+
+      <Typography variant="caption" color="text.disabled" sx={{ display: 'block', mt: 0.5 }}>
+        Status: {STATUS_LABEL[summary.status]}
+      </Typography>
     </Box>
   );
 }
 
 /**
  * Expands the previous single "Latest value" tile per series into the
- * full picture a researcher checks first: latest vs previous, the change
- * in both absolute and percentage terms, the trend direction, and — where
- * the indicator has an established convention (RSI's 30/70 thresholds) or
- * a generic trend-based fallback otherwise — a Bullish/Bearish/Neutral
- * signal badge. All computed by the pure, independently-tested
- * `summarizeSeries` (see `lib/result-analysis.ts`).
+ * full analytical picture a researcher checks first: latest vs previous,
+ * the change in both absolute and percentage terms, the trend direction,
+ * distance from the current market price, and — only where the indicator
+ * has an established convention for one (RSI's 30/70 thresholds) — a
+ * descriptive state label. This page displays analytical information
+ * only; it never classifies a plain moving average's direction as
+ * "bullish" or "bearish", since that would be manufacturing a trading
+ * signal out of a number that doesn't carry one. All computed by the
+ * pure, independently-tested `summarizeSeries` (see `lib/result-analysis.ts`).
  */
-function ResultSummaryInner({ series, knowledge }: ResultSummaryProps) {
+function ResultSummaryInner({ series, knowledge, currentPrice }: ResultSummaryProps) {
   return (
     <Stack
       direction="row"
@@ -126,7 +182,11 @@ function ResultSummaryInner({ series, knowledge }: ResultSummaryProps) {
       aria-label="Indicator summary"
     >
       {series.map((entry) => (
-        <SeriesSummaryCard key={entry.name} summary={summarizeSeries(entry, knowledge)} />
+        <SeriesSummaryCard
+          key={entry.name}
+          summary={summarizeSeries(entry, knowledge)}
+          currentPrice={currentPrice}
+        />
       ))}
     </Stack>
   );

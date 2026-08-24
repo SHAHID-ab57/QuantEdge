@@ -77,6 +77,16 @@ class IndicatorDTO(BaseModel):
     category: str
     parameters: list[ParameterSpecDTO]
     outputs: list[SeriesSpecDTO]
+    version: str = Field(
+        ...,
+        description="Indicator-level semver, independent of the platform's own release version",
+    )
+    author: str
+    complexity: str = Field(..., description="Free-form Big-O / performance note")
+    warmup_description: str = Field(
+        ...,
+        description="How the warmup candle count relates to this indicator's parameters",
+    )
 
     @classmethod
     def from_metadata(cls, metadata: IndicatorMetadata) -> "IndicatorDTO":
@@ -88,6 +98,10 @@ class IndicatorDTO(BaseModel):
             category=metadata.category,
             parameters=[ParameterSpecDTO.from_spec(spec) for spec in metadata.parameters],
             outputs=[SeriesSpecDTO.from_spec(spec) for spec in metadata.outputs],
+            version=metadata.version,
+            author=metadata.author,
+            complexity=metadata.complexity,
+            warmup_description=metadata.warmup_description,
         )
 
 

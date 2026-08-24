@@ -85,13 +85,24 @@ class ParameterSpec:
         if self.type not in {"int", "float"}:
             return
         if self.minimum is not None and value < self.minimum:
-            raise InvalidIndicatorParameterError(
-                self.name, f"must be >= {_number(self.minimum)}, got {_number(value)}"
-            )
+            message = self._bound_message(">=", self.minimum, value)
+            raise InvalidIndicatorParameterError(self.name, message)
         if self.maximum is not None and value > self.maximum:
-            raise InvalidIndicatorParameterError(
-                self.name, f"must be <= {_number(self.maximum)}, got {_number(value)}"
-            )
+            message = self._bound_message("<=", self.maximum, value)
+            raise InvalidIndicatorParameterError(self.name, message)
+
+    def _bound_message(self, comparator: str, bound: float, value: float) -> str:
+        """A bound violation, with the declared default appended as a recommendation.
+
+        The default is the one number the spec itself already vouches for
+        as a sane value — surfacing it directly in the error is cheap and
+        genuinely actionable, unlike inventing a "recommended value" from
+        nothing. Omitted for a required parameter (no default exists).
+        """
+        message = f"must be {comparator} {_number(bound)}, got {_number(value)}"
+        if self.default is not None:
+            message += f" (recommended: {_number(self.default)})"
+        return message
 
     def _check_choices(self, value: Any) -> None:
         if self.choices and value not in self.choices:

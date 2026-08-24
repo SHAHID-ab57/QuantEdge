@@ -12,13 +12,18 @@ from app.indicators.base import (
     IndicatorContext,
     IndicatorMetadata,
     IndicatorOutput,
-    IndicatorSeries,
     SeriesSpec,
 )
-from app.indicators.params import ParameterSpec
+from app.indicators.builtin.common import (
+    PRICE_SOURCES,
+    period_parameter,
+    period_warmup,
+    single_series_output,
+    source_parameter,
+)
 from app.indicators.registry import register
 
-PRICE_SOURCES = ("open", "high", "low", "close")
+__all__ = ["PRICE_SOURCES", "SimpleMovingAverage"]
 
 
 @register
@@ -35,23 +40,8 @@ class SimpleMovingAverage(Indicator):
         ),
         category="trend",
         parameters=(
-            ParameterSpec(
-                name="period",
-                type="int",
-                label="Period",
-                description="Number of candles averaged into each point.",
-                default=20,
-                minimum=1,
-                maximum=1000,
-            ),
-            ParameterSpec(
-                name="source",
-                type="string",
-                label="Source",
-                description="Which price of each candle to average.",
-                default="close",
-                choices=PRICE_SOURCES,
-            ),
+            period_parameter(description="Number of candles averaged into each point."),
+            source_parameter(description="Which price of each candle to average."),
         ),
         outputs=(
             SeriesSpec(
@@ -60,14 +50,27 @@ class SimpleMovingAverage(Indicator):
                 description="The moving average itself.",
             ),
         ),
+        version="1.0.0",
+        author="Eth AI Platform",
+        complexity="O(n) — one running-sum pass over the candle range.",
+        warmup_description="Equal to the period parameter.",
     )
 
     def warmup(self, params: Mapping[str, Any]) -> int:
         """A full window is needed before the first value."""
-        return int(params["period"])
+        return period_warmup(params)
 
     def calculate(self, ctx: IndicatorContext) -> IndicatorOutput:
-        """Compute the rolling mean using an O(n) running sum."""
+        """Compute the rolling mean using an O(n) running sum.
+
+        Deterministic and numerically stable for any realistic candle
+        count: the running sum only ever adds and removes values already
+        present in the series (no repeated re-summation of the whole
+        window), so there is no accumulation of rounding error beyond the
+        one unavoidable float addition/subtraction per step — the same
+        floating-point behavior Python's own ``sum()`` would produce, just
+        without redoing O(period) work at every point.
+        """
         period = ctx.int_param("period")
         values = ctx.source_values()
 
@@ -80,6 +83,4 @@ class SimpleMovingAverage(Indicator):
             if index >= period - 1:
                 out[index] = window_sum / period
 
-        return IndicatorOutput(
-            series=[IndicatorSeries(name="sma", label=f"SMA({period})", values=out)]
-        )
+        return single_series_output("sma", f"SMA({period})", out)

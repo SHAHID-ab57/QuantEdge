@@ -15,11 +15,9 @@ from app.indicators.base import (
     IndicatorContext,
     IndicatorMetadata,
     IndicatorOutput,
-    IndicatorSeries,
     SeriesSpec,
 )
-from app.indicators.builtin.sma import PRICE_SOURCES
-from app.indicators.params import ParameterSpec
+from app.indicators.builtin.common import period_parameter, single_series_output, source_parameter
 from app.indicators.registry import register
 
 #: RSI is undefined when there is no downside at all over the window; the
@@ -42,23 +40,12 @@ class RelativeStrengthIndex(Indicator):
         ),
         category="momentum",
         parameters=(
-            ParameterSpec(
-                name="period",
-                type="int",
-                label="Period",
+            period_parameter(
                 description="Look-back for the smoothed gain/loss averages.",
                 default=14,
                 minimum=2,
-                maximum=1000,
             ),
-            ParameterSpec(
-                name="source",
-                type="string",
-                label="Source",
-                description="Which price of each candle to measure changes on.",
-                default="close",
-                choices=PRICE_SOURCES,
-            ),
+            source_parameter(description="Which price of each candle to measure changes on."),
         ),
         outputs=(
             SeriesSpec(
@@ -66,6 +53,12 @@ class RelativeStrengthIndex(Indicator):
                 label="RSI",
                 description="The oscillator value, bounded to 0-100.",
             ),
+        ),
+        version="1.0.0",
+        author="Eth AI Platform",
+        complexity="O(n) — one Wilder-smoothing pass over the candle range.",
+        warmup_description=(
+            "One more than the period parameter — its first candle produces no change to measure."
         ),
     )
 
@@ -97,9 +90,7 @@ class RelativeStrengthIndex(Indicator):
             avg_loss = (avg_loss * (period - 1) + losses[index]) / period
             out[index] = _rsi(avg_gain, avg_loss)
 
-        return IndicatorOutput(
-            series=[IndicatorSeries(name="rsi", label=f"RSI({period})", values=out)]
-        )
+        return single_series_output("rsi", f"RSI({period})", out)
 
 
 def _rsi(avg_gain: float, avg_loss: float) -> float:

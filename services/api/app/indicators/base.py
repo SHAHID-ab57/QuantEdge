@@ -113,7 +113,21 @@ class IndicatorOutput:
 
 @dataclass(frozen=True, slots=True)
 class IndicatorMetadata:
-    """Everything the catalogue knows about an indicator without running it."""
+    """Everything the catalogue knows about an indicator without running it.
+
+    ``version``, ``author``, ``complexity``, and ``warmup_description`` are
+    additive fields (all defaulted) alongside the original contract, so no
+    existing indicator declaration had to change to gain them. ``version``
+    is an indicator-level semver, independent of the platform's own
+    release versioning — bump it when a change to this indicator's
+    ``calculate`` would alter previously-computed historical results, so a
+    consumer caching or comparing results over time has a signal that the
+    numbers underneath a name changed. ``complexity`` and
+    ``warmup_description`` are deliberately free-form strings, not derived
+    fields: Big-O and "how the warmup relates to the parameters" are true
+    intrinsic facts about an implementation that the engine has no way to
+    compute on the indicator's behalf.
+    """
 
     name: str
     label: str
@@ -121,6 +135,10 @@ class IndicatorMetadata:
     category: str
     parameters: tuple[ParameterSpec, ...] = field(default_factory=tuple)
     outputs: tuple[SeriesSpec, ...] = field(default_factory=tuple)
+    version: str = "1.0.0"
+    author: str = "Eth AI Platform"
+    complexity: str = "Not documented"
+    warmup_description: str = ""
 
 
 class Indicator(ABC):

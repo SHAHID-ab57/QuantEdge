@@ -22,6 +22,8 @@ import type { IndicatorKnowledge } from '../lib/indicator-knowledge';
 export interface IndicatorResultsProps {
   result: IndicatorCalculation;
   knowledge: IndicatorKnowledge;
+  /** The market's latest price, in the same units as the calculation's `source` parameter. */
+  currentPrice?: number;
   /** Rows shown in the value table; the full series is always summarised above it. */
   maxRows?: number;
 }
@@ -53,6 +55,7 @@ function formatValue(value: number | null): string {
 function IndicatorResultsInner({
   result,
   knowledge,
+  currentPrice,
   maxRows = DEFAULT_MAX_ROWS,
 }: IndicatorResultsProps) {
   const rows = useMemo(() => {
@@ -71,7 +74,7 @@ function IndicatorResultsInner({
 
   return (
     <Stack spacing={2}>
-      <ResultSummary series={result.series} knowledge={knowledge} />
+      <ResultSummary series={result.series} knowledge={knowledge} currentPrice={currentPrice} />
 
       <Paper variant="outlined" sx={{ p: { xs: 1.5, sm: 2 } }}>
         <Typography variant="subtitle2" component="h3" sx={{ fontWeight: 700, mb: 1 }}>

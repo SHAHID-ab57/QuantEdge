@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { IndicatorCalculation } from '@/types/api/indicators';
 import { buildApiRequestUrl, buildCsv, buildJson, buildValuesText, exportFileName } from './export';
+import { getIndicatorKnowledge } from './indicator-knowledge';
 
 function result(overrides: Partial<IndicatorCalculation> = {}): IndicatorCalculation {
   return {
@@ -11,6 +12,10 @@ function result(overrides: Partial<IndicatorCalculation> = {}): IndicatorCalcula
       label: 'Simple Moving Average',
       description: 'Stub.',
       category: 'trend',
+      version: '1.0.0',
+      author: 'Eth AI Platform',
+      complexity: 'O(n)',
+      warmup_description: 'Equal to the period parameter.',
       parameters: [],
       outputs: [],
     },
@@ -59,6 +64,16 @@ describe('buildCsv', () => {
     const csv = buildCsv(result());
     expect(csv).toContain('"2026-01-01T00:00:00Z",""');
   });
+
+  it('says the formula is not available when no knowledge is supplied', () => {
+    expect(buildCsv(result())).toContain('"Formula","Not available"');
+  });
+
+  it('includes the formula from the knowledge base when supplied', () => {
+    const knowledge = getIndicatorKnowledge(result().indicator);
+    const csv = buildCsv(result(), knowledge);
+    expect(csv).toContain('"Formula","SMA(t)');
+  });
 });
 
 describe('buildJson', () => {
@@ -66,6 +81,22 @@ describe('buildJson', () => {
     const parsed = JSON.parse(buildJson(result())) as IndicatorCalculation;
     expect(parsed.symbol).toBe('ETHUSD');
     expect(parsed.series[0]?.values).toEqual([null, 17.5]);
+  });
+
+  it('adds the formula and purpose when knowledge is supplied', () => {
+    const knowledge = getIndicatorKnowledge(result().indicator);
+    const parsed = JSON.parse(buildJson(result(), knowledge)) as {
+      formula: string;
+      purpose: string;
+    };
+    expect(parsed.formula).toContain('SMA(t)');
+    expect(parsed.purpose).toContain('Smooths price');
+  });
+
+  it('omits formula and purpose when no knowledge is supplied', () => {
+    const parsed = JSON.parse(buildJson(result())) as Record<string, unknown>;
+    expect(parsed.formula).toBeUndefined();
+    expect(parsed.purpose).toBeUndefined();
   });
 });
 

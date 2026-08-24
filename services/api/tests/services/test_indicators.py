@@ -44,7 +44,7 @@ class TestCatalogue:
     def test_lists_every_registered_indicator(self, session_factory: SessionFactory) -> None:
         catalogue = build_service(session_factory).list_indicators()
         names = {entry.name for entry in catalogue.indicators}
-        assert {"sma", "ema", "rsi"} <= names
+        assert {"sma", "ema", "wma", "rsi"} <= names
         assert catalogue.total == len(catalogue.indicators)
 
     def test_reports_the_distinct_categories_present(self, session_factory: SessionFactory) -> None:
@@ -65,6 +65,15 @@ class TestCatalogue:
     def test_raises_for_an_unknown_indicator(self, session_factory: SessionFactory) -> None:
         with pytest.raises(IndicatorNotFoundError):
             build_service(session_factory).get_indicator("nope")
+
+    def test_publishes_engineering_metadata_for_every_indicator(
+        self, session_factory: SessionFactory
+    ) -> None:
+        sma = build_service(session_factory).get_indicator("sma")
+        assert sma.version
+        assert sma.author
+        assert sma.complexity
+        assert sma.warmup_description == "Equal to the period parameter."
 
 
 class TestCalculation:
@@ -96,6 +105,17 @@ class TestCalculation:
         service = build_service(session_factory)
         result = await service.calculate("ETCUSD", "sma", timeframe="1h", params={"period": "2"})
         assert result.parameters == {"period": 2, "source": "close"}
+
+    async def test_calculates_correctly_when_optional_candle_fields_are_null(
+        self, session_factory: SessionFactory, seeded_varied: None
+    ) -> None:
+        # `seeded_varied` candles carry quote_volume=None and
+        # trade_count=None (both nullable in the schema) — the ORM →
+        # OHLCVPoint projection must never read them, so a calculation
+        # must succeed identically whether or not they're populated.
+        service = build_service(session_factory)
+        result = await service.calculate("ETCUSD", "sma", timeframe="1h", params={"period": "2"})
+        assert result.series[0].values == [None, pytest.approx(17.5), pytest.approx(28.0)]
 
     async def test_reports_calculation_metadata(
         self, session_factory: SessionFactory, seeded_varied: None

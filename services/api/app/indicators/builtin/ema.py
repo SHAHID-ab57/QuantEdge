@@ -15,11 +15,14 @@ from app.indicators.base import (
     IndicatorContext,
     IndicatorMetadata,
     IndicatorOutput,
-    IndicatorSeries,
     SeriesSpec,
 )
-from app.indicators.builtin.sma import PRICE_SOURCES
-from app.indicators.params import ParameterSpec
+from app.indicators.builtin.common import (
+    period_parameter,
+    period_warmup,
+    single_series_output,
+    source_parameter,
+)
 from app.indicators.registry import register
 
 
@@ -38,23 +41,8 @@ class ExponentialMovingAverage(Indicator):
         ),
         category="trend",
         parameters=(
-            ParameterSpec(
-                name="period",
-                type="int",
-                label="Period",
-                description="Smoothing period; the multiplier is 2 / (period + 1).",
-                default=20,
-                minimum=1,
-                maximum=1000,
-            ),
-            ParameterSpec(
-                name="source",
-                type="string",
-                label="Source",
-                description="Which price of each candle to smooth.",
-                default="close",
-                choices=PRICE_SOURCES,
-            ),
+            period_parameter(description="Smoothing period; the multiplier is 2 / (period + 1)."),
+            source_parameter(description="Which price of each candle to smooth."),
         ),
         outputs=(
             SeriesSpec(
@@ -63,14 +51,31 @@ class ExponentialMovingAverage(Indicator):
                 description="The exponentially weighted average.",
             ),
         ),
+        version="1.0.0",
+        author="Eth AI Platform",
+        complexity="O(n) — one recursive pass over the candle range after an O(period) seed.",
+        warmup_description="Equal to the period parameter.",
     )
 
     def warmup(self, params: Mapping[str, Any]) -> int:
         """The SMA seed needs a full window before the recursion can start."""
-        return int(params["period"])
+        return period_warmup(params)
 
     def calculate(self, ctx: IndicatorContext) -> IndicatorOutput:
-        """Seed with an SMA, then apply the standard EMA recurrence."""
+        """Seed with an SMA, then apply the standard EMA recurrence.
+
+        Numerical stability note: unlike SMA's running sum, this recursion
+        genuinely does carry floating-point error forward indefinitely —
+        each point is computed from the *previous computed point*, not
+        re-derived from the source data, so any rounding at step ``t``
+        remains part of every value from ``t`` onward (attenuated by the
+        multiplier each step, but never fully purged). This is an accepted,
+        well-known property of the EMA formula itself, not a bug in this
+        implementation; IEEE-754 double precision keeps the drift far below
+        anything visible at the six-significant-digit precision this
+        platform displays, even over a series of hundreds of thousands of
+        candles (see ``test_repeated_calculation_is_bit_for_bit_deterministic``).
+        """
         period = ctx.int_param("period")
         values = ctx.source_values()
         multiplier = 2.0 / (period + 1.0)
@@ -84,6 +89,4 @@ class ExponentialMovingAverage(Indicator):
             previous = (values[index] - previous) * multiplier + previous
             out[index] = previous
 
-        return IndicatorOutput(
-            series=[IndicatorSeries(name="ema", label=f"EMA({period})", values=out)]
-        )
+        return single_series_output("ema", f"EMA({period})", out)

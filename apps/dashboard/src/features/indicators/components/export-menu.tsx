@@ -13,6 +13,7 @@ import { useState, type MouseEvent } from 'react';
 import { env } from '@/config/env';
 import { downloadBlob } from '@/lib/download-file';
 import type { IndicatorCalculation } from '@/types/api/indicators';
+import type { IndicatorKnowledge } from '../lib/indicator-knowledge';
 import {
   buildApiRequestUrl,
   buildCsv,
@@ -23,6 +24,8 @@ import {
 
 export interface ExportMenuProps {
   result: IndicatorCalculation;
+  /** Enriches the export with the formula/purpose the knowledge base carries — the API response alone doesn't. */
+  knowledge?: IndicatorKnowledge;
 }
 
 async function copyText(text: string): Promise<boolean> {
@@ -41,7 +44,7 @@ async function copyText(text: string): Promise<boolean> {
  * a pure function — this component only wires them to a download/clipboard
  * side effect and reports success or failure.
  */
-export function ExportMenu({ result }: ExportMenuProps) {
+export function ExportMenu({ result, knowledge }: ExportMenuProps) {
   const [anchor, setAnchor] = useState<HTMLElement | null>(null);
   const [feedback, setFeedback] = useState<string | null>(null);
 
@@ -49,7 +52,7 @@ export function ExportMenu({ result }: ExportMenuProps) {
 
   const handleExportCsv = () => {
     downloadBlob(
-      new Blob([buildCsv(result)], { type: 'text/csv;charset=utf-8' }),
+      new Blob([buildCsv(result, knowledge)], { type: 'text/csv;charset=utf-8' }),
       exportFileName(result, 'csv'),
     );
     close();
@@ -57,7 +60,7 @@ export function ExportMenu({ result }: ExportMenuProps) {
 
   const handleExportJson = () => {
     downloadBlob(
-      new Blob([buildJson(result)], { type: 'application/json;charset=utf-8' }),
+      new Blob([buildJson(result, knowledge)], { type: 'application/json;charset=utf-8' }),
       exportFileName(result, 'json'),
     );
     close();

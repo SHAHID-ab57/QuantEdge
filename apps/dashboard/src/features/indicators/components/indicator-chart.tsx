@@ -24,9 +24,15 @@ function seriesColor(theme: Theme, index: number): string {
   return theme.palette[key].main;
 }
 
-function referenceLineColor(theme: Theme, tone: 'bullish' | 'bearish' | 'neutral'): string {
-  if (tone === 'bullish') return theme.palette.success.main;
-  if (tone === 'bearish') return theme.palette.error.main;
+/**
+ * Neutral, non-evaluative colors for a reference line's band position —
+ * deliberately not success/error (green/red), which this codebase reserves
+ * for "good/bad" and would read as a buy/sell cue on a line that is purely
+ * describing where a threshold sits on the oscillator's scale.
+ */
+function referenceLineColor(theme: Theme, band: 'low' | 'mid' | 'high'): string {
+  if (band === 'low') return theme.palette.info.main;
+  if (band === 'high') return theme.palette.warning.main;
   return theme.palette.divider;
 }
 
@@ -93,7 +99,7 @@ function IndicatorChartInner({ series, config, height = DEFAULT_HEIGHT }: Indica
               x2={WIDTH}
               y1={y}
               y2={y}
-              stroke={referenceLineColor(theme, line.tone)}
+              stroke={referenceLineColor(theme, line.band)}
               strokeDasharray="4 4"
               strokeWidth={1}
             />
@@ -136,7 +142,7 @@ function IndicatorChartInner({ series, config, height = DEFAULT_HEIGHT }: Indica
                 width: 10,
                 height: 0,
                 borderTop: '2px dashed',
-                borderColor: referenceLineColor(theme, line.tone),
+                borderColor: referenceLineColor(theme, line.band),
               }}
             />
             <Typography variant="caption" color="text.secondary">

@@ -13,6 +13,10 @@ function catalogueEntry(name: string, description = 'Stub.'): Indicator {
     label: name.toUpperCase(),
     description,
     category: 'trend',
+    version: '1.0.0',
+    author: 'Eth AI Platform',
+    complexity: 'O(n)',
+    warmup_description: 'Equal to the period parameter.',
     parameters: [],
     outputs: [],
   };
@@ -95,38 +99,51 @@ describe('summarizeSeries — trend', () => {
   });
 });
 
-describe('summarizeSeries — signal, generic fallback', () => {
-  it('falls back to trend direction for an indicator with no classifySignal', () => {
-    expect(summarizeSeries(series([10, 20]), sma).signal).toBe('bullish');
-    expect(summarizeSeries(series([20, 10]), sma).signal).toBe('bearish');
-    expect(summarizeSeries(series([10, 10]), sma).signal).toBe('neutral');
+describe('summarizeSeries — state, no fabricated reading', () => {
+  it('is null for an indicator with no established state convention', () => {
+    // A plain moving average's direction is not itself a reading of
+    // market state — that would be manufacturing a trading signal out of
+    // a number that doesn't carry one, so no fallback synthesizes one.
+    expect(summarizeSeries(series([10, 20]), sma).state).toBeNull();
+    expect(summarizeSeries(series([20, 10]), sma).state).toBeNull();
+    expect(summarizeSeries(series([10, 10]), sma).state).toBeNull();
   });
 
-  it('is null when trend itself cannot be computed', () => {
-    expect(summarizeSeries(series([10]), sma).signal).toBeNull();
+  it('trend direction is still reported independently of state', () => {
+    expect(summarizeSeries(series([10, 20]), sma).trend).toBe('up');
   });
 });
 
-describe('summarizeSeries — signal, indicator-specific thresholds', () => {
-  it('reads an RSI above 70 as bearish (overbought) regardless of trend direction', () => {
+describe('summarizeSeries — state, indicator-specific thresholds', () => {
+  it('reads an RSI above 70 as Overbought regardless of trend direction', () => {
     // Still rising into overbought territory — the threshold, not the
     // direction, should win for an indicator with its own convention.
     const summary = summarizeSeries(series([60, 75], 'rsi', 'RSI(14)'), rsi);
     expect(summary.trend).toBe('up');
-    expect(summary.signal).toBe('bearish');
+    expect(summary.state).toEqual({ label: 'Overbought', tone: 'notable' });
   });
 
-  it('reads an RSI below 30 as bullish (oversold)', () => {
+  it('reads an RSI below 30 as Oversold', () => {
     const summary = summarizeSeries(series([40, 25], 'rsi', 'RSI(14)'), rsi);
-    expect(summary.signal).toBe('bullish');
+    expect(summary.state).toEqual({ label: 'Oversold', tone: 'notable' });
   });
 
-  it('reads an RSI between 30 and 70 as neutral', () => {
+  it('reads an RSI between 30 and 70 as Neutral', () => {
     const summary = summarizeSeries(series([45, 55], 'rsi', 'RSI(14)'), rsi);
-    expect(summary.signal).toBe('neutral');
+    expect(summary.state).toEqual({ label: 'Neutral', tone: 'neutral' });
   });
 
   it('is null when there is no latest value to classify', () => {
-    expect(summarizeSeries(series([null, null], 'rsi', 'RSI(14)'), rsi).signal).toBeNull();
+    expect(summarizeSeries(series([null, null], 'rsi', 'RSI(14)'), rsi).state).toBeNull();
+  });
+});
+
+describe('summarizeSeries — status', () => {
+  it('is computed once a latest value exists', () => {
+    expect(summarizeSeries(series([10, 20]), sma).status).toBe('computed');
+  });
+
+  it('is warming-up when the series has no value at all', () => {
+    expect(summarizeSeries(series([null, null]), sma).status).toBe('warming-up');
   });
 });

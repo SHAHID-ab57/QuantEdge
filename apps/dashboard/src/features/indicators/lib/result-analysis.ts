@@ -1,7 +1,10 @@
 import type { IndicatorSeries } from '@/types/api/indicators';
-import type { IndicatorKnowledge, SignalTone } from './indicator-knowledge';
+import type { IndicatorKnowledge, IndicatorState } from './indicator-knowledge';
 
 export type TrendDirection = 'up' | 'down' | 'flat';
+
+/** Whether the latest visible point has a computed value yet. Almost always `'computed'` — the engine never returns a series with no value at all — kept explicit rather than assumed. */
+export type IndicatorStatus = 'computed' | 'warming-up';
 
 export interface SeriesSummary {
   name: string;
@@ -11,7 +14,16 @@ export interface SeriesSummary {
   absoluteChange: number | null;
   percentChange: number | null;
   trend: TrendDirection | null;
-  signal: SignalTone | null;
+  /**
+   * A descriptive classification of the latest value, only when the
+   * indicator has an established convention for one (e.g. RSI's 30/70
+   * thresholds). `null` for every indicator without one — deliberately
+   * never synthesized from trend direction: "the average is rising" is
+   * not itself a reading of market state, and labeling it one would be
+   * exactly the kind of trading signal this page does not generate.
+   */
+  state: IndicatorState | null;
+  status: IndicatorStatus;
 }
 
 /** Scans from the end for the last two non-null values, newest first. */
@@ -43,34 +55,11 @@ function trendOf(latest: number | null, previous: number | null): TrendDirection
 }
 
 /**
- * The signal a knowledge base entry's `classifySignal` gives when it has
- * one (e.g. RSI's 30/70 thresholds), or a trend-direction fallback when it
- * doesn't: rising reads bullish, falling reads bearish, flat reads
- * neutral. The fallback is deliberately generic rather than omitted —
- * every indicator's value is still comparable to its own recent past even
- * without curated thresholds.
- */
-function signalOf(
-  latest: number | null,
-  trend: TrendDirection | null,
-  knowledge: IndicatorKnowledge,
-): SignalTone | null {
-  if (latest !== null && knowledge.classifySignal) {
-    return knowledge.classifySignal(latest);
-  }
-  if (trend === null) {
-    return null;
-  }
-  if (trend === 'up') return 'bullish';
-  if (trend === 'down') return 'bearish';
-  return 'neutral';
-}
-
-/**
  * Reduces one computed series down to what a researcher checks first:
- * where it stands now, where it stood before, how much it moved, and how
- * to read that movement — computed once here rather than scattered across
- * the summary and chart components that both need it.
+ * where it stands now, where it stood before, how much it moved, and
+ * (only when the indicator itself defines a reading) its descriptive
+ * state — computed once here rather than scattered across the summary
+ * and chart components that both need it.
  */
 export function summarizeSeries(
   series: IndicatorSeries,
@@ -83,7 +72,8 @@ export function summarizeSeries(
       ? (absoluteChange / Math.abs(previous)) * 100
       : null;
   const trend = trendOf(latest, previous);
-  const signal = signalOf(latest, trend, knowledge);
+  const state = latest !== null && knowledge.classifyState ? knowledge.classifyState(latest) : null;
+  const status: IndicatorStatus = latest !== null ? 'computed' : 'warming-up';
 
   return {
     name: series.name,
@@ -93,6 +83,7 @@ export function summarizeSeries(
     absoluteChange,
     percentChange,
     trend,
-    signal,
+    state,
+    status,
   };
 }

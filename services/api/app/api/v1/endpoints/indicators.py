@@ -81,7 +81,7 @@ _ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
                         "value": {
                             "code": "indicator_not_found",
                             "detail": (
-                                "Indicator 'macd' is not registered; available: ema, rsi, sma"
+                                "Indicator 'macd' is not registered; available: ema, rsi, sma, wma"
                             ),
                         },
                     },

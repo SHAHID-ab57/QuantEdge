@@ -1,5 +1,6 @@
 import { csvLine, sanitizeFilenamePart } from '@/lib/csv';
 import type { IndicatorCalculation } from '@/types/api/indicators';
+import type { IndicatorKnowledge } from './indicator-knowledge';
 
 /**
  * Researcher export utilities for one calculation result. Deliberately
@@ -15,12 +16,20 @@ export function exportFileName(result: IndicatorCalculation, extension: 'csv' | 
   return `${symbol}-${indicator}-${timeframe}.${extension}`;
 }
 
-/** A metadata block followed by one data row per candle, oldest first (the calculation's own order). */
-export function buildCsv(result: IndicatorCalculation): string {
+/**
+ * A metadata block followed by one data row per candle, oldest first (the
+ * calculation's own order). `knowledge` is optional and additive: the
+ * formula and category come from the frontend's knowledge base, not the
+ * calculation response, so an export still includes every field the
+ * response itself carries even when it's omitted.
+ */
+export function buildCsv(result: IndicatorCalculation, knowledge?: IndicatorKnowledge): string {
   const meta: [string, string][] = [
     ['Market', result.symbol],
     ['Timeframe', result.timeframe],
     ['Indicator', result.indicator.label],
+    ['Category', result.indicator.category],
+    ['Formula', knowledge?.formula ?? 'Not available'],
     ['Parameters', JSON.stringify(result.parameters)],
     ['Candles analyzed', String(result.meta.candles_analyzed)],
     ['Warmup candles', String(result.meta.warmup_candles)],
@@ -35,8 +44,16 @@ export function buildCsv(result: IndicatorCalculation): string {
   return [...metaLines, '', header, ...rows].join('\n');
 }
 
-export function buildJson(result: IndicatorCalculation): string {
-  return JSON.stringify(result, null, 2);
+/**
+ * The full calculation response, enriched with the frontend's own
+ * knowledge-base fields (formula, purpose) that the API response itself
+ * doesn't carry — additive to, never a replacement for, the raw response.
+ */
+export function buildJson(result: IndicatorCalculation, knowledge?: IndicatorKnowledge): string {
+  const payload = knowledge
+    ? { ...result, formula: knowledge.formula, purpose: knowledge.purpose }
+    : result;
+  return JSON.stringify(payload, null, 2);
 }
 
 /** Tab-separated values, newest first — matching how the results table itself is displayed. */

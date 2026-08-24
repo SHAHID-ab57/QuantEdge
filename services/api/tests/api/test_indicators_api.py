@@ -6,6 +6,7 @@ shared ``AppError`` → JSON envelope are all covered end to end.
 """
 
 import httpx
+import pytest
 
 
 class TestCatalogueEndpoint:
@@ -14,7 +15,7 @@ class TestCatalogueEndpoint:
         assert response.status_code == 200
         body = response.json()
         names = {entry["name"] for entry in body["indicators"]}
-        assert {"sma", "ema", "rsi"} <= names
+        assert {"sma", "ema", "wma", "rsi"} <= names
         assert body["total"] == len(body["indicators"])
 
     async def test_publishes_parameter_specs_for_form_building(
@@ -41,6 +42,16 @@ class TestCatalogueEndpoint:
         assert response.status_code == 200
         assert response.json()["category"] == "momentum"
 
+    async def test_serializes_engineering_metadata_for_the_frontend(
+        self, client: httpx.AsyncClient
+    ) -> None:
+        response = await client.get("/api/v1/indicators/wma")
+        body = response.json()
+        assert body["version"] == "1.0.0"
+        assert body["author"] == "Eth AI Platform"
+        assert "O(n)" in body["complexity"]
+        assert body["warmup_description"] == "Equal to the period parameter."
+
     async def test_returns_404_for_an_unknown_indicator(self, client: httpx.AsyncClient) -> None:
         response = await client.get("/api/v1/indicators/nope")
         assert response.status_code == 404
@@ -63,6 +74,22 @@ class TestCalculationEndpoint:
         body = response.json()
         assert body["symbol"] == "ETCUSD"
         assert body["series"][0]["values"] == [None, 17.5, 28.0]
+
+    async def test_calculates_wma_over_stored_candles(
+        self, client: httpx.AsyncClient, seeded_varied: None
+    ) -> None:
+        # seeded_varied closes are 11, 24, 32; WMA(2) weights are 1,2:
+        # (11*1+24*2)/3, (24*1+32*2)/3.
+        response = await client.get(
+            "/api/v1/markets/ETCUSD/indicators/wma",
+            params={"timeframe": "1h", "period": 2},
+        )
+        assert response.status_code == 200
+        body = response.json()
+        values = body["series"][0]["values"]
+        assert values[0] is None
+        assert values[1] == pytest.approx(59 / 3)
+        assert values[2] == pytest.approx(88 / 3)
 
     async def test_aligns_timestamps_with_the_series(
         self, client: httpx.AsyncClient, seeded_varied: None
@@ -129,6 +156,15 @@ class TestCalculationErrors:
         )
         assert response.status_code == 400
         assert response.json()["code"] == "invalid_indicator_parameter"
+
+    async def test_out_of_range_parameter_recommends_the_default(
+        self, client: httpx.AsyncClient, seeded_varied: None
+    ) -> None:
+        response = await client.get(
+            "/api/v1/markets/ETCUSD/indicators/sma",
+            params={"timeframe": "1h", "period": 0},
+        )
+        assert "(recommended: 20)" in response.json()["detail"]
 
     async def test_rejects_an_unknown_parameter_rather_than_ignoring_it(
         self, client: httpx.AsyncClient, seeded_varied: None

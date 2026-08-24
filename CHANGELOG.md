@@ -8,6 +8,107 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Trend Indicator Package production-readiness review — a hardening pass
+  over SMA/EMA/WMA before more indicator families are built on top of this
+  engine, with **zero breaking API changes** and the existing architecture
+  fully preserved.
+
+  - **Shared Moving-Average Utilities** (`app/indicators/builtin/common.py`):
+    SMA, EMA, and WMA had each independently declared an identical
+    `period`/`source` parameter shape and an identical "warmup equals the
+    period" rule — extracted into four small, optional helpers
+    (`period_parameter`, `source_parameter`, `period_warmup`,
+    `single_series_output`) all three (and RSI) now call, with no change to
+    any indicator's external behavior.
+  - **A real performance bug fixed**: WMA's `calculate` was O(n times period)
+    — a fresh weighted re-sum per window — despite the engine's O(n) design
+    intent. Replaced with a true O(n) incremental update, verified against an
+    independent from-scratch reference computation to produce identical
+    results.
+  - **Numerical stability documented**: SMA/WMA's running-sum accumulation is
+    stable indefinitely; EMA's recursive formula carries floating-point
+    rounding forward by design (an accepted property of the formula, not a
+    defect), verified to stay finite and in-range over a 5,000-candle series;
+    no rounding is ever applied server-side.
+  - **Metadata contract extended** with four additive fields — `version`
+    (indicator-level semver), `author`, `complexity` (free-form Big-O), and
+    `warmup_description` — deliberately not adding separate "output type" or
+    "supported price sources" fields, since both are already derivable from
+    `outputs`/`source.choices` and a parallel field would risk drifting out
+    of sync.
+  - **Parameter validation messages** now recommend the spec's own declared
+    default on a bound violation (for example, a period of `0` against a
+    minimum of `1` now also names the recommended default) — reusing the one
+    number the spec already vouches for, never a fabricated suggestion;
+    omitted for a required parameter, which has none.
+  - **A design correction on the frontend**: the Results Summary's
+    "Bullish"/"Bearish"/"Neutral" badge was, for a plain trend indicator,
+    entirely synthesized from trend direction alone — manufacturing a
+    trading signal out of a number that never carried one. The classifier
+    (renamed from `classifySignal` to `classifyState`) now only returns a
+    reading when the indicator itself defines a convention (RSI:
+    "Overbought"/"Oversold"/"Neutral", still fully analytical, never an
+    instruction to trade); SMA/EMA/WMA show Trend Direction only, with no
+    fabricated state. Chart reference-line coloring moved from success/error
+    (green/red — this codebase's "good/bad" colors) to neutral
+    info/warning/divider tones.
+  - The **Indicator Metadata card** now sources category, complexity,
+    warmup description, version, and author from the backend's real
+    per-indicator fields, replacing the previous hardcoded "O(n)" and "Not
+    exposed by the API" placeholders — closing a gap the prior review had
+    explicitly flagged as an honest limitation.
+  - New **Current Price** and **Distance from Current Price** rows in the
+    Results Summary, reusing the existing latest-candle endpoint (no
+    indicator-response schema change) and comparing against the same price
+    field the indicator's own `source` parameter resolved to.
+  - **Exports** (CSV/JSON) now include the indicator's formula and purpose
+    from the knowledge base when available, additive to every field the
+    calculation response already carried.
+  - 63 new/updated backend tests (large datasets for SMA/EMA, bit-for-bit
+    determinism including through the result cache, an unsupported price
+    source, complete engineering metadata, nullable optional candle fields,
+    the new parameter-recommendation message) and frontend test updates
+    across the result-analysis, result-summary, indicator-chart, and
+    indicator-metadata-card suites, plus a new current-price test file —
+    full suites still pass (backend 541, frontend 990).
+  - See `ARCHITECTURE.md` § "Technical Indicator Engine" (new "Shared
+    Moving-Average Utilities", "Numerical stability", "Complexity analysis",
+    "Metadata contract", and "Future compatibility" subsections — EMA
+    crossovers, a Moving Average Ribbon, MACD, Bollinger Bands, Hull MA,
+    VWMA, and KAMA all verified to fit the existing contract with no engine
+    change), `API.md`, and `TESTING.md`.
+
+- Trend Indicator Package — Weighted Moving Average (`wma`), the third
+  member of the `trend` category alongside the already-shipped SMA and
+  EMA. Registered as an independent plugin
+  (`services/api/app/indicators/builtin/wma.py`) with **zero changes to
+  the engine, registry, API, or frontend** — the extensibility claim
+  documented for the indicator engine foundation, now proven in practice
+  rather than only asserted. WMA weights each candle in its window
+  linearly by recency (oldest candle weight 1, newest weight N, divided
+  by N(N+1)/2), sitting between SMA (equal weighting) and EMA (recursive,
+  unbounded memory): it reacts faster than an SMA of the same period, but
+  — unlike an EMA — an outlier ages out completely once it leaves the
+  window rather than lingering in a recursive average. Parameter
+  validation (`period` in `[1, 1000]`, `source` constrained to
+  open/high/low/close) and error handling (`insufficient_data`,
+  `invalid_indicator_parameter`) are entirely inherited from the shared
+  engine pipeline; WMA declares its parameters the same way SMA/EMA do
+  and needed no indicator-specific validation code. 12 new unit tests
+  (`TestWeightedMovingAverage`) cover a hand-computed value, the warmup
+  boundary, the source parameter, a faster-than-SMA reaction after a
+  price jump, constant prices, an empty dataset, invalid periods (zero
+  and negative), and a 5,000-candle dataset cross-checked at four points
+  against an independent from-scratch weighted-average computation — not
+  merely "it didn't crash." One new API integration test calculates WMA
+  over real stored candles against a hand-computed expected value. The
+  frontend's indicator knowledge base (`lib/indicator-knowledge.ts`)
+  gained a curated `wma` entry (purpose, formula, advantages/limitations,
+  recommended periods) with no other frontend change required — the
+  already-generic parameter form, results summary, chart, and export
+  utilities all picked it up automatically. See `ARCHITECTURE.md` §
+  "Technical Indicator Engine" (now covering "The Trend Indicator
+  Package"), `API.md`, and `TESTING.md`.
 - Technical Indicators page usability review — transformed `/indicators`
   from a functional-but-plain form into a research interface, without
   touching the indicator engine, the backend, or the API contract.

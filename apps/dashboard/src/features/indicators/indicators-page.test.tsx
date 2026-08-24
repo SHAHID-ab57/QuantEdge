@@ -18,6 +18,7 @@ vi.mock('@/lib/api/indicators', () => ({
 vi.mock('@/lib/api/market', () => ({
   fetchMarkets: vi.fn(),
   fetchTimeframes: vi.fn(),
+  fetchLatestCandle: vi.fn(),
 }));
 
 const mockedIndicators = vi.mocked(indicatorApi);
@@ -51,6 +52,10 @@ const catalog: IndicatorCatalog = {
       label: 'Simple Moving Average',
       description: 'The unweighted mean of the last N values.',
       category: 'trend',
+      version: '1.0.0',
+      author: 'Eth AI Platform',
+      complexity: 'O(n)',
+      warmup_description: 'Equal to the period parameter.',
       parameters: [
         {
           name: 'period',
@@ -82,6 +87,10 @@ const catalog: IndicatorCatalog = {
       label: 'Relative Strength Index',
       description: 'A 0-100 momentum oscillator.',
       category: 'momentum',
+      version: '1.0.0',
+      author: 'Eth AI Platform',
+      complexity: 'O(n)',
+      warmup_description: 'Equal to the period parameter.',
       parameters: [
         {
           name: 'period',
@@ -151,6 +160,20 @@ beforeEach(() => {
   window.localStorage.clear();
   mockedMarket.fetchMarkets.mockResolvedValue({ markets, total: 1 });
   mockedMarket.fetchTimeframes.mockResolvedValue({ symbol: 'ETHUSD', timeframes: ['1h', '1d'] });
+  mockedMarket.fetchLatestCandle.mockResolvedValue({
+    symbol: 'ETHUSD',
+    timeframe: '1h',
+    candle: {
+      open_time: '2026-01-01T01:00:00Z',
+      close_time: '2026-01-01T02:00:00Z',
+      open: '3050',
+      high: '3060',
+      low: '3040',
+      close: '3100',
+      volume: '100',
+      source: 'delta',
+    },
+  });
   mockedIndicators.fetchIndicators.mockResolvedValue(catalog);
   mockedIndicators.calculateIndicator.mockResolvedValue(calculation);
 });
@@ -251,6 +274,19 @@ describe('IndicatorsPage — calculation', () => {
     expect(within(summary).getByText('3,055.25')).toBeInTheDocument();
   });
 
+  it('shows current price and distance once the latest candle resolves', async () => {
+    renderPage();
+    await screen.findByRole('combobox', { name: 'Select an indicator' });
+    await configure();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Calculate' }));
+    await screen.findByRole('status', { name: 'Indicator summary' });
+
+    expect(await screen.findByText(/Current Price: 3,100/)).toBeInTheDocument();
+    // 3055.25 - 3100 = -44.75
+    expect(screen.getByText(/Distance: -44\.75/)).toBeInTheDocument();
+  });
+
   it('sends the configured market, timeframe, and parameters', async () => {
     renderPage();
     await screen.findByRole('combobox', { name: 'Select an indicator' });
@@ -349,6 +385,10 @@ describe('IndicatorsPage — indicator information panel', () => {
           label: 'MACD',
           description: 'Moving Average Convergence Divergence.',
           category: 'trend',
+          version: '1.0.0',
+          author: 'Eth AI Platform',
+          complexity: 'O(n)',
+          warmup_description: 'Equal to the period parameter.',
           parameters: [],
           outputs: [{ name: 'macd', label: 'MACD', description: '' }],
         },

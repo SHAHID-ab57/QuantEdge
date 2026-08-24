@@ -17,6 +17,8 @@ export interface ResultsPanelProps {
   result: IndicatorCalculation | undefined;
   /** Required whenever `result` is present — the panel that renders it needs it to size the chart and classify signals. */
   knowledge: IndicatorKnowledge | undefined;
+  /** The market's latest price, in the same units as the calculation's `source` parameter. */
+  currentPrice?: number;
   onRetry: () => void;
 }
 
@@ -35,6 +37,7 @@ export function ResultsPanel({
   error,
   result,
   knowledge,
+  currentPrice,
   onRetry,
 }: ResultsPanelProps) {
   if (!requested) {
@@ -75,5 +78,5 @@ export function ResultsPanel({
     return null;
   }
 
-  return <IndicatorResults result={result} knowledge={knowledge} />;
+  return <IndicatorResults result={result} knowledge={knowledge} currentPrice={currentPrice} />;
 }

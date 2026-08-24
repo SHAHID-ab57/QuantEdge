@@ -1558,6 +1558,238 @@ out of sync with the chart, by construction rather than by convention.
   snapshot store existing at all, not on anything in this frontend
   architecture — see "Why only candles are replayed" above.
 
+## Technical Indicators
+
+`/indicators` (`src/features/indicators/`) is a research interface for the
+backend's Technical Indicator Engine (see [`ARCHITECTURE.md`](ARCHITECTURE.md)
+§ "Technical Indicator Engine"): pick a market, timeframe, and indicator,
+fill in its parameters, and get back a summarized, charted, and tabulated
+result — with the research context (what it measures, how to read it)
+built into the page rather than left to external documentation.
+
+### The parameter form is generated, not written
+
+This page contains **no per-indicator functional code**. It does not know
+that SMA has a `period`, that RSI's minimum is 2, or that both accept a
+`source` of open/high/low/close.
+
+`GET /api/v1/indicators` publishes each parameter's type, label,
+description, default, required-ness, inclusive bounds, and permitted
+choices; `ParameterForm` renders fields straight from that. A numeric spec
+becomes a `type="number"` input carrying its own `min`/`max`; a spec with
+`choices` becomes a `<Select>` listing exactly those options.
+
+That is the frontend half of the engine's extensibility guarantee:
+registering a new indicator on the backend makes it appear here — in the
+right category, with a correct, constrained form — with **no frontend
+change**. `parameter-form.test.tsx` pins this by rendering arbitrary specs
+the codebase has never seen.
+
+### The indicator knowledge base — a separate, purely additive layer
+
+`lib/indicator-knowledge.ts` is deliberately **not** part of the above
+contract. It is frontend-only research content — purpose, mathematical
+intuition, formula, advantages/limitations, use cases, interpretation,
+methodology reference, recommended parameter values, chart configuration,
+and (where an indicator has an established convention) a signal
+classifier — keyed by indicator name, curated today for `sma`, `ema`, and
+`rsi`.
+
+The reason it has to be separate: the engine is explicitly designed to
+grow toward hundreds of indicators, and curated research content can only
+ever cover a fraction of them. `getIndicatorKnowledge()` therefore never
+returns undefined — an indicator with no curated entry gets an honest
+generic fallback built from its own catalogue `description` (a purpose
+statement, a plain "not yet documented" for the formula/advantages/
+limitations, a trend-direction-based signal instead of indicator-specific
+thresholds), so a future indicator's Information Panel, Results Summary,
+and Chart all render something true rather than blank or broken.
+`indicator-knowledge.test.ts` pins this fallback explicitly, alongside the
+curated content for each shipped indicator.
+
+### Component hierarchy
+
+```text
+IndicatorsPage                     owns market/timeframe/indicator selection, form state, and rerun wiring
+├── FieldInfo (x3)                  ⓘ tooltip beside Market / Timeframe / Indicator
+├── IndicatorInfoPanel              collapsible research card, keyed by indicator (purpose, formula, ...)
+├── ParameterForm                   fields generated from the published specs
+│   └── FieldInfo / recommended chips   per-parameter tooltip + common-value chips from the knowledge base
+├── ResultsPanel                    not-yet-requested / loading / error / results
+│   └── IndicatorResults
+│       ├── ResultSummary            latest/previous/change/trend/signal per series
+│       ├── IndicatorChart           dependency-free SVG line/oscillator visualization
+│       └── values table             newest-first, FieldInfo on stat tiles and the table heading
+├── ExportMenu                      Section action slot — CSV/JSON/copy values/copy request (once a result exists)
+├── IndicatorMetadataCard           sidebar: category, output type, complexity, cache status, ...
+└── RecentCalculationsPanel         sidebar: last 10 calculations (localStorage), one-click rerun
+```
+
+Laid out as a two-column `Grid` (`size={{ xs: 12, lg: 8 }}` for the main
+column, `{ xs: 12, lg: 4 }}` for the sidebar) — the same wide-primary/
+narrow-sidebar convention the Markets page already uses for its own
+list/detail split. The configuration/research/results flow sits on the
+left, engine metadata and recent-calculation history on the right,
+stacking to a single column below the `lg` breakpoint.
+
+### Tooltip system
+
+Every fixed field (Market, Timeframe, Indicator, Warmup Candles, Candles
+Analyzed, Calculation Time, Cache Status, Latest Value, the Results Table)
+carries a ⓘ affordance via `FieldInfo`, sourced from one dictionary
+(`lib/field-help.ts`) so no two places on the page can explain the same
+field differently. Every parameter field carries the same affordance via
+an inline `InfoTooltip`, sourced from the knowledge base's per-parameter
+hint when curated, falling back to the backend's own `description`
+otherwise.
+
+This is not a new pattern: it is the Trade Analytics dashboard's
+`MetricInfo` (`ⓘ` + accessible tooltip, opens on hover _and_ keyboard
+focus, `enterTouchDelay={0}` for touch) generalized. The rendering and
+accessibility contract was promoted out of `MetricInfo` into a shared
+`src/components/info-tooltip.tsx` once a second feature needed the
+identical affordance for a different dictionary of things to explain —
+`MetricInfo` itself now delegates to it, unchanged from the outside, so
+its existing tests kept passing without modification.
+
+### Indicator Information Panel
+
+`IndicatorInfoPanel` replaces the previous one-line description with a
+collapsible (`Accordion`) research card: category, purpose, mathematical
+intuition, a plain-text formula, recommended parameter values, advantages,
+limitations, typical use cases, common interpretation, and — when curated
+— a methodology reference (e.g. Wilder's 1978 book for RSI). Expanded by
+default each time a different indicator is selected (`key={selected.name}`
+resets its internal state), collapsible via the same `Accordion` this
+codebase would reach for anywhere else — no bespoke disclosure widget, so
+`aria-expanded` and keyboard activation come for free.
+
+### Visualization strategy — reusing the Sparkline's math, not a second chart engine
+
+`IndicatorChart` renders the computed series as a small SVG line (or, for
+an oscillator like RSI, a bounded plot with reference lines at 30/50/70).
+It is explicitly **not** a second `lightweight-charts` instance and does
+not overlay onto the candlestick chart module — the response has no price
+series to overlay against in the first place, only the indicator's own
+output.
+
+The domain/path math (`computeDomain`, `buildLinePath`, `yForValue`) was
+promoted out of the Trade Analytics `Sparkline` into
+`src/lib/svg-line-path.ts` once `IndicatorChart` needed the identical "plot
+these values against a shared domain" calculation, extended for multiple
+series sharing one y-scale and for a fixed domain plus reference lines.
+`Sparkline` itself was refactored to call the shared functions with no
+change to its external behavior — its existing test suite (and the Trade
+Analytics dashboard that uses it) kept passing unmodified.
+
+Chart shape (line vs. oscillator, fixed domain, reference lines) comes
+from the knowledge base's `ChartConfig`, never from a switch on the
+indicator's name — a future multi-series indicator (MACD, Bollinger Bands)
+plots correctly here the moment it declares a config, no component change.
+
+### Result Summary — latest, previous, change, trend, and signal
+
+`lib/result-analysis.ts`'s `summarizeSeries` is a pure function (19 unit
+tests) reducing one output series to what a researcher checks first:
+latest and previous non-null values, absolute and percentage change, trend
+direction, and a Bullish/Bearish/Neutral signal. The signal comes from the
+indicator's own `classifySignal` when the knowledge base defines one
+(RSI: above 70 is bearish/overbought, below 30 is bullish/oversold,
+regardless of which direction it is currently moving), or a generic
+trend-direction fallback otherwise (rising reads bullish, falling reads
+bearish) — so every indicator gets a signal, curated thresholds or not.
+
+### Researcher export utilities
+
+`ExportMenu` sits in the Results section's header action slot (only once a
+result exists) with four actions, each a thin wrapper over a pure builder
+in `lib/export.ts`: **Export CSV** / **Export JSON** (via the shared
+`downloadBlob`, promoted out of the History page's export buttons once
+this page needed the identical download-a-blob behavior), **Copy Values**
+(tab-separated, newest first, for pasting into a spreadsheet), and **Copy
+API Request** — the literal REST URL for the calculation on screen,
+assembled client-side with no request made, so what's copied always
+matches what the page actually sent.
+
+### Recent Calculations
+
+A per-browser convenience list (`use-recent-calculations.ts`,
+`lib/recent-calculations.ts`), capped at 10 entries and persisted to
+`localStorage` — the same category of state this codebase's Zustand store
+is reserved for (a remembered UI preference, not data that must be shared
+or durable), which is why this stays a plain localStorage-backed hook
+rather than expanding that store's scope. Every successful calculation is
+recorded from the **response's own echoed symbol/indicator/timeframe/
+parameters** (the fully-resolved values, defaults included) rather than
+the form's local state, so a rerun reproduces exactly what ran even if the
+form has since changed. An identical rerun moves the existing entry to the
+top instead of duplicating it; storage reads/writes tolerate a missing,
+corrupted, or throwing `Storage` (private browsing, quota, disabled site
+data) without ever surfacing an error to the researcher.
+
+One-click rerun sets the calculation `request` directly (bypassing client
+validation — a previously-succeeded configuration is already known-good)
+while the visible form fields catch up on the next render via the same
+reseed effect that runs when an indicator is switched.
+
+### Calculation is explicit, not reactive
+
+`useIndicatorCalculation` is gated on a request object that only
+`handleCalculate` (or a recent-calculation rerun) builds. A calculation is
+a real backend query — it reads candles — so firing on every keystroke
+would send four requests while a researcher types a period of `200`.
+`retry: false` for the same reason the Replay engine uses it: this
+endpoint's failures are overwhelmingly deterministic (an out-of-range
+parameter, too little data, an unknown symbol), so retrying only delays a
+message that will not change.
+
+Client-side validation (`lib/parameter-values.ts`) mirrors the backend's
+rules to give an immediate, field-anchored error instead of a round-trip —
+explicitly a convenience, never the enforcement boundary. The backend
+revalidates everything, because a UI check is trivially bypassed.
+
+One subtlety worth its comment in the code: an omitted optional parameter
+is sent as **absent**, not as an empty string. The backend applies the
+declared default for a missing key but would reject `""` as an invalid
+int — so `toRequestParams` drops blanks rather than forwarding them.
+
+Switching indicators reseeds the form from the new indicator's defaults
+rather than carrying the previous values over: SMA defaults `period` to 20
+and RSI to 14, and silently calculating an RSI(20) the researcher never
+asked for is exactly the plausible-but-wrong outcome this platform's
+conventions exist to prevent.
+
+### Accessibility
+
+- Every ⓘ affordance is a real `IconButton` with an explicit `aria-label`
+  naming what it explains, opens on keyboard focus as well as hover
+  (`enterTouchDelay={0}` for touch), and is wired to its tooltip body via
+  `aria-describedby` — the same contract `MetricInfo` already established,
+  now shared via `InfoTooltip`.
+- The Information Panel is a real `Accordion`: `aria-expanded` and
+  keyboard activation (Enter/Space on its header) come from MUI, not a
+  hand-rolled disclosure.
+- `IndicatorChart` and the results summary/table carry `role="img"` (with
+  a label naming every series) and `role="status"`/`aria-label`
+  respectively, so a screen reader announces what changed without reading
+  raw SVG or a bare grid of numbers.
+- Every color-coded signal (Bullish/Bearish/Neutral, the RSI reference
+  bands) pairs its color with text — a `Chip` label or a legend caption —
+  never color alone.
+- Every interactive element (selectors, parameter inputs, chips, menu
+  items, the export button, recent-calculation rows) is a native
+  focusable element (`TextField`, `Chip onClick`, `ListItemButton`,
+  `MenuItem`), so keyboard navigation and MUI's default focus-visible
+  ring apply with no custom wiring.
+
+### No chart overlays onto the candlestick module
+
+Scoped out of this task deliberately. The calculation response's shape — a
+`timestamps` array with every series aligned index-for-index against it —
+is chosen so overlaying an indicator onto the existing candlestick chart
+module is a later addition rather than a rework; `IndicatorChart` is this
+task's lightweight, standalone visualization instead.
+
 ## State management
 
 - Server state: TanStack Query (`src/lib/query/queryClient.ts`).

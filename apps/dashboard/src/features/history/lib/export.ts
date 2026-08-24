@@ -1,6 +1,9 @@
+import { csvLine, sanitizeFilenamePart } from '@/lib/csv';
 import type { Candle, CandlePage, CandleQuality, CandleStatistics } from '@/types/api/market';
 import type { HistoryQuery } from '../hooks/use-history-data';
 import { formatNumber } from './format';
+
+export { sanitizeFilenamePart };
 
 export interface ExportEnvelope {
   exported_at: string;
@@ -40,14 +43,6 @@ export function buildEnvelope(
   };
 }
 
-function escapeCsv(value: string): string {
-  return `"${value.replaceAll('"', '""')}"`;
-}
-
-function csvLine(values: (string | number)[]): string {
-  return values.map((value) => escapeCsv(String(value))).join(',');
-}
-
 export function envelopeToCsv(envelope: ExportEnvelope): string {
   const statistics = envelope.statistics;
   const quality = envelope.quality;
@@ -75,10 +70,6 @@ export function envelopeToCsv(envelope: ExportEnvelope): string {
     csvLine([candle.open_time, candle.open, candle.high, candle.low, candle.close, candle.volume]),
   );
   return [header, ...metadata, '', dataHeader, ...rows].join('\n');
-}
-
-export function sanitizeFilenamePart(value: string | null): string {
-  return value ? value.replace(/[^a-zA-Z0-9_-]/g, '-') : 'all';
 }
 
 export function exportFileName(query: HistoryQuery, extension: 'csv' | 'json'): string {

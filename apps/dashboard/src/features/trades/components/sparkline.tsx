@@ -1,6 +1,7 @@
 'use client';
 
 import { memo, useMemo } from 'react';
+import { buildLinePath, computeDomain } from '@/lib/svg-line-path';
 
 export interface SparklineProps {
   /** Oldest to newest. A `null` entry is a gap — skipped when drawing, not plotted as zero. */
@@ -23,29 +24,8 @@ const STROKE_WIDTH = 1.5;
  * component a pure function of `values` alone.
  */
 function buildPath(values: (number | null)[], width: number, height: number): string | null {
-  let min = Infinity;
-  let max = -Infinity;
-  for (const value of values) {
-    if (value !== null) {
-      if (value < min) min = value;
-      if (value > max) max = value;
-    }
-  }
-  if (!Number.isFinite(min) || !Number.isFinite(max)) {
-    return null;
-  }
-  const range = max - min;
-  const denominator = Math.max(values.length - 1, 1);
-  const points: string[] = [];
-  values.forEach((value, index) => {
-    if (value === null) {
-      return;
-    }
-    const x = (index / denominator) * width;
-    const y = range === 0 ? height / 2 : height - ((value - min) / range) * height;
-    points.push(`${points.length === 0 ? 'M' : 'L'}${x.toFixed(2)},${y.toFixed(2)}`);
-  });
-  return points.length >= 2 ? points.join(' ') : null;
+  const domain = computeDomain([values]);
+  return domain ? buildLinePath(values, width, height, domain) : null;
 }
 
 /**
@@ -57,7 +37,9 @@ function buildPath(values: (number | null)[], width: number, height: number): st
  * to tear down and recreate, so the usual "don't recreate the chart" concern
  * for a heavier charting library doesn't apply here in the first place. The
  * path string is memoized on the `values` reference so an unrelated parent
- * re-render (e.g. a sibling tile changing) never recomputes it.
+ * re-render (e.g. a sibling tile changing) never recomputes it. The
+ * underlying domain/path math now lives in `@/lib/svg-line-path`, shared
+ * with the Technical Indicators page's multi-series `IndicatorChart`.
  */
 function SparklineInner({
   values,

@@ -8,6 +8,117 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Technical Indicators page usability review — transformed `/indicators`
+  from a functional-but-plain form into a research interface, without
+  touching the indicator engine, the backend, or the API contract.
+  Every existing calculation and validation path is unchanged; this is
+  additive UI/UX work plus a small amount of shared-infrastructure
+  promotion. **Contextual tooltips** (ⓘ icon) beside every field —
+  Market, Timeframe, Indicator, every parameter, Warmup Candles, Candles
+  Analyzed, Calculation Time, Cache Status, Latest Value, and the Results
+  Table — sourced from one dictionary per surface
+  (`lib/field-help.ts` for fixed fields, `lib/indicator-knowledge.ts` for
+  parameters) via a new shared `InfoTooltip`
+  (`src/components/info-tooltip.tsx`), promoted out of the Trade Analytics
+  dashboard's `MetricInfo` once this page needed the identical
+  hover-and-keyboard-focus affordance; `MetricInfo` now delegates to it
+  with no change to its own external behavior (its existing 5 tests pass
+  unmodified). A new **Indicator Information Panel**
+  (`IndicatorInfoPanel`, collapsible via a real `Accordion`) replaces the
+  previous one-line description with category, purpose, mathematical
+  intuition, a plain-text formula, recommended parameter values,
+  advantages, limitations, typical use cases, common interpretation, and a
+  methodology reference — curated for SMA/EMA/RSI in a new, purely
+  additive knowledge base (`lib/indicator-knowledge.ts`) that degrades to
+  an honest generic fallback (never a fabrication) for any indicator it
+  hasn't curated, since the engine is explicitly designed to grow toward
+  hundreds. **Parameter inputs** now show a curated tooltip and a row of
+  recommended-value chips (e.g. RSI period: 7/9/14/21/25) that write
+  straight to the field on click, falling back to just the backend's
+  own description when a parameter has no curated entry. The **results
+  summary** (`ResultSummary`) expands the previous single "latest value"
+  tile per series into latest, previous, absolute and percentage change,
+  trend direction, and a Bullish/Bearish/Neutral signal badge — using an
+  indicator's own convention when the knowledge base defines one (RSI:
+  above 70 reads bearish regardless of current direction) or a generic
+  trend-based fallback otherwise, computed by a new pure, independently
+  tested `summarizeSeries` (`lib/result-analysis.ts`). A new lightweight
+  **visualization** (`IndicatorChart`) plots the computed series as an SVG
+  line, or, for an oscillator like RSI, a bounded plot with 30/50/70
+  reference lines — deliberately not a second charting engine: its
+  domain/path math was promoted out of the Trade Analytics `Sparkline`
+  into a new shared `src/lib/svg-line-path.ts`, and `Sparkline` itself was
+  refactored to call it with no change to its external behavior (its
+  existing tests, and the dashboard that uses it, pass unmodified). A new
+  **Indicator Metadata** card reports category, output type, time
+  complexity, warmup requirement, live cache status, and that Replay/
+  Backtesting/AI-Feature-Engineering support is an architectural property
+  of the engine's design rather than a per-indicator flag — and states
+  plainly that no engine-version endpoint exists yet rather than
+  inventing one. New **researcher export utilities** (`ExportMenu`):
+  Export CSV/JSON (via a shared `downloadBlob`, promoted out of the
+  History page's export buttons), Copy Values (tab-separated, newest
+  first), and Copy API Request (the literal REST URL for the calculation
+  on screen, assembled client-side with no request made). A new **Recent
+  Calculations** panel persists the last 10 calculations to `localStorage`
+  — recorded from the response's own echoed, fully-resolved parameters so
+  a rerun reproduces exactly what ran — with one-click rerun that fires
+  the calculation immediately while the visible form fields catch up.
+  Accessibility: every tooltip opens on keyboard focus as well as hover
+  with an explicit accessible name, the info panel is a native `Accordion`
+  rather than a hand-rolled disclosure, the chart and summary carry
+  `role="img"`/`role="status"` with descriptive labels, and every
+  color-coded signal pairs its color with a text label. 168 tests in
+  `src/features/indicators/`, all passing; the promoted shared modules
+  (`InfoTooltip`, `svg-line-path`, `csv`, `download-file`) were verified
+  against every consumer's original test suite, not just the new one. See
+  `FRONTEND.md` § "Technical Indicators" (fully rewritten) and
+  `TESTING.md` for the complete test breakdown.
+- Technical Indicator Engine foundation — the platform's Quantitative
+  Analysis groundwork. A registry-backed execution pipeline
+  (`services/api/app/indicators/`) for reusable analytical components,
+  designed so indicators can serve Research, Replay, Backtesting, Paper
+  Trading, Feature Engineering, and AI models from one implementation.
+  **Architecture over quantity**: only three reference indicators ship
+  (SMA, EMA, RSI), chosen to cover the three distinct shapes the contract
+  must support — a simple window, a recursive/stateful calculation, and a
+  multi-stage bounded oscillator — so a fourth has a close precedent to
+  copy. Adding an indicator requires **no change to the engine, registry,
+  service, API, or frontend**: drop a module into
+  `app/indicators/builtin/`, subclass `Indicator`, declare its metadata,
+  and decorate with `@register`; `pkgutil` discovery does the rest, and a
+  test registers a brand-new indicator to prove the claim rather than
+  assert it. Nothing in `app/indicators/` imports SQLAlchemy, FastAPI, or
+  Pydantic, which is what keeps the same implementations reusable outside
+  the REST API. The pipeline (resolve → validate → warmup check → cache →
+  calculate → verify alignment) catches two failures that would otherwise
+  be silent: an under-sized range raises `insufficient_data` with the
+  required and available counts rather than returning an all-`null`
+  series, and every output series is verified to align index-for-index
+  with the input candles — a misaligned series would still plot, just
+  against the wrong timestamps. A bug inside one indicator is wrapped as
+  `indicator_execution_failed` naming the culprit, never an anonymous 500.
+  Three new endpoints: an indicator catalogue (publishing each parameter's
+  type, bounds, choices, and default), a single-indicator description, and
+  a per-market calculation whose indicator parameters are passed as
+  ordinary query parameters, with unknown keys rejected rather than
+  ignored. An optional bounded LRU result cache is included with its
+  limits stated plainly — the key needs the candles, so a hit saves the
+  recomputation but never the database read (measured: ~9.6 ms database
+  vs ~0.08 ms compute for a 5-period SMA over 50 candles), and it is
+  deliberately in-process rather than introducing the platform's first
+  Redis dependency. New `/indicators` dashboard page
+  (`apps/dashboard/src/features/indicators/`) with market, timeframe, and
+  indicator selectors, a **parameter form generated entirely from the
+  backend's published specs** (no per-indicator frontend code — the
+  frontend half of the same extensibility guarantee), a results panel, and
+  loading/error states. Also extracted the shared market-query validation
+  (`app/services/market_query.py`) that the indicator and market-data
+  services now both use, rather than a second copy of "is this timeframe
+  supported"; `market_data.py` re-exports every moved error so existing
+  imports are unchanged. See `ARCHITECTURE.md` § "Technical Indicator
+  Engine", `API.md` § "Technical indicators", `FRONTEND.md` § "Technical
+  Indicators", and `TESTING.md`.
 - Historical Market Replay Engine (`/replay`,
   `apps/dashboard/src/features/replay/`) — configure a market, timeframe,
   and date range, load the whole session's candles once up front, then

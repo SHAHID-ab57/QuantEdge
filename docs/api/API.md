@@ -36,6 +36,70 @@ The API exposes historical market data and operational monitoring:
 | GET    | `/api/v1/markets/{symbol}/candles/stats` | Aggregate stats for a timeframe/range (count, min/max price, avg volume, first/last candle); 404 when the range is empty |
 | GET    | `/api/v1/markets/{symbol}/latest`        | Newest candle for a market/timeframe                                                                                     |
 
+### Technical indicators
+
+| Method | Path                                         | Purpose                                                       |
+| ------ | -------------------------------------------- | ------------------------------------------------------------- |
+| GET    | `/api/v1/indicators`                         | Catalogue of every registered indicator, with parameter specs |
+| GET    | `/api/v1/indicators/{indicator}`             | One indicator's metadata, parameters, and output series       |
+| GET    | `/api/v1/markets/{symbol}/indicators/{name}` | Run one indicator over the market's stored candles            |
+
+**The catalogue is the contract.** Each entry publishes every parameter's
+type, label, description, default, required-ness, inclusive `minimum`/
+`maximum`, and permitted `choices` — enough for a client to build a
+complete, correctly-constrained input form without hardcoding anything
+about any particular indicator. That is deliberate: registering a new
+indicator on the backend must not require a frontend change (the dashboard's
+`/indicators` page generates its whole parameter form from this response).
+
+**Calculation parameters are ordinary query parameters.** Beyond the
+reserved `timeframe`, `start`, `end`, and `limit`, every query key is
+passed to the indicator and validated against its own declared specs:
+
+```http
+GET /api/v1/markets/ETHUSD/indicators/sma?timeframe=1h&period=20&source=close
+```
+
+An unknown parameter is **rejected, not ignored** — a typo that silently
+fell back to a default would return a plausible-looking but wrong series,
+the worst failure mode for a research tool.
+
+**Response shape.** `timestamps` holds the candle open times, and every
+entry in `series` is aligned index-for-index with it. A `null` value marks
+a warmup position where the indicator is not yet defined — never a
+calculation failure, which arrives as an error response instead:
+
+```jsonc
+{
+  "symbol": "ETHUSD",
+  "timeframe": "1h",
+  "indicator": { "name": "sma", "label": "Simple Moving Average", "...": "..." },
+  "parameters": { "period": 20, "source": "close" }, // fully resolved, defaults applied
+  "timestamps": ["2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z"],
+  "series": [{ "name": "sma", "label": "SMA(20)", "values": [null, 3055.25] }],
+  "meta": {
+    "candles_analyzed": 2,
+    "warmup_candles": 1,
+    "execution_time_ms": 0.08,
+    "database_time_ms": 3.2,
+    "cache_status": "miss",
+    "generated_at": "2026-01-01T02:00:00Z",
+  },
+}
+```
+
+Indicator values serialize as JSON **numbers**, not the decimal-as-string
+convention the candle endpoints use. An EMA or RSI is a float
+approximation by construction, and a lossless decimal string would imply a
+precision the calculation does not have.
+
+Indicator-specific error codes: `indicator_not_found` (404),
+`invalid_indicator_parameter` (400), `insufficient_data` (400 — the range
+is shorter than the indicator's warmup), and `indicator_execution_failed`
+(500 — a bug inside one indicator, named so it is obvious which). The
+shared `market_not_found`, `candle_not_found`, `invalid_timeframe`,
+`invalid_range`, and `limit_exceeded` codes apply here too.
+
 ### Platform health
 
 | Method | Path                     | Purpose                                            |

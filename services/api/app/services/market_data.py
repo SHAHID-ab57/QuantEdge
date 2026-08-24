@@ -11,10 +11,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from time import perf_counter
 
-from fastapi import status
-
-from app.core.exceptions import AppError
-from app.models.candle import TIMEFRAMES
 from app.models.market import Market
 from app.repositories.candles import SORT_COLUMNS, CandleRepository, CandleStats
 from app.repositories.markets import MarketRepository
@@ -33,69 +29,34 @@ from app.schemas.market_data import (
     ResearchTimeframeMetrics,
     TimeframesResponse,
 )
+from app.services.market_query import (
+    CandleNotFoundError,
+    InvalidRangeError,
+    InvalidSortError,
+    InvalidTimeframeError,
+    LimitExceededError,
+    MarketNotFoundError,
+    as_utc,
+    normalize_range,
+    validate_limit,
+    validate_timeframe,
+)
 
 logger = logging.getLogger("app.services.market_data")
 
-
-class MarketNotFoundError(AppError):
-    """Raised when the requested market symbol does not exist."""
-
-    def __init__(self, symbol: str) -> None:
-        super().__init__(
-            f"Market {symbol!r} not found",
-            code="market_not_found",
-            status_code=status.HTTP_404_NOT_FOUND,
-        )
-
-
-class CandleNotFoundError(AppError):
-    """Raised when no candles exist for the requested market/timeframe."""
-
-    def __init__(self, symbol: str, timeframe: str) -> None:
-        super().__init__(
-            f"No candles stored for market {symbol!r} and timeframe {timeframe!r}",
-            code="candle_not_found",
-            status_code=status.HTTP_404_NOT_FOUND,
-        )
-
-
-class InvalidTimeframeError(AppError):
-    """Raised when the timeframe is not supported by the platform."""
-
-    def __init__(self, timeframe: str) -> None:
-        super().__init__(
-            f"Unsupported timeframe {timeframe!r}; supported: {', '.join(TIMEFRAMES)}",
-            code="invalid_timeframe",
-        )
-
-
-class InvalidRangeError(AppError):
-    """Raised when the requested candle range is unusable."""
-
-    def __init__(self, message: str) -> None:
-        super().__init__(message, code="invalid_range")
-
-
-class LimitExceededError(AppError):
-    """Raised when the page size exceeds the configured maximum."""
-
-    def __init__(self, limit: int, max_limit: int) -> None:
-        super().__init__(
-            f"limit {limit} exceeds the configured maximum of {max_limit}",
-            code="limit_exceeded",
-        )
-
-
-class InvalidSortError(AppError):
-    """Raised when the sort column or direction is unsupported."""
-
-    def __init__(self, sort: str, direction: str) -> None:
-        columns = ", ".join(sorted(SORT_COLUMNS))
-        super().__init__(
-            f"Unsupported sort {sort!r} (direction {direction!r}); "
-            f"supported columns: {columns}, directions: asc, desc",
-            code="invalid_sort",
-        )
+#: Re-exported for backwards compatibility: these domain errors moved to
+#: ``market_query`` when the indicator API began sharing the same
+#: symbol/timeframe/range/limit validation, but they have been part of this
+#: module's public surface since the market data API shipped.
+__all__ = [
+    "CandleNotFoundError",
+    "InvalidRangeError",
+    "InvalidSortError",
+    "InvalidTimeframeError",
+    "LimitExceededError",
+    "MarketDataService",
+    "MarketNotFoundError",
+]
 
 
 MISSING_SAMPLE_MAX_BUCKETS = 200_000
@@ -308,7 +269,7 @@ class MarketDataService:
         if expected > MISSING_SAMPLE_MAX_BUCKETS:
             return []
         present = {
-            int(_as_utc(open_time).timestamp())
+            int(as_utc(open_time).timestamp())
             for open_time in await self.candle_repository.get_open_times(
                 market_id,
                 timeframe,
@@ -316,9 +277,9 @@ class MarketDataService:
                 end=end,
             )
         }
-        range_start = _snap_up(int(_as_utc(aggregates.oldest_open).timestamp()), duration_seconds)
+        range_start = _snap_up(int(as_utc(aggregates.oldest_open).timestamp()), duration_seconds)
         range_end = (
-            _snap_down(int(_as_utc(aggregates.newest_open).timestamp()), duration_seconds)
+            _snap_down(int(as_utc(aggregates.newest_open).timestamp()), duration_seconds)
             + duration_seconds
         )
         samples: list[datetime] = []
@@ -414,38 +375,21 @@ class MarketDataService:
         return market
 
     def _validate_timeframe(self, timeframe: str) -> None:
-        if timeframe not in TIMEFRAMES:
-            raise InvalidTimeframeError(timeframe)
+        validate_timeframe(timeframe)
 
     def _validate_range(
         self,
         start: datetime | None,
         end: datetime | None,
     ) -> tuple[datetime | None, datetime | None]:
-        if (start is None) != (end is None):
-            raise InvalidRangeError("start and end must be provided together")
-        if start is None or end is None:
-            return None, None
-        start = _as_utc(start)
-        end = _as_utc(end)
-        if end <= start:
-            raise InvalidRangeError("end must be after start")
-        return start, end
+        return normalize_range(start, end)
 
     def _validate_limit(self, limit: int) -> None:
-        if limit > self.max_limit:
-            raise LimitExceededError(limit, self.max_limit)
+        validate_limit(limit, self.max_limit)
 
     def _validate_sort(self, sort: str, direction: str) -> None:
         if sort not in SORT_COLUMNS or direction not in {"asc", "desc"}:
-            raise InvalidSortError(sort, direction)
-
-
-def _as_utc(value: datetime) -> datetime:
-    """Normalize to aware UTC; naive datetimes are treated as UTC."""
-    if value.tzinfo is None:
-        return value.replace(tzinfo=UTC)
-    return value.astimezone(UTC)
+            raise InvalidSortError(sort, direction, ", ".join(sorted(SORT_COLUMNS)))
 
 
 def _timeframe_duration(timeframe: str) -> timedelta:
@@ -548,9 +492,7 @@ def _analytics(
     completeness = round(100.0 * total / expected, 1)
 
     age_seconds = (
-        max(0.0, (now - _as_utc(newest_close)).total_seconds())
-        if newest_close is not None
-        else None
+        max(0.0, (now - as_utc(newest_close)).total_seconds()) if newest_close is not None else None
     )
     freshness = _freshness_score(age_seconds)
 

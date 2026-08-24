@@ -112,6 +112,105 @@ what is actually live, and the Live Market Dashboard resolves its market
 against it (see [`FRONTEND.md`](FRONTEND.md) § "Market selection,
 validation and fallback").
 
+### Technical Indicator Engine
+
+`services/api/app/indicators/` is the platform's Quantitative Analysis
+foundation: a registry-backed execution pipeline for reusable analytical
+components. Indicators are **not** an end goal here — they are the shared
+building block that Research, Replay, Backtesting, Paper Trading, Feature
+Engineering, and AI models are all intended to consume, so the design
+optimises for adding hundreds of them cheaply rather than for shipping many
+today.
+
+**Layering.** The one rule everything else follows: nothing in
+`app/indicators/` imports SQLAlchemy, FastAPI, or Pydantic, and no
+indicator implementation may either. An indicator receives plain
+`OHLCVPoint` values and returns plain series. That is what lets the same
+implementation serve the REST API today and, unchanged, a replay session or
+a backtest that gets its candles from somewhere else entirely.
+
+```text
+app/indicators/
+├── base.py       Indicator ABC, OHLCVPoint, IndicatorContext/Output, metadata
+├── params.py     ParameterSpec + coercion/validation
+├── registry.py   IndicatorRegistry (+ the app-wide default_registry)
+├── engine.py     IndicatorEngine — the execution pipeline
+├── cache.py      Bounded LRU result cache
+├── errors.py     Domain errors (all AppError subclasses)
+└── builtin/      Auto-discovered indicator modules (sma, ema, rsi)
+```
+
+`app/services/indicators.py` is the _only_ place the two halves meet: it
+loads candles through the existing `CandleRepository`, projects them onto
+`OHLCVPoint`, and hands them to the engine. Routers never touch SQL and
+the engine never touches the ORM — both existing platform conventions hold.
+
+**Registry pattern (Strategy + Registry).** The engine never imports a
+concrete indicator; it asks the registry for one by name. Registration is
+by decorator at class-definition time, and `app/indicators/builtin/`
+imports every module in itself via `pkgutil` on startup. The practical
+consequence is the guarantee the whole design exists for:
+
+> **Adding an indicator requires no change to the engine, registry,
+> service, API, or frontend.**
+
+**Adding a new indicator** — the complete workflow:
+
+1. Create `app/indicators/builtin/<name>.py`.
+2. Subclass `Indicator`, declare a class-level `metadata:
+IndicatorMetadata` (name, label, description, category, `ParameterSpec`s,
+   `SeriesSpec`s), and implement `calculate`.
+3. Decorate the class with `@register`.
+4. Override `warmup(params)` if the indicator needs N candles before its
+   first value.
+
+That is the entire list. It appears in `GET /api/v1/indicators`
+immediately, and the dashboard's `/indicators` page renders a correct,
+constrained parameter form for it with no frontend work — because the form
+is generated from the published specs.
+
+Three reference indicators ship, chosen to cover the three distinct shapes
+the contract must support so a fourth has a close precedent to copy: **SMA**
+(simple window), **EMA** (recursive/stateful with a defined seed), and
+**RSI** (multi-stage, bounded, warmup one longer than its period).
+
+**Execution pipeline.** One fixed sequence applied identically to every
+indicator, with no branch on which indicator is running:
+
+```text
+resolve → validate parameters → check warmup → cache lookup
+        → calculate → verify alignment → cache store
+```
+
+Two stages are worth calling out because they exist to catch failures that
+would otherwise be silent:
+
+- **Warmup check** — an under-sized range raises `insufficient_data` with
+  the required and available counts, rather than returning a series that is
+  entirely `null`. A chart of nothing looks identical whether the market
+  was quiet or the range was too short.
+- **Alignment verification** — every returned series must have exactly one
+  value per input candle. A misaligned series would still serialize and
+  still plot, just against the wrong timestamps; checking it centrally
+  means every indicator gets the guarantee for free.
+
+A bug inside one indicator is wrapped as `indicator_execution_failed` and
+**names the culprit**, so one bad implementation never surfaces as an
+anonymous 500 for the whole API.
+
+**Caching.** An optional bounded LRU (`cache.py`), keyed by indicator,
+parameters, and an O(1) fingerprint of the candle range. Its limits are
+worth stating plainly: the key requires the candles, which the caller can
+only have _after_ reading them, so a hit saves the recomputation and never
+the database query. Measured against the live dev database, a 5-period SMA
+over 50 candles spends ~9.6 ms in the database and ~0.08 ms computing — the
+cache is close to irrelevant there, and earns its place only for
+genuinely expensive indicators and repeated identical requests. It is
+deliberately in-process rather than Redis-backed: `redis` remains a
+declared-but-unwired dependency, and introducing the platform's first Redis
+dependency for a cache that cannot avoid the dominant cost would be the
+wrong trade. `IndicatorCache` is the seam if that changes.
+
 ### Data Collection
 
 > To be completed in future tasks.

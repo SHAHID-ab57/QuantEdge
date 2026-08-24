@@ -500,6 +500,153 @@ fail immediately (11 expected calls vs. 17 and 13 observed), confirming
 these are real regression guards rather than checks that would pass
 either way.
 
+### Testing the Technical Indicator Engine
+
+**Backend.** The engine layer has no web or database dependency, so it is
+tested directly — plain function calls, no fixtures, no ASGI:
+
+- `tests/unit/indicators/test_params.py` (21 tests) covers coercion and
+  validation. Values are passed as **strings** in most cases, because that
+  is what the query layer actually delivers. Pins the decisions that
+  matter: `"2.5"` is rejected for an `int` parameter rather than silently
+  truncated, and an unknown parameter is rejected rather than ignored.
+- `tests/unit/indicators/test_registry.py` (16 tests) covers the extension
+  point. The load-bearing test registers a **brand-new indicator the
+  registry has never seen** and resolves it, proving the "no engine change"
+  claim rather than asserting it. Also pins duplicate rejection, that a
+  class without `metadata` fails loudly, and that two registries share no
+  state.
+- `tests/unit/indicators/test_engine.py` (29 tests) covers the pipeline
+  using **purpose-built stub indicators** — a `Doubler`, an `Exploding`, a
+  `Misaligned`, an `Empty`, a `BadWarmup` — rather than the real SMA/EMA/
+  RSI. That separation is deliberate: a change to a builtin's maths must
+  never be able to make a pipeline test pass or fail for the wrong reason.
+- `tests/unit/indicators/test_cache.py` (14 tests) covers the LRU and the
+  fingerprint, including the one genuinely mutable case a naive fingerprint
+  would miss: a still-forming final candle whose close changes while its
+  open time does not.
+- `tests/unit/indicators/test_builtin.py` (16 tests) covers discovery and
+  correctness separately. Discovery asserts `load_builtin_indicators()` is
+  idempotent (any entry point may call it defensively) and that every
+  builtin publishes usable metadata — an indicator declaring no outputs
+  would render an empty, unusable form on the frontend. Correctness checks
+  each indicator against hand-computed values.
+
+One RSI test is worth calling out because the **first version of it was
+wrong**: an alternating +1/−1 series was asserted to sit at exactly 50.
+Under Wilder's smoothing it does not — only the _seed_ is exactly 50, and
+past that the newest change pulls it above or below. The fix pinned both
+real properties (`the seed is exactly fifty` and `smoothing leans toward
+the most recent change`), which is strictly more informative than the
+original assertion would have been had it happened to pass.
+
+`tests/services/test_indicators.py` (17 tests) exercises the service
+against the in-memory SQLite database, so the ORM → `OHLCVPoint`
+projection and the shared market/timeframe/range/limit validation are
+covered against real rows. `tests/api/test_indicators_api.py` (21 tests)
+covers the REST surface end to end over ASGI, including that indicator
+parameters really are collected from the raw query string, that timestamps
+serialize with a literal `Z` suffix (the frontend's
+`z.string().datetime()` rejects a `+00:00` offset — the same bug the
+market-stream gateway once shipped), and every error code the endpoint can
+produce.
+
+**Frontend.** `lib/parameter-values.test.ts` (19 tests) covers the pure
+form helpers, including the two decisions most likely to be "simplified"
+later: a required parameter seeds to blank rather than a plausible zero,
+and an omitted optional parameter is dropped rather than sent as `""`
+(which the backend would reject as an invalid int instead of applying its
+default).
+
+`components/parameter-form.test.tsx` (15 tests) proves the form is
+genuinely spec-driven by rendering **arbitrary specs the codebase has never
+seen** (`alpha`, `beta`) and asserting the declared bounds land on the
+input as `min`/`max`, plus the enrichment layer added in the usability
+review: a curated per-parameter tooltip when the knowledge base has one, a
+fallback to the backend's own `description` when it doesn't, and a
+recommended-value chip per curated preset that writes straight to the
+field on click.
+
+**The indicator knowledge base and result analysis are both pure and
+independently tested**, deliberately separate from any component:
+`lib/indicator-knowledge.test.ts` (10 tests) pins the curated content for
+`sma`/`ema`/`rsi` (formula, chart config, RSI's 30/50/70 thresholds and
+classifier) and — the more load-bearing half — that an indicator the
+knowledge base has never seen still gets a complete, honest fallback
+(a real purpose from the catalogue description, an explicit "not yet
+documented" for the formula/advantages/limitations, never a fabricated
+one). `lib/result-analysis.test.ts` (19 tests) covers `summarizeSeries`:
+latest/previous extraction across trailing nulls, absolute/percentage
+change (including a zero-previous guard against dividing by zero), trend
+direction, and signal classification — an indicator with its own
+thresholds (RSI above 70 reads bearish _even while still rising_, proving
+the threshold wins over the trend fallback) versus the generic
+trend-based fallback every other indicator gets.
+
+`components/indicator-chart.test.tsx` (6 tests) covers the SVG
+visualization: one path per series, legend swatches, oscillator reference
+lines, and the "not enough data" placeholder when nothing can be drawn.
+`lib/svg-line-path.test.ts` (14 tests) covers the underlying domain/path
+math shared with the Trade Analytics `Sparkline` — including that a
+`null` mid-series is skipped rather than plotted as a zero-value point,
+and that a zero-range domain centers its line instead of dividing by zero.
+`components/result-summary.test.tsx` (8 tests) and
+`components/indicator-metadata-card.test.tsx` (9 tests) cover the
+expanded results summary (change/trend/signal badges) and the engineering
+metadata card respectively — the latter pinning that an unavailable fact
+(no engine version endpoint) is stated plainly rather than fabricated.
+`components/indicator-info-panel.test.tsx` (9 tests) covers the
+collapsible research card, including its own graceful degradation for an
+uncurated indicator. `components/field-info.test.tsx` (3 tests) covers
+the shared ⓘ tooltip affordance.
+
+`components/export-menu.test.tsx` (7 tests) covers CSV/JSON download (via
+mocked `URL.createObjectURL`/`revokeObjectURL`), clipboard copy for both
+values and the literal API request URL (mocked `navigator.clipboard`),
+and a clipboard failure reporting itself rather than failing silently.
+`lib/export.test.ts` (11 tests) and `lib/recent-calculations.test.ts`
+(10 tests) cover the pure builders and localStorage persistence
+respectively — the latter including a corrupted-JSON value, a
+non-array value, and a throwing `Storage` (private browsing, quota), all
+tolerated without surfacing an error to the researcher.
+`components/recent-calculations-panel.test.tsx` (6 tests) covers the list
+UI, including both of its two independent rerun triggers (the row itself
+and its dedicated button).
+
+`components/indicator-results.test.tsx` (11 tests) covers the composed
+results view — summary, chart, metadata stat tiles, and the values table —
+including that trailing nulls are skipped when reporting the latest value
+and that a fully-null series renders an em dash rather than a misleading
+zero.
+
+`indicators-page.test.tsx` (25 tests) is the integration suite: catalogue
+loading and error states with a working retry, the form rebuilding from
+the selected indicator's specs, **reseeding when the indicator changes**
+(carrying SMA's period 20 into RSI would silently calculate something the
+researcher never asked for), that a calculation fires only on submit and
+not on every keystroke, that client-side validation blocks a bad value
+without calling the backend at all, the calculating/error states, the
+information panel appearing (and degrading gracefully for an uncurated
+indicator), the metadata card's live cache status, the export menu
+appearing only once a result exists, and recent-calculation recording plus
+**one-click rerun** — proven by two configurations that produce
+distinguishable results, rather than asserting the mock was re-invoked
+(rerunning an identical, still-fresh configuration is correctly served
+from the query cache with no network call, which the test treats as
+correct rather than a failure).
+
+**Shared-infrastructure promotions were verified against their original
+suites, not just the new one.** This review promoted four small primitives
+out of features that already had them, once the Technical Indicators page
+needed the identical behavior: `MetricInfo` → `InfoTooltip`
+(`src/components/info-tooltip.tsx`), `Sparkline`'s path math →
+`src/lib/svg-line-path.ts`, the History export module's CSV escaping →
+`src/lib/csv.ts`, and its download-a-blob helper → `src/lib/download-file.ts`.
+Every one of `trades/`'s and `history/`'s existing test files (201 and 18
+tests respectively) was re-run after each promotion and passed unmodified —
+the promotions are refactors of _where the logic lives_, not changes to
+what it does.
+
 ## End-to-End Tests
 
 Not implemented. `tests/` at the repo root is reserved for this; no browser

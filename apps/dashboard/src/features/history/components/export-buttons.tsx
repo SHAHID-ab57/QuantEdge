@@ -8,20 +8,10 @@ import Stack from '@mui/material/Stack';
 import Typography from '@mui/material/Typography';
 import { useState } from 'react';
 import { fetchAllCandles } from '@/lib/api/paginate-candles';
+import { downloadBlob } from '@/lib/download-file';
 import type { HistoryQuery } from '../hooks/use-history-data';
 import { buildEnvelope, envelopeToCsv, exportFileName } from '../lib/export';
 import { formatNumber } from '../lib/format';
-
-function download(blob: Blob, filename: string) {
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement('a');
-  anchor.href = url;
-  anchor.download = filename;
-  document.body.appendChild(anchor);
-  anchor.click();
-  anchor.remove();
-  URL.revokeObjectURL(url);
-}
 
 interface ExportButtonsProps {
   query: HistoryQuery;
@@ -46,7 +36,7 @@ export function ExportButtons({ query, disabled }: ExportButtonsProps) {
           : new Blob([JSON.stringify(envelope, null, 2)], {
               type: 'application/json;charset=utf-8',
             });
-      download(blob, exportFileName(query, kind));
+      downloadBlob(blob, exportFileName(query, kind));
     } finally {
       setExporting(null);
       setProgress(null);

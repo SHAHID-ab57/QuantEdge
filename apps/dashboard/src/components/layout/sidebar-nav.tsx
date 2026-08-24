@@ -16,6 +16,7 @@ import BoltIcon from '@mui/icons-material/Bolt';
 import TableChartIcon from '@mui/icons-material/TableChart';
 import ReceiptLongIcon from '@mui/icons-material/ReceiptLong';
 import ReplayIcon from '@mui/icons-material/Replay';
+import FunctionsIcon from '@mui/icons-material/Functions';
 import ScienceIcon from '@mui/icons-material/Science';
 import SettingsIcon from '@mui/icons-material/Settings';
 import HealthAndSafetyIcon from '@mui/icons-material/HealthAndSafety';
@@ -34,6 +35,7 @@ const NAV_ITEMS: NavItem[] = [
   { label: 'Order Book', href: '/orderbook', icon: TableChartIcon },
   { label: 'Trade Analytics', href: '/trades', icon: ReceiptLongIcon },
   { label: 'Replay', href: '/replay', icon: ReplayIcon },
+  { label: 'Indicators', href: '/indicators', icon: FunctionsIcon },
   { label: 'Research', href: '/research', icon: ScienceIcon },
   { label: 'Settings', href: '/settings', icon: SettingsIcon },
   { label: 'Health', href: '/health', icon: HealthAndSafetyIcon },

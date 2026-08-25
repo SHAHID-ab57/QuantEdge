@@ -2,18 +2,213 @@
 
 ## Purpose
 
+How this platform gets from raw market data to trained models and
+probabilistic predictions — what exists today, what does not, and the
+contracts the missing pieces will plug into.
+
+Written honestly about status: the platform is **AI-ready at the data
+layer, and nothing more**. Feature engineering is implemented; model
+training, inference, and evaluation are not. Every section below says which
+it is, because a document that describes an aspirational pipeline in the
+present tense is worse than no document at all.
+
 ## Status
 
-Draft
+Draft — Feature Engineering implemented; Models, Training, Inference, and
+Evaluation are design intent only.
 
 ## Overview
 
-## Models
+Machine learning models do not consume raw candles. They consume engineered
+feature vectors: fixed-width, aligned, numeric rows with no missing values.
+The stage that produces them is the **Feature Engineering Engine**
+(`services/api/app/features/`), the platform's BC3 bounded context
+(`docs/architecture/DomainModel.md`).
 
-## Training Pipeline
+```text
+Market Data (D1–D5)  →  Engineered Features (D6)  →  ML Datasets (D7)  →  Models (D8–D9)
+   implemented              implemented                 implemented           not built
+```
 
-## Inference
+The first three stages exist today. A researcher can select a market,
+timeframe, date range, and set of features, build a versioned dataset, and
+export it as CSV or JSON — the input a training job needs. What consumes
+that dataset does not exist yet.
 
 ## Data Pipeline
 
+Full architecture in [`ARCHITECTURE.md`](../../ARCHITECTURE.md) § "Feature
+Engineering Engine"; API surface in [`API.md`](../api/API.md) § "Feature
+engineering". In short:
+
+| Stage              | Component                   | Responsibility                                                           |
+| ------------------ | --------------------------- | ------------------------------------------------------------------------ |
+| Candle load        | `services/candle_points.py` | Market/timeframe/range validation, one ordered query, ORM → `OHLCVPoint` |
+| Feature resolution | `features/registry.py`      | Name → generator; the single extension point                             |
+| Feature generation | `features/pipeline.py`      | Validate params → check warmup → generate → verify alignment             |
+| Dataset assembly   | `features/dataset.py`       | Column collision detection, warmup trimming, provenance                  |
+| Serialization      | `features/export.py`        | CSV and JSON, both carrying provenance                                   |
+
+Eight generators ship today: `ohlcv` (5 columns), `candle_shape` (body,
+upper wick, lower wick, direction), and `sma`/`ema`/`wma`.
+
+### Training/serving consistency
+
+The single most damaging failure mode in an ML system is _training/serving
+skew_: the feature a model was trained on and the feature computed at
+inference time are subtly different. BC3 exists to prevent it, and the
+engine's design is shaped around that guarantee:
+
+- **One implementation per calculation.** SMA, EMA, and WMA are not
+  reimplemented as feature generators. `IndicatorFeature`
+  (`features/builtin/indicator_feature.py`) wraps the _already-registered
+  indicator_ and delegates to the same `IndicatorEngine` the charts use, so
+  "SMA(20)" has exactly one definition on this platform. A dataset column
+  and a chart overlay cannot disagree, because they are the same code.
+- **One execution path.** The contract has no batch-versus-online split —
+  there is one `generate` method, given plain `OHLCVPoint` values. The same
+  generator can therefore serve a REST request today and a training job or
+  live inference path later without modification.
+- **Framework-free inputs.** Nothing in `app/features/` imports SQLAlchemy,
+  FastAPI, or Pydantic, so a future training job supplying candles from a
+  Parquet file or a replay session runs identical code.
+
+### Reproducibility
+
+An unreproducible dataset is not research (`PROJECT.md` § principles).
+Every dataset records, and every export carries:
+
+- `dataset_id` — a fresh `uuid4()` per build, identifying _this specific
+  build_, not a content hash. Rebuilding an identical request later — over
+  data that may itself have changed — is expected to yield a different
+  `dataset_id`; reproducibility is established by the fields below, not by
+  `dataset_id` matching.
+- `pipeline_version` — the execution pipeline's own version.
+- Each feature's `version` — bumped when a change would alter previously
+  computed values, so a dataset built under 1.0.0 is known not to be
+  reproducible under 2.0.0.
+- Each feature's **fully resolved** parameters, defaults applied — the
+  values that actually ran, not the ones that were requested.
+- `candles_analyzed`, `rows_dropped`, and `warmup_candles`.
+
+### Missing values
+
+A training matrix must not contain nulls, and imputing them is a modelling
+decision the data layer has no business making silently. The dataset
+builder therefore **drops any row containing a null** by default and reports
+how many it dropped. Set `drop_warmup: false` to keep full alignment for
+inspection or for a consumer that imputes its own.
+
+A feature that cannot be computed at all for the requested range —
+including a range shorter than its warmup — no longer aborts the whole
+dataset. It is instead recorded as one entry in `quality.feature_failures`
+(feature name, resolved params, error code, actionable detail), and every
+other requested feature's columns are still returned. See
+`ARCHITECTURE.md` § "Feature Engineering Engine — Production Hardening" for
+why (mirrors the indicator engine's batch partial-success contract) and
+`API.md` § "Feature engineering" for the exact response shape.
+
+### Data quality report
+
+Every dataset carries a `quality` object (`app/features/quality.py`'s
+`DatasetQualityReport`) summarizing its own trustworthiness: rows
+read/returned/removed, per-column null counts (computed **before** warmup
+trimming, so a mid-series null is never hidden by the trim), duplicate
+timestamps and missing candles in the source data, per-feature generation
+failures, and total generation time. A model-training pipeline consuming
+this API should treat a non-empty `feature_failures` or a non-zero
+`duplicate_timestamps`/`missing_candles` as a signal to inspect the dataset
+before training on it, not just its row count.
+
+## Models
+
+**Not built.** No model artifacts, no model registry, no training code
+exists in this repository. `docs/architecture/DomainModel.md` § BC4 defines
+the intended bounded context (AI Research & Training) and
+`DataArchitecture.md` § D8–D9 the intended artifacts.
+
+When it is built, its input is the dataset described above — which is why
+the dataset carries versioned provenance: a model artifact must be able to
+name the exact dataset definition it was trained on.
+
+## Training Pipeline
+
+**Not built.** The intended shape (`PROJECT.md` § objectives) is: dataset
+snapshot → experiment run → evaluation → model registry → promotion to
+serving. Nothing in that chain exists.
+
+What exists today is the first arrow: reproducible, versioned, exportable
+datasets, and an engine whose generators are callable directly from Python
+(`FeaturePipeline.run`) without going through HTTP — the seam a training
+job would use. `app/features/ai_extensions.py`'s `LabelSpec`/
+`LabelGenerator` and `WindowSpec`/`SequenceWindower` Protocols document,
+without implementing, the next two arrows this pipeline will need: turning
+a raw feature dataset into `(sequence, label)` training pairs.
+
+## Inference
+
+**Not built.** No prediction service exists (`DomainModel.md` § BC5).
+
+The relevant design commitment already made: because feature generators are
+framework-free and have a single execution path, an inference path will
+compute features with the _same_ code that produced the training data,
+rather than a reimplementation. That is the property that has to be
+designed in from the start, and it has been.
+
 ## Evaluation
+
+**Not built.** No backtesting engine, no evaluation harness, no metrics
+store.
+
+The platform's stated commitment (`PROJECT.md`) is that predictions are
+probabilistic and that uncertainty is communicated honestly — no evaluation
+code exists yet to hold to that, and none of the current UI displays any
+prediction or confidence figure, precisely because there is nothing real to
+display.
+
+## AI extension points
+
+**Documented, typed, and testable — not wired into any production path.**
+`services/api/app/features/ai_extensions.py` declares six `Protocol`/
+`dataclass` pairs so that when the workstreams above are actually built,
+they have a contract to implement rather than a blank page. Nothing here
+is imported outside its own test module today:
+
+| Extension point                                                | Purpose                                                                                                                                                     |
+| -------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `LabelSpec` / `LabelGenerator`                                 | Deriving a training target/label from a dataset (e.g. next-candle direction)                                                                                |
+| `WindowSpec` / `SequenceWindower`                              | Slicing a feature matrix into fixed-size, strided sequence windows                                                                                          |
+| `NormalizationStats` / `FeatureNormalizer`                     | Per-column scaling, with `fit`/`transform` kept as two separate methods so a normalizer fit on training data can never leak test-set statistics into itself |
+| `SplitRatios` / `DatasetSplit` / `TrainValidationTestSplitter` | Chronological (never random) train/validation/test splitting — a random split of time-series data leaks future information into training                    |
+| `CategoricalEncoding` / `CategoricalEncoder`                   | One-hot or ordinal encoding, driven by a column's declared `dtype`, never a hardcoded column list                                                           |
+
+These mirror the frontend's own established pattern for the same purpose:
+`apps/dashboard/src/features/replay/extension-points.ts` documents replay's
+own not-yet-built extension points the identical way. Implementing any one
+of these workstreams means writing a concrete class that satisfies the
+relevant Protocol — the pipeline, dataset builder, and export layer need no
+changes to support it, since all of them already produce the versioned,
+quality-reported dataset these Protocols consume as their input.
+
+## What a new feature generator requires
+
+Adding a generator is one file and one line:
+
+1. Create `services/api/app/features/builtin/<name>.py`.
+2. Subclass `FeatureGenerator`, declare `metadata: FeatureMetadata`, and
+   implement `generate(ctx) -> FeatureOutput`.
+3. Decorate the class with `@register`.
+
+Nothing else changes — not the pipeline, the registry, the dataset builder,
+the service, the API, or the frontend. The `/features` page renders the new
+generator's selection row, its parameter form, and its column headers
+directly from the catalogue response. An indicator-backed feature is even
+cheaper: add its name to `INDICATOR_BACKED_FEATURES`.
+
+## References
+
+- [`ARCHITECTURE.md`](../../ARCHITECTURE.md) § "Feature Engineering Engine"
+- [`API.md`](../api/API.md) § "Feature engineering"
+- [`FRONTEND.md`](../../FRONTEND.md) § "Feature Engineering"
+- [`docs/architecture/DomainModel.md`](../architecture/DomainModel.md) § BC3
+- [`docs/architecture/DataArchitecture.md`](../architecture/DataArchitecture.md) § D6, D7

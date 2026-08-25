@@ -38,6 +38,7 @@ tests/
 │   ├── generators.py    # seeded deterministic random data
 │   └── assertions.py    # response-shape assertions
 ├── api/                 # HTTP-level tests (FastAPI via httpx/ASGI)
+├── features/            # Feature Engineering engine (see below)
 ├── repository/          # repository tests against in-memory SQLite
 ├── service/             # service-layer tests
 ├── websocket/           # generic WS connection machinery (scripted server)
@@ -171,6 +172,63 @@ typos fail collection.
    default suite must run offline.
 6. Timing budgets in `performance/` are deliberately generous
    (10–30 s): they catch catastrophic regressions, not machine noise.
+
+## Feature Engineering tests
+
+`tests/features/` covers the engine described in `ARCHITECTURE.md`
+§ "Feature Engineering Engine", split by the guarantee each layer owns:
+
+| File                         | Covers                                                                                                                                                                 |
+| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `test_registry.py`           | Registration (class and instance), duplicate rejection, lookup, catalogue ordering, isolation, and (`TestDependencyValidation`) startup-time dependency/cycle checking |
+| `test_pipeline.py`           | Parameter validation, warmup, alignment/uniqueness guarantees, error wrapping                                                                                          |
+| `test_builtin_generators.py` | Each generator's maths, discovery, and the indicator-delegation contract                                                                                               |
+| `test_dataset.py`            | Assembly, column collisions, warmup trimming, provenance, dataset ID/quality report, and (`TestPartialSuccess`) per-feature failure recording                          |
+| `test_validation.py`         | Request-time dependency validation — a feature requested without its declared dependency is rejected, order-independent                                                |
+| `test_export.py`             | CSV and JSON round-trip fidelity, provenance, dataset ID/export timestamp, and the quality summary                                                                     |
+| `test_service.py`            | The candle-load join, row/limit semantics, preview truncation, export completeness, and one failing feature not blocking the others                                    |
+| `test_ai_extensions.py`      | Pins the AI extension points' (`ai_extensions.py`) dataclass defaults and proves each Protocol is implementable                                                        |
+| `test_performance.py`        | Opt-in (`--run-performance`) — builds a 100k-row, 5-feature dataset within budget; asserts the quality report's duplicate/missing-candle counting scales linearly      |
+
+`tests/api/test_features_api.py` covers the same surface end to end over
+ASGI, including the export endpoint's file-download headers and the
+partial-success quality-report contract below.
+
+Four conventions in these tests are worth keeping:
+
+- **The registry and pipeline are tested against isolated, throwaway
+  generators**, not the builtins. The pipeline's value is that every
+  generator gets the same guarantees without implementing them, so the
+  tests deliberately register misbehaving generators (misaligned output,
+  duplicate columns, a raising `warmup()`) that no real generator would
+  contain. `FeatureRegistry` is instantiable precisely so this cannot leak
+  into the application catalogue. `test_registry.py`'s dependency-cycle
+  tests follow the same convention with a second helper
+  (`make_dependent_generator`) that declares `dependencies`, kept separate
+  from the existing `make_generator` so it cannot disturb tests that don't
+  care about dependencies.
+- **The delegation contract is pinned, not assumed.**
+  `test_sma_matches_the_indicator_engines_own_result` computes SMA through
+  the indicator engine and through the feature pipeline and asserts they are
+  identical. If someone ever reimplements the maths on the feature side,
+  that test fails — which is the point, since the whole training/serving
+  consistency guarantee rests on there being one implementation.
+- **Error _status_ is asserted, not just the message** — for the errors
+  that still hard-fail (`duplicate_feature_column`,
+  `missing_feature_dependency`).
+- **Partial-success is asserted by inspecting `quality.feature_failures`,
+  not by expecting an exception.** An unknown feature, a bad parameter, an
+  under-sized range, or an execution error in one requested feature must
+  leave a dataset request at `200` with every other feature's columns
+  intact — `test_dataset.py::TestPartialSuccess`,
+  `test_service.py::test_one_failing_feature_does_not_block_the_others`,
+  and `tests/api/test_features_api.py::TestDatasetErrors` all assert the
+  failure by reading `dataset.quality.feature_failures[0]` /
+  `body["quality"]["feature_failures"][0]`, never `pytest.raises`. This is
+  a deliberate, tested behavior change from the engine's initial release
+  (see `API.md` § "Feature engineering" for the exact before/after) and the
+  tests were renamed to say so (e.g.
+  `test_records_an_unknown_feature_as_a_quality_failure_not_a_404`).
 
 ## Gates
 

@@ -2006,6 +2006,165 @@ Replay and Live Market charts accept the same `overlays` prop (proven by
 their own tests) but are not yet wired to the panel/store — a future
 extension, not an engine change.
 
+## Feature Engineering
+
+`/features` (`src/features/feature-engineering/`) is the workbench for
+turning stored market data into model-ready datasets: pick a market,
+timeframe and range, choose features, build, inspect, export. Backend
+design lives in [`ARCHITECTURE.md`](ARCHITECTURE.md) § "Feature Engineering
+Engine"; the AI-pipeline context is in [`docs/ai/AI.md`](docs/ai/AI.md).
+
+### Module layout
+
+```text
+src/features/feature-engineering/
+├── hooks/use-feature-data.ts        catalogue query + build/export mutations
+├── lib/feature-selection.ts         selection state, grouping, cell formatting (pure)
+├── store/use-recent-features-store.ts  session-scoped "recently used" (Zustand)
+├── components/
+│   ├── dataset-form.tsx             market / timeframe / range / max rows
+│   ├── feature-selector.tsx         search, category filter, keyboard nav, recently used
+│   ├── dataset-preview-table.tsx    virtualized matrix, with per-column dtype tooltips
+│   ├── dataset-info-card.tsx        identity/reproducibility (Dataset ID, versions, shape)
+│   ├── dataset-summary.tsx          quality report: row accounting, warmup, failures
+│   └── dataset-export.tsx           CSV / JSON download
+└── feature-engineering-page.tsx     composition root
+```
+
+### Nothing here knows about any specific feature
+
+The selector, every parameter input, and every column header are rendered
+from the catalogue response. Registering a generator on the backend adds it
+to this page — correctly constrained and documented — with **no frontend
+change**, which is the frontend half of the extensibility guarantee.
+
+That is achieved by reuse, not by re-implementation:
+
+- **`ParameterForm`** is imported unchanged from the Technical Indicators
+  feature module. The backend publishes feature parameters using the same
+  `ParameterSpec` type it publishes indicator parameters with, so the same
+  component renders both, and `validateValues` performs the same
+  client-side check.
+- **`useMarkets` / `useTimeframes`** come from the History module rather
+  than being re-declared. "Which timeframes does this market have candles
+  for" is answered once for the whole app; two copies would double the
+  requests and could disagree.
+- **`resolveRange` / `RANGE_PRESET_LABELS`** likewise: what "Last 7 Days"
+  means is defined in one place.
+- **`groupByCategory`** (`src/lib/group-by-category.ts`) was promoted out
+  of the Indicator Panel's own `categorize.ts` once this page needed the
+  identical mechanism over a different taxonomy. Both now share the
+  grouping, ordering, and title-cased fallback; only the taxonomy differs.
+  The fallback is load-bearing — a brand-new backend category must render
+  as a readable section rather than vanish.
+
+`DatasetForm` deliberately does _not_ use react-hook-form + Zod like
+`HistoryForm`. That form validates six interdependent fields including a
+cross-field date rule; this one has three whose only rule is "all present",
+so submit is simply disabled until a valid request can be produced — less
+machinery and a clearer affordance.
+
+### Building is an explicit action
+
+The dataset is built on a "Build Dataset" press, never reactively as the
+form changes, and `useBuildDataset` is a **mutation** rather than a query
+despite reading data. It is a deliberate, potentially expensive computation
+with a large response; modelling it as a query would let TanStack Query
+refetch it on remount and on key changes, re-running heavy work nobody
+asked for, and firing it on every checkbox tick would make the page
+unusable for exactly the researchers it serves.
+
+### Preview versus export
+
+The preview requests `preview_rows: 200` so the browser can render it. The
+export does not — `exportFeatureDataset` strips `preview_rows` at the call
+site and fetches the complete dataset from the backend, which is also the
+only place that can attach the pipeline and feature versions the file needs
+to be reproducible. Serializing the on-screen preview instead would ship a
+silently truncated training set, so the distinction is surfaced in the UI
+too: a truncated preview is labelled, states "Showing N of M rows", and
+says outright that exports contain everything.
+
+An export failure is shown inline rather than swallowed — a button that
+appears to do nothing is indistinguishable from a browser blocking the
+download.
+
+### Making dropped rows legible
+
+Warmup trimming is the single most confusing thing about a feature dataset:
+you ask for 500 rows and get 451. `DatasetSummary` therefore states the
+count, the cause, and the _specific feature_ responsible ("SMA needs 50
+candles before its first value") rather than leaving it to be inferred from
+a row count that looks wrong. `null` cells render as an em dash so a gap is
+visibly a gap, and each column header carries its `dtype` — a researcher
+needs to know whether a column is continuous or categorical before deciding
+how to model it.
+
+### Production hardening: identity, quality, search, and scale
+
+A hardening pass added researcher-facing polish without changing any
+existing component's contract or duplicating logic that already exists
+elsewhere in the app — see `ARCHITECTURE.md` § "Feature Engineering Engine
+— Production Hardening" for the backend half of this work (dataset
+versioning and the quality report this section's UI reads from).
+
+**Two cards instead of one, matching the backend's own split.**
+`DatasetInfoCard` (new) is identity and reproducibility — Dataset ID,
+Pipeline Version, Market, Timeframe, Rows, Columns, Generation Time, each
+with an `InfoTooltip` explaining the term. `DatasetSummary` (extended, not
+replaced) stays the trustworthiness report — it now also shows duplicate
+timestamps, missing candles, an info alert listing any column that still
+contains nulls, and a warning alert listing any feature that failed to
+generate (name + the backend's actionable error detail) — reading directly
+off the dataset's `quality` object. Splitting them mirrors why the backend
+keeps `FeatureDataset`'s provenance fields separate from its `quality`
+report: "what is this" and "can I trust it" are different questions with
+different audiences.
+
+**Search, category filter, and keyboard navigation on `FeatureSelector`.**
+`matchesCatalogSearch` (`src/lib/search-catalog.ts`, new) is the Indicator
+Panel's own name/label/category/aliases/description matcher
+(`matchesIndicatorSearch`) promoted to a shared module once the feature
+selector needed the identical logic — `search-indicators.ts` now delegates
+to it rather than keeping a second copy. The category filter is a real MUI
+`Select` with a visible `label="Category"`; an `aria-label` alone on a
+`Select` with no visible label resolves to an empty accessible name in
+practice (MUI still points `aria-labelledby` at a label element that
+doesn't exist, which wins over `aria-label`), so every select in this
+codebase — Market, Timeframe, Range, and now Category — carries a real
+visible label. Keyboard navigation is roving-focus, not a new dependency: a
+single `onKeyDown` on the list reads `data-feature-name` off
+`document.activeElement`, locates it in the currently-filtered visible
+list, and moves focus to the next/previous checkbox.
+
+**Recently-used features**, session-scoped, via
+`use-recent-features-store.ts` (new Zustand store): `persist` +
+`createJSONStorage(() => sessionStorage)`, mirroring
+`use-overlay-store.ts`'s established session-scoped pattern exactly (not
+`localStorage` — the requirement is "this session," not indefinite
+persistence). `recordUsed(name)` moves an existing entry to the front
+rather than duplicating it, capped at 8; a small "Recently used" chip row
+above the catalogue only renders once at least one feature has been
+toggled on.
+
+**Virtualized preview table, no new dependency.** `DatasetPreviewTable` was
+rewritten to window its rendered rows by scroll position rather than
+mounting the whole dataset: fixed `ROW_HEIGHT` (33px), a fixed scroll
+viewport height, and an overscan margin on each side of the visible window,
+with two blank spacer `<TableRow>`s standing in for everything above and
+below so the scrollbar's size and position stay correct without every row
+existing in the DOM. This is what keeps a 100,000+ row dataset's preview
+exactly as responsive as a 100-row one, verified by a test asserting fewer
+than 200 `<tr>` elements ever mount for a 100,000-row dataset and that
+scrolling changes which window is rendered. The component is wrapped in
+`memo()` so an unrelated parent re-render doesn't force a re-window.
+
+**Feature details on demand.** Selecting a feature (not only configuring
+one with parameters) now also expands a details panel showing its full
+description, its warmup requirement, and its declared dependencies — each
+with an `InfoTooltip` — so a researcher can see what a feature actually
+needs without leaving the selector.
+
 ## State management
 
 - Server state: TanStack Query (`src/lib/query/queryClient.ts`).
@@ -2016,7 +2175,9 @@ extension, not an engine change.
   uses the `persist` middleware with `createJSONStorage(() => sessionStorage)`
   — `sessionStorage`, not `localStorage`, because the requirement is "the
   current session," not indefinite persistence. See "Indicator Management &
-  Chart Overlay System" above.
+  Chart Overlay System" above. `src/features/feature-engineering/store/
+use-recent-features-store.ts` follows the identical pattern for the
+  Feature Selector's "recently used" list.
 - The chart module keeps its own crosshair-hover state
   (`useState` in `ChartContainer`) — it is presentation-only and does not
   belong in Zustand.

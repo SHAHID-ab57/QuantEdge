@@ -8,6 +8,156 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Feature Engineering Engine — production hardening** — a pass over the
+  system below preparing it for real training/backtesting/paper-trading
+  consumers, with **no rewrite** of the registry/pipeline/dataset
+  builder/export layer's shape and **zero duplication** of the indicator
+  engine's already-proven patterns.
+
+  - **Expanded feature metadata, additive-only**: `FeatureMetadata` gained
+    `unit`, `value_type`, `dependencies`, `is_deterministic`, and
+    `missing_values_expected`, every one defaulted so no existing generator
+    needed a change. `dependencies` is a real extension point, enforced by
+    two new validation layers (below), even though no shipped generator
+    declares one yet.
+  - **Two-layer dependency validation**: `FeatureRegistry.validate_dependencies()`
+    runs once at startup over the whole registry (unknown-dependency and
+    cycle detection via DFS, raising plain `RuntimeError`s — a developer
+    mistake, not a request error); `validate_feature_requests()` runs per
+    build, rejecting a request whose feature depends on another not also
+    requested (`missing_feature_dependency`, 400).
+  - **Partial-success dataset building** — the largest behavior change:
+    `FeatureDatasetBuilder.build()` now records a bad feature
+    (unknown/invalid-parameter/insufficient-data/execution-failure) as a
+    `FeatureFailure` in the dataset's quality report instead of aborting the
+    whole build, mirroring the indicator batch endpoint's already-proven
+    partial-success contract. A ten-feature request with one bad feature
+    now returns the other nine, not a blanket error. Column collisions and
+    missing dependencies still hard-fail, since no partial result makes
+    sense for either.
+  - **Dataset versioning**: every `FeatureDataset` carries a `dataset_id`
+    (fresh `uuid4()` per build — a snapshot identifier, deliberately not a
+    content hash) alongside its existing pipeline/feature version fields.
+  - **`DatasetQualityReport`**, new and attached to every dataset: total/
+    returned/removed row counts, per-column null counts (computed before
+    warmup trimming), duplicate timestamps, missing candles, per-feature
+    failures, and generation time.
+  - **Export-format registry** (`ExportFormat`/`EXPORT_FORMATS`) so CSV and
+    JSON are both driven by one dict rather than a branch, and a future
+    Parquet format is one new entry with no other code change. Every export
+    now also carries its `dataset_id`, an `exported_at` timestamp, and the
+    full quality summary.
+  - **AI extension points, documented but unwired**
+    (`app/features/ai_extensions.py`): `LabelSpec`/`LabelGenerator`,
+    `WindowSpec`/`SequenceWindower`, `NormalizationStats`/`FeatureNormalizer`
+    (split `fit`/`transform` to prevent train/test leakage),
+    `SplitRatios`/`DatasetSplit`/`TrainValidationTestSplitter` (chronological
+    only), and `CategoricalEncoding`/`CategoricalEncoder` — mirroring the
+    frontend's own `replay/extension-points.ts` precedent for describing a
+    future capability without building it prematurely.
+  - **Frontend**: a new `DatasetInfoCard` (identity/reproducibility) beside
+    an extended `DatasetSummary` (quality — duplicate timestamps, missing
+    candles, null-column and feature-failure alerts); `FeatureSelector`
+    gained search, category filtering, roving-focus keyboard navigation,
+    and a session-scoped "recently used" list
+    (`use-recent-features-store.ts`, mirroring `use-overlay-store.ts`'s
+    pattern); `matchesCatalogSearch` was promoted out of the indicator
+    overlay panel's search matcher into `src/lib/search-catalog.ts` for both
+    to share; `DatasetPreviewTable` was rewritten with manual scroll-position
+    virtualization (no new dependency) to stay responsive at 100,000+ rows;
+    tooltips added throughout explaining every technical term (Warmup Rows,
+    Feature/Pipeline/Dataset Version, Candle Direction, Body/Wick sizes,
+    SMA/EMA/WMA).
+  - 33 new backend tests (`test_validation.py`, `test_ai_extensions.py`,
+    `test_performance.py`'s feature-specific cases, plus extensions to
+    `test_registry.py`/`test_dataset.py`/`test_service.py`/
+    `test_features_api.py`) and 50 new frontend tests — full suites pass
+    (backend 767, 95.57% coverage; frontend 1226) alongside a clean lint,
+    typecheck, and production build.
+  - ⚠️ **Behavior change**: `/features/dataset` and `/features/export` no
+    longer return a 4xx/5xx for a single bad requested feature — see
+    `docs/api/API.md` § "Feature engineering" for the exact before/after.
+  - See `ARCHITECTURE.md` § "Feature Engineering Engine — Production
+    Hardening", `docs/ai/AI.md` § "AI extension points", `docs/api/API.md`
+    § "Feature engineering", `FRONTEND.md` § "Production hardening", and
+    `services/api/TESTING.md` § "Feature Engineering tests".
+
+- **Feature Engineering Engine** — the platform's AI-readiness layer (BC3),
+  turning raw market data into versioned, model-ready feature datasets.
+  Models consume engineered feature vectors, not raw candles; this is the
+  stage that produces them. Architecture-first and deliberately shallow on
+  algorithms: eight generators ship, and the design optimises for adding
+  hundreds cheaply.
+
+  - **Backend engine** (`services/api/app/features/`), layered exactly like
+    the indicator engine so the platform has one extension workflow rather
+    than two: a **Feature Registry** (name → generator; the single
+    extension point), a **Feature Pipeline** (resolve → validate params →
+    check warmup → generate → verify alignment → verify unique columns),
+    **Feature Metadata** (label, category, parameter specs, output columns,
+    version, author, complexity, warmup description, aliases), a **Dataset
+    Builder**, and **CSV/JSON export**.
+  - **Eight initial generators**: `ohlcv` (5 raw columns), `candle_shape`
+    (body, upper wick, lower wick, direction — with optional
+    range-normalization), and `sma`/`ema`/`wma`. Each is independently
+    testable and adds nothing to the pipeline.
+  - **SMA/EMA/WMA are not reimplemented.** `IndicatorFeature` wraps the
+    already-registered indicator and delegates to the same
+    `IndicatorEngine` the charts use, deriving its catalogue metadata from
+    the indicator's. This is the mechanism that makes _training/serving
+    consistency_ structural: with one implementation of "SMA(20)", a
+    dataset column and a chart overlay cannot disagree. Every future
+    indicator becomes a feature by adding its name to
+    `INDICATOR_BACKED_FEATURES`.
+  - **`OHLCVPoint` and `ParameterSpec` are reused** from the indicator
+    engine rather than redefined, and the pipeline calls its
+    `validate_parameters` directly — so bounds, choices, coercion, and the
+    "recommended: N" message exist once. Candle loading was extracted into
+    a shared `app/services/candle_points.py` that both the indicator and
+    feature services now use.
+  - **Dataset builder guarantees**: two features that would produce the
+    same column are rejected naming both (a silently overwritten column is
+    the worst possible dataset defect); rows where any feature is still
+    undefined are dropped by default, because a training matrix must not
+    contain nulls and imputing them is a modelling decision the data layer
+    must not make silently — with the count always reported; and every
+    dataset records the pipeline version, each feature's version, and its
+    fully-resolved parameters, because an unreproducible dataset is not
+    research.
+  - **`limit` counts rows, not candles**: the candle window is widened by
+    the largest requested warmup and trimmed back, so adding a
+    longer-period feature never silently shrinks an existing dataset.
+  - **REST API**: `GET /features`, `GET /features/{feature}`,
+    `POST /markets/{symbol}/features/dataset`, and
+    `POST /markets/{symbol}/features/export?format=csv|json` — all mounted
+    at both `/api/v1/*` and unversioned. Export is a separate endpoint that
+    always returns the complete dataset, never the truncated preview.
+  - **Frontend `/features` page**
+    (`apps/dashboard/src/features/feature-engineering/`): market,
+    timeframe, and date-range selectors, a category-grouped feature
+    selector with per-feature parameter forms, a dataset preview table with
+    per-column dtype tooltips, a summary that explains dropped warmup rows
+    and names the feature responsible, and CSV/JSON export. Renders
+    entirely from the catalogue response — a new backend generator appears
+    here with no frontend change.
+  - **Reuse on the frontend too**: `ParameterForm` and `validateValues` are
+    imported unchanged from the Indicators module (features publish the
+    same `ParameterSpec` shape), `useMarkets`/`useTimeframes`/`resolveRange`
+    from the History module, and a new shared
+    `src/lib/group-by-category.ts` was promoted out of the Indicator
+    Panel's `categorize.ts` once this page needed the identical grouping
+    over a different taxonomy.
+  - **Two real bugs found and fixed by the new tests**: an under-sized date
+    range surfaced as an opaque 500 instead of an actionable 400 naming the
+    shortfall, and an over-limit request was silently clamped instead of
+    rejected.
+  - 176 new backend tests and 82 new frontend tests — full suites pass
+    (backend 734, 95.46% coverage; frontend 1176).
+  - See `ARCHITECTURE.md` § "Feature Engineering Engine",
+    `docs/ai/AI.md` (written from a stub), `docs/api/API.md` § "Feature
+    engineering", `FRONTEND.md` § "Feature Engineering", and
+    `services/api/TESTING.md` § "Feature Engineering tests".
+
 - **Indicator Management & Chart Overlay System — production-readiness
   review** — a UX/scalability pass adding researcher-facing polish and one
   real caching improvement on top of the system below, with **zero

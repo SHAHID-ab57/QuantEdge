@@ -222,6 +222,217 @@ without candles to compute over. This endpoint is purely additive: `GET
 /markets/{symbol}/indicators/{name}` and every other indicator route are
 unchanged.
 
+### Feature engineering
+
+| Method | Path                                        | Purpose                                                       |
+| ------ | ------------------------------------------- | ------------------------------------------------------------- |
+| GET    | `/api/v1/features`                          | Catalogue of every registered generator, with parameter specs |
+| GET    | `/api/v1/features/{feature}`                | One generator's metadata, parameters, and output columns      |
+| POST   | `/api/v1/markets/{symbol}/features/dataset` | Build a feature dataset (optionally truncated for preview)    |
+| POST   | `/api/v1/markets/{symbol}/features/export`  | Build the same dataset and stream it as a CSV or JSON file    |
+
+Registered today: `ohlcv` (`category: "raw"`), `candle_shape`
+(`price_action`), and `sma`/`ema`/`wma` (`trend`). The set is queried from
+`GET /api/v1/features` at runtime, never hardcoded by a client; see
+`ARCHITECTURE.md` § "Feature Engineering Engine" for how a new generator
+joins this list with no API change.
+
+**The catalogue is the contract**, exactly as for indicators — each entry
+publishes every parameter's type, bounds, choices, default, and
+required-ness, so a client builds a correctly-constrained selection form
+from this response alone. Entries carry the same engineering metadata
+(`version`, `author`, `complexity`, `warmup_description`, `aliases`) plus
+`outputs`, the column-name templates the generator produces (e.g.
+`["sma_{period}"]`), and five additive fields from the production-hardening
+pass: `unit` (e.g. `"price"`, `""` when not applicable), `value_type`
+(`"float"` / `"categorical"` / `"mixed"`), `dependencies` (other feature
+names this one requires in the same request — empty for every generator
+shipped today), `is_deterministic` (always `true` currently — reserved for
+a future stochastic generator), and `missing_values_expected` (whether nulls
+beyond warmup are a normal outcome, e.g. `candle_shape`'s normalized wick
+ratios on a flat candle). A feature declaring `dependencies` that is
+requested without them yields `missing_feature_dependency` (400) — see
+"Feature-specific error codes" below.
+
+`version` is a **generator-level** semver, bumped when a change would alter
+previously-computed values — so a dataset recorded against 1.0.0 is known
+not to be reproducible under 2.0.0.
+
+**`sma`/`ema`/`wma` are the same implementations the indicator API serves.**
+They are not reimplemented here; the feature wraps the registered indicator
+and delegates to the same engine, so `label`, `complexity`, `aliases`, and
+the computed values are identical to `GET /api/v1/indicators/{name}`. This
+is what guarantees a dataset column and a chart overlay can never disagree.
+
+**Dataset requests use a JSON body**, unlike the indicator endpoints'
+query parameters, because a dataset request is inherently a _list_ of
+feature/parameter pairs that a flat query string cannot express:
+
+```jsonc
+{
+  "timeframe": "1h",
+  "start": "2026-01-01T00:00:00Z", // optional, half-open [start, end)
+  "end": "2026-02-01T00:00:00Z", // optional
+  "limit": 500, // rows in the dataset, not candles read — see below
+  "drop_warmup": true, // default; drop rows where any feature is undefined
+  "preview_rows": 200, // optional cap on the response only
+  "features": [
+    { "feature": "ohlcv" },
+    { "feature": "candle_shape", "params": { "normalize": "true" } },
+    { "feature": "sma", "params": { "period": "20" } },
+  ],
+}
+```
+
+**Response shape.** Row-oriented: `rows` is parallel to `timestamps`, and
+each row's values are ordered exactly as `columns`. Repeating column names
+per row (a records-oriented shape) would roughly double the payload for a
+wide dataset.
+
+```jsonc
+{
+  "dataset_id": "6f1e4a2c-3b8d-4c9a-9e2f-1a7c5d6b8e90", // fresh uuid4 per build — never a content hash
+  "symbol": "ETHUSD",
+  "timeframe": "1h",
+  "columns": [
+    { "name": "close", "label": "Close", "description": "...", "dtype": "float" },
+    { "name": "candle_direction", "label": "...", "dtype": "categorical" },
+    { "name": "sma_20", "label": "SMA(20)", "dtype": "float" },
+  ],
+  "timestamps": ["2026-01-01T19:00:00Z", "2026-01-01T20:00:00Z"],
+  "rows": [
+    [3055.25, "up", 3010.11],
+    [3180.5, "down", 3021.44],
+  ],
+  "features": [
+    {
+      "feature": "sma",
+      "label": "Simple Moving Average",
+      "version": "1.0.0",
+      "parameters": { "period": 20, "source": "close" }, // fully resolved
+      "columns": ["sma_20"],
+      "warmup": 20,
+      "execution_time_ms": 0.06,
+    },
+  ],
+  "meta": {
+    "row_count": 2, // rows in _this_ response
+    "total_rows": 481, // rows in the full dataset
+    "truncated": true, // capped by preview_rows
+    "candles_analyzed": 500,
+    "rows_dropped": 19,
+    "warmup_candles": 20,
+    "database_time_ms": 8.1,
+    "pipeline_version": "1.0.0",
+    "generated_at": "2026-01-01T21:00:00Z",
+  },
+  "quality": {
+    "total_rows": 500, // candles read, before warmup trimming
+    "rows_returned": 481,
+    "rows_removed": 19,
+    "null_counts": { "sma_20": 0 }, // computed before trimming, so a mid-series null is never hidden
+    "duplicate_timestamps": 0,
+    "missing_candles": 0,
+    "feature_failures": [], // see "Partial-success dataset building" below
+    "generation_time_ms": 4.7,
+  },
+}
+```
+
+**`dataset_id` identifies one specific build, not one specific request
+shape.** Rebuilding an identical request later — over data that may itself
+have changed — yields a new `dataset_id`; it is a build-time snapshot
+identifier, not a hash a caller can use to detect "did anything change."
+Reproducibility instead comes from the existing provenance fields
+(`pipeline_version`, each feature's `version` and resolved `parameters`).
+
+**`quality` reports the dataset's own trustworthiness.** It is present on
+every dataset response (build and export alike) and is what makes a
+partially-failed or partially-trimmed dataset legible without a caller
+having to infer it from row counts alone. `null_counts` is computed
+**before** `drop_warmup` trims anything, so a column whose nulls extend
+past the warmup boundary (e.g. a normalized wick ratio on a flat candle)
+still shows up. `duplicate_timestamps` and `missing_candles` are computed
+over the full candle series actually read, independent of any feature.
+
+`dtype` is published per column because a consumer needs to know whether a
+column is continuous or categorical _before_ deciding how to encode it —
+the difference between scaling and one-hot encoding — and the column name
+rarely says which.
+
+**Column names encode the parameters that produced them**, so requesting
+the same generator twice at different periods yields `sma_20` and `sma_50`
+rather than a collision. A non-default `source` is always visible
+(`sma_20_high`): a column must never hide a parameter that changes its
+values. Two requested features that _would_ collide are rejected with
+`duplicate_feature_column` naming both — a silently overwritten column is
+the worst possible dataset defect.
+
+**`limit` counts dataset rows, not candles read.** The server widens its
+candle window by the largest requested warmup, then trims back, so asking
+for 500 rows with an SMA(50) returns 500 — not 450. Without this, adding a
+longer-period feature would silently shrink an existing dataset.
+`candles_analyzed` reports the wider figure.
+
+**Warmup rows are dropped by default.** A training matrix must not contain
+nulls, and imputing them is a modelling decision this API must not make
+silently — so any row where a requested feature is still undefined is
+removed, and `rows_dropped`/`warmup_candles` always report what happened.
+Pass `"drop_warmup": false` to keep full alignment with the candle range,
+in which case warmup positions appear as `null`.
+
+**Export is a separate endpoint and always complete.** `preview_rows` is
+ignored by `/features/export`: an export truncated to what a preview
+happened to show would silently produce a partial training set. Both
+formats carry `dataset_id`, `exported_at` (when the file was written —
+distinct from the dataset's own `generated_at`), the pipeline version, each
+feature's version, its resolved parameters, and the full `quality` summary,
+so an exported file is reproducible and self-describing without the
+original API response. CSV writes that provenance as `#`-prefixed comment
+lines (one `# feature.<name>,version=... params=(...) columns=(...)
+warmup=...` line per feature, one `# quality.*` line per metric), which
+`pandas.read_csv(..., comment='#')` skips natively; `?format=json` emits
+one object per row plus the same metadata under a `quality` key.
+
+Supported formats are driven by an internal `ExportFormat` registry
+(`extension`, `media_type`, `serialize`), not a hardcoded branch — the
+`format` query parameter's valid values (currently `csv`|`json`) are
+generated from that registry, so a future format (Parquet) is one registry
+entry with no change to this endpoint's contract beyond a new accepted
+value.
+
+**Partial-success dataset building — a per-feature failure no longer fails
+the request.** `feature_not_found`, `invalid_feature_parameter`,
+`insufficient_data`, and `feature_execution_failed` (the same situations
+that are hard 404/400/500 errors on the single-feature `GET
+/api/v1/features/{feature}` lookup) do **not** raise on `/features/dataset`
+or `/features/export`. Instead each is recorded as one entry in
+`quality.feature_failures` — `{ "feature": "ema", "params": {...},
+"error_code": "insufficient_data", "error_detail": "..." }` — and the
+response still returns `200` with every other requested feature's columns
+intact. This mirrors the indicator batch endpoint's already-established
+partial-success contract: a ten-feature request with one bad feature
+returns nine good columns and one explained failure, not a blanket 4xx that
+discards the nine.
+
+⚠️ **Behavior change from the initial Feature Engineering Engine release**:
+those four codes previously aborted the whole dataset build with a matching
+HTTP error status. A client written against that earlier behavior that
+branches on a 4xx/5xx status for a bad feature request must be updated to
+instead check `quality.feature_failures` on an otherwise-200 response.
+
+Two error codes still hard-fail the whole request, because there is no
+partial result that makes sense: `duplicate_feature_column` (400 — two
+requested features collided on one output column, naming both) and
+`missing_feature_dependency` (400, new — a requested feature's declared
+`dependencies` were not also included in the request). `empty_dataset` (400)
+is narrower than before: it now fires only when columns exist but every row
+was legitimately trimmed as warmup, not when every requested feature failed
+outright (that case is instead a `200` with zero columns and a fully
+populated `quality.feature_failures`). The shared `market_not_found`,
+`candle_not_found`, `invalid_timeframe`, `invalid_range`, and
+`limit_exceeded` codes apply here too.
+
 ### Platform health
 
 | Method | Path                     | Purpose                                            |

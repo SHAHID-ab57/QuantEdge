@@ -673,9 +673,303 @@ grow unbounded across a long research session.
 
 > To be completed in future tasks.
 
+### Feature Engineering Engine
+
+`services/api/app/features/` is the platform's AI-readiness layer and its
+BC3 bounded context (`docs/architecture/DomainModel.md`). Models do not
+consume raw candles; they consume engineered feature vectors, and this is
+where market data becomes them. As with the indicator engine, the design
+optimises for adding hundreds of generators cheaply rather than for
+shipping many today — eight ship now.
+
+**Layering.** The same rule `app/indicators/` follows, for the same reason:
+nothing in `app/features/` imports SQLAlchemy, FastAPI, or Pydantic, and no
+generator may either. A generator receives plain `OHLCVPoint` values and
+returns plain columns, which is what lets the same implementation serve the
+REST API today and, unchanged, a training job or live inference path later.
+
+```text
+app/features/
+├── base.py       FeatureGenerator ABC, FeatureContext/Output/Column, metadata
+├── registry.py   FeatureRegistry (+ the app-wide default_registry)
+├── pipeline.py   FeaturePipeline — the execution pipeline
+├── dataset.py    FeatureDatasetBuilder — several generators into one matrix
+├── export.py     CSV and JSON serialization
+├── errors.py     Domain errors (all AppError subclasses)
+└── builtin/      Auto-discovered generator modules
+    ├── ohlcv.py             Raw OHLCV (5 columns)
+    ├── candle_shape.py      Body, upper wick, lower wick, direction
+    └── indicator_feature.py Adapter exposing any indicator as a feature
+```
+
+`app/services/features.py` is the only place the two halves meet, and
+candle loading itself is shared with the indicator service via
+`app/services/candle_points.py` — extracted once both needed the identical
+"resolve the market, validate the timeframe/range/limit, run one ordered
+query, project onto `OHLCVPoint`" sequence, because that is one operation,
+not one per analytical context.
+
+**Reuse over parallel implementation.** Two decisions matter more than any
+other here, and both are about _not_ writing code:
+
+1. **`OHLCVPoint` and `ParameterSpec` are imported from
+   `app/indicators/`, not redefined.** A feature's input _is_ a candle and
+   its parameters _are_ validated the same way an indicator's are. The
+   pipeline calls the indicator engine's own `validate_parameters` and
+   translates only the raised error type, so bounds, choices, coercion, and
+   the "recommended: N" message exist once.
+2. **SMA/EMA/WMA are not reimplemented.** `IndicatorFeature` wraps an
+   already-registered indicator and delegates every computation to the
+   shared `IndicatorEngine`, deriving its catalogue metadata from the
+   indicator's. This is not a convenience — it is the mechanism that makes
+   _training/serving consistency_ structural. If the maths were written
+   twice, "SMA(20)" would eventually mean two different things, and a model
+   would train on one definition while the chart showed another. That is
+   training/serving skew, the exact failure BC3 exists to prevent
+   ("Feature computation must be identical for training and inference").
+   The consequences compound: every future indicator becomes a feature by
+   adding its name to `INDICATOR_BACKED_FEATURES`, a fix to an indicator's
+   maths fixes the feature in the same commit, and both share the
+   indicator engine's result cache.
+
+**Registry.** Name → generator instance, the single extension point.
+Supports both `@register` over a class (a hand-written generator) and
+`register_generator(instance)` for a _constructed_ one — the latter exists
+for adapters: without it, reusing the indicator engine would have meant
+hand-writing a near-identical subclass per indicator, duplicating exactly
+the metadata the adapter derives.
+
+**Execution pipeline.** One fixed sequence, no branch on which generator is
+running:
+
+```text
+resolve → validate parameters → check warmup → generate → verify alignment → verify unique columns
+```
+
+Two stages exist to catch failures that would otherwise be silent:
+
+- **Warmup check** — a range shorter than a generator needs raises
+  `insufficient_data` (a 400 naming the shortfall) _before_ generation.
+  Checking it here rather than leaving it to the generator matters: a
+  delegating generator's own engine would otherwise raise inside the
+  generic failure boundary and surface as an opaque 500 for what is
+  plainly a bad request.
+- **Alignment verification** — every column must have exactly one value per
+  input candle. A misaligned column still serializes, still exports, and
+  still trains a model — against the wrong timestamps. Checking centrally
+  gives every generator the guarantee for free.
+
+No result cache lives in the pipeline, unlike `IndicatorEngine`. A feature
+request is a _dataset_ request whose output is proportional to the whole
+range, and the expensive part (loading candles) already happens once
+upstream; caching whole datasets would trade a lot of memory for a saving
+already captured. Indicator-backed generators still get the indicator
+engine's cache underneath.
+
+**Dataset builder.** Owns the three things only it can see, because it is
+the only component handed more than one generator at once:
+
+| Concern                | Behaviour                                                                                                                                                                                                                   |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Column collisions      | Two features producing the same column name are rejected, naming both. A silently overwritten column means the model trains on data nobody intended, with nothing looking wrong.                                            |
+| Warmup trimming        | Rows where _any_ requested feature is undefined are dropped by default — a training matrix cannot contain nulls, and imputing them is a modelling decision this layer must not make silently. The count is always reported. |
+| Reproducibility record | Pipeline version, every feature's version, fully-resolved parameters, and the exact row accounting.                                                                                                                         |
+
+Trimming drops _any_ incomplete row, not only leading ones: a null
+mid-series (a flat candle's undefined normalized wick fraction) is as
+unusable to a model as a leading one, and "complete rows only" is far
+easier to reason about than a list of special cases.
+
+**`limit` means rows, not candles.** The service widens its candle window
+by the largest requested warmup before loading, then caps the built dataset
+back to the requested row count. Without this, adding a longer-period
+feature would silently shrink an existing dataset — the kind of quiet
+change that makes results irreproducible. The caller's `limit` is validated
+_before_ widening, so an over-limit request is rejected rather than clamped
+and quietly under-served.
+
+**Export is server-side, and separate from preview.** A preview is capped
+so a browser can render it; an export is the complete dataset by
+definition. They are two endpoints rather than one with a `format`
+parameter, because conflating them is how a researcher exports the 200 rows
+they happened to see and trains on a fraction of their data. `preview_rows`
+is ignored by the export path, and the frontend strips it at the call site
+too. Both formats carry the full provenance record; CSV writes it as `#`
+comment lines so `read_csv(comment='#')` still works.
+
+**Extension workflow.** Adding a generator is one file: create
+`app/features/builtin/<name>.py`, subclass `FeatureGenerator`, declare
+`metadata`, implement `generate`, decorate with `@register`. Nothing else
+changes — not the pipeline, registry, builder, service, API, or frontend,
+since the `/features` page renders its selector, parameter forms, and
+column headers entirely from the catalogue response.
+
+### Feature Engineering Engine — Production Hardening
+
+A hardening pass over the system above, aimed at the platform's next
+consumers — AI training, backtesting, paper trading, model evaluation — all
+of which need a dataset to be **identifiable, reproducible, and honest about
+its own quality**, not just correct. Every change here is additive: the
+registry, pipeline, dataset builder, export layer, indicator engine, chart
+components, and Zustand stores this review builds on are unchanged in shape;
+nothing was rewritten or duplicated.
+
+**Metadata model: five new fields, all additive-defaulted.**
+`FeatureMetadata` gained `unit` (`""` default), `value_type` (`"float"`
+default), `dependencies: tuple[str, ...]` (`()` default), `is_deterministic`
+(`True` default), and `missing_values_expected` (`False` default) — every
+existing generator's metadata still constructs with no changes required,
+matching the same additive pattern the indicator review already established
+for `aliases`/`version`/`complexity`. `dependencies` is the one field that is
+also a real extension point, not just descriptive metadata: it feeds both
+layers of dependency validation below. No shipped generator declares a
+non-empty `dependencies` today — the field exists so a future generator that
+_does_ need another feature's output has somewhere correct to say so.
+
+**Dependency validation, two layers, two different failure modes.**
+
+1. **Registry-wide, at startup.** `FeatureRegistry.validate_dependencies()`
+   runs once, at the end of `load_builtin_features()`, over every registered
+   generator: an unresolvable dependency name raises
+   `UnknownFeatureDependencyError`, and a DFS over the whole dependency graph
+   (`_check_cycle`) raises `FeatureDependencyCycleError` naming the exact
+   cycle path. Both are plain `RuntimeError` subclasses, not `AppError` —
+   this is a developer mistake in a generator's declared metadata, caught at
+   import time, not a request the API should ever see.
+2. **Request-scoped, per build.** `validate_feature_requests()`
+   (`app/features/validation.py`) checks only that _this request's_ features
+   carry their declared dependencies alongside them in the same request,
+   raising `MissingFeatureDependencyError` (an `AppError`, 400, naming the
+   missing feature) if not. This is deliberately simpler than graph
+   traversal — presence-in-request, not reachability — because the registry
+   check above already guarantees no cycle or dangling reference can exist
+   in the first place; this layer only has to catch "you asked for the
+   dependent but forgot the dependency."
+
+**Partial-success dataset building — the largest single change.**
+`FeatureDatasetBuilder.build()` previously aborted the whole dataset on the
+first failing feature. It now mirrors the indicator engine's already-proven
+batch-endpoint contract exactly: `FeatureNotFoundError`,
+`InvalidFeatureParameterError`, `InsufficientFeatureDataError`, and
+`FeatureExecutionError` are caught per-request and recorded as a
+`FeatureFailure` in the dataset's quality report instead of raised, so one
+bad feature in a ten-feature request no longer discards the other nine.
+`required_warmup()` was changed to match — it now also swallows those same
+four errors per request, since computing the warmup window is the first
+thing `build()` does, and a request that will fail must not be allowed to
+poison that calculation before the failure is ever recorded. Two error
+classes still hard-fail immediately, because there is no partial result that
+makes sense for them: `DuplicateFeatureColumnError` (two features colliding
+on one output column) and `MissingFeatureDependencyError` (a structural
+problem with the request itself, not a single generator's runtime failure).
+
+**Dataset identity and versioning.** Every `FeatureDataset` now carries a
+`dataset_id` (`uuid4()`, generated fresh per build) alongside its existing
+`pipeline_version` and per-feature `version`s. It is deliberately **not** a
+content hash: rebuilding an identical request a day later — over data that
+may itself have changed (a corrected candle, a later `end`) — must yield a
+distinguishable dataset, not silently collide with a stale one. `dataset_id`
+answers "which specific build is this," not "is this data the same as
+before"; the existing provenance fields already answer the latter.
+
+**`DatasetQualityReport` (`app/features/quality.py`), new.** Every dataset
+now carries a structured account of its own trustworthiness alongside its
+data: `total_rows`/`rows_returned`/`rows_removed`, `null_counts` per column
+(computed **before** warmup trimming, so a column whose nulls extend past
+the warmup window is still visible), `duplicate_timestamps` and
+`missing_candles` (both computed over the full, untrimmed candle series via
+new `count_duplicate_timestamps`/`count_missing_candles` helpers —
+`count_missing_candles` reuses the existing `resolution_duration` from
+`app.services.candle_ingest` rather than re-declaring a timeframe table),
+`feature_failures` (the partial-success record above), and
+`generation_time_ms`. A dataset with zero successful features is now a
+_valid_, fully-explained empty result (`quality.feature_failures` says why)
+rather than the generic `EmptyDatasetError` it previously raised — that
+error is now reserved for its original, narrower meaning: columns exist but
+every row was legitimately trimmed as warmup.
+
+**Export layer: format registry, so Parquet is one entry, not a refactor.**
+`app/features/export.py` introduces `ExportFormat` (`extension`,
+`media_type`, `binary`, `serialize`) and an `EXPORT_FORMATS: dict[str,
+ExportFormat]` registry currently holding `csv` and `json`. Both
+`FeatureService.export_dataset` and the API endpoint's format-pattern regex
+derive from this registry rather than branching on format string — adding
+Parquet later means adding one `ExportFormat` entry (binary output, a
+different `serialize`) with no change to the service or endpoint.
+`ExportedDataset.content` was widened to `str | bytes` in anticipation.
+Every export now also carries the dataset's `dataset_id`, an `exported_at`
+timestamp (distinct from the dataset's own `generated_at` — this one marks
+when the file was written, not when the data was built), the pipeline
+version, and the full quality summary; CSV writes these as `#`-prefixed
+comment lines (including one `# feature.<name>,version=... params=(...)
+columns=(...) warmup=...` line per feature and one `# quality.*` line per
+metric), so `read_csv(comment='#')` still round-trips cleanly.
+
+**AI extension points, documented and typed but not wired
+(`app/features/ai_extensions.py`).** Six `Protocol`/`dataclass` pairs mirror
+the frontend's own established precedent
+(`apps/dashboard/src/features/replay/extension-points.ts`) for describing a
+future capability without building it prematurely: `LabelSpec`/
+`LabelGenerator` (target/label generation), `WindowSpec`/`SequenceWindower`
+(sliding-window sequence generation), `NormalizationStats`/
+`FeatureNormalizer` (`fit`/`transform` kept as two separate methods,
+deliberately never combined, so a normalizer fit on training data can never
+leak test-set statistics into itself), `SplitRatios`/`DatasetSplit`/
+`TrainValidationTestSplitter` (chronological splitting only — a random split
+of time-series data leaks future information into training), and
+`CategoricalEncoding`/`CategoricalEncoder` (reads a column's declared
+`dtype` rather than a hardcoded column list, so it generalizes to any future
+categorical feature). Nothing in this module is imported by any production
+code path — it exists so the _next_ milestone (AI Research, per
+`TASKBOOK.md`) has a contract to implement against rather than a blank page.
+
+**Frontend: search, keyboard navigation, recently-used, and virtualization
+— all additive to the existing `feature-engineering` module.**
+
+- **Shared search matching, promoted once a second consumer needed it.**
+  `matchesCatalogSearch` (`src/lib/search-catalog.ts`, new) is the indicator
+  overlay panel's `matchesIndicatorSearch` logic (name/label/category/
+  aliases/description) lifted out to a shared module — `search-indicators.ts`
+  now delegates to it — the same "promote on second use" pattern already
+  used for `group-by-category.ts`. `FeatureSelector` uses it for a search box
+  plus a category filter (a real, visible MUI `label`, not just
+  `aria-label` — a select with only `aria-label` and no visible label
+  resolves to an empty accessible name, a recurring MUI gotcha in this
+  codebase).
+- **Roving keyboard navigation, no new dependency.** A single `onKeyDown` on
+  the feature list reads `data-feature-name` off `document.activeElement`,
+  finds its position in the currently-filtered visible list, and moves focus
+  to the next/previous checkbox, wrapping at both ends.
+- **Recently-used features**, session-scoped.
+  `use-recent-features-store.ts` (new Zustand store, `persist` +
+  `sessionStorage`) mirrors `use-overlay-store.ts`'s established
+  session-scoped pattern exactly; `recordUsed(name)` moves an existing entry
+  to the front rather than duplicating, capped at 8.
+- **Two-card dataset display**, matching the backend's own provenance/quality
+  split. `DatasetInfoCard` (new) shows identity and reproducibility —
+  Dataset ID, Pipeline Version, Market, Timeframe, Rows, Columns, Generation
+  Time. The existing `DatasetSummary` was extended, not replaced, to show
+  trustworthiness — duplicate timestamps, missing candles, a null-columns
+  alert, and a feature-failures alert — reading directly off the new
+  `quality` object.
+- **Manual table virtualization, no new dependency.** `DatasetPreviewTable`
+  was rewritten to window its rows by scroll position (`ROW_HEIGHT = 33`,
+  `TABLE_HEIGHT = 460`, `OVERSCAN = 8`) with two spacer `<TableRow>`s
+  preserving correct scrollbar size — verified to mount far fewer than 200
+  `<tr>` elements for a 100,000-row dataset and to re-window correctly on
+  scroll, keeping the preview responsive regardless of dataset size.
+- **Tooltips throughout.** Every technical term surfaced by this review
+  (Warmup Rows, Feature Version, Pipeline Version, Dataset Version, Candle
+  Direction, Body Size, Upper/Lower Wick, EMA, SMA, WMA) is explained via the
+  existing, reused `InfoTooltip` component — never a new tooltip
+  implementation.
+
 ### Feature Store
 
-> To be completed in future tasks.
+> Not built. Features are computed on demand and exported; no persisted,
+> versioned feature-value store (`DataArchitecture.md` § D6) exists yet.
+> The engine above is the computation half of that context; persistence is
+> the missing half.
 
 ### AI Research
 

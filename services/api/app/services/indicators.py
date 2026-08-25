@@ -13,7 +13,6 @@ platform conventions hold.
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from time import perf_counter
 
 from app.indicators.base import OHLCVPoint
 from app.indicators.engine import ENGINE_VERSION, IndicatorEngine
@@ -23,7 +22,6 @@ from app.indicators.errors import (
     InsufficientDataError,
     InvalidIndicatorParameterError,
 )
-from app.models.candle import Candle
 from app.repositories.candles import CandleRepository
 from app.repositories.markets import MarketRepository
 from app.schemas.indicators import (
@@ -36,13 +34,7 @@ from app.schemas.indicators import (
     IndicatorDTO,
     IndicatorSeriesDTO,
 )
-from app.services.market_query import (
-    CandleNotFoundError,
-    MarketNotFoundError,
-    normalize_range,
-    validate_limit,
-    validate_timeframe,
-)
+from app.services.candle_points import load_candle_points
 
 logger = logging.getLogger("app.services.indicators")
 
@@ -213,53 +205,21 @@ class IndicatorService:
     ) -> tuple[list[OHLCVPoint], float]:
         """Validate the request and load one market's candles as engine-ready points.
 
-        Shared by ``calculate`` and ``calculate_batch`` — the market
-        lookup, timeframe/range/limit validation, and the single candle
-        query are identical between "run one indicator" and "run several
-        indicators over the same range," so this is the one place that
-        logic lives.
+        Shared by ``calculate`` and ``calculate_batch``, and now — via
+        ``load_candle_points`` — with the Feature Engineering service too:
+        "load the candles an analysis will run over" is one operation, not
+        one per analytical context. This method is kept as a thin adapter so
+        both callers above read unchanged.
         """
-        market = await self.market_repository.get_by_symbol(symbol)
-        if market is None:
-            raise MarketNotFoundError(symbol)
-        validate_timeframe(timeframe)
-        start, end = normalize_range(start, end)
-        resolved_limit = self.default_limit if limit is None else limit
-        validate_limit(resolved_limit, self.max_limit)
-
-        db_started = perf_counter()
-        candles = await self.candle_repository.get_candles(
-            market.id,
-            timeframe,
+        loaded = await load_candle_points(
+            symbol=symbol,
+            timeframe=timeframe,
+            market_repository=self.market_repository,
+            candle_repository=self.candle_repository,
+            default_limit=self.default_limit,
+            max_limit=self.max_limit,
             start=start,
             end=end,
-            limit=resolved_limit,
-            offset=0,
-            sort="open_time",
-            direction="asc",
+            limit=limit,
         )
-        database_time_ms = (perf_counter() - db_started) * 1000
-
-        if not candles:
-            raise CandleNotFoundError(symbol, timeframe)
-
-        return [_to_point(candle) for candle in candles], database_time_ms
-
-
-def _to_point(candle: Candle) -> OHLCVPoint:
-    """Project an ORM candle onto the engine's framework-free input type.
-
-    This is the boundary that keeps indicators free of SQLAlchemy: nothing
-    past this function sees an ORM object.
-    """
-    open_time = candle.open_time
-    if open_time.tzinfo is None:
-        open_time = open_time.replace(tzinfo=UTC)
-    return OHLCVPoint(
-        open_time=open_time,
-        open=float(candle.open),
-        high=float(candle.high),
-        low=float(candle.low),
-        close=float(candle.close),
-        volume=float(candle.volume),
-    )
+        return loaded.points, loaded.database_time_ms

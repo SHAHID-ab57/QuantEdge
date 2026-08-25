@@ -8,6 +8,150 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Dataset Validation page — usability pass for large feature sets** — a
+  frontend-only enhancement of `/validation` aimed at professional
+  quantitative researchers, reusing every existing API, component, store,
+  and validation-engine behavior; **no change to
+  `app/dataset_validation/` or any other backend code**.
+
+  - **Required Columns**: the free-text field is replaced by a searchable,
+    checkbox-driven multi-select (MUI `Autocomplete`, `multiple`+
+    `freeSolo`+`groupBy`) — grouped into five buckets (Raw Market Data,
+    Technical Indicators, Candle Features, Statistical Features, Future
+    Features) derived from the Feature Registry's own `category` field via
+    a new `columnCategoryFor`. Options are resolved from each feature's
+    declared `outputs` templates against its actual selected parameters
+    (or published defaults) via a new `resolveRequiredColumnOptions` —
+    Feature Registry metadata, never a second data source. Adds Select
+    All, Clear All, a live selected count, and a session-scoped
+    "Recently used" quick-pick row (`use-recent-columns-store.ts`).
+    `freeSolo` preserves the original field's ability to name a column
+    from a feature that isn't currently selected.
+  - **Required Column Presets**: five one-click starting points (Raw
+    Market Data, OHLCV Only, Trend Indicators, AI Basic Features, Full
+    Dataset), resolved live against the fetched catalogue
+    (`resolvePresetFeatures`) — applying one seeds both the feature
+    selection and the required columns; everything stays manually
+    editable afterward.
+  - **Feature Selector**: gained Favorites (a new, deliberately
+    `localStorage`-backed `use-favorite-features-store.ts` — the one
+    long-lived store in this area, unlike every "recently used" store's
+    `sessionStorage`), per-category Expand/Collapse plus bulk Expand
+    All/Collapse All, and Select All/Clear All (built entirely from the
+    existing `onToggle` callback — no new props, so the Feature
+    Engineering page needed zero changes to inherit all of it). Each row
+    now also shows its version, category, and produced-column count.
+  - **Tooltips on every configurable field** (Market, Timeframe, Range,
+    Start, End, Max rows, Required Columns, Features) — each explaining
+    Purpose/Expected values/Validation rules/Example, placed as a sibling
+    of the field rather than inside its `<label>` (nesting an interactive
+    tooltip button inside a form label is a known accessibility trap), so
+    no existing field's `aria-label`/`label` text changed.
+  - **Validation rule catalogue**: each rule now expands to show curated
+    "Why it matters" and "Example failure" content
+    (`lib/rule-knowledge.ts`) — frontend-only editorial content mirroring
+    `indicator-knowledge.ts`'s exact curated-plus-honest-fallback pattern,
+    so an uncurated future rule still renders a complete panel.
+  - **Validation Report**: the former fixed "Errors"/"Warnings" sections
+    are now one filterable `ValidationReportPanel` — full-text search, an
+    independently-toggleable severity filter, a category filter, bulk
+    Expand All/Collapse All, a **Copy Issue** button per row, and an
+    **Export Issues** action that downloads only the currently-filtered
+    subset as JSON (distinct from the existing full-report download).
+    Each issue also shows a curated **Suggested Fix**, keyed by its
+    specific error `code` rather than its `rule` (one rule can emit more
+    than one distinct code).
+  - **Summary cards**: gained Dataset Size (rows × columns), Rows,
+    Columns, Features, Rules Executed, and Validation Time, plus a
+    derived **Quality Score** (`lib/quality-score.ts` — 100 minus 15 per
+    error and 5 per warning, floored at 0) — an explicitly-labeled
+    frontend heuristic for fast triage, not a new backend metric.
+  - **Empty state**: replaced the single-sentence placeholder with a
+    "What validation does / How to start / Example workflow" panel.
+  - 111 new frontend tests (`resolve-required-columns`, `quality-score`,
+    `rule-knowledge`, the two new stores, `required-columns-selector`,
+    `required-column-presets`, `dataset-form` — a new dedicated file,
+    extended `feature-selector`/`validation-rule-catalog`/
+    `validation-issue-list`/`validation-summary-cards`, a new
+    `validation-report-panel`, and a substantially rewritten
+    `dataset-validation-page`) — full suite passes (frontend 1374) with a
+    clean lint, typecheck, and production build. Backend suite untouched
+    and still green (851 tests, 95.97% coverage) since nothing there
+    changed.
+  - See `FRONTEND.md` § "Dataset Validation" and § "Feature Engineering"
+    (Favorites/expand-collapse additions), and
+    `docs/testing/TESTING.md` § "Testing the Dataset Validation usability
+    pass".
+
+- **Dataset Validation & Quality Engine** — the platform's mandatory
+  quality gate ahead of AI training, backtesting, or research use. Reuses
+  the Feature Engineering Engine's dataset-building path outright rather
+  than duplicating it, and applies the same Strategy + Registry pattern
+  the indicator and feature engines already established, a third time.
+
+  - **`FeatureService.build_raw`** (renamed from a private `_build`
+    specifically to make this possible) is now the one dataset-building
+    path shared by `build_dataset`, `export_dataset`, and the new
+    validation service — there is no second, parallel "build a dataset to
+    validate it" path that could drift from the one everything else uses.
+  - **A new engine** (`services/api/app/dataset_validation/`), named
+    distinctly from this platform's two other "validation" concerns
+    (`app/features/validation.py`'s request-time dependency check,
+    `app/services/candle_validation.py`'s stored-candle report) since it
+    is a third, independent one: a `ValidationRule` ABC, a
+    `ValidationRuleRegistry` (+ `@register` extension point), a
+    `DatasetValidator` engine, and a structured `ValidationReport`.
+  - **Eleven builtin rules across four categories** — Structural
+    (`required_columns`, `data_types`), Data Quality (`missing_values`,
+    `duplicate_rows`, `duplicate_timestamps`, `nan_values`,
+    `infinite_values`), Time-Series (`timestamp_ordering`, `time_gaps`),
+    and Feature (`metadata_consistency`, `feature_failures`). Two rules
+    reuse existing counting functions (`count_duplicate_timestamps`,
+    `count_missing_candles` from `app/features/quality.py`) rather than
+    reimplementing them a third time, applied to the _delivered_ dataset
+    rather than the pre-trim candle range the build-time report covers.
+  - **Three-tier severity** (`error`/`warning`/`info`), the same convention
+    a linter uses: `error` fails the report's `passed` verdict,
+    `warning`/`info` are always reported but never block. `duplicate_rows`
+    and `time_gaps` default to `warning`; every other rule defaults to
+    `error`.
+  - **REST API**: `POST /markets/{symbol}/features/validate` (builds a
+    dataset — the same one `/features/dataset` builds — and validates it;
+    body is `DatasetValidationRequest`, a `FeatureDatasetRequest`
+    _subclass_ adding only `required_columns` and `rules`, never a
+    redeclaration) and `GET /validation/rules` (the rule catalogue,
+    mirroring `GET /features`/`GET /indicators`).
+  - **Frontend `/validation` page**
+    (`apps/dashboard/src/features/dataset-validation/`): reuses the
+    Feature Engineering page's `DatasetForm` and `FeatureSelector`
+    unchanged (the shared request shape is what makes this possible);
+    `DatasetForm` gained optional `submitLabel`/`busyLabel` props
+    (defaulted to its original text) so this page can say "Run
+    Validation" without a second form component. Shows an "Available
+    Checks" panel (from `GET /validation/rules`) before anything runs,
+    then — once validated — summary cards (pass/fail, error/warning/info
+    counts, a per-category breakdown), an Error list and a Warning list
+    (one shared `ValidationIssueList` component parameterized by
+    severity), Statistics, and a Report Download action that serializes
+    the report already in hand — no second backend round-trip, since a
+    validation report is never truncated.
+  - **`toDatasetRange`** (range-preset/custom-date conversion) was
+    promoted out of the Feature Engineering page's own local `toRange`
+    into `src/lib/resolve-dataset-range.ts` once this page needed the
+    identical conversion.
+  - 84 new backend tests (`tests/dataset_validation/` — registry, engine,
+    one file per rule category, builtin discovery, service delegation —
+    plus `tests/api/test_dataset_validation_api.py` covering both a clean
+    dataset and intentionally corrupted ones, reusing the existing
+    `seeded`/`seeded_with_gap` candle fixtures rather than inventing new
+    ones) and 37 new frontend tests — full suites pass (backend 851,
+    95.95% coverage; frontend 1263) alongside a clean lint, typecheck, and
+    production build.
+  - See `ARCHITECTURE.md` § "Dataset Validation & Quality Engine",
+    `docs/ai/AI.md` § "Dataset Validation Gate", `docs/api/API.md` §
+    "Dataset validation", `FRONTEND.md` § "Dataset Validation", and
+    `services/api/TESTING.md` § "Dataset Validation tests".
+
 - **Feature Engineering Engine — production hardening** — a pass over the
   system below preparing it for real training/backtesting/paper-trading
   consumers, with **no rewrite** of the registry/pipeline/dataset

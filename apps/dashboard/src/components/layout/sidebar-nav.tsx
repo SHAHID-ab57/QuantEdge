@@ -18,6 +18,7 @@ import ReceiptLongIcon from '@mui/icons-material/ReceiptLong';
 import ReplayIcon from '@mui/icons-material/Replay';
 import FunctionsIcon from '@mui/icons-material/Functions';
 import DatasetIcon from '@mui/icons-material/Dataset';
+import FactCheckIcon from '@mui/icons-material/FactCheck';
 import ScienceIcon from '@mui/icons-material/Science';
 import SettingsIcon from '@mui/icons-material/Settings';
 import HealthAndSafetyIcon from '@mui/icons-material/HealthAndSafety';
@@ -38,6 +39,7 @@ const NAV_ITEMS: NavItem[] = [
   { label: 'Replay', href: '/replay', icon: ReplayIcon },
   { label: 'Indicators', href: '/indicators', icon: FunctionsIcon },
   { label: 'Features', href: '/features', icon: DatasetIcon },
+  { label: 'Validation', href: '/validation', icon: FactCheckIcon },
   { label: 'Research', href: '/research', icon: ScienceIcon },
   { label: 'Settings', href: '/settings', icon: SettingsIcon },
   { label: 'Health', href: '/health', icon: HealthAndSafetyIcon },

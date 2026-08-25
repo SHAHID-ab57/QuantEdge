@@ -39,6 +39,7 @@ tests/
 │   └── assertions.py    # response-shape assertions
 ├── api/                 # HTTP-level tests (FastAPI via httpx/ASGI)
 ├── features/            # Feature Engineering engine (see below)
+├── dataset_validation/  # Dataset Validation & Quality engine (see below)
 ├── repository/          # repository tests against in-memory SQLite
 ├── service/             # service-layer tests
 ├── websocket/           # generic WS connection machinery (scripted server)
@@ -229,6 +230,58 @@ Four conventions in these tests are worth keeping:
   (see `API.md` § "Feature engineering" for the exact before/after) and the
   tests were renamed to say so (e.g.
   `test_records_an_unknown_feature_as_a_quality_failure_not_a_404`).
+
+## Dataset Validation tests
+
+`tests/dataset_validation/` covers the engine described in
+`ARCHITECTURE.md` § "Dataset Validation & Quality Engine" — a third
+Strategy + Registry pattern on this platform, tested the same way the
+first two (`tests/features/test_registry.py`,
+`tests/unit/indicators/test_registry.py`) already are:
+
+| File                         | Covers                                                                                                                                                                               |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `conftest.py`                | `make_dataset(...)` — builds a `FeatureDataset` directly, without running the pipeline                                                                                               |
+| `test_registry.py`           | Registration, duplicate rejection, lookup, catalogue ordering, isolated registries                                                                                                   |
+| `test_engine.py`             | Rule execution, the pass/fail verdict, rule-subset selection, per-category summary seeding at zero                                                                                   |
+| `test_rules_structural.py`   | `required_columns`, `data_types`                                                                                                                                                     |
+| `test_rules_data_quality.py` | `missing_values`, `duplicate_rows`, `duplicate_timestamps`, `nan_values`, `infinite_values`                                                                                          |
+| `test_rules_time_series.py`  | `timestamp_ordering`, `time_gaps`                                                                                                                                                    |
+| `test_rules_feature.py`      | `metadata_consistency`, `feature_failures`                                                                                                                                           |
+| `test_builtin_discovery.py`  | Every builtin rule module is auto-discovered, in its expected category, exactly once                                                                                                 |
+| `test_service.py`            | `DatasetValidationService` delegates to `FeatureService.build_raw` and forwards `required_columns`/`rules` to the engine, via a stub in place of a real (DB-backed) `FeatureService` |
+
+`tests/api/test_dataset_validation_api.py` covers the same surface end to
+end over ASGI, against both a clean dataset (`seeded_varied`) and several
+**intentionally corrupted** ones reused from the existing candle-quality
+fixtures rather than newly invented: `seeded` (five candles with
+byte-for-byte identical OHLCV — a real, not synthetic, duplicate-rows
+scenario) and `seeded_with_gap` (a market whose candles skip the 03:00
+bucket — a real gap for `time_gaps` to catch).
+
+Three conventions worth keeping:
+
+- **Rules are unit-tested against a hand-built `FeatureDataset`
+  (`conftest.py`'s `make_dataset`), never a real pipeline run.** A rule's
+  job is to check a dataset's _shape_; a hand-built one can express exactly
+  the shape being tested (a duplicate timestamp, a NaN cell, a mismatched
+  dtype, a feature failure) without needing a real generator that happens
+  to produce it — the same "isolated, throwaway" convention
+  `tests/features/test_registry.py` already established, applied to data
+  instead of to generators.
+- **The service test uses a stub, not a real `FeatureService`.**
+  `DatasetValidationService` exists only to call
+  `FeatureService.build_raw` and hand the result to the engine — proving
+  that delegation doesn't require a database, so the test doesn't need one
+  either. End-to-end coverage against a real (in-memory SQLite) database
+  lives in the API test file instead.
+- **Corrupted-data tests reuse existing fixtures over inventing new
+  ones.** `seeded` and `seeded_with_gap` already exist for
+  `candle_validation.py`'s own tests; reusing them here means the
+  validation engine is proven against the same corrupted data the
+  platform's other quality-reporting code is already tested against,
+  rather than a second, parallel set of "bad data" fixtures that could
+  drift from the first.
 
 ## Gates
 

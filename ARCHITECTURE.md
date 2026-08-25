@@ -964,6 +964,156 @@ code path — it exists so the _next_ milestone (AI Research, per
   existing, reused `InfoTooltip` component — never a new tooltip
   implementation.
 
+### Dataset Validation & Quality Engine
+
+`services/api/app/dataset_validation/` is a mandatory quality gate that
+sits _after_ the Feature Engineering Engine, never inside it: a dataset is
+built exactly the way `/features/dataset` and `/features/export` already
+build one, and only then handed to this engine's rules. Named
+`dataset_validation` rather than `validation` deliberately — this platform
+already has two other things reasonably called "validation"
+(`app/features/validation.py`'s request-time feature-dependency check, and
+`app/services/candle_validation.py`'s stored-candle integrity report, which
+has no REST surface); this is a third, distinct concern with its own
+registry, report schema, and API endpoint, and needed a name that could not
+be confused with either.
+
+**Reuse over parallel implementation — the same rule this platform has
+applied twice already, applied a third time.** `FeatureService.build_raw`
+(renamed from a private `_build` specifically for this) is the _one_
+dataset-building path every consumer shares — `build_dataset`,
+`export_dataset`, and now `DatasetValidationService.validate_dataset` all
+call it. There is no second, parallel "build a dataset to validate it"
+path that could quietly drift from the one everything else uses. Two
+existing helpers are called directly rather than reimplemented a third
+time: `count_duplicate_timestamps` and `count_missing_candles`
+(`app/features/quality.py`), the same functions the dataset builder's own
+`DatasetQualityReport` already uses — called here over the _delivered_
+dataset (post-warmup-trim, post-`preview_rows`-cap) rather than the
+pre-trim candle range the build-time report covers, which is a genuinely
+different, still-useful scope: a caller who set `drop_warmup=false` gets a
+report about the exact series a model would actually receive.
+
+**Rule architecture: Strategy + Registry, a third application of the same
+pattern `app/features/` and `app/indicators/` already establish.**
+
+```text
+app/dataset_validation/
+├── base.py      ValidationRule ABC, ValidationContext/Issue, rule metadata
+├── registry.py  ValidationRuleRegistry (+ the app-wide default_registry)
+├── engine.py    DatasetValidator — runs rules, assembles the report
+├── report.py    ValidationReport, ValidationSummary, CategorySummary
+├── errors.py    Domain errors (AppError + startup-time RuntimeErrors)
+└── rules/       Auto-discovered rule modules
+    ├── structural.py     RequiredColumnsRule, DataTypesRule
+    ├── data_quality.py   MissingValues, DuplicateRows, DuplicateTimestamps,
+    │                     NaNValues, InfiniteValues
+    ├── time_series.py    TimestampOrdering, TimeGaps
+    └── feature_rules.py  MetadataConsistency, FeatureFailure
+```
+
+A `ValidationRule` receives a `ValidationContext` (the built `FeatureDataset`
+plus an optional caller-supplied `required_columns` tuple — the one real,
+tested extension point beyond the dataset itself) and returns zero or more
+`ValidationIssue`s. **Adding a rule is one file**: subclass `ValidationRule`,
+declare `metadata: ValidationRuleMetadata` (name, category, description,
+default severity), implement `check`, decorate with `@register`. Nothing
+else changes — not the engine, the registry, the service, the API, or the
+frontend, since `/validation` renders its rule-catalogue panel entirely
+from `GET /validation/rules`, exactly as `/features` renders its selector
+from `GET /features`.
+
+Only one registration style exists here (unlike the feature registry's
+two) — no rule needs to _wrap_ an already-registered component the way
+`IndicatorFeature` wraps an indicator, so there was nothing to build an
+adapter mechanism for.
+
+**Four categories, eleven builtin rules, matching every named check:**
+
+| Category     | Rules                                                                                       |
+| ------------ | ------------------------------------------------------------------------------------------- |
+| Structural   | `required_columns`, `data_types`                                                            |
+| Data quality | `missing_values`, `duplicate_rows`, `duplicate_timestamps`, `nan_values`, `infinite_values` |
+| Time-series  | `timestamp_ordering`, `time_gaps`                                                           |
+| Feature      | `metadata_consistency`, `feature_failures`                                                  |
+
+Two data-quality rules deliberately distinguish failure modes a single
+"missing values" check would conflate: `nan_values` (a float `NaN` — a
+computation defect, e.g. a division by zero) is not the same defect as
+`missing_values` (a `None` — an intentional, reported absence, usually
+warmup), and `infinite_values` is a third, distinct defect from either.
+Conflating them into one check would report "something is wrong" without
+saying what, which is not actionable.
+
+**Severity is three-tier, exactly like a linter's:** `error`, `warning`,
+`info`. `ValidationReport.passed` is `False` only when at least one `error`
+was found — a `warning`/`info` finding is always reported but never blocks
+the dataset. Two rules are deliberately `warning`-only even though they
+found something real: `duplicate_rows` (a whole row repeating is _usually_
+a red flag but occasionally expected — a flat market, say — so it should
+be seen, not silently block a researcher) and `time_gaps` (a gap in the
+delivered series is worth knowing about, but "the data has a hole" is a
+different severity than "the data is corrupt"). Every other rule that can
+fire at all defaults to `error`, since each represents a defect a model
+should never train on.
+
+**Validation report generation.** `DatasetValidator.validate()` runs every
+registered rule (or a caller-chosen subset by name — an unknown name raises
+`UnknownValidationRuleError`, a 404 naming every valid option) and
+assembles a `ValidationReport`: `dataset_id`/`symbol`/`timeframe` (from the
+dataset it validated), `engine_version` (the _execution pipeline's_ own
+version, independent of any rule's, mirroring `PIPELINE_VERSION`/
+`ENGINE_VERSION` elsewhere on this platform), `validated_at`, `passed`,
+`rules_run`, a headline `summary` (total/errors/warnings/info), a
+per-category `categories` breakdown (every category present at zero rather
+than merely absent, so a UI never has to guess whether "time-series: 0" is
+missing data or a clean bill of health), the flat `issues` list, and
+`rows`/`columns`/`duration_ms`. Every field is JSON-serializable
+(`app/schemas/dataset_validation.py` maps the Pydantic-free engine
+dataclasses onto the wire, the same split `app/schemas/features.py`
+already makes).
+
+**API surface**, mounted beside the features endpoints it depends on
+(`/markets/{symbol}/features/...`, not a new `/datasets/...` namespace —
+one dataset-related URL family, not two):
+
+| Method | Path                                         | Purpose                                                  |
+| ------ | -------------------------------------------- | -------------------------------------------------------- |
+| POST   | `/api/v1/markets/{symbol}/features/validate` | Build a dataset and run every registered rule over it    |
+| GET    | `/api/v1/validation/rules`                   | Catalogue of every registered rule, for a rule-picker UI |
+
+`POST .../validate`'s body is `DatasetValidationRequest` — a
+`FeatureDatasetRequest` _subclass_ adding only `required_columns` and
+`rules`, never a redeclaration of the market/timeframe/range/feature-list
+fields. This is what lets the exact same selection that builds a dataset
+also validate it: a caller changes the URL, not the shape of what they
+send.
+
+**Frontend** (`apps/dashboard/src/features/dataset-validation/`,
+`/validation`): reuses the Feature Engineering page's own `DatasetForm` and
+`FeatureSelector` outright rather than declaring a second dataset-selection
+UI — the identical "reuse, don't duplicate" instruction this whole engine
+was built under. `DatasetForm` gained optional `submitLabel`/`busyLabel`
+props (defaulted to its original "Build Dataset"/"Building…" text, so every
+existing caller is unaffected) so this page can relabel the same action
+"Run Validation" without a second, near-identical form component.
+`toDatasetRange` (the form's preset/custom-date-to-API-bounds conversion)
+was promoted out of the Feature Engineering page's own local `toRange` into
+`src/lib/resolve-dataset-range.ts` once this page needed the identical
+conversion — the "promote on second use" pattern this codebase already
+applies repeatedly (`group-by-category.ts`, `search-catalog.ts`). The page
+renders: a Dataset Configuration section (the reused form plus an optional
+comma-separated "Required columns" field), a Features section (the reused
+selector), an "Available Checks" panel reading `GET /validation/rules` so
+the rule catalogue is visible _before_ running anything, and — once
+validated — summary cards (pass/fail, error/warning/info counts, a
+per-category breakdown), an Error list and a Warning list (one shared
+`ValidationIssueList` component parameterized by severity, not two near-
+identical lists), Statistics (dataset id, rows/columns, rules run, duration),
+and a Download action that serializes the report already in hand as JSON —
+no second backend round-trip, since a validation report (unlike a feature
+dataset) is never truncated in the first place.
+
 ### Feature Store
 
 > Not built. Features are computed on demand and exported; no persisted,

@@ -740,6 +740,105 @@ tests respectively) was re-run after each promotion and passed unmodified —
 the promotions are refactors of _where the logic lives_, not changes to
 what it does.
 
+### Testing the Dataset Validation usability pass
+
+This pass added no backend change at all, so every new test is frontend-
+only (`apps/dashboard/src/features/dataset-validation/`,
+`.../feature-engineering/`). It follows the same layering the rest of this
+document already uses: pure logic tested with no rendering, then
+components, then the page.
+
+**Pure logic, no rendering.** `lib/resolve-required-columns.test.ts`
+covers `columnCategoryFor` (every backend category mapped to its UI
+bucket, and the "Future Features" fallback for one this map doesn't
+recognize — the same graceful-degradation discipline `groupByCategory`'s
+own tests already establish), `resolveRequiredColumnOptions` (a
+parameterized output resolves against a feature's _selected_ parameters
+when it's part of the current selection and its _published defaults_
+otherwise, and a column produced by more than one feature is deduplicated
+once), and `resolvePresetFeatures` (each of the five presets against a
+small fixture catalogue, including one that resolves to an empty set when
+nothing matches). `lib/quality-score.test.ts` pins the exact heuristic (15
+per error, 5 per warning, floored at 0, informational findings never
+counted) and every `qualityBand` boundary. `lib/rule-knowledge.test.ts`
+asserts every one of the eleven builtin rules has curated content
+(including a literal pin of the `duplicate_rows` copy this feature's own
+spec specified verbatim), that an uncurated rule name degrades to an
+honest "Not yet documented" rather than an error, and the same for
+`suggestedFixFor`'s per-`code` fallback — mirroring
+`indicator-knowledge.test.ts`'s exact curated-plus-fallback assertion
+shape, applied to rules instead of indicators.
+
+**Stores.** `use-recent-columns-store.test.ts` mirrors
+`use-recent-features-store.test.ts` test-for-test (front-of-list
+recording, dedup-by-moving-to-front, an eight-entry cap, clearing) —
+expected, since it's the identical `persist`/`sessionStorage` pattern
+applied to column names. `use-favorite-features-store.test.ts` is the one
+store in this codebase deliberately tested _without_ clearing
+`sessionStorage` in its `afterEach` — it persists to `localStorage`
+instead, and the test suite clears that store explicitly to match.
+
+**Components.** `feature-selector.test.tsx` gained four new `describe`
+blocks for the additions shared by both `FeatureSelector` callers:
+metadata display (each row's `v{version} · {category} · {N} columns`
+caption), favorites (star toggle, `aria-pressed`, the quick-pick chip, and
+a persistence-across-remount check proving `localStorage` survival),
+expand/collapse (per-category and bulk Expand All/Collapse All, plus a
+keyboard-navigation test proving Arrow-key focus skips a collapsed
+category's now-hidden rows), and select-all/clear-all (respecting an
+active search filter for Select All, ignoring it for Clear All, and
+disabled-state checks for both). `dataset-form.test.tsx` is a new,
+dedicated file — the component had grown enough new logic (a tooltip
+beside every field) to warrant direct coverage rather than relying only on
+the page-level tests that already exercise it — and its one load-bearing
+test asserts a tooltip **never changes** the field's pre-existing
+`aria-label`/`label` text, since two other pages' tests already query
+those fields by exactly those strings.
+
+`required-columns-selector.test.tsx` and `required-column-presets.test.tsx`
+are new. The former covers the MUI `Autocomplete`
+(`multiple`+`freeSolo`+checkboxes+`groupBy`) end to end: opening it lists
+every resolved option grouped by category, search filters them, selecting
+an option commits its name, a selected feature's own chosen parameters
+(not its defaults) resolve into the option list, typing an arbitrary name
+and pressing Enter still commits it (the preserved `freeSolo` escape
+hatch), and Select All/Clear All/the recently-used row all behave as
+expected. `validation-rule-catalog.test.tsx` and
+`validation-issue-list.test.tsx` were both extended for their new
+expand/collapse behavior (each degrading gracefully for uncurated content,
+per the pattern above) and — `validation-issue-list.test.tsx` specifically
+— the Copy Issue button, using a mocked `navigator.clipboard.writeText`
+since jsdom does not implement the Clipboard API. `validation-report-panel.test.tsx`
+is new and covers the consolidated search/severity-filter/category-filter/
+expand-all/export-issues panel, including that toggling a severity chip
+off and back on is reversible and that "Export Issues" only serializes the
+currently-filtered subset. `validation-summary-cards.test.tsx` was
+extended for the new dataset-shape cards and the Quality Score, scoping
+assertions to a specific card's container (`getByText(label).closest(...)`)
+rather than a bare `getByText(value)` wherever a numeral could otherwise
+collide with an unrelated card showing the same figure.
+
+**A recurring gotcha, worth naming explicitly: MUI's `Collapse` with
+`unmountOnExit` does not remove its content from the DOM synchronously.**
+Its exit transition — even in jsdom, which has no real CSS — still runs
+through an asynchronous fallback timeout before the child unmounts, so a
+test that fires a collapse-triggering click and immediately asserts
+`.not.toBeInTheDocument()` will intermittently see the _pre-collapse_ DOM.
+Every test in this pass that collapses something (a Feature Selector
+category, a rule catalogue row, an issue row) wraps that specific assertion
+in `await waitFor(...)` rather than asserting synchronously — expanding
+(entering) never has this problem and is asserted directly.
+
+**Page-level.** `dataset-validation-page.test.tsx` was substantially
+rewritten: the old free-text "type a comma-separated string" test is
+replaced with driving the real `Autocomplete` (open it, click an option),
+a new test proves applying a preset seeds both the feature selection and
+the required-columns selector correctly (asserting the actual outgoing
+request, not just DOM state), the two old fixed "Errors"/"Warnings"
+section assertions collapsed into one "Validation Report" section check,
+and a new empty-state test asserts the "What validation does"/"How to
+start"/"Example workflow" copy renders before anything has been validated.
+
 ## End-to-End Tests
 
 Not implemented. `tests/` at the repo root is reserved for this; no browser

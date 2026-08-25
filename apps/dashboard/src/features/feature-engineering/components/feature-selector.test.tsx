@@ -1,8 +1,9 @@
 import { ThemeProvider } from '@mui/material/styles';
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { theme } from '@/theme/theme';
 import type { Feature } from '@/types/api/features';
+import { useFavoriteFeaturesStore } from '../store/use-favorite-features-store';
 import { useRecentFeaturesStore } from '../store/use-recent-features-store';
 import type { FeatureSelection } from '../lib/feature-selection';
 import { FeatureSelector } from './feature-selector';
@@ -87,7 +88,9 @@ function renderSelector(props: Partial<React.ComponentProps<typeof FeatureSelect
 afterEach(() => {
   cleanup();
   act(() => useRecentFeaturesStore.getState().clear());
+  act(() => useFavoriteFeaturesStore.getState().clear());
   sessionStorage.clear();
+  localStorage.clear();
 });
 
 describe('FeatureSelector — listing', () => {
@@ -346,5 +349,160 @@ describe('FeatureSelector — parameters', () => {
     fireEvent.change(screen.getByLabelText('Period'), { target: { value: '0' } });
     expect(onParamsChange).not.toHaveBeenCalled();
     expect(screen.getByText(/Must be at least 1/)).toBeInTheDocument();
+  });
+});
+
+describe('FeatureSelector — metadata display', () => {
+  it('shows each generators version, category, and column count', () => {
+    renderSelector();
+    expect(screen.getByText(/v1\.0\.0 · trend · 1 column/)).toBeInTheDocument();
+    expect(screen.getByText(/v1\.0\.0 · raw · 5 columns/)).toBeInTheDocument();
+  });
+});
+
+describe('FeatureSelector — favorites', () => {
+  it('shows no favorites row before anything has been starred', () => {
+    renderSelector();
+    expect(screen.queryByText('Favorites:')).not.toBeInTheDocument();
+  });
+
+  it('stars a feature and lists it under Favorites', () => {
+    renderSelector();
+    fireEvent.click(screen.getByRole('button', { name: 'Add Simple Moving Average to favorites' }));
+    expect(screen.getByText('Favorites:')).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: 'Toggle Simple Moving Average (favorite)' }),
+    ).toBeInTheDocument();
+  });
+
+  it('unstars a feature via its own toggle button', () => {
+    renderSelector();
+    const star = screen.getByRole('button', { name: 'Add Simple Moving Average to favorites' });
+    fireEvent.click(star);
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Remove Simple Moving Average from favorites' }),
+    );
+    expect(screen.queryByText('Favorites:')).not.toBeInTheDocument();
+  });
+
+  it('marks the star button as pressed once favorited', () => {
+    renderSelector();
+    const star = screen.getByRole('button', { name: 'Add Simple Moving Average to favorites' });
+    expect(star).toHaveAttribute('aria-pressed', 'false');
+    fireEvent.click(star);
+    expect(
+      screen.getByRole('button', { name: 'Remove Simple Moving Average from favorites' }),
+    ).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('toggles selection via a favorite chip', () => {
+    const { onToggle } = renderSelector();
+    fireEvent.click(screen.getByRole('button', { name: 'Add Simple Moving Average to favorites' }));
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Toggle Simple Moving Average (favorite)' }),
+    );
+    expect(onToggle).toHaveBeenCalledTimes(1);
+    expect(onToggle.mock.calls[0]![0].name).toBe('sma');
+  });
+
+  it('persists favorites across a remount (localStorage, not sessionStorage)', () => {
+    const { unmount } = renderSelector();
+    fireEvent.click(screen.getByRole('button', { name: 'Add Simple Moving Average to favorites' }));
+    unmount();
+    renderSelector();
+    expect(screen.getByText('Favorites:')).toBeInTheDocument();
+  });
+});
+
+describe('FeatureSelector — expand/collapse categories', () => {
+  it('starts with every category expanded', () => {
+    renderSelector();
+    expect(screen.getByText('Simple Moving Average')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Collapse Trend' })).toBeInTheDocument();
+  });
+
+  it('collapsing a category hides its rows', async () => {
+    renderSelector();
+    fireEvent.click(screen.getByRole('button', { name: 'Collapse Trend' }));
+    // MUI's Collapse unmounts its content only once its exit transition
+    // completes, which is asynchronous even in a test environment.
+    await waitFor(() => {
+      expect(screen.queryByText('Simple Moving Average')).not.toBeInTheDocument();
+    });
+    expect(screen.getByText('OHLCV')).toBeInTheDocument();
+  });
+
+  it('re-expands a collapsed category', async () => {
+    renderSelector();
+    fireEvent.click(screen.getByRole('button', { name: 'Collapse Trend' }));
+    await waitFor(() => {
+      expect(screen.queryByText('Simple Moving Average')).not.toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Expand Trend' }));
+    expect(await screen.findByText('Simple Moving Average')).toBeInTheDocument();
+  });
+
+  it('Collapse All hides every category, Expand All restores them', async () => {
+    renderSelector();
+    fireEvent.click(screen.getByRole('button', { name: 'Collapse All' }));
+    await waitFor(() => {
+      expect(screen.queryByText('Simple Moving Average')).not.toBeInTheDocument();
+      expect(screen.queryByText('OHLCV')).not.toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Expand All' }));
+    expect(await screen.findByText('Simple Moving Average')).toBeInTheDocument();
+    expect(screen.getByText('OHLCV')).toBeInTheDocument();
+  });
+
+  it('keyboard navigation skips rows in a collapsed category', () => {
+    renderSelector();
+    fireEvent.click(screen.getByRole('button', { name: 'Collapse Trend' }));
+    const ohlcvCheckbox = screen.getByRole('checkbox', { name: 'Include OHLCV' });
+    ohlcvCheckbox.focus();
+    fireEvent.keyDown(ohlcvCheckbox, { key: 'ArrowDown' });
+    // SMA (Trend) is collapsed, so the only other visible row is Candle Shape.
+    expect(document.activeElement).toBe(
+      screen.getByRole('checkbox', { name: 'Include Candle Shape' }),
+    );
+  });
+});
+
+describe('FeatureSelector — select all / clear all', () => {
+  it('selects every currently-filtered feature', () => {
+    const { onToggle } = renderSelector();
+    fireEvent.click(screen.getByRole('button', { name: 'Select All' }));
+    expect(onToggle).toHaveBeenCalledTimes(3);
+  });
+
+  it('only selects features matching an active search', () => {
+    const { onToggle } = renderSelector();
+    fireEvent.change(screen.getByRole('textbox', { name: 'Search features' }), {
+      target: { value: 'moving' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Select All' }));
+    expect(onToggle).toHaveBeenCalledTimes(1);
+    expect(onToggle.mock.calls[0]![0].name).toBe('sma');
+  });
+
+  it('clears every selection, even ones hidden by an active filter', () => {
+    const selections: FeatureSelection[] = [
+      { feature: 'ohlcv', params: {} },
+      { feature: 'sma', params: { period: '20' } },
+    ];
+    const { onToggle } = renderSelector({ selections });
+    fireEvent.change(screen.getByRole('textbox', { name: 'Search features' }), {
+      target: { value: 'moving' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Clear All' }));
+    expect(onToggle).toHaveBeenCalledTimes(2);
+  });
+
+  it('disables Select All when nothing is visible, and Clear All when nothing is selected', () => {
+    renderSelector();
+    expect(screen.getByRole('button', { name: 'Clear All' })).toBeDisabled();
+    fireEvent.change(screen.getByRole('textbox', { name: 'Search features' }), {
+      target: { value: 'nonexistent' },
+    });
+    expect(screen.getByRole('button', { name: 'Select All' })).toBeDisabled();
   });
 });

@@ -7,15 +7,16 @@ probabilistic predictions — what exists today, what does not, and the
 contracts the missing pieces will plug into.
 
 Written honestly about status: the platform is **AI-ready at the data
-layer, and nothing more**. Feature engineering is implemented; model
-training, inference, and evaluation are not. Every section below says which
-it is, because a document that describes an aspirational pipeline in the
-present tense is worse than no document at all.
+layer, and nothing more**. Feature engineering and dataset validation are
+implemented; model training, inference, and evaluation are not. Every
+section below says which it is, because a document that describes an
+aspirational pipeline in the present tense is worse than no document at
+all.
 
 ## Status
 
-Draft — Feature Engineering implemented; Models, Training, Inference, and
-Evaluation are design intent only.
+Draft — Feature Engineering and the Dataset Validation Gate implemented;
+Models, Training, Inference, and Evaluation are design intent only.
 
 ## Overview
 
@@ -26,14 +27,16 @@ The stage that produces them is the **Feature Engineering Engine**
 (`docs/architecture/DomainModel.md`).
 
 ```text
-Market Data (D1–D5)  →  Engineered Features (D6)  →  ML Datasets (D7)  →  Models (D8–D9)
-   implemented              implemented                 implemented           not built
+Market Data (D1–D5)  →  Engineered Features (D6)  →  ML Datasets (D7)  →  Validated (gate)  →  Models (D8–D9)
+   implemented              implemented                 implemented         implemented           not built
 ```
 
-The first three stages exist today. A researcher can select a market,
-timeframe, date range, and set of features, build a versioned dataset, and
-export it as CSV or JSON — the input a training job needs. What consumes
-that dataset does not exist yet.
+The first four stages exist today. A researcher can select a market,
+timeframe, date range, and set of features, build a versioned dataset,
+export it as CSV or JSON, and run it through the **Dataset Validation &
+Quality Engine** — the platform's mandatory quality gate — before treating
+it as fit for training, backtesting, or research use. What consumes a
+validated dataset does not exist yet.
 
 ## Data Pipeline
 
@@ -41,13 +44,14 @@ Full architecture in [`ARCHITECTURE.md`](../../ARCHITECTURE.md) § "Feature
 Engineering Engine"; API surface in [`API.md`](../api/API.md) § "Feature
 engineering". In short:
 
-| Stage              | Component                   | Responsibility                                                           |
-| ------------------ | --------------------------- | ------------------------------------------------------------------------ |
-| Candle load        | `services/candle_points.py` | Market/timeframe/range validation, one ordered query, ORM → `OHLCVPoint` |
-| Feature resolution | `features/registry.py`      | Name → generator; the single extension point                             |
-| Feature generation | `features/pipeline.py`      | Validate params → check warmup → generate → verify alignment             |
-| Dataset assembly   | `features/dataset.py`       | Column collision detection, warmup trimming, provenance                  |
-| Serialization      | `features/export.py`        | CSV and JSON, both carrying provenance                                   |
+| Stage              | Component                      | Responsibility                                                           |
+| ------------------ | ------------------------------ | ------------------------------------------------------------------------ |
+| Candle load        | `services/candle_points.py`    | Market/timeframe/range validation, one ordered query, ORM → `OHLCVPoint` |
+| Feature resolution | `features/registry.py`         | Name → generator; the single extension point                             |
+| Feature generation | `features/pipeline.py`         | Validate params → check warmup → generate → verify alignment             |
+| Dataset assembly   | `features/dataset.py`          | Column collision detection, warmup trimming, provenance                  |
+| Serialization      | `features/export.py`           | CSV and JSON, both carrying provenance                                   |
+| Validation gate    | `dataset_validation/engine.py` | Structural, data-quality, time-series, and feature checks, on demand     |
 
 Eight generators ship today: `ohlcv` (5 columns), `candle_shape` (body,
 upper wick, lower wick, direction), and `sma`/`ema`/`wma`.
@@ -119,6 +123,46 @@ failures, and total generation time. A model-training pipeline consuming
 this API should treat a non-empty `feature_failures` or a non-zero
 `duplicate_timestamps`/`missing_candles` as a signal to inspect the dataset
 before training on it, not just its row count.
+
+## Dataset Validation Gate
+
+**Implemented, and the platform's other explicit mandatory gate** (see
+`ARCHITECTURE.md` § "Dataset Validation & Quality Engine" for the full rule
+architecture). Per the project's own stated Data Engineering objective
+("Dataset quality must be measured and reported before any dataset is
+approved for model training or backtesting use" — `PROJECT.md` § Medium-
+Term Goals), a dataset's own `quality` report (above) is necessarily
+partial: it can only describe what the _build_ itself observed. The
+validation gate is a second, independent pass over the _delivered_ dataset
+— run on demand via `POST /markets/{symbol}/features/validate` — checking
+four categories a training pipeline should require pass (or at least
+inspect) before consuming a dataset:
+
+| Category     | What it catches                                                                              |
+| ------------ | -------------------------------------------------------------------------------------------- |
+| Structural   | A declared column that doesn't actually exist; a value that doesn't match its column's dtype |
+| Data quality | Missing values, whole-row duplicates, duplicate timestamps, NaN, and infinite values         |
+| Time-series  | Out-of-order timestamps; gaps in the delivered series at the timeframe's cadence             |
+| Feature      | Row/column count inconsistencies; any feature that failed during generation                  |
+
+The verdict (`passed`) is boolean and mechanical — `False` only when at
+least one `error`-severity finding exists — so a training pipeline can gate
+on it programmatically (`if not report["passed"]: raise`) rather than
+having a human read a report every time. `warning`/`info` findings are
+always included but never block, matching the platform's existing
+"correctness blocks, judgment calls surface" posture (the same three-tier
+severity a linter uses).
+
+**Extensibility**: a new check is one file in
+`app/dataset_validation/rules/` — a class, its metadata, and `@register` —
+with no change to the engine, the API, or the frontend, the identical
+guarantee `FeatureGenerator` and `Indicator` already give their own
+registries. This matters specifically for AI readiness: as concrete
+training/backtesting workflows are built, they will very likely need
+additional checks this initial set does not anticipate (e.g. label
+leakage, class imbalance, feature-target correlation) — the rule
+architecture exists so those arrive as new files, not as changes to
+already-shipped rules.
 
 ## Models
 
@@ -205,10 +249,28 @@ generator's selection row, its parameter form, and its column headers
 directly from the catalogue response. An indicator-backed feature is even
 cheaper: add its name to `INDICATOR_BACKED_FEATURES`.
 
+## What a new validation rule requires
+
+Adding a rule is one file:
+
+1. Create a module in `services/api/app/dataset_validation/rules/` (or add
+   to an existing category module if the check fits one already there).
+2. Subclass `ValidationRule`, declare `metadata: ValidationRuleMetadata`
+   (name, category, description, default severity), and implement
+   `check(ctx) -> list[ValidationIssue]`.
+3. Decorate the class with `@register`.
+
+Nothing else changes — not the engine, the registry, the service, the API,
+or the frontend. `/validation`'s "Available Checks" panel and `GET
+/validation/rules` both render the new rule immediately, with no frontend
+change.
+
 ## References
 
 - [`ARCHITECTURE.md`](../../ARCHITECTURE.md) § "Feature Engineering Engine"
-- [`API.md`](../api/API.md) § "Feature engineering"
-- [`FRONTEND.md`](../../FRONTEND.md) § "Feature Engineering"
+  and § "Dataset Validation & Quality Engine"
+- [`API.md`](../api/API.md) § "Feature engineering" and § "Dataset validation"
+- [`FRONTEND.md`](../../FRONTEND.md) § "Feature Engineering" and
+  § "Dataset Validation"
 - [`docs/architecture/DomainModel.md`](../architecture/DomainModel.md) § BC3
 - [`docs/architecture/DataArchitecture.md`](../architecture/DataArchitecture.md) § D6, D7

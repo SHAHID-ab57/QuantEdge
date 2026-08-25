@@ -39,6 +39,11 @@ All real pages live under the `(dashboard)` route group
 | `/history`     | Implemented — historical candle browser, **Chart** and **Table** tabs   |
 | `/live-market` | Implemented — real-time price, chart, and trade tape (see below)        |
 | `/orderbook`   | Implemented — live depth tables, spread, and depth selector (see below) |
+| `/trades`      | Implemented — Live Trade Analytics Dashboard (see below)                |
+| `/replay`      | Implemented — Historical Market Replay Engine (see below)               |
+| `/indicators`  | Implemented — Technical Indicators calculator + chart overlays          |
+| `/features`    | Implemented — Feature Engineering dataset workbench (see below)         |
+| `/validation`  | Implemented — Dataset Validation & Quality Engine workbench (see below) |
 | `/dashboard`   | Placeholder                                                             |
 | `/research`    | Placeholder                                                             |
 | `/settings`    | Placeholder                                                             |
@@ -2165,6 +2170,224 @@ description, its warmup requirement, and its declared dependencies — each
 with an `InfoTooltip` — so a researcher can see what a feature actually
 needs without leaving the selector.
 
+**Favorites, per-category expand/collapse, and bulk selection — added for
+the Dataset Validation usability pass, and shared by both `FeatureSelector`
+callers (`/features` and `/validation`) for free.** `use-favorite-features-
+store.ts` is deliberately the one Zustand store in this feature area that
+persists to `localStorage`, not `sessionStorage` — a favorite is a
+long-lived, deliberate marking a researcher wants to survive tomorrow, the
+opposite of "recent," which means "this session" by definition. A star
+`IconButton` per row toggles it, and a "Favorites" quick-pick chip row
+renders beside "Recently used," sharing one `QuickPickRow` sub-component
+rather than a second copy of the same chip-rendering logic. Each category
+group's `ListSubheader` gained its own expand/collapse chevron (`Collapse`,
+`unmountOnExit`), plus toolbar-level "Expand All"/"Collapse All" buttons;
+the roving keyboard-navigation list was updated to compute its visible-row
+order from the _expanded_ groups only, so Arrow-key navigation never lands
+on a row that is not currently rendered. "Select All"/"Clear All" reuse the
+existing per-feature `onToggle` callback — calling it once per feature that
+needs to change state — rather than requiring `FeatureSelector`'s public
+props to grow a bulk-selection API; "Select All" respects the active
+search/category filter (it only selects what's currently visible), while
+"Clear All" clears every selection regardless of filter, matching the
+common expectation that a full reset should not depend on what happens to
+be on screen. Each row also now shows its generator's version, category,
+and produced-column count (`v1.0.0 · trend · 1 column`) — all read from the
+catalogue response already fetched for the row, never a new request.
+
+## Dataset Validation
+
+`/validation` (`src/features/dataset-validation/`) is the mandatory
+quality-gate workbench: pick a market, timeframe, range, and features —
+the same selection a dataset build uses — run the validation engine's full
+rule suite over the resulting dataset, and inspect the structured report.
+Backend design lives in [`ARCHITECTURE.md`](ARCHITECTURE.md) § "Dataset
+Validation & Quality Engine"; the API surface is in
+[`docs/api/API.md`](docs/api/API.md) § "Dataset validation".
+
+A usability pass (this section's second half, below "Module layout")
+targeted the page at professional quantitative researchers working with
+large feature sets: a searchable, checkbox-driven Required Columns
+selector in place of free text, curated rule/issue knowledge, a filterable
+report, richer summary cards with a derived Quality Score, and presets —
+**with no change to the validation engine itself**: every addition here
+reuses the existing `POST /features/validate` request shape, the existing
+`GET /validation/rules` catalogue, and the existing report schema. Nothing
+in `app/dataset_validation/` changed to support any of it.
+
+### Module layout
+
+```text
+src/features/dataset-validation/
+├── hooks/use-dataset-validation.ts        rule-catalogue query + validate mutation
+├── lib/
+│   ├── report-filename.ts                 pure filename builder for the report download
+│   ├── resolve-required-columns.ts        Feature Registry metadata → column options + presets
+│   ├── quality-score.ts                   the derived Quality Score heuristic
+│   └── rule-knowledge.ts                  curated "why it matters"/"example failure"/suggested-fix content
+├── store/use-recent-columns-store.ts      session-scoped "recently used" required columns
+├── components/
+│   ├── validation-summary-cards.tsx       pass/fail, size/shape metrics, Quality Score, per-category breakdown
+│   ├── validation-report-panel.tsx        search + severity/category filters + expand-all + export-issues
+│   ├── validation-issue-list.tsx          renders an already-filtered issue array, one row per issue
+│   ├── validation-statistics.tsx          dataset id, rows/columns, rules run, duration
+│   ├── validation-rule-catalog.tsx        GET /validation/rules, grouped by category, expandable
+│   ├── validation-report-download.tsx     JSON download of the full report already in hand
+│   ├── required-columns-selector.tsx      searchable multi-select, grouped, with chips
+│   └── required-column-presets.tsx        one-click starting points for both features and columns
+└── dataset-validation-page.tsx            composition root
+```
+
+### Nothing here duplicates the Feature Engineering page's own dataset selection
+
+`DatasetForm` and `FeatureSelector` are imported **unchanged** from
+`src/features/feature-engineering/`, not redeclared. The backend makes this
+possible: `POST /markets/{symbol}/features/validate`'s body is a
+`FeatureDatasetRequest` _subclass_ (`DatasetValidationRequest`) adding only
+`required_columns` and `rules` — so the exact same market/timeframe/range/
+feature-selection controls that build a dataset also validate one, and a
+second, near-identical selection UI was never needed. `FeatureSelector`'s
+own Favorites/expand-collapse/select-all/bulk-clear additions (see
+"Feature Engineering" above) came from this same usability pass and are
+shared by both callers automatically.
+
+`DatasetForm` gained two optional props to make this reuse possible without
+a fork: `submitLabel`/`busyLabel` (defaulted to the original "Build
+Dataset"/"Building…" text, so the Feature Engineering page — its only other
+caller — is unaffected), letting this page say "Run Validation"/
+"Validating…" for the identical form and action.
+
+`toDatasetRange` (converting the form's range preset or custom start/end
+into the API's half-open UTC bounds) was promoted out of the Feature
+Engineering page's own local `toRange` into `src/lib/resolve-dataset-
+range.ts` once this page needed the identical conversion — the same
+"promote on second use" pattern this codebase already applies repeatedly
+(`group-by-category.ts`, `search-catalog.ts`). Both pages now import one
+function; neither defines its own copy of what "Last 7 Days" means.
+
+### Tooltips on every configurable field
+
+Every field `DatasetForm` renders (Market, Timeframe, Range, Start, End,
+Max rows) now carries an `InfoTooltip` explaining its Purpose, Expected
+values, Validation rules, and a worked Example — plus Required Columns and
+Features on this page itself. The tooltip is placed as a **sibling** of
+each field (a small `FieldTooltip` wrapper), never inside the field's own
+MUI `label` prop: nesting an interactive icon button inside a `<label>`
+element is a known accessibility trap (a screen reader can double-announce
+or mis-associate it), so every field's existing `label`/`aria-label`/
+`helperText` — and every pre-existing test that queries by them — stays
+completely unchanged. `DatasetForm` gained its own dedicated test file
+(`dataset-form.test.tsx`) specifically to pin that a tooltip never changes
+how an existing field is found.
+
+### Required Columns: a searchable, grouped multi-select, not free text
+
+`RequiredColumnsSelector` replaces the original comma-separated text field
+with an MUI `Autocomplete` (`multiple`, `freeSolo`, checkboxes,
+`groupBy`) — the same component `DatasetForm`'s own Market field already
+uses, so this follows the existing design system rather than introducing a
+new selection widget. `freeSolo` stays on deliberately: a researcher can
+still type an arbitrary column name the resolver doesn't know about, which
+matters because requiring a column from a feature that isn't currently
+selected is exactly the scenario a validation gate exists to catch.
+
+The option list is **Feature Registry metadata, not a second data
+source**: `resolveRequiredColumnOptions` (`lib/resolve-required-
+columns.ts`) walks the already-fetched feature catalogue's `outputs`
+templates (e.g. `"sma_{period}"`) and resolves each `{param}` placeholder
+against that feature's _actual selected parameters_ when it's part of the
+current selection, or its published defaults otherwise — mirroring, on the
+frontend, exactly how the backend names a column, without a second backend
+call. Options are grouped into five fixed buckets mapped from each
+feature's backend `category` (Raw Market Data, Technical Indicators,
+Candle Features, Statistical Features, and a Future Features catch-all for
+any category this map doesn't yet recognize — the same graceful-fallback
+guarantee `groupByCategory` already gives the Feature Selector). Select
+All, Clear All, a live selected-count, and a session-scoped "Recently
+used" quick-pick row (`use-recent-columns-store.ts`, the same `persist` +
+`sessionStorage` pattern as recently-used features) round out the control.
+
+### Presets seed both the feature selection and the required columns
+
+`RequiredColumnPresets` offers five one-click starting points — Raw Market
+Data, OHLCV Only, Trend Indicators, AI Basic Features, and Full Dataset —
+each resolved live against the fetched catalogue (`resolvePresetFeatures`),
+never a hardcoded feature list. Applying one sets both `selections` (the
+matched features, each seeded with its own published defaults via the
+existing `defaultParamsFor`) and `requiredColumns` (every column those
+features would produce) in one action; a researcher can still add, remove,
+or reconfigure anything afterward, since a preset is a starting point, not
+a locked configuration.
+
+### Rule catalogue: expandable, with curated "why it matters" content
+
+`ValidationRuleCatalog` still reads `GET /validation/rules` and groups by
+category, but each rule now expands (a `Collapse`, mirroring the Feature
+Selector's own per-feature details panel) to reveal curated "Why it
+matters" and "Example failure" content from `lib/rule-knowledge.ts` —
+frontend-only editorial content, deliberately separate from the backend's
+`ValidationRuleMetadata`, mirroring `indicator-knowledge.ts`'s exact
+curated-content-plus-honest-fallback pattern: a rule this module hasn't
+curated yet still renders a complete panel, one that says plainly "Not yet
+documented for this rule" rather than fabricating an explanation.
+
+### The Validation Report: one filterable panel, not two fixed lists
+
+The former separate "Errors"/"Warnings" sections are now one
+`ValidationReportPanel`: full-text search (rule, code, message, column),
+an independently-toggleable severity filter (error/warning/info — any
+combination), a category filter, and bulk Expand All/Collapse All
+alongside each issue's own expand toggle. `ValidationIssueList` was
+correspondingly simplified to a pure renderer — it takes an
+**already-filtered** `issues` array (no `severity` prop of its own
+anymore) — since search/severity/category filtering all now live one
+level up, in the panel, computed through a single `useMemo` so typing in
+the search box or toggling a chip never re-filters more than once per
+change.
+
+Each issue row shows its rule, severity, category, and message at a
+glance, with a **Copy Issue** button (`navigator.clipboard.writeText`,
+gracefully no-op if clipboard access is unavailable) and, on expand,
+Affected Column, Affected Row, and a **Suggested Fix** — curated per issue
+`code` (not `rule`, since one rule can emit more than one distinct code —
+`required_columns` alone emits both `missing_required_column` and
+`missing_declared_column`) via `suggestedFixFor` in `rule-knowledge.ts`.
+"Export Issues" downloads only the _currently filtered_ issues as a
+separate, narrower JSON artifact than the full report
+`ValidationReportDownload` already offers.
+
+### Summary cards: dataset shape, rule execution, and a derived Quality Score
+
+`ValidationSummaryCards` gained a second row of metrics — Dataset Size
+(rows × columns), Rows, Columns, Features (sourced from the page's own
+selection count, not the report, since validating a dataset doesn't
+require knowing how many features built it), Rules Executed, and
+Validation Time — alongside the existing Result/Errors/Warnings/Info cards
+and per-category breakdown. **Quality Score** (`lib/quality-score.ts`) is
+a deliberately simple, frontend-only heuristic — 100 minus 15 per error
+and 5 per warning, floored at 0 — for scanning many datasets quickly; its
+own tooltip says plainly that it is not a scientific metric, since the
+validation engine's actual contract is the pass/fail verdict plus the
+issue list (see `ARCHITECTURE.md` § "Dataset Validation & Quality Engine"
+on why severity is three-tier rather than a single blended score).
+
+### Report download needs no second backend request
+
+`ValidationReportDownload` serializes the `ValidationReport` object already
+returned by the validation call, as-is, to a JSON `Blob` via the shared
+`downloadBlob` (`src/lib/download-file.ts`) — unlike the Feature
+Engineering page's dataset export, which must re-fetch the complete,
+untruncated dataset from the backend because the on-screen preview is
+deliberately capped. A validation report is never truncated in the first
+place, so what's on screen already _is_ the complete report.
+
+### Empty state: what, how, and an example
+
+Before anything has been validated, the page shows a `GettingStarted`
+panel explaining what the engine checks, the four steps to run it, and a
+worked example (apply a preset, pick a market/timeframe/range, run
+validation) — replacing the earlier single-sentence placeholder.
+
 ## State management
 
 - Server state: TanStack Query (`src/lib/query/queryClient.ts`).
@@ -2176,8 +2399,12 @@ needs without leaving the selector.
   — `sessionStorage`, not `localStorage`, because the requirement is "the
   current session," not indefinite persistence. See "Indicator Management &
   Chart Overlay System" above. `src/features/feature-engineering/store/
-use-recent-features-store.ts` follows the identical pattern for the
-  Feature Selector's "recently used" list.
+use-recent-features-store.ts` and `src/features/dataset-validation/store/
+use-recent-columns-store.ts` follow the identical session-scoped pattern
+  for their own "recently used" lists. `src/features/feature-engineering/
+store/use-favorite-features-store.ts` is the deliberate exception: it
+  persists to `localStorage`, not `sessionStorage`, because a favorite is a
+  long-lived marking meant to survive tomorrow — the opposite of "recent."
 - The chart module keeps its own crosshair-hover state
   (`useState` in `ChartContainer`) — it is presentation-only and does not
   belong in Zustand.

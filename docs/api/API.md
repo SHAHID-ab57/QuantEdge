@@ -15,6 +15,8 @@ The API exposes historical market data and operational monitoring:
 
 - Liveness and metadata: `GET /health`, `GET /api/v1/health`
 - Market data (read-only): `GET /api/v1/markets`, `/api/v1/markets/{symbol}/candles`, ...
+- Feature engineering: `GET /api/v1/features`, `POST /api/v1/markets/{symbol}/features/dataset|export`
+- Dataset validation: `POST /api/v1/markets/{symbol}/features/validate`, `GET /api/v1/validation/rules`
 - Platform health monitoring: `GET /api/v1/system/health|status|metrics`
 
 ## Endpoints
@@ -432,6 +434,118 @@ outright (that case is instead a `200` with zero columns and a fully
 populated `quality.feature_failures`). The shared `market_not_found`,
 `candle_not_found`, `invalid_timeframe`, `invalid_range`, and
 `limit_exceeded` codes apply here too.
+
+### Dataset validation
+
+| Method | Path                                         | Purpose                                                          |
+| ------ | -------------------------------------------- | ---------------------------------------------------------------- |
+| POST   | `/api/v1/markets/{symbol}/features/validate` | Build a dataset and run every registered validation rule over it |
+| GET    | `/api/v1/validation/rules`                   | Catalogue of every registered validation rule                    |
+
+This surface is the platform's mandatory quality gate ahead of AI
+training, backtesting, or research use — see `ARCHITECTURE.md` § "Dataset
+Validation & Quality Engine" for the rule architecture and `AI.md` for how
+it fits the AI-readiness pipeline. It builds nothing new: `POST
+.../validate` builds the _same_ dataset `/features/dataset` and
+`/features/export` build (via the shared `FeatureService.build_raw`), then
+runs the validation engine's rules over it.
+
+**The request body extends the dataset-build request, rather than
+redeclaring it.** `DatasetValidationRequest` is a `FeatureDatasetRequest`
+(the identical `timeframe`/`start`/`end`/`limit`/`features`/`drop_warmup`
+body `/features/dataset` accepts) plus two validation-only fields:
+
+```jsonc
+{
+  "timeframe": "1h",
+  "features": [{ "feature": "ohlcv" }, { "feature": "sma", "params": { "period": "20" } }],
+  "required_columns": ["close", "sma_20"], // optional — additionally require these columns
+  "rules": ["required_columns", "duplicate_timestamps"], // optional — run only this subset
+}
+```
+
+Omitting `rules` runs every registered rule. Naming an unregistered rule
+returns `validation_rule_not_found` (404), listing every valid name.
+
+**Response shape.** A structured, JSON quality report:
+
+```jsonc
+{
+  "dataset_id": "6f1e4a2c-3b8d-4c9a-9e2f-1a7c5d6b8e90",
+  "symbol": "ETHUSD",
+  "timeframe": "1h",
+  "engine_version": "1.0.0", // the validation engine's own version, independent of any rule's
+  "validated_at": "2026-01-01T21:00:05Z",
+  "passed": false, // false only when at least one error-severity issue was found
+  "rules_run": ["required_columns", "data_types", "..."],
+  "summary": { "total_checks": 2, "errors": 1, "warnings": 1, "info": 0 },
+  "categories": {
+    "structural": { "errors": 0, "warnings": 0, "info": 0 },
+    "data_quality": { "errors": 1, "warnings": 0, "info": 0 }, // every category is present, even at zero
+    "time_series": { "errors": 0, "warnings": 1, "info": 0 },
+    "feature": { "errors": 0, "warnings": 0, "info": 0 },
+  },
+  "issues": [
+    {
+      "rule": "duplicate_timestamps",
+      "category": "data_quality",
+      "severity": "error",
+      "code": "duplicate_timestamps",
+      "message": "1 timestamp(s) appear more than once — each row must be uniquely timestamped",
+      "column": null,
+      "row_index": null,
+      "count": 1,
+      "details": {},
+    },
+    {
+      "rule": "time_gaps",
+      "category": "time_series",
+      "severity": "warning",
+      "code": "time_gaps",
+      "message": "1 expected 1h interval(s) are missing from the delivered series",
+      "count": 1,
+    },
+  ],
+  "rows": 480,
+  "columns": 6,
+  "duration_ms": 3.2,
+}
+```
+
+**Severity is three-tier, like a linter's**: `error` (fails the gate, in
+`summary.errors` and `passed`), `warning` (reported, never blocks),
+`info` (context only). `duplicate_rows` and `time_gaps` default to
+`warning` — a repeated row or a gap in the series is worth a researcher's
+attention but is not automatically disqualifying the way a NaN, an
+infinity, or a duplicate/out-of-order timestamp is (every other rule
+defaults to `error`).
+
+**Eleven builtin rules across four categories** — `GET /validation/rules`
+is the live catalogue (name, category, description, default severity);
+today's set:
+
+| Category       | Rules                                                                                       |
+| -------------- | ------------------------------------------------------------------------------------------- |
+| `structural`   | `required_columns`, `data_types`                                                            |
+| `data_quality` | `missing_values`, `duplicate_rows`, `duplicate_timestamps`, `nan_values`, `infinite_values` |
+| `time_series`  | `timestamp_ordering`, `time_gaps`                                                           |
+| `feature`      | `metadata_consistency`, `feature_failures`                                                  |
+
+Adding a rule requires no change to this endpoint's contract — a new rule
+file with `@register` appears in `rules_run`/`GET /validation/rules`
+automatically.
+
+Error codes specific to this endpoint: `validation_rule_not_found` (404 —
+an unregistered name in `rules`). Every error code from `/features/dataset`
+(`market_not_found`, `invalid_timeframe`, `invalid_range`,
+`limit_exceeded`, `duplicate_feature_column`, `missing_feature_dependency`)
+also applies here, since building the dataset is the first step; the four
+partial-success feature codes (`feature_not_found`,
+`invalid_feature_parameter`, `insufficient_data`,
+`feature_execution_failed`) never surface as HTTP errors here either — a
+failed feature is recorded in `quality.feature_failures` during the build
+and then, distinctly, surfaced again as a `feature_generation_failed`
+validation issue by the `feature_failures` rule.
 
 ### Platform health
 

@@ -84,7 +84,7 @@ class FeatureService:
         self, symbol: str, request: FeatureDatasetRequest
     ) -> FeatureDatasetResponse:
         """Build a feature dataset for one market/timeframe/range."""
-        dataset, database_time_ms = await self._build(symbol, request)
+        dataset, database_time_ms = await self.build_raw(symbol, request)
         return FeatureDatasetResponse.from_dataset(
             dataset,
             database_time_ms=database_time_ms,
@@ -105,7 +105,7 @@ class FeatureService:
         it, so a future binary format (Parquet) needs no change here — see
         ``app/features/export.py``.
         """
-        dataset, _ = await self._build(symbol, request)
+        dataset, _ = await self.build_raw(symbol, request)
         export_format = EXPORT_FORMATS[fmt]
         return ExportedDataset(
             content=export_format.serialize(dataset),
@@ -113,7 +113,7 @@ class FeatureService:
             filename=dataset_filename(dataset, export_format.extension),
         )
 
-    async def _build(
+    async def build_raw(
         self, symbol: str, request: FeatureDatasetRequest
     ) -> tuple[FeatureDataset, float]:
         """Load candles once, then run every requested generator over them.
@@ -124,6 +124,13 @@ class FeatureService:
         a longer-period feature would silently shrink an existing dataset,
         which is exactly the kind of quiet, hard-to-notice change that
         makes results irreproducible.
+
+        Public (not the underscore-prefixed helper it once was) because it
+        is the one dataset-building path every consumer shares: this
+        service's own ``build_dataset``/``export_dataset``, and
+        ``DatasetValidationService``, which validates the *exact* dataset
+        those two would otherwise build — never a second, parallel build
+        path that could quietly drift from the one everything else uses.
         """
         load_builtin_features()
         requests = _to_requests(request.features)

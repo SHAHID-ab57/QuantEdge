@@ -10,8 +10,8 @@ import Typography from '@mui/material/Typography';
 import { useCallback, useMemo, useState } from 'react';
 import { Section } from '@/components/section';
 import { useMarkets } from '@/features/history/hooks/use-history-data';
-import { resolveRange } from '@/features/history/lib/resolve-range';
 import type { BuildDatasetParams } from '@/lib/api/features';
+import { toDatasetRange } from '@/lib/resolve-dataset-range';
 import type { Feature } from '@/types/api/features';
 import { DatasetExport } from './components/dataset-export';
 import { DatasetForm, type DatasetFormValues } from './components/dataset-form';
@@ -27,8 +27,6 @@ import {
   type FeatureSelection,
 } from './lib/feature-selection';
 
-const DAY_MS = 86_400_000;
-
 const INITIAL_FORM: DatasetFormValues = {
   market: '',
   timeframe: '',
@@ -38,32 +36,13 @@ const INITIAL_FORM: DatasetFormValues = {
   limit: 500,
 };
 
-/**
- * Convert the form's date inputs into the half-open UTC bounds the API
- * expects, matching the History page's own conversion exactly — the end day
- * is included in full, so "1st to 2nd" covers both days entirely.
- */
-function toRange(values: DatasetFormValues): { start?: string; end?: string } {
-  if (values.range === 'custom') {
-    if (!values.start || !values.end) {
-      return {};
-    }
-    const end = new Date(new Date(`${values.end}T00:00:00Z`).getTime() + DAY_MS)
-      .toISOString()
-      .replace(/\.\d{3}Z$/, 'Z');
-    return { start: `${values.start}T00:00:00Z`, end };
-  }
-  const resolved = resolveRange(values.range);
-  return { start: resolved.start ?? undefined, end: resolved.end ?? undefined };
-}
-
 function buildParams(
   values: DatasetFormValues,
   selections: readonly FeatureSelection[],
 ): BuildDatasetParams {
   return {
     timeframe: values.timeframe,
-    ...toRange(values),
+    ...toDatasetRange(values),
     limit: values.limit,
     features: toRequestBodies(selections),
     preview_rows: PREVIEW_ROWS,

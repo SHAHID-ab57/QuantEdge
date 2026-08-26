@@ -45,7 +45,13 @@ share/python-wheels/
 venv/
 env/
 ENV/
-.python-version
+# .python-version is deliberately NOT ignored here: `services/api/.python-version`
+# pins the project's shared Python version (3.13, matching
+# `pyproject.toml`'s `requires-python`) for every contributor and CI —
+# a committed configuration file, not a per-developer pyenv preference.
+# The generic Python .gitignore template this section was based on
+# assumes the opposite (a personal, uncommitted pin) and was wrong for
+# this repo's actual convention.
 .mypy_cache/
 .ruff_cache/
 .pytype/
@@ -71,11 +77,21 @@ wandb/
 dvc.lock
 dvc.yaml
 .dvc/
-runs/
-experiments/
+# Anchored to the repo root: these are meant to ignore local ML-tooling
+# scratch output (e.g. MLflow/DVC run directories), not any directory that
+# happens to share the name deeper in the tree — unanchored patterns here
+# previously shadowed real source (apps/dashboard/src/features/experiments/,
+# the (dashboard)/experiments/ route, services/api/tests/experiments/,
+# services/api/app/models/ — see services/api/.gitignore's own note on
+# the last one). Every rule in this block is deliberately root-scoped for
+# the same reason; none of them should ever be widened back to a bare,
+# unanchored `name/` pattern.
+/runs/
+/experiments/
+/models/
 
-artifacts/
-datasets/
+/artifacts/
+/datasets/
 *.parquet.tmp*
 
 # Docker

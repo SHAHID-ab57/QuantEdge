@@ -949,6 +949,65 @@ the Feature Engineering suite. This file's own `testTimeout` is raised to
 page render, which occasionally exceeds the default 5s only under the
 full suite's parallel worker contention, never when the file runs alone.
 
+### Testing the Experiment Management System (frontend)
+
+`apps/dashboard/src/features/experiments/` is this platform's first
+dynamic route and its first page built around persistent, full-CRUD
+backend state, so its own test suite follows the usual layering (pure
+logic, then components, then the two composition roots) with one added
+wrinkle: several MUI accessibility-query gotchas that hadn't come up in
+any prior feature's tests.
+
+**Pure logic.** `lib/experiment-status.test.ts` pins the status→label
+capitalization and the color mapping for every status, including that
+`statusLabel` accepts an arbitrary string (not just a known status) since
+the filter bar's status list comes from the backend's own
+`ExperimentListResponse.statuses`.
+
+**Components.** `experiment-filters-bar.test.tsx`,
+`experiment-notes-card.test.tsx`, `experiment-metrics-table.test.tsx`,
+`experiment-artifacts-list.test.tsx`, and `delete-experiment-dialog.test.tsx`
+each cover one interactive component in isolation — search/status/tag
+filter changes, the notes view/edit toggle, the metrics and artifacts
+inline add forms (including that Add stays disabled until the required
+fields are filled, and that unit/description default to `null` rather
+than an empty string), and the delete confirmation dialog's busy state.
+
+**Two new MUI query-scoping gotchas, worth naming so a future test
+doesn't rediscover them the slow way:**
+
+1. **`getByLabelText` matches a `<section>` via `aria-labelledby`, not
+   just a form control's own `aria-label`.** Every `Section` component
+   renders `aria-labelledby` pointing at its heading, so
+   `screen.getByLabelText('Notes')` matches _both_ the whole Notes
+   `<section>` (labelled by its own "Notes" heading) _and_ the notes
+   `<textarea aria-label="Notes">` inside it — "multiple elements found."
+   The fix is scoping: query a more specific `aria-label` first (e.g. the
+   wrapping `Stack`'s `"Edit experiment notes"`) and find the actual
+   control with `within(...).getByRole(...)`, rather than reaching for the
+   generic field name directly.
+2. **An MUI `Select`'s own `aria-label` lands on the outer `InputBase`
+   wrapper, not the inner interactive `role="combobox"` div `mouseDown`
+   needs to actually open the menu** — the same gotcha the ML Dataset
+   Builder's `HorizonPresetSelect` tests already ran into. Where a visible
+   MUI `label` prop exists, query by that (it resolves to the correct
+   inner element); where it doesn't (`ExperimentMetadataPanel`'s status
+   select has no visible `label`, only an `aria-label`), scope with
+   `within(screen.getByLabelText(...)).getByRole('combobox')` instead.
+
+**Page-level.** `experiments-page.test.tsx` covers the list page: loading/
+error/empty states, search/status-filter/sort all producing the expected
+outgoing `fetchExperiments` call, and the create-experiment flow
+(disabled until a name is entered, calls `createExperiment`, navigates to
+the new experiment's detail page on success). `experiment-detail-page.test.tsx`
+covers the detail page: loading/error states, metadata display (including
+the feature set/target/split configuration read from the nested JSON
+fields), the status select calling `updateExperiment`, notes edit-and-save,
+a tag addition sending the full replacement tag set, metric and artifact
+add/delete each calling their own endpoint with the experiment id, and the
+delete-experiment confirm/cancel flow (confirming navigates back to
+`/experiments`; cancelling calls nothing).
+
 ## End-to-End Tests
 
 Not implemented. `tests/` at the repo root is reserved for this; no browser

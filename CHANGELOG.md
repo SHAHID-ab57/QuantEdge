@@ -8,6 +8,63 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Experiment Management System** — the platform's central registry for
+  every experiment run over a versioned ML dataset: configuration,
+  evaluation metrics, and artifact references. This is this platform's
+  **first genuinely persistent, full-CRUD backend domain** — every prior
+  engine (Feature Engineering, Dataset Validation, the ML Dataset Builder)
+  computes a response on demand rather than storing rows.
+
+  - **Schema** (new tables, migration `fa0a2a1c8181`): `experiments`
+    (name, dataset version, feature set, target config, split config, a
+    placeholder model type, status, notes), `experiment_tags` (normalized,
+    not a JSON array — the first structural departure this schema has
+    ever needed, since every existing table is already fully normalized),
+    `experiment_metrics` (the Metrics entity), and `experiment_artifacts`
+    (the Artifact Reference entity — a pointer, never stored file
+    content). `status` is `CHECK`-constrained at the database level to
+    `draft | running | completed | failed | archived`.
+  - **No duplicated dataset-building logic.** `dataset_version`/
+    `feature_set`/`target_config`/`split_config` are recorded as plain
+    strings/JSON, not foreign keys — the ML Dataset Builder never
+    persists a dataset to a table, so an experiment cites its
+    `ml_dataset_id` the way a lab notebook would, not as a live reference.
+  - **CRUD + search/filter/sort API**: `POST`/`GET`/`PATCH`/`DELETE
+/experiments`, plus nested `POST`/`DELETE` for metrics and artifacts.
+    `GET /experiments` reuses the exact whitelisted-sort-column,
+    limit/offset-with-total pagination shape `GET /markets/{symbol}/candles`
+    already established, rather than inventing a second convention.
+    `q` searches name/notes; `status`/`model_type`/`dataset_version`/`tag`
+    filter exactly. A `PATCH` sending `tags` replaces the full tag set.
+  - **Frontend**: a new `/experiments` list page (search, status/tag
+    filters, a sortable/paginated table reusing `TableSortLabel`/
+    `TablePagination` from the History page's own candle table) and
+    `/experiments/[id]` — this platform's **first dynamic route** — a
+    detail page with an editable status, an edit-toggling notes card, an
+    always-live tags editor, a metrics table with an inline add form, and
+    an artifacts list with an inline add form. Every mutation goes
+    straight through the backend with no separate client-side draft state.
+  - 74 new backend tests (`tests/experiments/`,
+    `tests/api/test_experiments_api.py` — CRUD, tag replacement/dedup,
+    cascade-on-delete, every domain error, and search/filter/sort/pagination
+    against real SQL) at 100% coverage of every new backend module; full
+    backend suite still green (1040 passed, 16 skipped). 60 new frontend
+    tests (component tests for every interactive piece, plus full
+    integration tests for both the list and detail pages covering
+    loading/error states and every mutation); full frontend suite passes
+    (1581 tests) with a clean lint, typecheck, and production build.
+  - A real bug caught by its own test suite, worth naming: `replace_tags`
+    initially returned a stale tag list after committing, because
+    `expire_on_commit=False` doesn't invalidate an already-loaded
+    relationship collection on commit — fixed by explicitly expiring the
+    `tags` attribute before the follow-up read, documented in the
+    repository's own docstring.
+  - See `ARCHITECTURE.md` § "Experiment Management System", `AI.md` §
+    "Experiment Management", `API.md` § "Experiment management",
+    `FRONTEND.md` § "Experiment Management", `docs/database/DATABASE.md` §
+    "Experiment Management schema", and both `TESTING.md`s' § "Testing the
+    Experiment Management System".
+
 - **ML Dataset Builder — UX and reproducibility pass.** Turns `/ml-datasets`
   from a dataset generator into a workbench; **no backend change** —
   everything below still goes through the existing `MLDatasetRequest`/

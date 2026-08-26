@@ -16,9 +16,10 @@ all.
 
 ## Status
 
-Draft — Feature Engineering, the Dataset Validation Gate, and the ML
-Dataset Builder implemented; Models, Training (beyond dataset preparation),
-Inference, and Evaluation are design intent only.
+Draft — Feature Engineering, the Dataset Validation Gate, the ML Dataset
+Builder, and Experiment Management (the registry, not model training)
+implemented; Models, Training (beyond dataset preparation), Inference, and
+Evaluation are design intent only.
 
 ## Overview
 
@@ -238,6 +239,65 @@ to eyeball. See `API.md` § "ML dataset builder" for the full request/
 response shape and `TESTING.md` § "Testing the ML Dataset Builder" for how
 the leakage-prevention guarantees above are independently tested.
 
+## Experiment Management
+
+**Implemented** (`services/api/app/models/experiment.py` +
+`app/repositories/experiments.py` + `app/services/experiments.py`; full
+design in `ARCHITECTURE.md` § "Experiment Management System"). Per
+`PROJECT.md`'s own stated objective ("Establish experiment tracking and
+model versioning... Complete experiment provenance ensures that any
+prediction can be traced back to the exact model, data, and parameters
+that produced it"), this is the platform's central registry for recording
+an experiment's configuration and outcome:
+
+```text
+Experiment record: name, dataset_version, feature_set, target_config, split_config, model_type, status, notes, tags
+                    → Metrics (evaluation results)
+                    → Artifact references (files/reports/exports produced)
+```
+
+**This records the intent and result of a training run — it does not run
+one.** No model training exists on this platform (see § "Models" below),
+so `model_type` is explicitly documented, in both the schema and the API,
+as a placeholder label a researcher fills in by hand — not a value this
+system validates against a real model registry, because no such registry
+exists yet.
+
+**Reproducibility, the same principle the ML Dataset Builder already
+established, applied one layer up.** An experiment references its
+dataset by copying the ML Dataset Builder's own `ml_dataset_id` (and the
+resolved feature/target/split configuration that produced it) as plain
+data — not a foreign key, since the dataset itself is never persisted to
+a table (§ "ML Dataset Builder" above). This is the same "cite it like a
+lab notebook would" relationship applied consistently: neither the
+dataset nor the experiment record depends on the other still existing to
+remain meaningful on its own.
+
+**Full CRUD, not an append-only ledger** — deliberately. `docs/
+architecture/DataArchitecture.md` § D9 describes experiment records as
+"persistent and append-only," which this system honors in the sense that
+matters for reproducibility (a re-run of an experiment gets a _new_
+record, never silently overwriting a prior one's history) without
+extending that to "a researcher can never fix a typo or delete a
+duplicate entry" — the same distinction the dataset builder already draws
+between an immutable _build_ and a mutable _view_ over it.
+
+**Search, filter, sort** (`GET /experiments`) reuse the exact whitelisted-
+sort-column and limit/offset-with-total pagination shape `GET /markets/
+{symbol}/candles` already established, rather than inventing a second
+pagination convention for the one other list-shaped endpoint this
+platform has. Tags are their own normalized table
+(`experiment_tags`), not a JSON array — the first genuinely new
+structural choice in this schema, made because a tag is exactly the kind
+of value that benefits from being indexed and joined on, and because
+every other table in this schema is already fully normalized.
+
+See `API.md` § "Experiment management" for the full request/response
+shapes and error codes, `docs/database/DATABASE.md` § "Experiment
+Management schema" for the table definitions, and `TESTING.md` § "Testing
+the Experiment Management System" for how CRUD, search/filter/sort, and
+validation are tested.
+
 ## Models
 
 **Not built.** No model artifacts, no model registry, no training code
@@ -368,12 +428,15 @@ change.
 ## References
 
 - [`ARCHITECTURE.md`](../../ARCHITECTURE.md) § "Feature Engineering Engine",
-  § "Dataset Validation & Quality Engine", and § "ML Dataset Builder"
+  § "Dataset Validation & Quality Engine", § "ML Dataset Builder", and
+  § "Experiment Management System"
 - [`API.md`](../api/API.md) § "Feature engineering", § "Dataset validation",
-  and § "ML dataset builder"
+  § "ML dataset builder", and § "Experiment management"
 - [`FRONTEND.md`](../../FRONTEND.md) § "Feature Engineering", § "Dataset
-  Validation", and § "ML Dataset Builder"
+  Validation", § "ML Dataset Builder", and § "Experiment Management"
 - [`TESTING.md`](../../services/api/TESTING.md) § "Testing the ML Dataset
-  Builder"
-- [`docs/architecture/DomainModel.md`](../architecture/DomainModel.md) § BC3
-- [`docs/architecture/DataArchitecture.md`](../architecture/DataArchitecture.md) § D6, D7
+  Builder" and § "Testing the Experiment Management System"
+- [`docs/database/DATABASE.md`](../database/DATABASE.md) § "Experiment
+  Management schema"
+- [`docs/architecture/DomainModel.md`](../architecture/DomainModel.md) § BC3, BC4
+- [`docs/architecture/DataArchitecture.md`](../architecture/DataArchitecture.md) § D6, D7, D9

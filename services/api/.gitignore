@@ -19,8 +19,12 @@ htmlcov/
 .env.*
 !.env.example
 
-# The repo-wide "models/" rule targets ML artifact directories only;
-# the ORM models package must always be tracked.
+# The repo root's `/models/` rule is anchored to the repo root only (it
+# targets a hypothetical top-level ML-artifact scratch directory, never
+# committed) and therefore cannot match this nested `app/models/` — the
+# ORM models package. The negation below is defense-in-depth only, kept
+# in case a future edit widens the root rule back to a bare, unanchored
+# `models/`; it is not required for `app/models/` to be tracked today.
 !app/models/
 !app/models/**
 app/models/__pycache__/

@@ -2526,6 +2526,77 @@ pressed. Both the dialog and `MLDatasetExport`'s own buttons are rendered
 from `EXPORT_FORMAT_OPTIONS` (data, not two hardcoded components), so a
 future export format needs no redesign of either.
 
+## Experiment Management
+
+`/experiments` and `/experiments/[id]` (`src/features/experiments/`) are
+the frontend for the Experiment Management System — the platform's first
+dynamic route and its first page built around genuinely persistent,
+full-CRUD backend state rather than a computed-on-demand build. Backend
+design lives in [`ARCHITECTURE.md`](ARCHITECTURE.md) § "Experiment
+Management System"; the API surface is in
+[`docs/api/API.md`](docs/api/API.md) § "Experiment management".
+
+```text
+src/features/experiments/
+├── hooks/use-experiments-data.ts       list/detail queries + create/update/delete/metric/artifact mutations
+├── lib/experiment-status.ts            status → color/label mapping
+├── components/
+│   ├── experiment-status-chip.tsx      a colored Chip per status
+│   ├── experiment-filters-bar.tsx      search/status/tag filter controls
+│   ├── experiments-table.tsx           sortable, paginated list (TableSortLabel + TablePagination)
+│   ├── create-experiment-dialog.tsx    register a new experiment
+│   ├── experiment-metadata-panel.tsx   read-only reproducibility fields + an editable status select
+│   ├── experiment-notes-card.tsx       view/edit-toggle free-form notes
+│   ├── experiment-tags-editor.tsx      an always-live tag editor
+│   ├── experiment-metrics-table.tsx    the Metrics entity's table + an inline add form
+│   ├── experiment-artifacts-list.tsx   the Artifact Reference entity's list + an inline add form
+│   └── delete-experiment-dialog.tsx    a confirm-before-delete dialog
+├── experiments-page.tsx                list page composition root
+└── experiment-detail-page.tsx          detail page composition root
+```
+
+**The list page reuses `TableSortLabel`/`TablePagination` outright** from
+`history/components/candles-table.tsx`'s own established pattern, rather
+than inventing a second sortable/paginated table shape — server-side sort
+(clicking a column header calls the backend's own whitelisted `sort`/`dir`
+query params) and limit/offset pagination both mirror the History page's
+candle table exactly.
+
+**The detail page's mutations all go straight through the backend, with
+no client-side draft state beyond what's actively being edited.** Changing
+the status `<select>`, saving notes, or committing a tag change each fire
+an immediate `PATCH /experiments/{id}` and invalidate the same TanStack
+Query cache key family every other mutation on this page uses — there is
+no "save all changes" button collecting several edits into one request,
+since each field is independently meaningful the moment it changes (a
+status transition, in particular, is the experiment's own lifecycle, not
+a draft).
+
+**Notes toggles between view and edit; Tags stays always-editable.** A
+note is a paragraph a researcher reads far more often than they edit, so
+`ExperimentNotesCard` defaults to a read view with an Edit affordance. A
+tag is a short, low-stakes label added or removed in passing, so
+`ExperimentTagsEditor` — like the create dialog's own tag input — is
+always a live `Autocomplete` with no separate edit mode.
+
+**Metadata is deliberately read-only except status.** Dataset version,
+feature set, target configuration, and split configuration describe what
+was actually built and run; editing them after the fact would misrepresent
+the experiment's own reproducibility record. Status is the one field this
+panel lets a researcher change, since a status transition is the
+experiment lifecycle itself (see `AI.md` § "Experiment Management").
+
+**Testing.** `experiments-page.test.tsx` and `experiment-detail-page.test.tsx`
+cover both composition roots end to end (search/filter/sort, create,
+status/notes/tags edits, metric/artifact add and delete, and the
+delete-experiment confirm flow) against a mocked API client; each
+interactive component (`experiment-filters-bar`, `experiment-notes-card`,
+`experiment-metrics-table`, `experiment-artifacts-list`,
+`delete-experiment-dialog`) additionally has its own focused unit test.
+See `docs/testing/TESTING.md` § "Testing the Experiment Management System
+(frontend)" for the full inventory, including the MUI `Select`/`aria-labelledby`
+query-scoping gotchas this suite ran into and how each was resolved.
+
 ## State management
 
 - Server state: TanStack Query (`src/lib/query/queryClient.ts`).

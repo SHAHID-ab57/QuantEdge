@@ -7,6 +7,15 @@ import * as marketApi from '@/lib/api/market';
 import type { Market } from '@/types/api/market';
 import { DatasetValidationPage } from './dataset-validation-page';
 
+// This file's tests each drive a market/timeframe Autocomplete plus a full
+// page render before asserting — heavier than most test files here. The
+// default 5s timeout is occasionally too tight only when the *entire*
+// suite runs under parallel worker contention (never when this file runs
+// alone), so it's raised file-wide rather than patched per test — the
+// same fix already applied to `ml-datasets-page.test.tsx` for the
+// identical reason.
+vi.setConfig({ testTimeout: 15000 });
+
 vi.mock('@/lib/api/market', () => ({
   fetchMarkets: vi.fn(),
   fetchTimeframes: vi.fn(),

@@ -355,6 +355,47 @@ configured maximum; `test_pipeline.py`'s `ZeroHorizon` generator and
 early-return branch and the pipeline's `registry` property, neither of
 which any builtin target's `horizon >= 1` default reaches.
 
+## Testing the Experiment Management System
+
+`tests/experiments/` covers the engine described in `ARCHITECTURE.md` §
+"Experiment Management System" — this platform's first genuinely
+persistent, CRUD-backed domain, tested against the in-memory SQLite
+database rather than isolated stubs, since there is no computation to
+isolate from (unlike Feature/Target/Validation, there's no pluggable
+registry here — a repository test _is_ the unit under test):
+
+| File                 | Covers                                                                                                                                                                                                                                                           |
+| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `test_repository.py` | CRUD (create/get/update/delete), tag replacement (add, remove, deduplicate), metrics/artifacts add+delete+cascade-on-delete, and search/filter/sort/pagination against real SQL                                                                                  |
+| `test_service.py`    | Every domain error (`ExperimentNotFoundError`, `MetricNotFoundError`, `ArtifactNotFoundError`, `InvalidExperimentSortError`), partial updates (including clearing a nullable field and updating the JSON config columns), and summary-row metric/artifact counts |
+
+`tests/api/test_experiments_api.py` covers the same surface end to end
+over ASGI: every CRUD verb, nested metric/artifact create/delete,
+search/filter/sort/pagination via real query parameters, the `422`s
+Pydantic validation produces for a bad `status`/`artifact_type`/empty
+`name`, and the unversioned-mount check every other domain's API test
+file also includes.
+
+**A real bug this suite caught, worth naming explicitly: `expire_on_commit
+=False` does not mean "collections stay fresh after a commit."**
+`ExperimentRepository.replace_tags` mutates the `experiment_tags` child
+rows and commits, but the parent `Experiment.tags` collection already
+loaded in the session's identity map is **not** automatically invalidated
+by that commit (that's exactly what `expire_on_commit=False` opts out of).
+The first version of `replace_tags` returned a stale, pre-mutation tag
+list from `get_by_id` — a same-session identity-map hit short-circuited
+the fresh `selectinload`. `test_replace_tags_adds_and_removes` caught this
+immediately (asserting the _returned_ tags, not just the database's final
+state). The fix is `self.session.expire(experiment, ["tags"])`
+immediately after commit, forcing the next `get_by_id` to actually reload
+the collection — documented in the repository's own docstring so it isn't
+"fixed" back into the bug later.
+
+**100% test coverage** on every new backend module
+(`app/models/experiment.py`, `app/repositories/experiments.py`,
+`app/services/experiments.py`, `app/schemas/experiments.py`,
+`app/dependencies/experiments.py`, `app/api/v1/endpoints/experiments.py`).
+
 ## Gates
 
 Before pushing, run:

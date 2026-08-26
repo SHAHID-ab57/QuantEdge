@@ -7,7 +7,10 @@ FastAPI service in `services/api` (OpenAPI docs at `/docs`).
 
 ## Status
 
-Draft — v1 surface is read-only and unauthenticated (monitoring + market data).
+Draft — unauthenticated throughout. Market data, feature engineering,
+dataset validation, and the ML dataset builder are read-only/build-only;
+Experiment Management is the platform's first genuinely persistent,
+full-CRUD surface.
 
 ## Overview
 
@@ -18,6 +21,7 @@ The API exposes historical market data and operational monitoring:
 - Feature engineering: `GET /api/v1/features`, `POST /api/v1/markets/{symbol}/features/dataset|export`
 - Dataset validation: `POST /api/v1/markets/{symbol}/features/validate`, `GET /api/v1/validation/rules`
 - ML dataset builder: `GET /api/v1/ml/targets`, `POST /api/v1/markets/{symbol}/ml/dataset|dataset/export`
+- Experiment management (full CRUD): `GET|POST /api/v1/experiments`, `GET|PATCH|DELETE /api/v1/experiments/{id}`, plus nested metrics/artifacts
 - Platform health monitoring: `GET /api/v1/system/health|status|metrics`
 
 ## Endpoints
@@ -736,6 +740,115 @@ columns, which is a valid, fully-explained result, not an error). Every
 error code from `/features/dataset` also applies here, since building
 features is the first step; the four partial-success feature codes
 surface identically (recorded in `quality.feature_failures`, not raised).
+
+### Experiment management
+
+| Method | Path                                               | Purpose                                         |
+| ------ | -------------------------------------------------- | ----------------------------------------------- |
+| POST   | `/api/v1/experiments`                              | Register a new experiment                       |
+| GET    | `/api/v1/experiments`                              | Search, filter, sort, and paginate experiments  |
+| GET    | `/api/v1/experiments/{id}`                         | Get one experiment (with metrics and artifacts) |
+| PATCH  | `/api/v1/experiments/{id}`                         | Partial update                                  |
+| DELETE | `/api/v1/experiments/{id}`                         | Delete an experiment and its children           |
+| POST   | `/api/v1/experiments/{id}/metrics`                 | Record a metric                                 |
+| DELETE | `/api/v1/experiments/{id}/metrics/{metric_id}`     | Delete a metric                                 |
+| POST   | `/api/v1/experiments/{id}/artifacts`               | Record an artifact reference                    |
+| DELETE | `/api/v1/experiments/{id}/artifacts/{artifact_id}` | Delete an artifact reference                    |
+
+The platform's one registry for experiment provenance — see
+`ARCHITECTURE.md` § "Experiment Management System" for the full design.
+Unlike every other surface in this document, this is a genuinely
+persistent CRUD resource: an experiment is a real row, not a value
+recomputed on every request.
+
+**Create** (`POST /experiments`):
+
+```jsonc
+{
+  "name": "baseline sma experiment",
+  "dataset_version": "9c1e4a2c-3b8d-4c9a-9e2f-1a7c5d6b8e90", // the ML Dataset Builder's own ml_dataset_id
+  "feature_set": [{ "feature": "sma", "params": { "period": "20" } }],
+  "target_config": [{ "target": "next_close", "params": { "horizon": "1" } }],
+  "split_config": { "train": 0.7, "validation": 0.15, "test": 0.15 },
+  "model_type": "xgboost_baseline", // a placeholder label only — no training engine exists yet
+  "status": "draft", // draft | running | completed | failed | archived — defaults to draft
+  "notes": "first attempt, default hyperparameters",
+  "tags": ["baseline", "sma"],
+}
+```
+
+Every field except `name` is optional. `dataset_version`/`feature_set`/
+`target_config`/`split_config` are **not** validated against a real
+dataset — the ML Dataset Builder never persists one to reference (§ "ML
+dataset builder" above) — they are recorded as given, the same way a lab
+notebook entry would cite them.
+
+**Response shape** — the full record, including its metrics and artifact
+references:
+
+```jsonc
+{
+  "id": "6f1e4a2c-3b8d-4c9a-9e2f-1a7c5d6b8e90",
+  "name": "baseline sma experiment",
+  "dataset_version": "9c1e4a2c-3b8d-4c9a-9e2f-1a7c5d6b8e90",
+  "feature_set": [{ "feature": "sma", "params": { "period": "20" } }],
+  "target_config": [{ "target": "next_close", "params": { "horizon": "1" } }],
+  "split_config": { "train": 0.7, "validation": 0.15, "test": 0.15 },
+  "model_type": "xgboost_baseline",
+  "status": "draft",
+  "notes": "first attempt, default hyperparameters",
+  "tags": ["baseline", "sma"],
+  "metrics": [
+    {
+      "id": "...",
+      "name": "accuracy",
+      "value": 0.87,
+      "unit": "ratio",
+      "recorded_at": "2026-01-01T21:00:05Z",
+    },
+  ],
+  "artifacts": [
+    {
+      "id": "...",
+      "artifact_type": "dataset_export",
+      "uri": "ETHUSD-1h-ml-dataset.csv",
+      "description": null,
+      "created_at": "2026-01-01T21:00:05Z",
+    },
+  ],
+  "created_at": "2026-01-01T21:00:05Z",
+  "updated_at": "2026-01-01T21:00:05Z",
+}
+```
+
+**Search, filter, sort** (`GET /experiments`) — every query parameter is
+optional:
+
+| Parameter         | Meaning                                                                                  |
+| ----------------- | ---------------------------------------------------------------------------------------- |
+| `q`               | Case-insensitive substring match against `name` OR `notes`                               |
+| `status`          | Exact status match                                                                       |
+| `model_type`      | Exact model-type match                                                                   |
+| `dataset_version` | Exact dataset-version match                                                              |
+| `tag`             | Exact tag match (an experiment carrying that tag)                                        |
+| `sort`            | One of `name`, `status`, `model_type`, `created_at`, `updated_at` (default `created_at`) |
+| `dir`             | `asc` or `desc` (default `desc`)                                                         |
+| `limit`/`offset`  | Pagination — same shape as `GET /markets/{symbol}/candles`                               |
+
+The response is `{ experiments: [...summaries], total, limit, offset,
+statuses, artifact_types }` — `statuses`/`artifact_types` are the full
+valid value lists, published so a filter dropdown never hardcodes them.
+Each summary row omits `metrics`/`artifacts` (only their counts) to keep a
+list page light; fetch `GET /experiments/{id}` for the full record.
+
+**`PATCH` semantics**: only fields present in the request body are
+changed. Sending `tags` **replaces** the entire tag set (not a merge) —
+omit it to leave tags untouched.
+
+**Error codes**: `experiment_not_found` / `metric_not_found` /
+`artifact_not_found` (404), `invalid_sort` (400 — unsupported `sort` or
+`dir`). A malformed request body (e.g. an invalid `status` or
+`artifact_type` value) is rejected with FastAPI's standard `422`.
 
 ### Platform health
 

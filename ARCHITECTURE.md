@@ -1329,6 +1329,124 @@ validation/report.py`), so the panel says that rather than inventing a
   alongside its existing global ones. Both changes benefit `/features` and
   `/validation` too, since all three pages share these components.
 
+### Experiment Management System
+
+The AI Research & Training bounded context's (BC4) registry — "what was
+tried, over which dataset, with what configuration, and what happened."
+Unlike the Feature Engineering/Dataset Validation/ML Dataset Builder
+engines above it (all stateless request/response computations over
+already-stored candles), this is the platform's **first genuinely
+persistent, CRUD-backed domain**: an experiment is a real row, created
+once and read/updated/deleted like any registry entry, not a value
+computed fresh on every request.
+
+**Entities**, matching `docs/database/DATABASE.md` § "Experiment
+Management schema" exactly:
+
+| Entity             | Table                  | Purpose                                                                           |
+| ------------------ | ---------------------- | --------------------------------------------------------------------------------- |
+| Experiment         | `experiments`          | Metadata, dataset version, feature/target/split config, model type, status, notes |
+| Tag                | `experiment_tags`      | A normalized, indexable label — not a JSON array column                           |
+| Metric             | `experiment_metrics`   | One recorded evaluation number (name, value, unit, timestamp)                     |
+| Artifact reference | `experiment_artifacts` | A pointer (file path/filename/URL) to something the experiment produced           |
+
+**Reuse over duplication, in the one place it actually applies here**:
+`dataset_version`/`feature_set`/`target_config`/`split_config` are _not_
+foreign keys into anything, because there is nothing to reference — the ML
+Dataset Builder never persists a dataset row (§ "ML Dataset Builder"
+above). An experiment copies the dataset's own `ml_dataset_id` and the
+feature/target/split request shapes verbatim (mirroring
+`MLTargetRequestItem`/`SplitRatiosDTO` field-for-field in
+`app/schemas/experiments.py`, rather than redeclaring an incompatible
+shape) — the same relationship a lab notebook has to the experiment it
+describes: a citation, not a live reference.
+
+**Tags are their own table, not a JSON column — the one new structural
+decision this domain introduces.** Every existing table in this schema
+(`exchanges`/`markets`/`candles`) is fully normalized with zero JSON
+columns; a tag is exactly the kind of value that benefits from staying
+that way, since `GET /experiments?tag=...` is then a real, indexed
+`WHERE experiment_id IN (SELECT ...)` join rather than an in-application
+scan over a growing blob. `feature_set`/`target_config`/`split_config` are
+still stored as `JSON`, deliberately — they are genuinely a nested,
+non-queried configuration snapshot, not something ever filtered or joined
+on, so a real column would only add migration churn for schema shapes
+that are already fully described (and versioned) upstream.
+
+**No pluggable-engine pattern here, on purpose.** Feature/Target/Validation
+are all Strategy + Registry because each has a genuinely open-ended set of
+implementations a third party might add. An experiment record has a fixed
+shape — there is nothing to register — so this domain is modeled the same
+way `Market`/`Candle` already are: `app/models/experiment.py` (ORM),
+`app/repositories/experiments.py` (all SQL, including search/filter/sort),
+`app/services/experiments.py` (orchestration and domain errors,
+mirroring `app/services/market_query.py`'s colocated-errors style), and
+`app/schemas/experiments.py` (DTOs) — not a fourth registry.
+
+**Search, filter, and sort** (`GET /experiments`) follow the exact
+pagination/whitelisted-sort shape `GET /markets/{symbol}/candles` already
+established: `sort`/`dir` are checked against a `SORT_COLUMNS` whitelist
+(`name`, `status`, `model_type`, `created_at`, `updated_at`), raising the
+same shape of `invalid_sort` (400) `InvalidSortError` already uses for
+candles. `q` does a case-insensitive substring match against `name` OR
+`notes`; `status`/`model_type`/`dataset_version` are exact-match filters;
+`tag` filters via a subquery against `experiment_tags`. `limit`/`offset`
+pagination returns `total` alongside the page, exactly like
+`CandlePageResponse`.
+
+**The experiment lifecycle is a status transition, not a delete-and-recreate.**
+`status` moves `draft → running → completed | failed`, with `archived` as
+an explicit "done looking at this" state — enforced as a `CHECK` constraint
+at the database level (`ck_experiments_status_valid`) so an invalid status
+can never reach storage regardless of which layer (Pydantic, the frontend
+form) it might slip past. Full CRUD (including delete) is still supported
+— `docs/architecture/DataArchitecture.md` § D9 describes experiment records
+as "persistent and append-only" in the sense that a re-run never overwrites
+a prior record's history (it gets a new row), not in the sense that a
+researcher can never correct a mistake or remove a bad entry; this is the
+same distinction `FeatureDatasetBuilder` already draws between "a dataset
+is a snapshot, not a live view" and "you can still delete the row about it."
+
+**API surface**, mounted like every other domain (both `/api/v1/*` and
+unversioned):
+
+| Method | Path                                               | Purpose                                         |
+| ------ | -------------------------------------------------- | ----------------------------------------------- |
+| POST   | `/api/v1/experiments`                              | Register a new experiment                       |
+| GET    | `/api/v1/experiments`                              | Search/filter/sort/paginate                     |
+| GET    | `/api/v1/experiments/{id}`                         | One experiment, with metrics and artifacts      |
+| PATCH  | `/api/v1/experiments/{id}`                         | Partial update (only fields sent are changed)   |
+| DELETE | `/api/v1/experiments/{id}`                         | Delete an experiment and its children (cascade) |
+| POST   | `/api/v1/experiments/{id}/metrics`                 | Record a metric                                 |
+| DELETE | `/api/v1/experiments/{id}/metrics/{metric_id}`     | Delete a metric                                 |
+| POST   | `/api/v1/experiments/{id}/artifacts`               | Record an artifact reference                    |
+| DELETE | `/api/v1/experiments/{id}/artifacts/{artifact_id}` | Delete an artifact reference                    |
+
+A `PATCH` sending `tags` **replaces** the full tag set (not a merge) —
+the same "the client sends the whole desired state for this one field"
+contract `ChronologicalSplitter`'s split ratios use, chosen because a
+partial tag merge has no obvious single correct semantics (add-only?
+remove-only? both?) whereas "here is the new tag set" is unambiguous.
+
+**Frontend** (`apps/dashboard/src/features/experiments/`, `/experiments`
+and `/experiments/[id]` — the platform's first dynamic route). A list page
+(search box, status/tag filters, a sortable/paginated table reusing
+`TablePagination`/`TableSortLabel` exactly as `history/components/
+candles-table.tsx` already does, and a create dialog) and a detail page
+(an editable status select, an edit-toggling notes card, an always-live
+tags editor, a metrics table with an inline add form, and an artifacts
+list with an inline add form) — every mutation goes straight through the
+same endpoints above, with no separate client-side draft state.
+
+**Testing.** `tests/experiments/test_repository.py` and `test_service.py`
+cover CRUD, search/filter/sort (including combined filters and pagination
+math), and every partial-success/not-found error path;
+`tests/api/test_experiments_api.py` covers the same surface end to end
+over ASGI. 100% test coverage on every new backend module. See
+`services/api/TESTING.md` § "Testing the Experiment Management System" and
+`docs/testing/TESTING.md`'s frontend counterpart for the full test
+inventory.
+
 ### Feature Store
 
 > Not built. Features are computed on demand and exported; no persisted,
@@ -1338,7 +1456,13 @@ validation/report.py`), so the panel says that rather than inventing a
 
 ### AI Research
 
-> To be completed in future tasks.
+**Partially implemented.** The Experiment Management System above is BC4's
+registry slice — recording configuration, dataset version, and outcomes.
+Everything else BC4 owns (`docs/architecture/DomainModel.md` § BC4:
+managing experiment _training_ itself, evaluating models, the model
+registry) remains not built — this system records the _intent and result_
+of a training run; it does not run one. See `AI.md` § "Experiment
+Management" for the current, honest boundary between the two.
 
 ### Prediction Service
 

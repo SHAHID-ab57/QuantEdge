@@ -41,6 +41,9 @@ class Settings(BaseSettings):
     candles_default_limit: int = 100
     candles_max_limit: int = 1000
 
+    experiments_default_limit: int = 50
+    experiments_max_limit: int = 200
+
     delta_base_url: str = "https://api.india.delta.exchange"
     delta_api_key: str = ""
     delta_api_secret: str = ""

@@ -19,12 +19,13 @@ aspirational.
 ## Overview
 
 PostgreSQL 17 in development (`infra/docker/docker-compose.yml`), accessed
-through SQLAlchemy 2.x async + asyncpg. Two schema families exist:
+through SQLAlchemy 2.x async + asyncpg. Three schema families exist:
 
 | Family                | Tables                                                                         | Owner                                        |
 | --------------------- | ------------------------------------------------------------------------------ | -------------------------------------------- |
 | Market data           | `exchanges`, `markets`, `candles`                                              | Market Data bounded context                  |
 | Experiment Management | `experiments`, `experiment_tags`, `experiment_metrics`, `experiment_artifacts` | AI Research & Training bounded context (BC4) |
+| ML Training Framework | `training_jobs`, `training_job_logs`                                           | AI Research & Training bounded context (BC4) |
 
 Every table uses a surrogate `UUID` primary key (`app/models/base.py`'s
 `BaseModel`) and `created_at`/`updated_at` timezone-aware UTC timestamps
@@ -40,6 +41,8 @@ exchanges 1──* markets 1──* candles
 experiments 1──* experiment_tags
 experiments 1──* experiment_metrics
 experiments 1──* experiment_artifacts
+experiments 1──* training_jobs
+training_jobs 1──* training_job_logs
 ```
 
 Market data is described in full (entities, constraints, business rules)
@@ -119,6 +122,52 @@ since this platform has no object storage wired in yet; see
 | `description`             | `text`          | Nullable                                                                               |
 | `created_at`/`updated_at` | `timestamptz`   |                                                                                        |
 
+### Machine Learning Training Framework schema
+
+Backing the Training Framework (`ARCHITECTURE.md` § "Machine Learning
+Training Framework"; `AI.md` § "Machine Learning Training Framework"). A
+`training_jobs` row always belongs to exactly one `experiments` row — unlike
+an experiment's own `dataset_version` (a citation, since the ML Dataset
+Builder persists nothing), the linked experiment is a real row that already
+exists by the time a job is created, so this is a genuine foreign key.
+
+**`training_jobs`**
+
+| Column                      | Type           | Notes                                                                     |
+| --------------------------- | -------------- | ------------------------------------------------------------------------- |
+| `id`                        | `uuid` PK      |                                                                           |
+| `experiment_id`             | `uuid` FK      | → `experiments.id`, `ON DELETE CASCADE`, not null, indexed                |
+| `dataset_version`           | `varchar(200)` | Nullable — defaults from the linked experiment's own `dataset_version`    |
+| `model_type`                | `varchar(100)` | Not null — a registered model adapter name (`app/training/registry.py`)   |
+| `hyperparameters`           | `json`         | Nullable — arbitrary hyperparameters passed verbatim to the adapter       |
+| `status`                    | `varchar(24)`  | Not null, default `'pending'`; `CHECK` constrained to five values (below) |
+| `current_stage`             | `varchar(32)`  | Nullable — the pipeline stage last entered; frozen on failure             |
+| `error_message`             | `text`         | Nullable                                                                  |
+| `result_summary`            | `json`         | Nullable — the adapter's fabricated metrics/summary                       |
+| `started_at`/`completed_at` | `timestamptz`  | Nullable                                                                  |
+| `created_at`/`updated_at`   | `timestamptz`  |                                                                           |
+
+`status` is `CHECK`-constrained to `'pending' | 'running' | 'completed' |
+'failed' | 'cancelled'` at the database level (`ck_training_jobs_status_valid`)
+— the same value set `app/training/state_machine.py`'s transition rules and
+the frontend's status chip both derive from.
+
+**`training_job_logs`** — one row per log line (the pipeline logs every
+stage's start and completion), the same "growing collection gets its own
+table, not a JSON array" choice `experiment_metrics` already made:
+
+| Column      | Type          | Notes                                                                        |
+| ----------- | ------------- | ---------------------------------------------------------------------------- |
+| `id`        | `uuid` PK     |                                                                              |
+| `job_id`    | `uuid` FK     | → `training_jobs.id`, `ON DELETE CASCADE`, not null, indexed                 |
+| `level`     | `varchar(16)` | `CHECK` constrained to `debug \| info \| warning \| error`, default `'info'` |
+| `stage`     | `varchar(32)` | Nullable — which of the six pipeline stages logged this line                 |
+| `message`   | `text`        | Not null                                                                     |
+| `logged_at` | `timestamptz` | Defaults to insert time                                                      |
+
+Indexed on `(job_id, logged_at)` for "every log line for this job, in
+order" queries.
+
 ## Migrations
 
 Alembic (`services/api/alembic/versions/`), applied in order against the
@@ -129,6 +178,8 @@ local Postgres instance:
 3. `0d1c3a9b5e2f` — add Delta-specific market metadata columns
 4. `fa0a2a1c8181` — create Experiment Management schema (`experiments`,
    `experiment_tags`, `experiment_metrics`, `experiment_artifacts`)
+5. `8cc1992f6c6f` — create Machine Learning Training Framework schema
+   (`training_jobs`, `training_job_logs`)
 
 Run via `services/api/Makefile` targets: `make db-upgrade`, `db-downgrade
 REV=-1`, `db-current`, `db-history`, `make db-create-migration

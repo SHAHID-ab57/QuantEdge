@@ -37,26 +37,43 @@ function Field({ label, value, help }: { label: string; value: string; help?: st
   );
 }
 
-function describeFeatureSet(experiment: Experiment): string {
+/**
+ * Reused wherever a compact, human-readable summary of an experiment's
+ * reproducibility record is needed outside this panel itself — e.g. the
+ * Training Job creation dialog's auto-populated, read-only summary (see
+ * `features/ml-training/components/experiment-summary-fields.tsx`) — so
+ * "how a feature set/target/split reads as text" has exactly one
+ * definition on this platform.
+ */
+export function describeFeatureSet(experiment: Experiment): string {
   if (!experiment.feature_set || experiment.feature_set.length === 0) {
     return 'Not recorded';
   }
   return experiment.feature_set.map((entry) => entry.feature).join(', ');
 }
 
-function describeTargetConfig(experiment: Experiment): string {
+export function describeTargetConfig(experiment: Experiment): string {
   if (!experiment.target_config || experiment.target_config.length === 0) {
     return 'Not recorded';
   }
   return experiment.target_config.map((entry) => entry.target).join(', ');
 }
 
-function describeSplitConfig(experiment: Experiment): string {
+export function describeSplitConfig(experiment: Experiment): string {
   const split = experiment.split_config;
   if (!split) {
     return 'Not recorded';
   }
   return `${(split.train * 100).toFixed(0)}% / ${(split.validation * 100).toFixed(0)}% / ${(split.test * 100).toFixed(0)}%`;
+}
+
+/** The first recorded target's `horizon` parameter, if any target config declares one. */
+export function describePredictionHorizon(experiment: Experiment): string | null {
+  for (const entry of experiment.target_config ?? []) {
+    const horizon = entry.params?.horizon;
+    if (horizon !== undefined) return horizon;
+  }
+  return null;
 }
 
 /**

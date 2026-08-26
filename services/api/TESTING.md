@@ -40,7 +40,10 @@ tests/
 ├── api/                 # HTTP-level tests (FastAPI via httpx/ASGI)
 ├── features/            # Feature Engineering engine (see below)
 ├── dataset_validation/  # Dataset Validation & Quality engine (see below)
+├── experiments/         # Experiment Management repository/service tests
+├── training/            # ML Training Framework tests (see below)
 ├── repository/          # repository tests against in-memory SQLite
+│                        # (plus opt-in `postgres`-marked cascade tests)
 ├── service/             # service-layer tests
 ├── websocket/           # generic WS connection machinery (scripted server)
 ├── event_bus/           # EventBus tests
@@ -395,6 +398,51 @@ the collection — documented in the repository's own docstring so it isn't
 (`app/models/experiment.py`, `app/repositories/experiments.py`,
 `app/services/experiments.py`, `app/schemas/experiments.py`,
 `app/dependencies/experiments.py`, `app/api/v1/endpoints/experiments.py`).
+
+## Testing the Machine Learning Training Framework
+
+`tests/training/` covers the framework described in `ARCHITECTURE.md` §
+"Machine Learning Training Framework", split by the same seam the code
+itself draws between framework-free logic and database-backed
+orchestration:
+
+| File                          | Covers                                                                                                                                                                                                                                                                                                                                                                                        |
+| ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `test_state_machine.py`       | Every legal transition, every illegal transition (parametrized), and that every terminal status has no outgoing edge                                                                                                                                                                                                                                                                          |
+| `test_registry.py`            | Register/get/duplicate-name/unknown-name on a throwaway `ModelAdapterRegistry`, plus that `load_builtin_model_adapters` registers `placeholder` and is idempotent                                                                                                                                                                                                                             |
+| `test_placeholder_adapter.py` | `initialize`'s scalar-hyperparameter validation, and `train`'s determinism (same inputs → identical output; different `epochs` → different fabricated loss)                                                                                                                                                                                                                                   |
+| `test_pipeline.py`            | Every one of the six stages runs in order (plain async stub hooks — no database), and every failure mode (missing dataset version, unknown adapter, `initialize`/`train` raising) stops at the right stage and never reaches `save_results`/`update_experiment`                                                                                                                               |
+| `test_repository.py`          | CRUD, log append-and-order, and search/filter/sort/pagination against real SQL                                                                                                                                                                                                                                                                                                                |
+| `test_service.py`             | Create/get/search/delete/cancel, a full successful `run()` (including that the linked experiment's status/metrics/artifacts are updated), a failed `run()` (missing dataset version, unknown adapter), the lifecycle guard against double-running or deleting a running job, and that a failed run's best-effort experiment update tolerates the experiment having been deleted independently |
+
+`tests/api/test_training_api.py` covers the same surface end to end over
+ASGI, including the model adapter catalogue endpoint and that `/run`
+always returns `200` with the job's final state (never a `5xx`) even when
+the pipeline fails. `tests/repository/test_training_postgres.py` (marked
+`postgres`, mirrors `test_candles_postgres.py`'s opt-in pattern) is the one
+place `ON DELETE CASCADE` on `training_jobs.experiment_id` and
+`training_job_logs.job_id` is actually exercised — the in-memory SQLite
+engine used everywhere else does not enable `PRAGMA foreign_keys`, so a
+cascade-delete test written against it would pass or fail for the wrong
+reason.
+
+**A real gotcha this suite caught, worth naming: the same `expire_on_commit
+=False` staleness `ExperimentRepository.replace_tags` already ran into,
+here for a job's `logs` collection instead of an experiment's `tags`.**
+`TrainingJobRepository.add_log` commits a new log row, but a `TrainingJob`
+already loaded earlier in the same session keeps its stale (possibly
+empty) `logs` collection in the identity map — `selectinload` only reloads
+a relationship that isn't already populated. The fix is the identical one:
+`self.session.expire(job, ["logs"])` right after the commit. A second,
+related gotcha this introduced: any caller that logs _and then_ returns an
+already-held job reference (rather than re-fetching) hands back a stale
+collection — `TrainingJobService.cancel` was reordered to log first, then
+re-fetch, so its response reflects the log line it just wrote.
+
+**100% test coverage** on every new backend module (`app/models/
+training.py`, `app/repositories/training.py`, `app/services/training.py`,
+`app/schemas/training.py`, `app/dependencies/training.py`, `app/api/v1/
+endpoints/training.py`, and every module under `app/training/`).
 
 ## Gates
 

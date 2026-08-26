@@ -8,6 +8,118 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Machine Learning Training Framework — ML Operations UX pass**
+  (frontend-only; the backend CRUD/lifecycle API is unchanged). Transforms
+  `/ml/training` from a functional but plain CRUD page into a
+  discoverability-and-usability-focused dashboard:
+
+  - **Contextual help**: an `InfoTooltip` beside every configurable field
+    (Experiment, Dataset Version, Model Type, Hyperparameters) explaining
+    what it is, why it matters, acceptable values, and where the value
+    comes from; a shared legend documents all five lifecycle statuses
+    once, reused by the status chip, the detail dialog, and the table's
+    Status column header.
+  - **Searchable comboboxes** replace the Experiment/Dataset Version/Model
+    Type fields — `Autocomplete` throughout, with search, keyboard
+    navigation, a built-in clear, and explicit loading/empty states.
+  - **Auto-population**: selecting an experiment fetches its full record
+    (reusing `useExperiment`, the same hook the Experiment detail page
+    uses) and shows its Target/Feature Set/Split Configuration read-only,
+    with Dataset Version pre-filled but overridable.
+  - **A live Training Summary Panel** previews Experiment, Dataset
+    Version, Target, Model, Split, Feature Count, and Prediction Horizon
+    before submission, with warning chips for anything missing — and
+    honestly reports **Estimated Dataset Size** and **Validation Status**
+    as untracked/unknown (with a link to Dataset Validation) rather than
+    fabricating numbers this platform has nowhere to source from.
+  - **Structured hyperparameter UX**: `epochs`, `learning_rate`,
+    `batch_size`, `random_seed`, and `validation_frequency` are now
+    dedicated, validated, defaulted numeric fields with tooltips; any
+    other name/value pair remains a free-form "custom parameter,"
+    rejecting one that collides with a known field name.
+  - **An 8-step pipeline timeline** (`Pending → Dataset Validation →
+Dataset Loaded → Model Initialized → Training → Saving Results →
+Experiment Updated → Completed`) replaces the plain status chip,
+    highlighting the current stage and marking exactly where a failed job
+    stopped.
+  - **Logs** gained per-line timestamps, stage badges, search-to-filter,
+    copy, download, collapse/expand, and auto-scroll while running.
+  - **Empty states** for zero experiments, zero recorded dataset
+    citations, and zero registered model adapters, each linking to the
+    page that fixes it where one exists.
+  - **Confirm-before-act dialogs** for both Delete Job and Cancel Job
+    (a new generic `ConfirmActionDialog`, mirroring `experiments`'
+    existing delete-confirmation pattern).
+  - **Proactive validation**: every reason a submission would fail today
+    (missing experiment/dataset version/model type, or an invalid
+    hyperparameter) is listed live, rather than only a disabled button.
+  - `experiments/components/experiment-metadata-panel.tsx`'s
+    `describeFeatureSet`/`describeTargetConfig`/`describeSplitConfig`
+    helpers are now exported (plus a new `describePredictionHorizon`) so
+    the training summary panel reuses them instead of redefining "how a
+    feature set reads as text" a second time.
+  - 61 new frontend tests across 7 new component test files
+    (`training-job-stage-timeline`, `training-job-logs-panel`,
+    `training-summary-panel`, `confirm-action-dialog`,
+    `empty-state-notice`, plus the rewritten `hyperparameter-editor` and
+    the newly-exported experiment describe-helpers), plus 14 new
+    `ml-training-page` integration tests; full frontend suite (1678
+    tests) passes with a clean lint, typecheck, and production build. No
+    backend files were touched — every existing backend test still
+    passes unmodified.
+
+- **Machine Learning Training Framework** — reusable training
+  orchestration built on top of Experiment Management: a `TrainingJob`
+  entity, a lifecycle state machine (`pending → running → completed |
+failed`, plus `cancelled`), a framework-free six-stage pipeline
+  (`validate_dataset → load_dataset → initialize_model → execute_training
+→ save_results → update_experiment`), a Strategy + Registry model
+  adapter extension point (`app/training/base.py`/`registry.py`), and full
+  CRUD + lifecycle REST endpoints (`/training-jobs`, `.../run`,
+  `.../cancel`, `.../models`). **Implements no real model training** —
+  `PlaceholderModelAdapter` is the only registered adapter, and it
+  fabricates deterministic metrics so the orchestration can be built and
+  tested end to end before a real TensorFlow/PyTorch/scikit-learn
+  integration is wired in.
+
+  - **Schema** (new tables, migration `8cc1992f6c6f`): `training_jobs`
+    (experiment FK, dataset citation, model adapter name, hyperparameters,
+    status, current pipeline stage, error message, result summary) and
+    `training_job_logs` (one row per pipeline-stage log line — a growing
+    collection, not a JSON array, the same choice `experiment_metrics`
+    already made). `status` is `CHECK`-constrained at the database level
+    to `pending | running | completed | failed | cancelled`.
+  - **Reuses `ExperimentService` directly for its "update experiment"
+    stage** — a completed job calls the exact same `update`/`add_metric`/
+    `add_artifact` methods the Experiment Management API itself uses, so
+    a training run's outcome lands in the experiment's existing
+    metrics/artifacts tables with zero duplicated persistence logic.
+  - **Frontend**: a new `/ml/training` page (job list with
+    experiment/status filters, a create dialog with an Experiment
+    selector, a Dataset selector defaulting from the selected
+    experiment, a Model Type selector sourced from the model adapter
+    catalogue, and a generic key/value Hyperparameter editor) and a
+    detail dialog serving as the status monitor (current stage,
+    timestamps, the full log trail, the result summary, and Run/Cancel/
+    Delete actions), polling every 3s while a job is running.
+  - 96 new backend tests (`tests/training/`, `tests/api/
+test_training_api.py`, plus an opt-in `postgres`-marked cascade-delete
+    test) at 100% coverage of every new backend module; full backend
+    suite still green. 66 new frontend tests (component tests for the
+    hyperparameter editor and filters bar, plus full page-level
+    integration tests covering listing, filtering, sorting, job creation,
+    and the detail dialog's status monitor/logs/result summary/actions);
+    full frontend suite passes with a clean lint, typecheck, and
+    production build.
+  - Two gotchas worth naming: (1) `TrainingJobRepository.add_log` hit the
+    same `expire_on_commit=False` staleness `ExperimentRepository.
+replace_tags` already documented — fixed the same way, by expiring the
+    job's `logs` collection after commit; (2) a required MUI `TextField
+select`'s visible asterisk becomes part of its label's accessible
+    name in this MUI version, so the create dialog's Model Type field
+    needed an explicit `aria-label` override to stay queryable by exact
+    text in tests.
+
 - **Experiment Management System** — the platform's central registry for
   every experiment run over a versioned ML dataset: configuration,
   evaluation metrics, and artifact references. This is this platform's

@@ -1447,6 +1447,149 @@ over ASGI. 100% test coverage on every new backend module. See
 `docs/testing/TESTING.md`'s frontend counterpart for the full test
 inventory.
 
+### Machine Learning Training Framework
+
+The AI Research & Training bounded context's (BC4) orchestration layer,
+sitting directly on top of Experiment Management: "run a training attempt
+against an experiment, track its lifecycle, log its progress, and record
+its outcome back onto that experiment." Implements **no real model
+training** — the framework's stated purpose is orchestration, lifecycle
+management, and extensibility, so a future TensorFlow, PyTorch, or
+scikit-learn integration can be added without touching the pipeline,
+service, repository, or API.
+
+**Entities**, matching `docs/database/DATABASE.md` § "Machine Learning
+Training Framework schema" exactly:
+
+| Entity       | Table               | Purpose                                                                                                                             |
+| ------------ | ------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| Training Job | `training_jobs`     | Which experiment, dataset citation, model adapter, hyperparameters, lifecycle status, current pipeline stage, error, result summary |
+| Job Log      | `training_job_logs` | One line per pipeline-stage transition (or adapter-raised error)                                                                    |
+
+**No pluggable-engine pattern for the job entity itself, for the same
+reason `Experiment` isn't one**: a job record has a fixed shape. `app/models/
+training.py` (ORM), `app/repositories/training.py` (all SQL), `app/services/
+training.py` (orchestration, domain errors, and the composition point with
+`ExperimentService`), and `app/schemas/training.py` (DTOs) — not a fourth
+registry, mirroring `Experiment`'s own "registry, not a Strategy" choice.
+
+**The model adapter _is_ a Strategy + Registry, on purpose — the one place
+this domain genuinely is open-ended.** `app/training/base.py`'s
+`ModelAdapter` (an abstract `initialize(hyperparameters)` /
+`train(dataset, hyperparameters) -> TrainingResult` contract) and
+`app/training/registry.py`'s `ModelAdapterRegistry` are the fourth
+Strategy + Registry pair on this platform (after `FeatureGenerator`/
+`TargetGenerator`/`ValidationRule`), because "which model actually runs" is
+exactly the axis a future TensorFlow/PyTorch/scikit-learn integration needs
+to plug into without changing anything else. `app/training/adapters/
+placeholder.py`'s `PlaceholderModelAdapter` is the only adapter registered
+today: it fabricates deterministic metrics (a function of `epochs`/
+`learning_rate` only, never wall-clock time or randomness, so a re-run with
+the same hyperparameters reproduces the same fabricated result) — it does
+not read, load, or train on any real data.
+
+**The job lifecycle is a state machine** (`app/training/state_machine.py`),
+enforced in application code the same way `Experiment.status`'s _value set_
+is enforced by a database `CHECK` constraint — this adds the _transition_
+rule a `CHECK` constraint alone cannot express:
+
+```text
+pending -> running -> completed
+                    -> failed
+pending -> cancelled
+running -> cancelled
+```
+
+`completed`/`failed`/`cancelled` are terminal. `status` is also `CHECK`-
+constrained at the database level (`ck_training_jobs_status_valid`) to the
+same five values, so an invalid status can never reach storage regardless
+of which layer it slips past — the identical belt-and-suspenders design
+`Experiment.status` already uses.
+
+**The training pipeline** (`app/training/pipeline.py`'s `TrainingPipeline`)
+is a fixed six-stage sequence, run by `POST /training-jobs/{id}/run`:
+
+```text
+validate_dataset -> load_dataset -> initialize_model -> execute_training -> save_results -> update_experiment
+```
+
+Framework-free by design, mirroring `app/features/pipeline.py`: the
+pipeline never imports SQLAlchemy or FastAPI. Every stage is logged (start
+and completion, or the exception on failure) through a small `log` async
+callback; the DB-touching stages (`load_dataset`, `save_results`,
+`update_experiment`) are each a callback hook the pipeline is given, not
+something it does itself — `app/services/training.py`'s `TrainingJobService`
+supplies the concrete implementations, the same separation `app/services/
+ml_datasets.py` already draws between "the pure computation" and "the
+database session that surrounds it." Runs **synchronously** within the
+request — no worker/queue service exists anywhere on this platform yet, so
+`/run` blocks for the (near-instant, since nothing real trains) duration
+of the pipeline.
+
+**`update_experiment` reuses `ExperimentService` directly — the one
+integration point this whole framework exists to wire up.** A completed
+job calls `ExperimentService.update(status="completed")`, then
+`add_metric(...)` for every fabricated metric and `add_artifact(artifact_type=
+"model_checkpoint", ...)` for the run's placeholder artifact — the _exact
+same_ methods `POST /experiments/{id}/metrics` and `.../artifacts`
+themselves call. A failed job (any stage raised) instead calls `update(status=
+"failed")`, best-effort (a job whose experiment was independently deleted
+mid-run still reports its own failure correctly; the experiment-update
+failure is logged, not re-raised). Zero experiment-mutating SQL is
+duplicated anywhere in this package.
+
+**Logging** (`training_job_logs`): one row per stage transition, carrying
+`level` (`debug`/`info`/`warning`/`error`), `stage`, and `message` — a
+status monitor polling `GET /training-jobs/{id}` sees the full trail of
+what the pipeline has done so far, in order, including exactly which stage
+a failure occurred at.
+
+**Result summaries**: `TrainingJob.result_summary` (JSON) holds the model
+adapter's fabricated `metrics`, `artifact_uri`, and free-form `summary` —
+written once, at the `save_results` stage, before the same numbers are
+copied onto the experiment at `update_experiment`.
+
+**API surface**, mounted like every other domain (both `/api/v1/*` and
+unversioned):
+
+| Method | Path                                | Purpose                                   |
+| ------ | ----------------------------------- | ----------------------------------------- |
+| GET    | `/api/v1/training-jobs/models`      | The model adapter catalogue               |
+| POST   | `/api/v1/training-jobs`             | Register a new job (starts `pending`)     |
+| GET    | `/api/v1/training-jobs`             | Search/filter/sort/paginate               |
+| GET    | `/api/v1/training-jobs/{id}`        | One job, with its full log trail          |
+| DELETE | `/api/v1/training-jobs/{id}`        | Delete a job (409 if currently `running`) |
+| POST   | `/api/v1/training-jobs/{id}/run`    | Execute the pipeline synchronously        |
+| POST   | `/api/v1/training-jobs/{id}/cancel` | Cancel a `pending` (or `running`) job     |
+
+**Frontend** (`apps/dashboard/src/features/ml-training/`, route
+`/ml/training`). A job list (experiment/status filters, a sortable/
+paginated table reusing `TablePagination`/`TableSortLabel` exactly as
+`experiments-table.tsx` already does) and a create dialog with an
+Experiment selector (an `Autocomplete` over `GET /experiments`), a Dataset
+selector (a text field defaulting from the selected experiment's own
+`dataset_version`), a Model Type selector (populated from `GET
+/training-jobs/models`, never free text — the one field this domain
+constrains to a real registry), and a generic key/value Hyperparameter
+editor (generic because each model adapter defines its own hyperparameter
+space; the framework has no fixed schema to build a typed form against). A
+detail dialog is the status monitor: current status/stage/timestamps, the
+full log trail, the result summary once completed, and Run/Cancel/Delete
+actions — it polls every 3s while `status === "running"`, since the run
+itself has no independent push channel.
+
+**Testing.** `tests/training/` covers the state machine (every legal/
+illegal transition), the model adapter registry and the placeholder
+adapter's determinism, the pipeline (every stage in order, and every
+failure mode, with plain async stub hooks — no database), the repository
+(CRUD/search/filter/sort/logs), and the service (lifecycle, pipeline
+execution, and the experiment-integration path, including the
+best-effort failure path); `tests/api/test_training_api.py` covers the
+same surface end to end over ASGI; `tests/repository/test_training_postgres.py`
+(opt-in, `postgres` marker) exercises the real `ON DELETE CASCADE` the
+in-memory SQLite test engine cannot. 100% test coverage on every new
+backend module. See `docs/testing/TESTING.md` for the full inventory.
+
 ### Feature Store
 
 > Not built. Features are computed on demand and exported; no persisted,

@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     experiments_default_limit: int = 50
     experiments_max_limit: int = 200
 
+    training_jobs_default_limit: int = 50
+    training_jobs_max_limit: int = 200
+
     delta_base_url: str = "https://api.india.delta.exchange"
     delta_api_key: str = ""
     delta_api_secret: str = ""

@@ -14,6 +14,7 @@ from app.models.experiment import (
     ExperimentTag,
 )
 from app.models.market import Market
+from app.models.training import TrainingJob, TrainingJobLog
 
 __all__ = [
     "BaseModel",
@@ -25,4 +26,6 @@ __all__ = [
     "ExperimentMetric",
     "ExperimentTag",
     "Market",
+    "TrainingJob",
+    "TrainingJobLog",
 ]

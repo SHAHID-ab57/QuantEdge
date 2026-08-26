@@ -9,8 +9,9 @@ FastAPI service in `services/api` (OpenAPI docs at `/docs`).
 
 Draft — unauthenticated throughout. Market data, feature engineering,
 dataset validation, and the ML dataset builder are read-only/build-only;
-Experiment Management is the platform's first genuinely persistent,
-full-CRUD surface.
+Experiment Management and the Machine Learning Training Framework are the
+platform's genuinely persistent, full-CRUD surfaces. The Training
+Framework implements no real model training — see its section below.
 
 ## Overview
 
@@ -22,6 +23,7 @@ The API exposes historical market data and operational monitoring:
 - Dataset validation: `POST /api/v1/markets/{symbol}/features/validate`, `GET /api/v1/validation/rules`
 - ML dataset builder: `GET /api/v1/ml/targets`, `POST /api/v1/markets/{symbol}/ml/dataset|dataset/export`
 - Experiment management (full CRUD): `GET|POST /api/v1/experiments`, `GET|PATCH|DELETE /api/v1/experiments/{id}`, plus nested metrics/artifacts
+- Machine Learning Training Framework (full CRUD + lifecycle): `GET|POST /api/v1/training-jobs`, `GET|DELETE /api/v1/training-jobs/{id}`, `POST /api/v1/training-jobs/{id}/run|cancel`, `GET /api/v1/training-jobs/models`
 - Platform health monitoring: `GET /api/v1/system/health|status|metrics`
 
 ## Endpoints
@@ -849,6 +851,105 @@ omit it to leave tags untouched.
 `artifact_not_found` (404), `invalid_sort` (400 — unsupported `sort` or
 `dir`). A malformed request body (e.g. an invalid `status` or
 `artifact_type` value) is rejected with FastAPI's standard `422`.
+
+### Machine Learning Training Framework
+
+| Method | Path                                | Purpose                                                   |
+| ------ | ----------------------------------- | --------------------------------------------------------- |
+| GET    | `/api/v1/training-jobs/models`      | List every registered model adapter (the extension point) |
+| POST   | `/api/v1/training-jobs`             | Register a new training job against an experiment         |
+| GET    | `/api/v1/training-jobs`             | Search, filter, sort, and paginate training jobs          |
+| GET    | `/api/v1/training-jobs/{id}`        | Get one training job (with its full log trail)            |
+| DELETE | `/api/v1/training-jobs/{id}`        | Delete a training job (refuses a running job)             |
+| POST   | `/api/v1/training-jobs/{id}/run`    | Execute the six-stage placeholder pipeline synchronously  |
+| POST   | `/api/v1/training-jobs/{id}/cancel` | Cancel a pending job                                      |
+
+The orchestration layer BC4 adds on top of Experiment Management — see
+`ARCHITECTURE.md` § "Machine Learning Training Framework" for the full
+design. Implements **no real model training**: `POST .../run` executes a
+placeholder pipeline that fabricates deterministic metrics, so the
+lifecycle, logging, and experiment-integration contracts can be exercised
+before a real TensorFlow/PyTorch/scikit-learn adapter is wired in.
+
+**Create** (`POST /training-jobs`):
+
+```jsonc
+{
+  "experiment_id": "6f1e4a2c-3b8d-4c9a-9e2f-1a7c5d6b8e90",
+  "model_type": "placeholder", // must be a name from GET /training-jobs/models
+  "dataset_version": null, // optional — defaults from the experiment's own dataset_version
+  "hyperparameters": { "epochs": 5, "learning_rate": 0.01 },
+}
+```
+
+The job starts in `pending` status. `dataset_version` is not validated
+against a real dataset (the ML Dataset Builder never persists one) — it is
+a citation, exactly as `Experiment.dataset_version` already is.
+
+**Response shape** — the full job record:
+
+```jsonc
+{
+  "id": "...",
+  "experiment_id": "6f1e4a2c-3b8d-4c9a-9e2f-1a7c5d6b8e90",
+  "dataset_version": "9c1e4a2c-3b8d-4c9a-9e2f-1a7c5d6b8e90",
+  "model_type": "placeholder",
+  "hyperparameters": { "epochs": 5, "learning_rate": 0.01 },
+  "status": "completed", // pending | running | completed | failed | cancelled
+  "current_stage": "update_experiment", // the last pipeline stage entered
+  "error_message": null,
+  "result_summary": {
+    "metrics": { "placeholder_loss": 0.166667, "placeholder_accuracy": 0.833333 },
+    "artifact_uri": "placeholder://training-runs/9c1e4a2c-...",
+    "epochs": 5,
+    "learning_rate": 0.01,
+  },
+  "started_at": "2026-01-01T21:00:00Z",
+  "completed_at": "2026-01-01T21:00:01Z",
+  "logs": [
+    {
+      "id": "...",
+      "level": "info",
+      "stage": "validate_dataset",
+      "message": "Starting stage: validate_dataset",
+      "logged_at": "...",
+    },
+  ],
+  "created_at": "2026-01-01T21:00:00Z",
+  "updated_at": "2026-01-01T21:00:01Z",
+}
+```
+
+**Lifecycle** (`app/training/state_machine.py`): `pending -> running ->
+completed | failed`, and `pending | running -> cancelled`. `completed`/
+`failed`/`cancelled` are terminal. `POST .../run` executes the pipeline
+**synchronously** — no worker/queue service exists on this platform yet
+(`AI.md` § "Current status"), so the call blocks for the run's duration
+(near-instant, since no real training happens).
+
+**The pipeline's six stages**, each logged as it starts and completes:
+`validate_dataset` (dataset citation present, model adapter registered) →
+`load_dataset` (resolves the citation into a `TrainingDataset` handle — no
+real rows are read) → `initialize_model` → `execute_training` (the
+adapter's fabricated metrics) → `save_results` (writes `result_summary`) →
+`update_experiment` — this last stage reuses `ExperimentService` directly:
+it sets the linked experiment's `status` to `completed` (or `failed`, if
+any earlier stage raised), and records the run's metrics/artifact through
+the _same_ `POST /experiments/{id}/metrics` / `.../artifacts` logic the
+Experiment Management API itself uses — no duplicated persistence code.
+
+**Search, filter, sort** (`GET /training-jobs`): `experiment_id`, `status`,
+`model_type` filter exactly; `sort` is one of `status`, `model_type`,
+`created_at`, `updated_at`, `started_at`, `completed_at` (default
+`created_at`); `dir` is `asc`/`desc`; `limit`/`offset` paginate, same shape
+as every other list endpoint on this platform.
+
+**Error codes**: `training_job_not_found` / `model_adapter_not_found` (404),
+`invalid_training_job_transition` / `training_job_not_cancellable` (409 —
+an illegal lifecycle move, e.g. running a completed job or deleting a
+running one), `missing_dataset_version` (400 — raised mid-pipeline, surfaces
+as a `failed` job rather than an HTTP error since `/run` always returns
+200 with the job's final state), `invalid_sort` (400).
 
 ### Platform health
 

@@ -1008,6 +1008,94 @@ add/delete each calling their own endpoint with the experiment id, and the
 delete-experiment confirm/cancel flow (confirming navigates back to
 `/experiments`; cancelling calls nothing).
 
+### Testing the Machine Learning Training Framework (frontend)
+
+`apps/dashboard/src/features/ml-training/` follows the same layering as
+`experiments/`: pure logic, then components in isolation, then the two
+composition roots (the list page, and the two dialogs it opens). The
+usability pass (tooltips, searchable comboboxes, auto-population, the
+summary panel, the stage timeline, the improved logs panel, confirm
+dialogs, and proactive validation) added several new focused component
+test files rather than growing the existing ones.
+
+**Pure logic.** `lib/training-job-status.test.ts` pins the status→label/
+color mapping, the stage→label mapping (`STAGE_ORDER`, the single source
+of truth both the log panel's stage badges and the stage timeline read
+from — a deliberate fix: these two once had their own, differently-worded
+copies of the same six labels), and the fallback for a stage the frontend
+doesn't recognize. `experiment-metadata-panel.test.tsx` (in `experiments/`,
+not `ml-training/` — see below) covers `describeFeatureSet`/
+`describeTargetConfig`/`describeSplitConfig`/`describePredictionHorizon`.
+
+**Components.** `hyperparameter-editor.test.tsx` covers the known-field
+numeric validation (integer/bounds/blank-means-omitted for `epochs`/
+`learning_rate`/`batch_size`/`random_seed`/`validation_frequency`, each
+with its own default), the custom key/value list (add/edit/remove, and
+that a custom name colliding with a known field is rejected with an inline
+warning rather than silently overwritten), and the
+`buildHyperparametersPayload`/`coerceHyperparameterValue`/`entriesToRecord`/
+`recordToEntries`/`knownHyperparametersAreValid` helpers.
+`training-job-filters-bar.test.tsx` covers the experiment/status filter
+dropdowns. `training-job-stage-timeline.test.tsx` asserts all eight steps
+always render, the correct step carries `aria-current="step"` while
+running, no step is "active" once the job is `pending`/`completed`/
+`failed`, and a failed job's failing stage is marked without implying
+later stages ran. `training-job-logs-panel.test.tsx` covers search
+filtering, copy (mocking `navigator.clipboard.writeText`), download being
+disabled with no logs, and collapse/expand (which needs an explicit
+`waitFor`/`findBy*` — MUI's `Collapse` unmounts its content asynchronously
+even with `unmountOnExit`, so a synchronous `queryBy*` right after the
+click still sees the old content). `training-summary-panel.test.tsx`
+covers every warning chip appearing when a field is unselected and the
+correct values once an experiment is supplied.
+`confirm-action-dialog.test.tsx` and `empty-state-notice.test.tsx` cover
+the two small generic components each in isolation.
+
+**Two MUI gotchas specific to this feature, worth naming:**
+
+1. **A required MUI `TextField select`'s visible asterisk becomes part of
+   the associated `<label>`'s accessible name in this MUI version.** The
+   create dialog's Model Type field was originally a `TextField select`;
+   `getByLabelText('Model type')` (an exact match) failed until the
+   field's `aria-label` was set explicitly via
+   `slotProps={{ select: { 'aria-label': 'Model type' } }}` — the same fix
+   `experiments`' own required-field tests already needed for a plain
+   `TextField`, just here needed for a _select_ specifically. Model Type
+   was subsequently rewritten as a searchable `Autocomplete` (per the
+   comboboxes requirement); its `renderInput` `TextField` still carries
+   the same explicit `aria-label` override, but now resolves to a real
+   `<input>` element — so `toHaveValue('Placeholder Model')` works
+   directly, unlike the old native select (which required
+   `toHaveTextContent` instead, since MUI's `Select` shows its display
+   text in a `div[role="combobox"]`, not a real `<input>`).
+2. **`Tooltip`-wrapped `IconButton`s render their `aria-label` on both the
+   `Tooltip`'s cloned wrapper `<span>` and the inner `<button>`** when the
+   button is disabled (a disabled element can't receive the pointer
+   events a `Tooltip` needs, so MUI wraps it in a forwarding `<span>`) —
+   `getByLabelText`/`getByText` then finds two matches. `training-job-logs-panel.test.tsx`'s
+   disabled-copy/download assertions and the "copies logs" test query
+   `getByRole('button', { name: ... })` instead, which resolves to the
+   inner `<button>` unambiguously.
+
+**Page-level.** `ml-training-page.test.tsx` covers the list page (loading/
+error/empty states — including "no experiments exist yet" versus "no jobs
+match this filter" — experiment/status filtering, sorting), the create-job
+dialog (proactive validation messaging that updates live and disappears
+once every required field is filled; the Experiment Autocomplete
+auto-filling Dataset Version from the selected experiment; the empty-state
+notices for zero experiments, zero recorded dataset citations, and zero
+model adapters; and successful creation opening the detail dialog), and
+the detail dialog (the stage timeline, the log trail, the result summary
+once completed, the error message on a failed job, and the Run action plus
+the confirm-then-mutate flow for both Cancel and Delete — including
+backing out of a confirmation without triggering the mutation). The
+Experiment selector appearing in both the page's filter bar and the create
+dialog at the same time (once the dialog is open) means tests querying
+"Experiment" scope with `within(screen.getByRole('dialog'))` rather than
+the bare `screen`, to avoid a "multiple elements found" ambiguity — the
+same scoping discipline `experiments`' own tests already established for a
+different ambiguity.
+
 ## End-to-End Tests
 
 Not implemented. `tests/` at the repo root is reserved for this; no browser

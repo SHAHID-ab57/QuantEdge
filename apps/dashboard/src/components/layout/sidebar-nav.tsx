@@ -22,6 +22,7 @@ import FactCheckIcon from '@mui/icons-material/FactCheck';
 import BiotechIcon from '@mui/icons-material/Biotech';
 import ModelTrainingIcon from '@mui/icons-material/ModelTraining';
 import ScienceIcon from '@mui/icons-material/Science';
+import SmartToyIcon from '@mui/icons-material/SmartToy';
 import SettingsIcon from '@mui/icons-material/Settings';
 import HealthAndSafetyIcon from '@mui/icons-material/HealthAndSafety';
 
@@ -44,6 +45,7 @@ const NAV_ITEMS: NavItem[] = [
   { label: 'Validation', href: '/validation', icon: FactCheckIcon },
   { label: 'ML Datasets', href: '/ml-datasets', icon: ModelTrainingIcon },
   { label: 'Experiments', href: '/experiments', icon: BiotechIcon },
+  { label: 'Training', href: '/ml/training', icon: SmartToyIcon },
   { label: 'Research', href: '/research', icon: ScienceIcon },
   { label: 'Settings', href: '/settings', icon: SettingsIcon },
   { label: 'Health', href: '/health', icon: HealthAndSafetyIcon },

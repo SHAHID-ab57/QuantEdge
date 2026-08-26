@@ -44,6 +44,7 @@ All real pages live under the `(dashboard)` route group
 | `/indicators`  | Implemented — Technical Indicators calculator + chart overlays          |
 | `/features`    | Implemented — Feature Engineering dataset workbench (see below)         |
 | `/validation`  | Implemented — Dataset Validation & Quality Engine workbench (see below) |
+| `/ml/training` | Implemented — Machine Learning Training Framework dashboard (see below) |
 | `/dashboard`   | Placeholder                                                             |
 | `/research`    | Placeholder                                                             |
 | `/settings`    | Placeholder                                                             |
@@ -2596,6 +2597,169 @@ interactive component (`experiment-filters-bar`, `experiment-notes-card`,
 See `docs/testing/TESTING.md` § "Testing the Experiment Management System
 (frontend)" for the full inventory, including the MUI `Select`/`aria-labelledby`
 query-scoping gotchas this suite ran into and how each was resolved.
+
+## Machine Learning Training Framework
+
+`/ml/training` (`src/features/ml-training/`) is the frontend for the
+Machine Learning Training Framework — an "ML Operations dashboard" over
+the Training Job CRUD + lifecycle API, layered directly on top of
+Experiment Management. Backend design lives in
+[`ARCHITECTURE.md`](ARCHITECTURE.md) § "Machine Learning Training
+Framework"; the API surface is in [`docs/api/API.md`](docs/api/API.md) §
+"Machine Learning Training Framework". No backend change was needed to
+build this page — the UX pass described below is entirely a frontend
+enhancement over the framework's existing CRUD/lifecycle surface.
+
+```text
+src/features/ml-training/
+├── hooks/use-training-jobs-data.ts        list/detail (polls while running)/catalogue queries + create/run/cancel/delete mutations
+├── lib/
+│   ├── training-job-status.ts             status → color/label, and the six-stage STAGE_ORDER (single source of truth)
+│   ├── training-job-help.ts               every InfoTooltip's copy, so wording never drifts between two places it appears
+│   └── hyperparameter-specs.ts            the five known hyperparameters' defaults, bounds, and validation
+├── components/
+│   ├── training-job-status-chip.tsx       a colored, tooltip-explained Chip per status
+│   ├── training-job-filters-bar.tsx       experiment/status filter controls
+│   ├── training-jobs-table.tsx            sortable, paginated list (TableSortLabel + TablePagination), Status column tooltip-legend
+│   ├── create-training-job-dialog.tsx     register a new job: Experiment/Dataset Version/Model Type comboboxes, live summary, hyperparameters
+│   ├── training-summary-panel.tsx         live, read-only preview of exactly what the job being created will train for
+│   ├── hyperparameter-editor.tsx          five validated numeric fields (known params) + a generic key/value list (custom params)
+│   ├── empty-state-notice.tsx             "there's nothing to select yet" notices, each linking to the page that fixes it
+│   ├── training-job-detail-dialog.tsx     status monitor + logs + result summary + lifecycle actions
+│   ├── training-job-stage-timeline.tsx    the 8-step pipeline checklist (Pending → … → Completed)
+│   ├── training-job-logs-panel.tsx        searchable, collapsible log trail with copy/download
+│   └── confirm-action-dialog.tsx          a generic "are you sure" dialog, shared by Delete Job and Cancel Job
+└── ml-training-page.tsx                    list page composition root
+```
+
+**Every configurable field carries an `InfoTooltip`** (the same ⓘ
+component `experiments`/`ml-datasets`/`indicators` already use), explaining
+what it is, why it matters, acceptable values, and where the value comes
+from — content centralized in `lib/training-job-help.ts` so the create
+dialog and the detail dialog's status legend never drift out of sync with
+each other. `TRAINING_STATUS_HELP`/`TRAINING_STATUS_LEGEND` document all
+five lifecycle states (`pending`/`running`/`completed`/`failed`/
+`cancelled`) once, reused by the status chip's own tooltip, the detail
+dialog's legend, and the table's Status column header.
+
+**Experiment, Dataset Version, and Model Type are all searchable
+comboboxes**, not plain `<select>`s. Experiment and Model Type are MUI
+`Autocomplete`s over `GET /experiments` and `GET /training-jobs/models`
+respectively (search, keyboard navigation, and a built-in clear button all
+come from `Autocomplete` itself); Dataset Version is a `freeSolo`
+`Autocomplete` whose suggestions are every distinct `dataset_version`
+already recorded across every experiment — letting a researcher reuse a
+known dataset citation by search, while still allowing an arbitrary
+override, since the ML Dataset Builder persists no dataset registry to
+select from authoritatively (see `app/training/base.py`'s `TrainingDataset`
+docstring).
+
+**Selecting an experiment auto-populates Dataset Version, Target, Feature
+Set, and Split Configuration.** The dialog fetches the experiment's full
+record via `useExperiment` (`features/experiments/hooks/
+use-experiments-data.ts` — the exact same hook the Experiment detail page
+itself uses, not a second copy) the moment it's selected. Dataset Version
+is the one field a researcher may then override — switching experiments
+again does not clobber a hand-edited override, tracked via a
+`datasetVersionTouched` bit. Target/Feature Set/Split Configuration are
+never editable here, mirroring `ExperimentMetadataPanel`'s own "these
+describe what was actually built and run" read-only stance; `TrainingSummaryPanel`
+reuses that panel's own `describeFeatureSet`/`describeTargetConfig`/
+`describeSplitConfig`/`describePredictionHorizon` helpers (exported from
+`experiments/components/experiment-metadata-panel.tsx`) rather than
+redefining "how a feature set reads as text" a second time.
+
+**The Training Summary Panel is a live preview, not a separate confirm
+step.** It re-renders on every keystroke/selection, showing Experiment,
+Dataset Version, Target, Model, Split, Feature Count, and Prediction
+Horizon pulled straight from the form's own state — plus two fields that
+are honestly reported as unavailable rather than fabricated: **Estimated
+Dataset Size** ("Not tracked" — the ML Dataset Builder persists no row
+counts against a `dataset_version` citation) and **Validation Status**
+("Unknown" — this platform persists no per-dataset-version validated flag;
+a link to `/validation` is offered instead of a fake pass/fail badge). A
+warning `Chip` (not a blank cell) marks anything still missing.
+
+**Hyperparameters are five validated, defaulted numeric fields, plus a
+free-form list for anything else.** `epochs`, `learning_rate`,
+`batch_size`, `random_seed`, and `validation_frequency` — the parameters a
+real model adapter is expected to read — get dedicated `TextField
+type="number"` inputs pre-filled with sensible defaults, bounds-checked
+inline (`validateHyperparameterValue`), and tooltipped; a blank field is
+omitted from the payload rather than sent as `0`. Anything else is a
+"custom parameter," entered the same generic key/value way the original
+implementation worked, with a numeric/boolean coercion pass
+(`coerceHyperparameterValue`) — a custom name colliding with a known field
+is rejected with an inline warning rather than silently overwritten.
+
+**Validation is proactive, not just a disabled button.** Every reason a
+submission would fail today (no experiment, no dataset version, no model
+type, or an invalid hyperparameter) is listed in a warning `Alert` the
+moment the dialog opens, updating live as fields are filled — "explain why"
+rather than leaving a researcher to guess why Create is greyed out. Each
+of the three comboboxes also renders its own empty-state notice
+(`EmptyStateNotice`) when there is nothing to select: no experiments exist
+(→ Create an Experiment, linking to `/experiments`), no experiment has
+ever recorded a dataset citation (→ Build a dataset, linking to
+`/ml-datasets`), or no model adapter is registered (a backend-only fix,
+so no link — see `app/training/adapters/`). The jobs table shows the same
+distinction at the list level: "no experiments exist yet" versus "no jobs
+match this filter."
+
+**The status chip became an 8-step timeline.** `TrainingJobStageTimeline`
+walks `Pending → Dataset Validation → Dataset Loaded → Model Initialized →
+Training → Saving Results → Experiment Updated → Completed` — the exact
+six pipeline stages `app/training/pipeline.py` executes, framed by the
+job's own start and completion. It derives every step's state (done /
+active / error / cancelled / pending) purely from the two fields the old
+plain chip already read (`status`, `current_stage`) — richer _rendering_ of
+existing data, not new backend state. A failed job shows the failing stage
+with an error mark and leaves everything after it un-attempted, rather
+than implying progress that never happened.
+
+**Logs gained search, copy, download, collapse, and explicit timestamps.**
+`TrainingJobLogsPanel` renders each line's wall-clock time, a level `Chip`,
+and a stage `Chip` (labels sourced from the same `STAGE_ORDER` the
+timeline uses); a search box filters the visible trail; Copy
+(`navigator.clipboard.writeText`) and Download (`downloadBlob`, the same
+helper `history`/`indicators` export use for CSV/JSON) always act on the
+_full_, unfiltered trail, not just what search happens to be showing; the
+panel auto-scrolls to the newest line while `status === "running"`.
+
+**Every lifecycle action that can't be undone goes through
+`ConfirmActionDialog` first** — Delete Job and Cancel Job each open a
+confirm step (mirroring `experiments/components/delete-experiment-dialog.tsx`'s
+own shape, generalized so both actions share one implementation) before
+the mutation actually fires.
+
+**Accessibility**: every `InfoTooltip` is a real, keyboard-focusable
+`IconButton` with an explicit `aria-label` (the shared component's own
+contract — see `components/info-tooltip.tsx`); the stage timeline is a
+semantic `<ol>`/`<li>` list with `aria-current="step"` on the active step;
+the log panel is `role="log"` with `aria-live="polite"` so new lines are
+announced while a job is running; every icon-only button (delete, cancel,
+copy, download, collapse/expand) carries a descriptive `aria-label` rather
+than relying on its icon alone.
+
+**Testing.** Every new/changed component has its own focused test:
+`hyperparameter-editor.test.tsx` (known-field validation and defaults,
+custom-parameter add/remove/collision), `training-job-stage-timeline.test.tsx`
+(every one of the eight steps always renders; the correct step is marked
+active/error per status; `aria-current` placement), `training-job-logs-panel.test.tsx`
+(search filtering, copy, download-disabled-when-empty, collapse/expand),
+`training-summary-panel.test.tsx` (warning chips when fields are missing;
+correct values once an experiment is selected), `confirm-action-dialog.test.tsx`,
+`empty-state-notice.test.tsx`, and `experiment-metadata-panel.test.tsx`
+(the newly-exported `describe*` helpers, including the new
+`describePredictionHorizon`). `ml-training-page.test.tsx` covers the whole
+page end to end: listing/filtering/sorting, the create dialog's
+auto-population, live summary, proactive validation messaging, and all
+three empty states, and the detail dialog's timeline/logs/result summary
+plus the confirm-then-mutate flow for both Cancel and Delete. See
+`docs/testing/TESTING.md` § "Testing the Machine Learning Training
+Framework (frontend)" for the full inventory, including one MUI
+accessible-name gotcha this pass ran into (a required `TextField select`'s
+visible asterisk becomes part of its label's text in this MUI version).
 
 ## State management
 

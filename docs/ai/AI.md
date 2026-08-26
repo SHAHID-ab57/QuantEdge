@@ -7,19 +7,22 @@ probabilistic predictions — what exists today, what does not, and the
 contracts the missing pieces will plug into.
 
 Written honestly about status: the platform is **AI-ready at the data
-layer, and nothing more**. Feature engineering, dataset validation, and the
-ML Dataset Builder (target generation, chronological splitting, versioned
-export) are implemented; model training, inference, and evaluation are not.
-Every section below says which it is, because a document that describes an
-aspirational pipeline in the present tense is worse than no document at
-all.
+layer, and now has a real training-job lifecycle, but still no real
+model**. Feature engineering, dataset validation, the ML Dataset Builder
+(target generation, chronological splitting, versioned export), Experiment
+Management, and the Machine Learning Training Framework (job lifecycle,
+pipeline orchestration, logging) are implemented; real model training,
+inference, and evaluation are not. Every section below says which it is,
+because a document that describes an aspirational pipeline in the present
+tense is worse than no document at all.
 
 ## Status
 
 Draft — Feature Engineering, the Dataset Validation Gate, the ML Dataset
-Builder, and Experiment Management (the registry, not model training)
-implemented; Models, Training (beyond dataset preparation), Inference, and
-Evaluation are design intent only.
+Builder, Experiment Management (the registry), and the Machine Learning
+Training Framework (job lifecycle + placeholder pipeline, not real model
+training) implemented; real Models, Inference, and Evaluation are design
+intent only.
 
 ## Overview
 
@@ -300,28 +303,100 @@ validation are tested.
 
 ## Models
 
-**Not built.** No model artifacts, no model registry, no training code
-exists in this repository. `docs/architecture/DomainModel.md` § BC4 defines
-the intended bounded context (AI Research & Training) and
-`DataArchitecture.md` § D8–D9 the intended artifacts.
+**No real model artifacts, no model registry, no real training code exists
+in this repository — the orchestration around where they would plug in now
+does.** `docs/architecture/DomainModel.md` § BC4 defines the intended
+bounded context (AI Research & Training) and `DataArchitecture.md` § D8–D9
+the intended artifacts. `app/training/base.py`'s `ModelAdapter` is the
+extension point a real model would implement (`initialize`/`train`,
+resolved by name through `app/training/registry.py`'s
+`ModelAdapterRegistry`); `app/training/adapters/placeholder.py`'s
+`PlaceholderModelAdapter` is the only adapter registered today, and it
+fabricates deterministic metrics rather than training anything. When a
+real model is built, its input is the dataset described above — which is
+why the dataset carries versioned provenance: a model artifact must be
+able to name the exact dataset definition it was trained on.
 
-When it is built, its input is the dataset described above — which is why
-the dataset carries versioned provenance: a model artifact must be able to
-name the exact dataset definition it was trained on.
+## Machine Learning Training Framework
 
-## Training Pipeline
+**Implemented as orchestration and lifecycle management; implements no
+real model training** (`services/api/app/training/` + `app/models/
+training.py` + `app/services/training.py`; full design in `ARCHITECTURE.md`
+§ "Machine Learning Training Framework"). This is the seam
+`PROJECT.md`'s "experiment run" arrow (below) plugs into: a `TrainingJob`
+records which experiment it trains for, which registered model adapter runs
+it, its hyperparameters, its lifecycle status, and — once finished — a
+result summary copied onto that experiment.
 
-**Dataset preparation is implemented; the model-facing half is not.** The
-intended full shape (`PROJECT.md` § objectives) is: dataset snapshot →
-experiment run → evaluation → model registry → promotion to serving. The
-first arrow — turning stored candles into a reproducible, versioned,
-labeled, chronologically split, exportable dataset — is now built end to
-end by the ML Dataset Builder (§ above). Everything from "experiment run"
-onward does not exist.
+```text
+Training Job: experiment_id, dataset_version, model_type, hyperparameters, status, current_stage, result_summary
+              -> Job Logs (one row per pipeline-stage transition)
+```
+
+**The pipeline** (`app/training/pipeline.py`) is a fixed six-stage
+sequence — `validate_dataset -> load_dataset -> initialize_model ->
+execute_training -> save_results -> update_experiment` — run synchronously
+by `POST /training-jobs/{id}/run` (no worker/queue service exists on this
+platform yet, so the call blocks for the run's, currently near-instant,
+duration). `load_dataset` does not read any real rows — the ML Dataset
+Builder persists nothing to load from (§ above) — it only carries the
+dataset citation forward, the same honesty principle `TrainingDataset`'s
+own docstring states explicitly.
+
+**`update_experiment` is the one place this framework reuses rather than
+reimplements**: it calls `ExperimentService.update`/`add_metric`/
+`add_artifact` directly — the exact same methods `POST /experiments/{id}/
+metrics` and `.../artifacts` themselves call — so a training run's outcome
+lands in the experiment's existing metrics/artifacts tables with no
+duplicated persistence logic.
+
+**The job lifecycle is a state machine** (`app/training/state_machine.py`):
+`pending -> running -> completed | failed`, and `pending | running ->
+cancelled`, with the value set additionally `CHECK`-constrained at the
+database level — the same belt-and-suspenders design `Experiment.status`
+already uses.
+
+See `API.md` § "Machine Learning Training Framework" for the full request/
+response shapes and error codes, `docs/database/DATABASE.md` § "Machine
+Learning Training Framework schema" for the table definitions, and
+`TESTING.md` for how the pipeline, state machine, registry, and
+service/API layers are each tested.
+
+**The frontend received a usability pass on top of this unchanged
+backend** (`apps/dashboard/src/features/ml-training/`, `/ml/training` —
+full detail in `FRONTEND.md` § "Machine Learning Training Framework"):
+contextual tooltips on every field (including what each of the five
+lifecycle statuses means), searchable comboboxes for Experiment/Dataset
+Version/Model Type, auto-population of Dataset Version/Target/Feature
+Set/Split Configuration from the selected experiment, a live pre-submit
+summary panel, dedicated validated fields for the five hyperparameters a
+real model adapter is expected to read, an 8-step pipeline timeline
+replacing the plain status chip, a searchable/downloadable log panel, and
+confirm-before-delete/cancel dialogs. Two fields in that summary panel are
+deliberately reported as unavailable rather than invented: **Estimated
+Dataset Size** and **Validation Status** — this platform tracks neither a
+row count against a `dataset_version` citation nor a per-dataset-version
+validated flag, so the summary says "Not tracked"/"Unknown" and links to
+Dataset Validation instead of fabricating a number or a pass/fail badge.
+
+## Training Pipeline (dataset preparation → model)
+
+**Dataset preparation and job orchestration are implemented; real model
+training is not.** The intended full shape (`PROJECT.md` § objectives) is:
+dataset snapshot → experiment run → evaluation → model registry →
+promotion to serving. The first arrow — turning stored candles into a
+reproducible, versioned, labeled, chronologically split, exportable
+dataset — is built end to end by the ML Dataset Builder (§ above). The
+second arrow — registering and running an experiment attempt, end to end
+through a real lifecycle — is now built by the Machine Learning Training
+Framework (§ above), but the "run" it orchestrates is a placeholder, not a
+real model fit. Evaluation, a model registry, and promotion to serving do
+not exist.
 
 Generators remain callable directly from Python (`FeaturePipeline.run`,
-`TargetPipeline.run`) without going through HTTP — the seam a training job
-would use. `app/features/ai_extensions.py`'s `SplitRatios`/`DatasetSplit`/
+`TargetPipeline.run`) without going through HTTP — the seam a real training
+job's `load_dataset` stage would eventually use, once one exists to load
+from. `app/features/ai_extensions.py`'s `SplitRatios`/`DatasetSplit`/
 `TrainValidationTestSplitter` Protocol now has a real implementer
 (`app/ml_datasets/split.py`'s `ChronologicalSplitter`); `LabelSpec`/
 `LabelGenerator` is likewise now realized in substance by the ML Dataset

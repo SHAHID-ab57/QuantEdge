@@ -7,16 +7,18 @@ probabilistic predictions — what exists today, what does not, and the
 contracts the missing pieces will plug into.
 
 Written honestly about status: the platform is **AI-ready at the data
-layer, and nothing more**. Feature engineering and dataset validation are
-implemented; model training, inference, and evaluation are not. Every
-section below says which it is, because a document that describes an
+layer, and nothing more**. Feature engineering, dataset validation, and the
+ML Dataset Builder (target generation, chronological splitting, versioned
+export) are implemented; model training, inference, and evaluation are not.
+Every section below says which it is, because a document that describes an
 aspirational pipeline in the present tense is worse than no document at
 all.
 
 ## Status
 
-Draft — Feature Engineering and the Dataset Validation Gate implemented;
-Models, Training, Inference, and Evaluation are design intent only.
+Draft — Feature Engineering, the Dataset Validation Gate, and the ML
+Dataset Builder implemented; Models, Training (beyond dataset preparation),
+Inference, and Evaluation are design intent only.
 
 ## Overview
 
@@ -27,16 +29,21 @@ The stage that produces them is the **Feature Engineering Engine**
 (`docs/architecture/DomainModel.md`).
 
 ```text
-Market Data (D1–D5)  →  Engineered Features (D6)  →  ML Datasets (D7)  →  Validated (gate)  →  Models (D8–D9)
-   implemented              implemented                 implemented         implemented           not built
+Market Data (D1–D5) → Engineered Features (D6) → ML Datasets (D7) → Validated (gate) → ML Dataset (versioned, split) → Models (D8–D9)
+   implemented            implemented                implemented       implemented         implemented                   not built
 ```
 
-The first four stages exist today. A researcher can select a market,
+The first five stages exist today. A researcher can select a market,
 timeframe, date range, and set of features, build a versioned dataset,
 export it as CSV or JSON, and run it through the **Dataset Validation &
-Quality Engine** — the platform's mandatory quality gate — before treating
-it as fit for training, backtesting, or research use. What consumes a
-validated dataset does not exist yet.
+Quality Engine** — the platform's mandatory quality gate. On top of that,
+the **ML Dataset Builder** (`services/api/app/ml_datasets/`) appends
+prediction-target label columns, re-runs the same validation gate over the
+combined matrix, and produces a chronologically split, versioned,
+exportable training artifact — the only supported path for producing a
+dataset actually used in AI training (see § "ML Dataset Builder" below).
+What consumes that artifact — a model, a training loop — does not exist
+yet.
 
 ## Data Pipeline
 
@@ -164,6 +171,73 @@ leakage, class imbalance, feature-target correlation) — the rule
 architecture exists so those arrive as new files, not as changes to
 already-shipped rules.
 
+## ML Dataset Builder
+
+**Implemented** (`services/api/app/ml_datasets/`; full architecture in
+`ARCHITECTURE.md` § "ML Dataset Builder"). Composes the Feature Engineering
+Engine, a new target-generation pipeline, and the Dataset Validation Gate
+into the platform's one supported path from stored candles to a
+model-trainable artifact:
+
+```text
+Features (X)  +  Targets/labels (y)  →  combined matrix  →  Validation Gate  →  Chronological split  →  Versioned export
+```
+
+**Target generation** is a fourth Strategy + Registry, deliberately kept in
+its own namespace rather than folded into the feature registry — a target
+generator can never be requested as a feature, which structurally rules
+out training a model on its own label. Three initial targets ship, each a
+`horizon`-parameterized generator: `next_close` (raw future close price),
+`next_return` (fractional change to it), and `next_direction`
+(`"up"`/`"down"`/`"flat"` classification).
+
+**No look-ahead bias, enforced three ways, not merely by convention:**
+
+1. A target is always computed by reading `candles[i + horizon]` for row
+   `i` — a strictly later candle — never row `i` itself or anything
+   earlier.
+2. `TargetPipeline` mechanically verifies that a generator's trailing
+   `horizon` positions are `None` before accepting its output, rejecting
+   any generator (buggy or malicious) that fabricates an unknowable future
+   value.
+3. Splitting is strictly chronological and contiguous — train, then
+   validation, then test, in time order, **never shuffled** — so no split
+   boundary can place a future row in the training set ahead of a past row
+   in validation or test.
+
+**Versioning** layers on top of the Feature Engineering Engine's own
+provenance (§ "Reproducibility" above): a fresh `ml_dataset_id` per build,
+independent from the embedded `dataset_id`; `ML_BUILDER_VERSION` and
+`TARGET_PIPELINE_VERSION`, each bumped independently of `PIPELINE_VERSION`
+and the validation engine's own version; each target's own resolved
+version and parameters; the exact `split_ratios` used; and the embedded
+`ValidationReport` verdict for the combined feature+target matrix.
+
+**Export** produces one flat CSV or JSON file — not three — containing the
+full matrix plus a per-row `split` label (`"train"`/`"validation"`/
+`"test"`), so the one downloaded artifact is complete and reproducible on
+its own. The `/ml-datasets` workbench shows exactly this shape (rows,
+columns, target, split ratios, format, an approximate size) in a
+confirmation dialog before the download starts.
+
+**Configuration is portable, not just the dataset.** Beyond the dataset
+artifact's own versioning, `/ml-datasets` lets a researcher copy the
+_request_ that produced it — market, timeframe, range, feature selections,
+target selections, and split ratios — as one JSON object, and paste it
+back in later (their own session, a teammate's, or a future one) to
+restore the exact configuration before rebuilding. This is a frontend-only
+convenience with no server-side counterpart: importing a configuration
+only populates the build form, and the researcher still triggers the
+build themselves, so it can never become an unaudited second way to
+produce a dataset.
+
+A training pipeline consuming this API should treat the embedded
+`validation.passed` the same way it should treat a plain feature dataset's
+quality report: a mechanical gate to check before training, not something
+to eyeball. See `API.md` § "ML dataset builder" for the full request/
+response shape and `TESTING.md` § "Testing the ML Dataset Builder" for how
+the leakage-prevention guarantees above are independently tested.
+
 ## Models
 
 **Not built.** No model artifacts, no model registry, no training code
@@ -177,17 +251,26 @@ name the exact dataset definition it was trained on.
 
 ## Training Pipeline
 
-**Not built.** The intended shape (`PROJECT.md` § objectives) is: dataset
-snapshot → experiment run → evaluation → model registry → promotion to
-serving. Nothing in that chain exists.
+**Dataset preparation is implemented; the model-facing half is not.** The
+intended full shape (`PROJECT.md` § objectives) is: dataset snapshot →
+experiment run → evaluation → model registry → promotion to serving. The
+first arrow — turning stored candles into a reproducible, versioned,
+labeled, chronologically split, exportable dataset — is now built end to
+end by the ML Dataset Builder (§ above). Everything from "experiment run"
+onward does not exist.
 
-What exists today is the first arrow: reproducible, versioned, exportable
-datasets, and an engine whose generators are callable directly from Python
-(`FeaturePipeline.run`) without going through HTTP — the seam a training
-job would use. `app/features/ai_extensions.py`'s `LabelSpec`/
-`LabelGenerator` and `WindowSpec`/`SequenceWindower` Protocols document,
-without implementing, the next two arrows this pipeline will need: turning
-a raw feature dataset into `(sequence, label)` training pairs.
+Generators remain callable directly from Python (`FeaturePipeline.run`,
+`TargetPipeline.run`) without going through HTTP — the seam a training job
+would use. `app/features/ai_extensions.py`'s `SplitRatios`/`DatasetSplit`/
+`TrainValidationTestSplitter` Protocol now has a real implementer
+(`app/ml_datasets/split.py`'s `ChronologicalSplitter`); `LabelSpec`/
+`LabelGenerator` is likewise now realized in substance by the ML Dataset
+Builder's target-generation pipeline, though not through that exact
+Protocol type (target generators use `TargetGenerator`, described above, for
+the leakage-prevention reasons documented there). `WindowSpec`/
+`SequenceWindower` remains the next, still-unimplemented arrow: turning a
+labeled feature matrix into fixed-size, strided sequence windows for a
+sequence model.
 
 ## Inference
 
@@ -212,19 +295,18 @@ display.
 
 ## AI extension points
 
-**Documented, typed, and testable — not wired into any production path.**
+**Documented, typed, and testable — one now has a real implementer.**
 `services/api/app/features/ai_extensions.py` declares six `Protocol`/
 `dataclass` pairs so that when the workstreams above are actually built,
-they have a contract to implement rather than a blank page. Nothing here
-is imported outside its own test module today:
+they have a contract to implement rather than a blank page:
 
-| Extension point                                                | Purpose                                                                                                                                                     |
-| -------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `LabelSpec` / `LabelGenerator`                                 | Deriving a training target/label from a dataset (e.g. next-candle direction)                                                                                |
-| `WindowSpec` / `SequenceWindower`                              | Slicing a feature matrix into fixed-size, strided sequence windows                                                                                          |
-| `NormalizationStats` / `FeatureNormalizer`                     | Per-column scaling, with `fit`/`transform` kept as two separate methods so a normalizer fit on training data can never leak test-set statistics into itself |
-| `SplitRatios` / `DatasetSplit` / `TrainValidationTestSplitter` | Chronological (never random) train/validation/test splitting — a random split of time-series data leaks future information into training                    |
-| `CategoricalEncoding` / `CategoricalEncoder`                   | One-hot or ordinal encoding, driven by a column's declared `dtype`, never a hardcoded column list                                                           |
+| Extension point                                                | Purpose                                                                                                                                                     | Status                                                                                                                                                                    |
+| -------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `LabelSpec` / `LabelGenerator`                                 | Deriving a training target/label from a dataset (e.g. next-candle direction)                                                                                | Realized in substance by `app/ml_datasets/` (a distinct `TargetGenerator` contract — see § "ML Dataset Builder")                                                          |
+| `WindowSpec` / `SequenceWindower`                              | Slicing a feature matrix into fixed-size, strided sequence windows                                                                                          | Not implemented                                                                                                                                                           |
+| `NormalizationStats` / `FeatureNormalizer`                     | Per-column scaling, with `fit`/`transform` kept as two separate methods so a normalizer fit on training data can never leak test-set statistics into itself | Not implemented                                                                                                                                                           |
+| `SplitRatios` / `DatasetSplit` / `TrainValidationTestSplitter` | Chronological (never random) train/validation/test splitting — a random split of time-series data leaks future information into training                    | **Implemented** — `app/ml_datasets/split.py`'s `ChronologicalSplitter` is the first real implementer; `SplitRatios`/`DatasetSplit` are imported unchanged, not redeclared |
+| `CategoricalEncoding` / `CategoricalEncoder`                   | One-hot or ordinal encoding, driven by a column's declared `dtype`, never a hardcoded column list                                                           | Not implemented                                                                                                                                                           |
 
 These mirror the frontend's own established pattern for the same purpose:
 `apps/dashboard/src/features/replay/extension-points.ts` documents replay's
@@ -249,6 +331,24 @@ generator's selection row, its parameter form, and its column headers
 directly from the catalogue response. An indicator-backed feature is even
 cheaper: add its name to `INDICATOR_BACKED_FEATURES`.
 
+## What a new prediction target requires
+
+Adding a target generator is one file:
+
+1. Create `services/api/app/ml_datasets/targets/<name>.py`.
+2. Subclass `TargetGenerator`, declare `metadata: TargetMetadata` (name,
+   label, description, category, `default_horizon`), and implement
+   `generate(ctx) -> TargetOutput`.
+3. Decorate the class with `@register`.
+
+Nothing else changes — not the pipeline, the registry, the dataset
+builder, the service, the API, or the frontend. `/ml-datasets`'s target
+selector and `GET /ml/targets` both render the new generator immediately,
+with no frontend change. A generator's output is mechanically checked for
+look-ahead bias by `TargetPipeline` before it is ever accepted (§ "ML
+Dataset Builder" above) — a new target cannot silently introduce leakage
+without the pipeline itself rejecting it.
+
 ## What a new validation rule requires
 
 Adding a rule is one file:
@@ -267,10 +367,13 @@ change.
 
 ## References
 
-- [`ARCHITECTURE.md`](../../ARCHITECTURE.md) § "Feature Engineering Engine"
-  and § "Dataset Validation & Quality Engine"
-- [`API.md`](../api/API.md) § "Feature engineering" and § "Dataset validation"
-- [`FRONTEND.md`](../../FRONTEND.md) § "Feature Engineering" and
-  § "Dataset Validation"
+- [`ARCHITECTURE.md`](../../ARCHITECTURE.md) § "Feature Engineering Engine",
+  § "Dataset Validation & Quality Engine", and § "ML Dataset Builder"
+- [`API.md`](../api/API.md) § "Feature engineering", § "Dataset validation",
+  and § "ML dataset builder"
+- [`FRONTEND.md`](../../FRONTEND.md) § "Feature Engineering", § "Dataset
+  Validation", and § "ML Dataset Builder"
+- [`TESTING.md`](../../services/api/TESTING.md) § "Testing the ML Dataset
+  Builder"
 - [`docs/architecture/DomainModel.md`](../architecture/DomainModel.md) § BC3
 - [`docs/architecture/DataArchitecture.md`](../architecture/DataArchitecture.md) § D6, D7

@@ -1,5 +1,5 @@
 import { ThemeProvider } from '@mui/material/styles';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 import { theme } from '@/theme/theme';
 import type { FeatureDataset } from '@/types/api/features';
@@ -145,6 +145,141 @@ describe('DatasetPreviewTable', () => {
     renderTable({ maxRows: 1 });
     expect(screen.getByText('2026-01-01T00:00:00Z')).toBeInTheDocument();
     expect(screen.queryByText('2026-01-01T01:00:00Z')).not.toBeInTheDocument();
+  });
+});
+
+describe('DatasetPreviewTable — ML dataset extensions (target columns and split)', () => {
+  it('marks a target column with a "target" badge in its header', () => {
+    renderTable({ targetColumns: ['candle_direction'] });
+    expect(screen.getByText('target')).toBeInTheDocument();
+  });
+
+  it('does not badge a feature column', () => {
+    renderTable({ targetColumns: ['candle_direction'] });
+    expect(screen.getAllByText('target')).toHaveLength(1);
+  });
+
+  it('renders no Split column when splitLabels is omitted', () => {
+    renderTable();
+    expect(screen.queryByText('Split')).not.toBeInTheDocument();
+  });
+
+  it('renders a Split column with a per-row label when splitLabels is provided', () => {
+    renderTable({ splitLabels: ['train', 'validation'] });
+    expect(screen.getByText('Split')).toBeInTheDocument();
+    expect(screen.getByText('train')).toBeInTheDocument();
+    expect(screen.getByText('validation')).toBeInTheDocument();
+  });
+
+  it('caps split labels along with rows when maxRows is set', () => {
+    renderTable({ splitLabels: ['train', 'validation'], maxRows: 1 });
+    expect(screen.getByText('train')).toBeInTheDocument();
+    expect(screen.queryByText('validation')).not.toBeInTheDocument();
+  });
+});
+
+describe('DatasetPreviewTable — column search and visibility', () => {
+  it('renders a column search box', () => {
+    renderTable();
+    expect(screen.getByPlaceholderText('Search columns…')).toBeInTheDocument();
+  });
+
+  it('hides columns whose name does not match the search text', () => {
+    renderTable();
+    fireEvent.change(screen.getByPlaceholderText('Search columns…'), {
+      target: { value: 'close' },
+    });
+    expect(screen.getByText('close')).toBeInTheDocument();
+    expect(screen.queryByText('candle_direction')).not.toBeInTheDocument();
+  });
+
+  it('reports when no column matches the search text', () => {
+    renderTable();
+    fireEvent.change(screen.getByPlaceholderText('Search columns…'), {
+      target: { value: 'nonexistent' },
+    });
+    expect(screen.getByRole('status')).toHaveTextContent(/No columns match/);
+  });
+
+  it('offers a column-visibility menu that can hide a column', () => {
+    renderTable();
+    fireEvent.click(screen.getByRole('button', { name: 'Toggle column visibility' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Toggle close visibility' }));
+    const table = document.querySelector('table') as HTMLElement;
+    expect(within(table).queryByText('close')).not.toBeInTheDocument();
+    expect(within(table).getByText('candle_direction')).toBeInTheDocument();
+    expect(screen.getByText('1 column hidden')).toBeInTheDocument();
+  });
+
+  it('re-shows a hidden column when toggled again', () => {
+    renderTable();
+    fireEvent.click(screen.getByRole('button', { name: 'Toggle column visibility' }));
+    const item = screen.getByRole('menuitem', { name: 'Toggle close visibility' });
+    fireEvent.click(item);
+    fireEvent.click(item);
+    const table = document.querySelector('table') as HTMLElement;
+    expect(within(table).getByText('close')).toBeInTheDocument();
+    expect(screen.queryByText(/column hidden/)).not.toBeInTheDocument();
+  });
+
+  it('resets hidden columns when the dataset changes shape', () => {
+    const { rerender } = renderTable();
+    fireEvent.click(screen.getByRole('button', { name: 'Toggle column visibility' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Toggle close visibility' }));
+    expect(
+      within(document.querySelector('table') as HTMLElement).queryByText('close'),
+    ).not.toBeInTheDocument();
+
+    rerender(
+      <ThemeProvider theme={theme}>
+        <DatasetPreviewTable
+          dataset={dataset({
+            columns: [{ name: 'sma_20', label: 'SMA', description: '', dtype: 'float' }],
+            rows: [[1], [2]],
+          })}
+        />
+      </ThemeProvider>,
+    );
+    expect(
+      within(document.querySelector('table') as HTMLElement).getByText('sma_20'),
+    ).toBeInTheDocument();
+  });
+});
+
+describe('DatasetPreviewTable — sticky first column', () => {
+  it('keeps the Timestamp header sticky at the left edge', () => {
+    renderTable();
+    const header = screen.getByText('Timestamp').closest('th');
+    expect(header).toHaveStyle({ position: 'sticky', left: '0px' });
+  });
+});
+
+describe('DatasetPreviewTable — column statistics popover', () => {
+  it('offers a statistics popup for a numeric column', () => {
+    renderTable();
+    expect(screen.getByRole('button', { name: 'Show statistics for close' })).toBeInTheDocument();
+  });
+
+  it('does not offer a statistics popup for a categorical column', () => {
+    renderTable();
+    expect(
+      screen.queryByRole('button', { name: 'Show statistics for candle_direction' }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('shows the computed min/max when the popup is opened', () => {
+    renderTable();
+    fireEvent.click(screen.getByRole('button', { name: 'Show statistics for close' }));
+    expect(screen.getByText('Min')).toBeInTheDocument();
+    // The values also appear in the table body, hence both instead of one.
+    expect(screen.getAllByText('100.5')).toHaveLength(2);
+    expect(screen.getAllByText('101.25')).toHaveLength(2);
+  });
+
+  it('notes the statistics are preview-scoped when maxRows caps the table', () => {
+    renderTable({ maxRows: 1 });
+    fireEvent.click(screen.getByRole('button', { name: 'Show statistics for close' }));
+    expect(screen.getByText(/rendered preview rows only/)).toBeInTheDocument();
   });
 });
 

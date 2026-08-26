@@ -839,6 +839,116 @@ section assertions collapsed into one "Validation Report" section check,
 and a new empty-state test asserts the "What validation does"/"How to
 start"/"Example workflow" copy renders before anything has been validated.
 
+### Testing the ML Dataset Builder (frontend)
+
+`apps/dashboard/src/features/ml-datasets/` follows the same layering as
+every other feature module in this document: pure logic tested with no
+rendering, then components, then the page. A second, UX/reproducibility-
+focused pass (searchable target selection, horizon presets, a split
+timeline, dataset metadata, configuration copy/import, and an export
+confirmation dialog) added tests the same way, with no backend involved
+in any of them.
+
+**Pure logic, no rendering.** `lib/target-selection.test.ts` mirrors
+`feature-selection.test.ts` test-for-test (defaulting a selection's
+parameters from the catalogue's published defaults, toggling a target in
+and out while preserving the order of the rest, replacing one selection's
+params without touching any other, mapping selections onto the API request
+shape) — expected, since it is the identical selection-state contract
+applied to targets instead of features. `lib/split-ratios.test.ts` pins the
+exact tolerance (`1e-6`) the client-side check shares with the backend's
+own `ChronologicalSplitter._validate_ratios`, including the IEEE-754
+`0.7 + 0.15 + 0.15` case that is not bit-exact in floating point, so a
+form that "looks like it sums to 1.0" is never rejected by a stricter
+client-side check than the server actually enforces. `lib/horizon-presets.test.ts`
+covers preset filtering against a target's declared min/max bounds and the
+"Custom…" sentinel resolution. `lib/target-type.test.ts` pins the
+`value_type` → Classification/Regression mapping and the horizon-range
+description text, including its fallback for a target with no `horizon`
+parameter at all. `lib/export-format.test.ts` covers the byte-size
+heuristic (including that it scales with the extra `split` column) and
+`formatBytes`'s unit rounding. `lib/dataset-config.test.ts` is the
+round-trip test that matters most in this pass: it serializes a
+configuration and asserts `parseDatasetConfig` reconstructs the identical
+object, plus invalid-JSON, missing-required-field, and wrong-type-field
+rejection cases with actionable error messages.
+
+**Components.** `split-config-form.test.tsx` covers the three ratio fields
+rendering their current values and percentage helper text, the
+valid/invalid state toggling the `SplitTimeline` versus an error message,
+editing a field calling `onChange`, and that an estimated per-split row
+count only appears once `estimatedTotalRows` is supplied (i.e., only after
+a dataset has actually been built). `target-selector.test.tsx` drives the
+`Autocomplete` search box directly (opening it, narrowing by search text,
+reading an option's problem-type chip/description/output/horizon-range
+text, selecting and removing a target via its tag and via its card's
+remove button) and separately exercises `HorizonPresetSelect` (seeded
+value, committing a preset change, and revealing/using the "Custom…"
+field) — the horizon commit tests assert against the visible "Horizon"
+label rather than a supplementary `aria-label`, since `getByLabelText`
+resolves an MUI `Select`'s programmatic `aria-label` to its outer
+`InputBase` wrapper rather than the inner interactive `role="combobox"`
+element, and only the visible-label route lands on the element `mouseDown`
+needs to actually open the menu. `export-summary-dialog.test.tsx` and
+`dataset-config-actions.test.tsx` are new, covering the confirmation
+dialog's rows/columns/target/split/format/approximate-size display and,
+respectively, clipboard copy (asserting the exact round-tripped JSON,
+degrading silently on a rejected `navigator.clipboard.writeText`) and
+paste-to-import (valid JSON restoring state, invalid JSON surfacing an
+inline error, Cancel discarding the pasted text). `ml-dataset-export.test.tsx`
+was rewritten around the new confirm-then-export flow: clicking a format
+button opens the dialog without exporting, Cancel discards it without
+exporting, and only confirming the dialog triggers `downloadBlob`.
+`ml-dataset-metadata-panel.test.tsx` is new, pinning the dataset UUID,
+source market/timeframe/date-range, generated timestamp, the "Validation
+Report ID" honestly reusing the embedded report's own `dataset_id`, the
+target-generator list, and the fixed `ChronologicalSplitter` label.
+
+**The shared preview table gained tests for its new, optional behavior
+without touching any of its existing assertions.**
+`dataset-preview-table.test.tsx` (Feature Engineering's own test file — not
+forked, since the component itself was extended, not duplicated) gained
+`describe` blocks for: the target-column badge and the "Split" column
+(unchanged from the first pass); column search (narrows the rendered
+columns, reports when nothing matches); the column-visibility menu
+(hides/re-shows a column, and resets whenever the dataset's own column
+list changes shape — proven by rerendering with a differently-shaped
+dataset while a column is hidden); the sticky Timestamp column (asserting
+its computed `position: sticky; left: 0` style); and `ColumnStatsPopover`
+(offered only for numeric columns, showing computed min/max on open, and
+noting when the figures are preview-scoped because `maxRows` capped the
+table). Several of these assertions scope their queries to
+`document.querySelector('table')` via `within(...)` rather than the whole
+document, since MUI's `Menu`/`Popover` marks the rest of the page
+`aria-hidden` while open and can otherwise leave a stale, still-open menu
+item's text colliding with the table's own.
+
+**Page-level.** `ml-datasets-page.test.tsx` mirrors
+`feature-engineering-page.test.tsx`'s structure section-for-section
+(loading/error states, configuration, building, export) with the additions
+this page's own requirements demand: the build button stays disabled until
+both a feature _and_ a target are selected (two independent empty-selection
+messages, not one), and separately disables when the split ratios don't sum
+to `1.0` even though a feature and target are both selected; target
+selection is driven through the `Autocomplete` (`selectNextClosePrice`
+helper) rather than a checkbox, matching the rewritten `TargetSelector`;
+the outgoing request is asserted to carry `targets` and
+`split_train`/`split_validation`/`split_test` alongside the existing
+`features` field; a built dataset's preview is asserted to render the
+"Split" column (queried by `getByRole('columnheader', ...)` specifically,
+since the info card also renders the literal word "Split" elsewhere on the
+page and a bare `getByText` collides); export is asserted to open the
+summary dialog before calling the backend, and only export after
+confirming; a new `describe` block covers the metadata panel appearing
+once built and the Copy/Import Configuration controls, including a full
+paste-and-restore round trip; and a target-generation partial failure is
+asserted to render in the summary without blocking the rest of the
+dataset from displaying, mirroring the equivalent feature-failure test in
+the Feature Engineering suite. This file's own `testTimeout` is raised to
+15s (`vi.setConfig`) — its tests each drive two `Autocomplete`s and a full
+page render, which occasionally exceeds the default 5s only under the
+full suite's parallel worker contention, never when the file runs alone.
+
 ## End-to-End Tests
 
 Not implemented. `tests/` at the repo root is reserved for this; no browser

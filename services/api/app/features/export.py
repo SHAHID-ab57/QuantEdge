@@ -68,8 +68,8 @@ class ExportFormat:
 
 def dataset_filename(dataset: FeatureDataset, extension: str) -> str:
     """A stable, filesystem-safe name identifying what the file holds."""
-    symbol = _safe(dataset.symbol)
-    timeframe = _safe(dataset.timeframe)
+    symbol = safe_filename_part(dataset.symbol)
+    timeframe = safe_filename_part(dataset.timeframe)
     stamp = dataset.generated_at.astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
     return f"{symbol}-{timeframe}-features-{stamp}.{extension}"
 
@@ -99,7 +99,7 @@ def to_csv(dataset: FeatureDataset, *, include_metadata: bool = True) -> str:
 
     writer.writerow(["timestamp", *(column.name for column in dataset.columns)])
     for timestamp, row in zip(dataset.timestamps, dataset.rows, strict=True):
-        writer.writerow([_iso(timestamp), *(_csv_cell(value) for value in row)])
+        writer.writerow([iso_utc(timestamp), *(csv_cell(value) for value in row)])
 
     return buffer.getvalue()
 
@@ -117,8 +117,8 @@ def to_json(dataset: FeatureDataset, *, orient: str = "records") -> str:
         "dataset_id": dataset.dataset_id,
         "symbol": dataset.symbol,
         "timeframe": dataset.timeframe,
-        "generated_at": _iso(dataset.generated_at),
-        "exported_at": _iso(datetime.now(UTC)),
+        "generated_at": iso_utc(dataset.generated_at),
+        "exported_at": iso_utc(datetime.now(UTC)),
         "pipeline_version": dataset.pipeline_version,
         "columns": [
             {
@@ -167,7 +167,7 @@ def to_json(dataset: FeatureDataset, *, orient: str = "records") -> str:
     }
 
     if orient == "columns":
-        payload["timestamps"] = [_iso(value) for value in dataset.timestamps]
+        payload["timestamps"] = [iso_utc(value) for value in dataset.timestamps]
         payload["data"] = {
             column.name: [row[index] for row in dataset.rows]
             for index, column in enumerate(dataset.columns)
@@ -175,7 +175,7 @@ def to_json(dataset: FeatureDataset, *, orient: str = "records") -> str:
     else:
         payload["data"] = [
             {
-                "timestamp": _iso(timestamp),
+                "timestamp": iso_utc(timestamp),
                 **{column.name: row[index] for index, column in enumerate(dataset.columns)},
             }
             for timestamp, row in zip(dataset.timestamps, dataset.rows, strict=True)
@@ -206,8 +206,8 @@ def _metadata_pairs(dataset: FeatureDataset) -> list[tuple[str, str]]:
         ("dataset_id", dataset.dataset_id),
         ("symbol", dataset.symbol),
         ("timeframe", dataset.timeframe),
-        ("generated_at", _iso(dataset.generated_at)),
-        ("exported_at", _iso(datetime.now(UTC))),
+        ("generated_at", iso_utc(dataset.generated_at)),
+        ("exported_at", iso_utc(datetime.now(UTC))),
         ("pipeline_version", dataset.pipeline_version),
         ("rows", str(dataset.row_count)),
         ("candles_analyzed", str(dataset.candles_analyzed)),
@@ -243,16 +243,29 @@ def _params_text(params: dict[str, Any]) -> str:
     return " ".join(f"{key}={params[key]}" for key in sorted(params))
 
 
-def _csv_cell(value: FeatureValue) -> str | float | int | bool:
-    """Render one cell, mapping ``None`` to an empty field."""
+def csv_cell(value: FeatureValue) -> str | float | int | bool:
+    """Render one cell, mapping ``None`` to an empty field.
+
+    Public (not the underscore-prefixed helper it once was) because
+    ``app/ml_datasets/export.py`` reuses it wholesale for the identical
+    CSV-cell-rendering need over an ML dataset's rows.
+    """
     return _CSV_NULL if value is None else value
 
 
-def _iso(value: datetime) -> str:
-    """ISO-8601 UTC with a literal ``Z``, matching every other timestamp on this API."""
+def iso_utc(value: datetime) -> str:
+    """ISO-8601 UTC with a literal ``Z``, matching every other timestamp on this API.
+
+    Public for the same reason as ``csv_cell`` — reused by
+    ``app/ml_datasets/export.py`` rather than redeclared there.
+    """
     return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
-def _safe(value: str) -> str:
-    """Strip anything unsafe for a filename."""
+def safe_filename_part(value: str) -> str:
+    """Strip anything unsafe for a filename.
+
+    Public for the same reason as ``csv_cell`` — reused by
+    ``app/ml_datasets/export.py`` rather than redeclared there.
+    """
     return "".join(char if char.isalnum() or char in "-_" else "-" for char in value)

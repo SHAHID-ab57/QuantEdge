@@ -283,6 +283,78 @@ Three conventions worth keeping:
   rather than a second, parallel set of "bad data" fixtures that could
   drift from the first.
 
+## Testing the ML Dataset Builder
+
+`tests/ml_datasets/` covers the engine described in `ARCHITECTURE.md` §
+"ML Dataset Builder" — a fourth Strategy + Registry (target generation),
+tested the same way the first three already are, plus dedicated
+composition and leakage-prevention tests:
+
+| File                        | Covers                                                                                                                                                          |
+| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `conftest.py`               | `candles(count, ...)` — ascending, monotonic synthetic OHLCV, one candle per hour                                                                               |
+| `test_registry.py`          | Registration, duplicate rejection, lookup, catalogue ordering, isolated registries — mirrors `tests/features/test_registry.py`                                  |
+| `test_pipeline.py`          | Parameter validation, horizon resolution, the forward-looking-contract check, alignment/uniqueness guarantees, error wrapping                                   |
+| `test_targets.py`           | Each builtin target's maths (`next_close`, `next_return`'s zero-close guard, `next_direction`'s up/down/flat classification), and the contract-enforcement test |
+| `test_split.py`             | Contiguity, ratio respect, chronological ordering, no reordering, `dataset_id` preservation across slices, ratio validation                                     |
+| `test_dataset.py`           | Assembly, partial success, column collisions, the empty-dataset case, and (`TestLeakagePrevention`) the load-bearing no-look-ahead-bias tests                   |
+| `test_builtin_discovery.py` | Every builtin target module is auto-discovered, exactly once, with its horizon parameter and output templates published                                         |
+| `test_export.py`            | CSV/JSON round-trip fidelity, the `split` column, per-target provenance in the preamble/payload                                                                 |
+| `test_service.py`           | The candle-load join (widened by warmup **and** horizon), row/limit semantics with re-splitting, export completeness                                            |
+
+`tests/api/test_ml_datasets_api.py` covers the same surface end to end
+over ASGI, including split-ratio validation, column-collision handling,
+and a target-not-found request surfacing as a partial failure rather than
+a 404 during a build.
+
+**The leakage-prevention tests in `test_dataset.py::TestLeakagePrevention`
+are the ones actually worth reading first.** They assert the property this
+whole engine exists to guarantee, concretely rather than by inspection:
+
+- `test_a_targets_value_always_comes_from_a_strictly_later_candle` builds a
+  dataset, then for every surviving row independently re-derives what the
+  target value _should_ be from the raw candle list and asserts equality —
+  and separately asserts the target value is never equal to that same
+  row's own close, so a copy-the-input bug would fail loudly rather than
+  passing by coincidence.
+- `test_trailing_rows_with_no_future_candle_are_never_present` asserts the
+  very last candle can never appear as a row at all, since it has no future
+  close to be labeled with.
+- `test_a_multi_horizon_request_still_never_leaks` requests the same
+  target at two different horizons in one build and independently verifies
+  both columns, proving the realignment logic doesn't cross-contaminate
+  when two target columns trim different numbers of trailing rows.
+
+**The forward-looking contract is proven adversarially, not just by
+inspection.** `test_targets.py::TestForwardLookingContractIsEnforced`
+registers a deliberately cheating generator (`_Cheater`) that fabricates a
+value for a row with no future candle, and asserts `TargetPipeline.run`
+raises `TargetAlignmentError` rather than silently accepting the output —
+the same "prove the guard actually fires" discipline
+`test_sma_matches_the_indicator_engines_own_result` applies to the
+training/serving-consistency guarantee.
+
+**The empty-dataset case is deliberately engineered, not incidental.**
+`test_dataset.py::TestEmptyDataset` builds `sma(period=8)` over 10 candles
+(leaving only the last 2 rows past warmup) alongside `next_close(horizon=5)`
+(undefined for the last 5) — both surviving rows fall inside the horizon
+window, so `EmptyMLDatasetError` fires even though every target generated
+successfully. The same test file separately proves that _zero target
+columns_ (every target failed outright, not merely trimmed away) is a
+valid, fully-explained result — mirroring the Feature Engineering Engine's
+identical precedent for an all-failed feature request.
+
+**Coverage-completing unit tests, called out so they aren't mistaken for
+redundant.** A few branches need a synthetic, narrower test because the
+realistic end-to-end path can't reach them: `test_service.py::TestCapRows`
+calls the service's private `_cap_rows` directly on a synthetic 9-row
+`MLDataset` capped to 3, since a real request's widen-then-cap arithmetic
+can't be forced over the limit without also controlling the server's
+configured maximum; `test_pipeline.py`'s `ZeroHorizon` generator and
+`TestRegistryProperty` exist solely to exercise the `horizon == 0`
+early-return branch and the pipeline's `registry` property, neither of
+which any builtin target's `horizon >= 1` default reaches.
+
 ## Gates
 
 Before pushing, run:

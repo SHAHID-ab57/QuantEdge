@@ -8,6 +8,147 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **ML Dataset Builder — UX and reproducibility pass.** Turns `/ml-datasets`
+  from a dataset generator into a workbench; **no backend change** —
+  everything below still goes through the existing `MLDatasetRequest`/
+  `MLDatasetResponse` shape.
+
+  - **Target selection**: `TargetSelector` replaced its checkbox list with
+    a searchable `Autocomplete` (the same widget `RequiredColumnsSelector`
+    already uses) showing each target's problem type (Classification/
+    Regression, derived from `value_type`), description, output columns,
+    and horizon compatibility range. Each selected target gets a
+    **`HorizonPresetSelect`** — a preset dropdown (1/2/3/5/10/20/50
+    candles) plus a "Custom…" numeric field — in place of a bare number
+    input, still validated through the same `validateValues` gate against
+    the backend-published `horizon` spec before being committed.
+  - **Split visualization**: `SplitConfigForm` gained a `SplitTimeline` —
+    a proportional, chronologically-ordered bar (train → validation →
+    test) with a percentage per field and, once a dataset has been built
+    at least once, an estimated row count per split (computed client-side
+    from the last build's row count, no extra backend call). Validation is
+    unchanged: a zero validation/test ratio is still allowed, matching
+    `ChronologicalSplitter`'s own tested backend behavior.
+  - **Dataset metadata**: a new `MLDatasetMetadataPanel` — dataset UUID,
+    feature pipeline version, source market/timeframe/date-range,
+    generated timestamp, target generator(s), splitter, and supported
+    export formats — separate from the existing identity and quality
+    panels so fields aren't duplicated across three cards.
+  - **Reproducibility**: a new `DatasetConfigActions` — "Copy
+    Configuration" serializes the current market/timeframe/range/features/
+    targets/split as JSON to the clipboard; "Import Configuration" parses
+    a pasted JSON (Zod-validated) and restores it into the form. Import
+    never builds anything on its own — the researcher still presses
+    "Build ML Dataset" afterward.
+  - **Export confirmation**: CSV/JSON export now opens an
+    `ExportSummaryDialog` (rows, columns, target, split, format, an
+    approximate size) before downloading, instead of downloading
+    immediately on click. Export formats are rendered from a data list
+    (`EXPORT_FORMAT_OPTIONS`), not hardcoded, so a future format needs no
+    redesign.
+  - **Dataset preview** (`DatasetPreviewTable`, shared with Feature
+    Engineering and Dataset Validation): added a column search box, a
+    column-visibility menu, a sticky first (Timestamp) column, and a
+    per-numeric-column statistics popup (`ColumnStatsPopover` — min/max/
+    mean/std/null count), all display-only and benefiting all three pages
+    that render this component. `FeatureSelector` gained per-category
+    Select All/Clear buttons alongside its existing global ones.
+  - 97 new or rewritten frontend tests across new lib modules
+    (`horizon-presets`, `target-type`, `export-format`, `dataset-config`,
+    `column-stats`), new components (`target-selector`,
+    `export-summary-dialog`, `dataset-config-actions`,
+    `ml-dataset-metadata-panel`), an extended `dataset-preview-table`, a
+    rewritten `ml-dataset-export` (confirm-then-export flow), and an
+    updated `ml-datasets-page`; full frontend suite passes (1521 tests)
+    with a clean lint, typecheck, and production build. Backend suite
+    untouched and still green (966 passed, 16 skipped) since nothing
+    there changed.
+  - See `ARCHITECTURE.md` § "ML Dataset Builder" (Frontend), `FRONTEND.md`
+    § "ML Dataset Builder", `AI.md` § "ML Dataset Builder", and
+    `docs/testing/TESTING.md` § "Testing the ML Dataset Builder (frontend)".
+
+- **ML Dataset Builder** — the platform's one supported mechanism for
+  producing a dataset used in AI training. Composes the Feature
+  Engineering Engine, a new target-generation pipeline, and the Dataset
+  Validation Gate into a versioned, chronologically-split, leakage-safe
+  training artifact; reuses every existing engine outright rather than
+  duplicating any of them.
+
+  - **Target generation** (`services/api/app/ml_datasets/`) is a fourth
+    Strategy + Registry, deliberately kept in its own namespace rather
+    than folded into the feature registry — a target can never be
+    requested as a feature, which structurally rules out training a model
+    on its own label. Three initial, `horizon`-parameterized targets:
+    `next_close` (raw future close), `next_return` (fractional change),
+    `next_direction` (`"up"`/`"down"`/`"flat"` classification).
+  - **No look-ahead bias, enforced three independent ways**: targets are
+    generated over the full, untrimmed candle range and read only
+    strictly-future candles; `TargetPipeline` mechanically verifies a
+    generator's trailing `horizon` positions are `None` before accepting
+    its output (`TargetAlignmentError` otherwise — proven via a
+    deliberately cheating test generator); and splitting is strictly
+    chronological and contiguous, never shuffled.
+  - **`ChronologicalSplitter`** (`app/ml_datasets/split.py`) is the first
+    real implementer of the `TrainValidationTestSplitter` Protocol
+    `app/features/ai_extensions.py` declared and left unwired in an
+    earlier task; reuses that module's own `SplitRatios`/`DatasetSplit`
+    rather than redeclaring them. Ratios must be non-negative, train must
+    exceed zero, and the three must sum to `1.0` within a `1e-6`
+    tolerance.
+  - **`MLDatasetBuilder`** composes the _existing_ `FeatureDatasetBuilder`
+    and `DatasetValidator` (the same cached singletons `/features/dataset`
+    and `/validation` use) with the new target pipeline and splitter.
+    Targets are appended as ordinary columns onto the same feature matrix;
+    partial-success mirrors the feature/indicator batch contract exactly
+    (one failing target is recorded, not fatal); a column-name collision
+    still hard-fails; `EmptyMLDatasetError` fires only when every
+    surviving row falls inside some target's undefined horizon window.
+  - **Versioning chain**: a fresh `ml_dataset_id` per build, independent
+    of the embedded feature build's own `dataset_id`; `ML_BUILDER_VERSION`
+    and `TARGET_PIPELINE_VERSION`, each bumped independently of
+    `PIPELINE_VERSION` and the validation engine's own version; each
+    target's resolved version/parameters; the exact split ratios used; and
+    the embedded validation verdict.
+  - **Export** (CSV/JSON) is one flat file, not three — the full assembled
+    matrix plus a per-row `split` label (`"train"`/`"validation"`/
+    `"test"`), reusing `app/features/export.py`'s formatting helpers
+    (`iso_utc`/`safe_filename_part`/`csv_cell`, promoted from
+    module-private names specifically for this reuse).
+  - **API**: `GET /ml/targets`, `GET /ml/targets/{target}`,
+    `POST /markets/{symbol}/ml/dataset`, `POST /markets/{symbol}/ml/dataset/export`.
+    `MLDatasetRequest` subclasses `FeatureDatasetRequest` — the same
+    market/timeframe/range/feature selection that builds a plain feature
+    dataset also builds a fully versioned ML dataset.
+  - **Frontend** (`/ml-datasets` — a top-level route, the same deviation
+    from the literal `/dashboard/ml/datasets` spec already made for
+    `/features` and `/validation`): a Dataset Configuration form and Split
+    Configuration (reusing `DatasetForm`), a Feature selector (reusing
+    `FeatureSelector`) and a new Target selector (`TargetSelector`,
+    reusing `ParameterForm` for the `horizon` input), an ML Dataset
+    Information card, a Dataset Summary (warmup vs. horizon row-drop
+    counts, target failures), the Validation verdict (reusing
+    `ValidationSummaryCards`/`ValidationReportPanel` outright from Dataset
+    Validation), a Dataset Preview, and CSV/JSON Export. The shared
+    `DatasetPreviewTable` gained two optional props — `targetColumns`
+    (highlights label columns) and `splitLabels` (a trailing "Split"
+    column) — rather than being forked; both default to `undefined`, so
+    the Feature Engineering page's existing usage is unaffected.
+  - 115 new backend tests (`tests/ml_datasets/`, `tests/api/test_ml_datasets_api.py`
+    — target maths, the forward-looking-contract enforcement, chronological
+    split logic, assembly/leakage-prevention/partial-success/collision/
+    empty-dataset cases, export round-trip fidelity, the service and API
+    layers) at 100% coverage of the new `app/ml_datasets`/
+    `app/services/ml_datasets.py`/`app/schemas/ml_datasets.py` code;
+    backend suite overall still green (966 passed, 16 skipped, 96.40%
+    coverage). 50 new frontend tests (`target-selection`, `split-ratios`,
+    `split-config-form`, `ml-dataset-export`, an extended
+    `dataset-preview-table`, and `ml-datasets-page`); full frontend suite
+    passes (1424 tests) with a clean lint, typecheck, and production build.
+  - See `ARCHITECTURE.md` § "ML Dataset Builder", `AI.md` § "ML Dataset
+    Builder", `API.md` § "ML dataset builder", `FRONTEND.md` § "ML Dataset
+    Builder", and `docs/testing/TESTING.md`/`services/api/TESTING.md` §
+    "Testing the ML Dataset Builder".
+
 - **Dataset Validation page — usability pass for large feature sets** — a
   frontend-only enhancement of `/validation` aimed at professional
   quantitative researchers, reusing every existing API, component, store,

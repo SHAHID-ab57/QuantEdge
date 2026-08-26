@@ -17,6 +17,7 @@ The API exposes historical market data and operational monitoring:
 - Market data (read-only): `GET /api/v1/markets`, `/api/v1/markets/{symbol}/candles`, ...
 - Feature engineering: `GET /api/v1/features`, `POST /api/v1/markets/{symbol}/features/dataset|export`
 - Dataset validation: `POST /api/v1/markets/{symbol}/features/validate`, `GET /api/v1/validation/rules`
+- ML dataset builder: `GET /api/v1/ml/targets`, `POST /api/v1/markets/{symbol}/ml/dataset|dataset/export`
 - Platform health monitoring: `GET /api/v1/system/health|status|metrics`
 
 ## Endpoints
@@ -546,6 +547,195 @@ partial-success feature codes (`feature_not_found`,
 failed feature is recorded in `quality.feature_failures` during the build
 and then, distinctly, surfaced again as a `feature_generation_failed`
 validation issue by the `feature_failures` rule.
+
+### ML dataset builder
+
+| Method | Path                                         | Purpose                                                              |
+| ------ | -------------------------------------------- | -------------------------------------------------------------------- |
+| GET    | `/api/v1/ml/targets`                         | Catalogue of every registered prediction-target generator            |
+| GET    | `/api/v1/ml/targets/{target}`                | One target generator's full metadata                                 |
+| POST   | `/api/v1/markets/{symbol}/ml/dataset`        | Build a versioned, split, validated ML dataset                       |
+| POST   | `/api/v1/markets/{symbol}/ml/dataset/export` | Export the complete dataset (`?format=csv\|json`) with a split label |
+
+This is the platform's one supported path for producing a dataset used in
+AI training — see `ARCHITECTURE.md` § "ML Dataset Builder" and `AI.md` §
+"ML Dataset Builder" for the full leakage-prevention design. It builds
+nothing new by itself: features come from the same `FeatureDatasetBuilder`
+`/features/dataset` uses, and the embedded `validation` verdict comes from
+the same `DatasetValidator` `/features/validate` uses.
+
+**`GET /ml/targets`** — the target catalogue, in the same shape as `GET
+/features`:
+
+```jsonc
+{
+  "targets": [
+    {
+      "name": "next_close",
+      "label": "Next Close Price",
+      "description": "The close price N candles ahead.",
+      "category": "price",
+      "parameters": [
+        {
+          "name": "horizon",
+          "type": "int",
+          "label": "Horizon",
+          "default": 1,
+          "minimum": 1,
+          "maximum": 500,
+          "required": false,
+          "choices": [],
+        },
+      ],
+      "outputs": ["next_close_{horizon}"],
+      "version": "1.0.0",
+      "author": "Eth AI Platform",
+      "value_type": "float",
+      "default_horizon": 1,
+      "is_deterministic": true,
+    },
+    // next_return (value_type "float"), next_direction (value_type "categorical") — same shape
+  ],
+  "total": 3,
+  "categories": ["price", "return", "direction"],
+}
+```
+
+**The request body extends the dataset-build request, rather than
+redeclaring it.** `MLDatasetRequest` is a `FeatureDatasetRequest` (the
+identical `timeframe`/`start`/`end`/`limit`/`features`/`drop_warmup` body
+`/features/dataset` accepts) plus targets and a split:
+
+```jsonc
+{
+  "timeframe": "1h",
+  "features": [{ "feature": "ohlcv" }],
+  "targets": [
+    { "target": "next_close", "params": { "horizon": "1" } },
+    { "target": "next_direction" }, // horizon defaults to the generator's own default_horizon
+  ],
+  "drop_undefined_targets": true, // default; drops trailing rows with no future candle to label them from
+  "split_train": 0.7,
+  "split_validation": 0.15,
+  "split_test": 0.15,
+}
+```
+
+At least one target is required. `split_train`/`split_validation`/
+`split_test` must each be non-negative, `split_train` must be greater than
+zero, and the three must sum to `1.0` within a `1e-6` tolerance, or the
+request 400s with `invalid_split_ratios` before any building happens.
+
+**Response shape** — a target-appended, split `FeatureDataset` plus its
+versioning and validation record:
+
+```jsonc
+{
+  "ml_dataset_id": "9c1e4a2c-...", // this exact ML artifact's identity
+  "dataset_id": "6f1e4a2c-...", // the underlying feature build's own identity
+  "symbol": "ETHUSD",
+  "timeframe": "1h",
+  "columns": [
+    { "name": "close", "label": "Close", "dtype": "float", "description": "..." },
+    { "name": "next_close_1", "label": "Next Close (h=1)", "dtype": "float", "description": "..." },
+  ],
+  "feature_columns": ["close"], // model inputs (X)
+  "target_columns": ["next_close_1"], // prediction labels (y)
+  "timestamps": ["2026-01-01T00:00:00Z", "..."],
+  "rows": [[3055.25, 3180.5]],
+  "split": ["train"], // per-row label, parallel to rows/timestamps — "train" | "validation" | "test"
+  "features": [
+    {
+      "feature": "ohlcv",
+      "label": "OHLCV",
+      "version": "1.0.0",
+      "parameters": {},
+      "columns": ["close"],
+      "warmup": 0,
+      "execution_time_ms": 0.1,
+    },
+  ],
+  "targets": [
+    {
+      "target": "next_close",
+      "label": "Next Close Price",
+      "version": "1.0.0",
+      "parameters": { "horizon": 1 },
+      "columns": ["next_close_1"],
+      "horizon": 1,
+      "execution_time_ms": 0.2,
+    },
+  ],
+  "target_failures": [], // partial-success record — a failed target never blocks the others
+  "split_ratios": { "train": 0.7, "validation": 0.15, "test": 0.15 },
+  "split_bounds": { "train_rows": 700, "validation_rows": 150, "test_rows": 149 },
+  "quality": {
+    "total_rows": 999,
+    "rows_returned": 999,
+    "rows_removed": 0,
+    "null_counts": {},
+    "duplicate_timestamps": 0,
+    "missing_candles": 0,
+    "feature_failures": [],
+    "generation_time_ms": 0.4,
+  },
+  "validation": {
+    "dataset_id": "6f1e4a2c-...",
+    "symbol": "ETHUSD",
+    "timeframe": "1h",
+    "engine_version": "1.0.0",
+    "validated_at": "2026-01-01T21:00:05Z",
+    "passed": true,
+    "rules_run": ["..."],
+    "summary": { "total_checks": 11, "errors": 0, "warnings": 0, "info": 0 },
+    "categories": {},
+    "issues": [],
+    "rows": 999,
+    "columns": 2,
+    "duration_ms": 3.1,
+  }, // the same ValidationReport shape /features/validate returns
+  "meta": {
+    "row_count": 999,
+    "total_rows": 999,
+    "candles_analyzed": 1001,
+    "rows_dropped_warmup": 0, // rows removed because a feature was still in warmup
+    "rows_dropped_horizon": 1, // trailing rows removed because a target had no future candle yet — the leakage-prevention trim
+    "warmup_candles": 0,
+    "max_horizon": 1,
+    "truncated": false,
+    "database_time_ms": 1.4,
+    "pipeline_version": "1.0.0",
+    "target_pipeline_version": "1.0.0",
+    "builder_version": "1.0.0",
+    "generated_at": "2026-01-01T21:00:05Z",
+    "created_at": "2026-01-01T21:00:05Z",
+  },
+}
+```
+
+**Export** (`POST .../ml/dataset/export?format=csv|json`) accepts the same
+body (`preview_rows` is ignored — an export is always the complete,
+unsplit-into-files matrix) and returns one flat file containing every row
+plus the `split` column — never three separate files. The CSV's comment
+preamble additionally lists each target's resolved parameters and version,
+alongside the feature provenance `/features/export` already documents.
+
+**Error codes specific to this surface.** Four target-generation codes are
+partial-success, never a hard failure during a build — mirroring the
+feature-engineering contract exactly — each recorded as one entry in
+`target_failures` while every other requested target still returns:
+`target_not_found` (also a top-level 404 when requested directly via `GET
+/ml/targets/{target}`), `invalid_target_parameter`, `insufficient_data`
+(shared code with the equivalent feature/indicator case), and
+`target_execution_failed`. Three codes do hard-fail the request (400):
+`duplicate_target_column` (two targets, or a target and a feature,
+producing the same column name — no partial result makes sense for a name
+collision), `invalid_split_ratios`, and `empty_ml_dataset` (every row fell
+inside some target's undefined horizon window; distinct from zero target
+columns, which is a valid, fully-explained result, not an error). Every
+error code from `/features/dataset` also applies here, since building
+features is the first step; the four partial-success feature codes
+surface identically (recorded in `quality.feature_failures`, not raised).
 
 ### Platform health
 

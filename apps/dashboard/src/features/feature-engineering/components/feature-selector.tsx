@@ -36,6 +36,7 @@ import {
   groupFeaturesByCategory,
   isSelected,
   paramSummary,
+  type FeatureCategoryGroup,
   type FeatureSelection,
 } from '../lib/feature-selection';
 
@@ -385,6 +386,24 @@ export function FeatureSelector({
     }
   };
 
+  /** Select every feature in one category, respecting the active search filter — mirrors `handleSelectAll`, scoped. */
+  const handleSelectCategory = (group: FeatureCategoryGroup) => {
+    for (const feature of group.features) {
+      if (!isSelected(selections, feature.name)) {
+        handleToggle(feature);
+      }
+    }
+  };
+
+  /** Deselect every feature in one category — mirrors `handleClearAll`, scoped. */
+  const handleClearCategory = (group: FeatureCategoryGroup) => {
+    for (const feature of group.features) {
+      if (isSelected(selections, feature.name)) {
+        handleToggle(feature);
+      }
+    }
+  };
+
   const toggleCategoryCollapsed = (key: string) => {
     setCollapsedCategories((current) => {
       const next = new Set(current);
@@ -552,6 +571,23 @@ export function FeatureSelector({
                     <Typography variant="caption" color="text.secondary">
                       ({group.features.length})
                     </Typography>
+                    <Box sx={{ flexGrow: 1 }} />
+                    <Button
+                      size="small"
+                      onClick={() => handleSelectCategory(group)}
+                      aria-label={`Select all in ${group.label}`}
+                      sx={{ minWidth: 0, textTransform: 'none' }}
+                    >
+                      Select all
+                    </Button>
+                    <Button
+                      size="small"
+                      onClick={() => handleClearCategory(group)}
+                      aria-label={`Clear ${group.label}`}
+                      sx={{ minWidth: 0, textTransform: 'none' }}
+                    >
+                      Clear
+                    </Button>
                   </ListSubheader>
                   <Collapse in={!collapsed} unmountOnExit>
                     {group.features.map((feature) => (

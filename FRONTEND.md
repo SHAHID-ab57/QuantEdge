@@ -2388,6 +2388,144 @@ panel explaining what the engine checks, the four steps to run it, and a
 worked example (apply a preset, pick a market/timeframe/range, run
 validation) — replacing the earlier single-sentence placeholder.
 
+## ML Dataset Builder
+
+`/ml-datasets` (`src/features/ml-datasets/`) is the workbench for the only
+supported path to a training-ready dataset: pick a market, timeframe,
+range, and features (model inputs) plus one or more prediction targets
+(labels), set a chronological train/validation/test split, build, and
+inspect the result. Backend design lives in
+[`ARCHITECTURE.md`](ARCHITECTURE.md) § "ML Dataset Builder"; the API
+surface is in [`docs/api/API.md`](docs/api/API.md) § "ML dataset builder".
+A top-level route (`/ml-datasets`, not the nested `/dashboard/ml/datasets`
+path) for the same reason `/features` and `/validation` are top-level:
+every other page in the `(dashboard)` route group lives there.
+
+A second UX/reproducibility pass turned this page from a dataset
+_generator_ into a workbench — richer configuration, metadata, preview
+inspection, and a configuration-portability story — with **no backend
+change**: every addition below still goes through the exact same
+`MLDatasetRequest`/`MLDatasetResponse` shape the original build already
+used.
+
+```text
+src/features/ml-datasets/
+├── hooks/use-ml-dataset-data.ts     target-catalogue query + build/export mutations
+├── lib/
+│   ├── target-selection.ts         target-side counterpart to feature-selection.ts
+│   ├── split-ratios.ts             client-side split-ratio validation (mirrors the backend's tolerance)
+│   ├── target-type.ts              value_type → Classification/Regression label; horizon range text
+│   ├── horizon-presets.ts          preset horizon values (1/2/3/5/10/20/50) + the "Custom…" sentinel
+│   ├── export-format.ts           EXPORT_FORMAT_OPTIONS (data, not hardcoded buttons) + approximate size estimate
+│   ├── data-range-text.ts          human-readable rendering of the submitted date range
+│   └── dataset-config.ts           DatasetConfig type + Zod schema — serialize/parse for Copy/Import
+├── components/
+│   ├── target-selector.tsx           searchable multi-select of prediction targets
+│   ├── horizon-preset-select.tsx     preset dropdown + "Custom…" numeric field, for one target's horizon
+│   ├── split-config-form.tsx         train/validation/test ratio inputs
+│   ├── split-timeline.tsx            proportional, chronologically-ordered split visualization
+│   ├── ml-dataset-info-card.tsx      identity/versioning chain
+│   ├── ml-dataset-summary.tsx        overview + warmup/horizon row-drop counts + target failures
+│   ├── ml-dataset-metadata-panel.tsx dedicated "what produced this file" card
+│   ├── dataset-config-actions.tsx    Copy Configuration / Import Configuration
+│   ├── export-summary-dialog.tsx     rows/columns/target/split/format/approx-size confirmation before export
+│   └── ml-dataset-export.tsx         CSV/JSON export, gated behind the summary dialog above
+└── ml-datasets-page.tsx              composition root
+```
+
+**Reuses, rather than redeclares, three existing UIs.** `DatasetForm` and
+`FeatureSelector` are imported unchanged from `feature-engineering/` — the
+identical market/timeframe/range/feature-selection controls that build a
+plain feature dataset also build an ML dataset, since `MLDatasetRequest` is
+a `FeatureDatasetRequest` subclass. `ValidationSummaryCards` and
+`ValidationReportPanel` are imported unchanged from `dataset-validation/` —
+the embedded validation verdict on an `MLDatasetResponse` is the exact same
+`ValidationReport` shape either page already renders, so a second
+rendering component would only drift from the first.
+
+**`DatasetPreviewTable` (shared with Feature Engineering) gained four more
+optional capabilities, still without being forked.** On top of its
+existing `targetColumns`/`splitLabels` props (badges label columns;
+renders a trailing "Split" column), it now offers a column search box, a
+column-visibility menu (hidden columns reset whenever the dataset's column
+list itself changes shape, so a hide never survives into an unrelated
+rebuild), a sticky first (Timestamp) column so a wide matrix's row context
+never scrolls out of view, and — for every numeric column — a small
+statistics icon opening `ColumnStatsPopover` (min/max/mean/std/null count,
+via the new `feature-engineering/lib/column-stats.ts`; the popover says
+explicitly when the figures are scoped to only the rendered preview rows).
+All of this benefits `/features` and `/validation` too, since all three
+pages render the same component. `FeatureSelector` similarly gained
+per-category Select All/Clear buttons alongside its existing global ones.
+
+**Target selection is now a searchable multi-select, not a fixed checkbox
+list.** `TargetSelector` uses `Autocomplete` (the same widget
+`RequiredColumnsSelector` already uses in Dataset Validation), with each
+option showing the target's problem type (Classification/Regression,
+derived from `value_type` by `lib/target-type.ts`'s
+`targetProblemTypeLabel`), description, output-column templates, and
+horizon compatibility range (`horizonRangeText`). Each selected target
+renders its own card below the search box with its output columns and a
+**`HorizonPresetSelect`** in place of a bare numeric field for the
+`horizon` parameter — a dropdown of common values (1/2/3/5/10/20/50
+candles) plus a "Custom…" option that reveals a numeric field. This is
+display-only: every value it produces is still validated against the
+backend-published `horizon` `ParameterSpec` via the same `validateValues`
+gate every other parameter field in this codebase uses, and is committed
+through the identical `onParamsChange` callback — the preset UI cannot
+introduce a value the backend would reject that the old numeric field
+couldn't already produce.
+
+**`SplitConfigForm` gained a `SplitTimeline`** — a horizontal bar showing
+train/validation/test as proportional, chronologically-ordered segments
+(train, then validation, then test, left to right — visually reinforcing
+"never shuffled"), a percentage under each ratio field, and, once a
+dataset has been built at least once, an estimated row count per split
+computed client-side from the last build's `meta.total_rows` (no second
+backend call). The three ratio fields themselves are unchanged — still
+0–1 fractions, still gated by `validateSplitRatios` — and that validation
+still deliberately permits a zero validation or test ratio, matching
+`ChronologicalSplitter`'s own tested backend behavior; this pass did not
+tighten the rule to "every split must be greater than zero," since doing
+so would reject a configuration the backend explicitly supports.
+
+**`MLDatasetMetadataPanel`** (new) is a dedicated "what produced this
+file, and where did it come from" card — dataset UUID, feature pipeline
+version, source market/timeframe/date-range, generated timestamp, target
+generator(s), the (currently singular) splitter name, and the supported
+export formats — deliberately separate from `MLDatasetInfoCard`
+(versioning, for reproducibility) and `MLDatasetSummary` (quality/trust),
+so identity fields aren't duplicated across three panels. Its "Validation
+Report ID" field is honestly the embedded `ValidationReport`'s own
+`dataset_id`, since the validation engine has no independent report-ID
+concept — stated as such rather than fabricating a field the backend
+doesn't have.
+
+**`DatasetConfigActions`** (new) is the reproducibility control:
+"Copy Configuration" serializes the current market, timeframe, range,
+feature selections, target selections, and split ratios as one JSON
+object (`lib/dataset-config.ts`'s `serializeDatasetConfig`) to the
+clipboard, degrading silently if clipboard access is unavailable — the
+same graceful-fallback convention `validation-issue-list.tsx`'s Copy Issue
+button already established. "Import Configuration" opens a paste dialog;
+the pasted text is parsed and validated against a Zod schema
+(`parseDatasetConfig`, returning a discriminated result rather than
+throwing, since a hand-edited or corrupted paste is an expected input
+here) and, only once valid, replaces the page's form and selection state.
+Import never builds anything on its own — the researcher still presses
+"Build ML Dataset" themselves afterward, exactly as if they had configured
+it by hand; this keeps the import path from becoming a second,
+un-audited way to trigger a build.
+
+**Export now confirms before downloading.** Clicking CSV or JSON opens
+`ExportSummaryDialog` — rows, columns, target columns, split ratios,
+format, and an approximate file size explicitly labeled as an estimate
+(`lib/export-format.ts`) — rather than downloading immediately; the
+actual download only starts once the dialog's own "Export" button is
+pressed. Both the dialog and `MLDatasetExport`'s own buttons are rendered
+from `EXPORT_FORMAT_OPTIONS` (data, not two hardcoded components), so a
+future export format needs no redesign of either.
+
 ## State management
 
 - Server state: TanStack Query (`src/lib/query/queryClient.ts`).

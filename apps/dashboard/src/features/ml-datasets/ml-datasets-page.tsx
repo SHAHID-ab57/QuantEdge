@@ -8,6 +8,7 @@ import Skeleton from '@mui/material/Skeleton';
 import Stack from '@mui/material/Stack';
 import Typography from '@mui/material/Typography';
 import { useCallback, useMemo, useState } from 'react';
+import { ConfirmActionDialog } from '@/components/confirm-action-dialog';
 import { Section } from '@/components/section';
 import { ValidationReportPanel } from '@/features/dataset-validation/components/validation-report-panel';
 import { ValidationSummaryCards } from '@/features/dataset-validation/components/validation-summary-cards';
@@ -28,15 +29,23 @@ import { useMarkets } from '@/features/history/hooks/use-history-data';
 import type { BuildMLDatasetParams } from '@/lib/api/ml-datasets';
 import { toDatasetRange } from '@/lib/resolve-dataset-range';
 import type { Feature } from '@/types/api/features';
-import type { TargetDTO } from '@/types/api/ml-datasets';
+import type { MLDatasetBuildSummary, TargetDTO } from '@/types/api/ml-datasets';
 import { DatasetConfigActions } from './components/dataset-config-actions';
+import { DatasetHistoryDetailDialog } from './components/dataset-history-detail-dialog';
+import { DatasetHistoryTable } from './components/dataset-history-table';
 import { MLDatasetExport } from './components/ml-dataset-export';
 import { MLDatasetInfoCard } from './components/ml-dataset-info-card';
 import { MLDatasetMetadataPanel } from './components/ml-dataset-metadata-panel';
 import { MLDatasetSummary } from './components/ml-dataset-summary';
 import { SplitConfigForm } from './components/split-config-form';
 import { TargetSelector } from './components/target-selector';
-import { PREVIEW_ROWS, useBuildMLDataset, useTargetCatalog } from './hooks/use-ml-dataset-data';
+import {
+  PREVIEW_ROWS,
+  useBuildMLDataset,
+  useDeleteMLDatasetBuild,
+  useMLDatasetBuilds,
+  useTargetCatalog,
+} from './hooks/use-ml-dataset-data';
 import { dataRangeText } from './lib/data-range-text';
 import { serializeDatasetConfig, type DatasetConfig } from './lib/dataset-config';
 import { validateSplitRatios, type SplitRatioValues } from './lib/split-ratios';
@@ -128,6 +137,33 @@ export function MLDatasetsPage() {
   const [split, setSplit] = useState<SplitRatioValues>(INITIAL_SPLIT);
   /** The request that produced the dataset on screen — so exports match it exactly. */
   const [built, setBuilt] = useState<{ symbol: string; params: BuildMLDatasetParams } | null>(null);
+
+  const [historyPage, setHistoryPage] = useState(1);
+  const [historySort, setHistorySort] = useState<
+    'symbol' | 'timeframe' | 'row_count' | 'created_at'
+  >('created_at');
+  const [historyDir, setHistoryDir] = useState<'asc' | 'desc'>('desc');
+  const [openBuildId, setOpenBuildId] = useState<string | null>(null);
+  const [deletingBuild, setDeletingBuild] = useState<MLDatasetBuildSummary | null>(null);
+  const historyLimit = 10;
+  const history = useMLDatasetBuilds({
+    sort: historySort,
+    dir: historyDir,
+    limit: historyLimit,
+    offset: (historyPage - 1) * historyLimit,
+  });
+  const deleteBuild = useDeleteMLDatasetBuild();
+
+  const handleHistorySort = useCallback((sort: typeof historySort, dir: 'asc' | 'desc') => {
+    setHistorySort(sort);
+    setHistoryDir(dir);
+    setHistoryPage(1);
+  }, []);
+
+  const handleDeleteConfirmed = useCallback(() => {
+    if (!deletingBuild) return;
+    deleteBuild.mutate(deletingBuild.id, { onSuccess: () => setDeletingBuild(null) });
+  }, [deleteBuild, deletingBuild]);
 
   const features = useMemo(() => featureCatalogue.data?.features ?? [], [featureCatalogue.data]);
   const targets = useMemo(() => targetCatalogue.data?.targets ?? [], [targetCatalogue.data]);
@@ -265,6 +301,24 @@ export function MLDatasetsPage() {
         </Stack>
       </Section>
 
+      <Section
+        title="Dataset History"
+        subtitle="Every dataset you've built and its full matrix — reopen or delete a past build"
+      >
+        <DatasetHistoryTable
+          data={history.data}
+          isLoading={history.isLoading}
+          page={historyPage}
+          limit={historyLimit}
+          sort={historySort}
+          dir={historyDir}
+          onPageChange={setHistoryPage}
+          onSortChange={handleHistorySort}
+          onSelect={(entry) => setOpenBuildId(entry.id)}
+          onDelete={setDeletingBuild}
+        />
+      </Section>
+
       <Grid container spacing={2}>
         <Grid size={{ xs: 12, lg: 4 }}>
           <Stack spacing={2}>
@@ -400,6 +454,23 @@ export function MLDatasetsPage() {
           </Stack>
         </Grid>
       </Grid>
+
+      <DatasetHistoryDetailDialog buildId={openBuildId} onClose={() => setOpenBuildId(null)} />
+      <ConfirmActionDialog
+        open={deletingBuild !== null}
+        title="Delete Dataset Build"
+        description={
+          deletingBuild
+            ? `Permanently remove ${deletingBuild.symbol} · ${deletingBuild.timeframe} (${deletingBuild.row_count.toLocaleString()} rows) from Dataset History? The underlying candles are untouched — this only deletes the saved copy.`
+            : ''
+        }
+        confirmLabel="Delete"
+        busyLabel="Deleting…"
+        color="error"
+        busy={deleteBuild.isPending}
+        onCancel={() => setDeletingBuild(null)}
+        onConfirm={handleDeleteConfirmed}
+      />
     </Stack>
   );
 }

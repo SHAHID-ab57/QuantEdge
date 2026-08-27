@@ -11,7 +11,7 @@ from `app.schemas.dataset_validation`, rather than redeclaring any of them.
 """
 
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field, field_serializer
 
@@ -25,6 +25,9 @@ from app.schemas.features import (
     FeatureDatasetRequest,
 )
 from app.schemas.indicators import ParameterSpecDTO
+
+if TYPE_CHECKING:
+    from app.models.ml_dataset_build import MLDatasetBuild
 
 
 class TargetDTO(BaseModel):
@@ -307,3 +310,76 @@ class MLDatasetResponse(BaseModel):
                 created_at=ml_dataset.created_at,
             ),
         )
+
+
+class MLDatasetBuildSummaryDTO(BaseModel):
+    """One row in the Dataset History list — metadata only, to keep the list light.
+
+    Deliberately mirrors `TrainingJobSummaryDTO`'s "list is metadata-only, detail
+    is the full record" split — a history list with hundreds of entries must
+    never pull every entry's full (row-including) payload just to render a table.
+    """
+
+    id: str
+    ml_dataset_id: str
+    symbol: str
+    timeframe: str
+    row_count: int
+    column_count: int
+    feature_count: int
+    target_count: int
+    quality_passed: bool
+    created_at: datetime
+
+    @field_serializer("created_at")
+    def _serialize_created_at(self, value: datetime) -> str:
+        return _iso(value)
+
+    @classmethod
+    def from_model(cls, build: "MLDatasetBuild") -> "MLDatasetBuildSummaryDTO":
+        return cls(
+            id=str(build.id),
+            ml_dataset_id=build.ml_dataset_id,
+            symbol=build.symbol,
+            timeframe=build.timeframe,
+            row_count=build.row_count,
+            column_count=build.column_count,
+            feature_count=build.feature_count,
+            target_count=build.target_count,
+            quality_passed=build.quality_passed,
+            created_at=build.created_at,
+        )
+
+
+class MLDatasetBuildListResponse(BaseModel):
+    """One page of past ML dataset builds — Dataset History's list view."""
+
+    builds: list[MLDatasetBuildSummaryDTO]
+    total: int
+    limit: int
+    offset: int
+
+
+class MLDatasetBuildDetailResponse(BaseModel):
+    """One persisted build's full record — the exact response it produced, reopened."""
+
+    id: str
+    created_at: datetime
+    dataset: MLDatasetResponse
+
+    @field_serializer("created_at")
+    def _serialize_created_at(self, value: datetime) -> str:
+        return _iso(value)
+
+    @classmethod
+    def from_model(cls, build: "MLDatasetBuild") -> "MLDatasetBuildDetailResponse":
+        return cls(
+            id=str(build.id),
+            created_at=build.created_at,
+            dataset=MLDatasetResponse.model_validate(build.payload),
+        )
+
+
+def _iso(value: datetime) -> str:
+    """ISO-8601 UTC with a literal `Z`, matching every timestamp on this API."""
+    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")

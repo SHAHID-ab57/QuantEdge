@@ -139,6 +139,29 @@ class EmptyMLDatasetError(AppError):
         self.horizon = horizon
 
 
+class MLDatasetBuildNotFoundError(AppError):
+    """Raised when the requested persisted ML dataset build id does not exist."""
+
+    def __init__(self, build_id: object) -> None:
+        super().__init__(
+            f"ML dataset build {build_id} not found",
+            code="ml_dataset_build_not_found",
+            status_code=status.HTTP_404_NOT_FOUND,
+        )
+
+
+class InvalidMLDatasetBuildSortError(AppError):
+    """Raised when Dataset History's sort column or direction is unsupported."""
+
+    def __init__(self, sort: str, direction: str, columns: tuple[str, ...]) -> None:
+        options = ", ".join(sorted(columns))
+        super().__init__(
+            f"Unsupported sort {sort!r} (direction {direction!r}); "
+            f"supported columns: {options}, directions: asc, desc",
+            code="invalid_sort",
+        )
+
+
 class DuplicateTargetError(RuntimeError):
     """Raised at import time when two target generators claim the same registry name.
 

@@ -197,3 +197,102 @@ class TestExportEndpoint:
             json=dataset_body({"feature": "ohlcv"}),
         )
         assert response.status_code == 422
+
+
+class TestDatasetHistoryEndpoints:
+    """`/ml/dataset-builds` — Dataset History's list/detail/delete surface."""
+
+    async def test_a_build_appears_in_history_after_building(
+        self, client: httpx.AsyncClient, seeded_varied: None
+    ) -> None:
+        await client.post(
+            "/api/v1/markets/ETCUSD/ml/dataset", json=dataset_body({"feature": "ohlcv"})
+        )
+
+        response = await client.get("/api/v1/ml/dataset-builds")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["total"] == 1
+        assert body["builds"][0]["symbol"] == "ETCUSD"
+        assert body["builds"][0]["row_count"] > 0
+
+    async def test_filters_by_symbol_and_quality_passed(
+        self, client: httpx.AsyncClient, seeded_varied: None
+    ) -> None:
+        await client.post(
+            "/api/v1/markets/ETCUSD/ml/dataset", json=dataset_body({"feature": "ohlcv"})
+        )
+
+        matching = await client.get(
+            "/api/v1/ml/dataset-builds", params={"symbol": "ETCUSD", "quality_passed": "true"}
+        )
+        not_matching = await client.get("/api/v1/ml/dataset-builds", params={"symbol": "NOPEUSD"})
+
+        assert matching.json()["total"] == 1
+        assert not_matching.json()["total"] == 0
+
+    async def test_returns_400_for_an_invalid_sort_column(self, client: httpx.AsyncClient) -> None:
+        response = await client.get("/api/v1/ml/dataset-builds", params={"sort": "not_a_column"})
+        assert response.status_code == 400
+        assert response.json()["code"] == "invalid_sort"
+
+    async def test_reopens_a_past_build_with_its_full_rows(
+        self, client: httpx.AsyncClient, seeded_varied: None
+    ) -> None:
+        built = (
+            await client.post(
+                "/api/v1/markets/ETCUSD/ml/dataset", json=dataset_body({"feature": "ohlcv"})
+            )
+        ).json()
+        listed = (await client.get("/api/v1/ml/dataset-builds")).json()
+        build_id = listed["builds"][0]["id"]
+
+        response = await client.get(f"/api/v1/ml/dataset-builds/{build_id}")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["id"] == build_id
+        assert body["dataset"]["rows"] == built["rows"]
+        assert body["dataset"]["ml_dataset_id"] == built["ml_dataset_id"]
+
+    async def test_returns_404_for_an_unknown_build_id(self, client: httpx.AsyncClient) -> None:
+        response = await client.get(
+            "/api/v1/ml/dataset-builds/6f1e4a2c-3b8d-4c9a-9e2f-1a7c5d6b8e90"
+        )
+        assert response.status_code == 404
+        assert response.json()["code"] == "ml_dataset_build_not_found"
+
+    async def test_deletes_a_past_build(
+        self, client: httpx.AsyncClient, seeded_varied: None
+    ) -> None:
+        await client.post(
+            "/api/v1/markets/ETCUSD/ml/dataset", json=dataset_body({"feature": "ohlcv"})
+        )
+        listed = (await client.get("/api/v1/ml/dataset-builds")).json()
+        build_id = listed["builds"][0]["id"]
+
+        response = await client.delete(f"/api/v1/ml/dataset-builds/{build_id}")
+
+        assert response.status_code == 204
+        assert (await client.get(f"/api/v1/ml/dataset-builds/{build_id}")).status_code == 404
+
+    async def test_returns_404_when_deleting_an_unknown_build_id(
+        self, client: httpx.AsyncClient
+    ) -> None:
+        response = await client.delete(
+            "/api/v1/ml/dataset-builds/6f1e4a2c-3b8d-4c9a-9e2f-1a7c5d6b8e90"
+        )
+        assert response.status_code == 404
+
+    async def test_exporting_or_training_on_a_dataset_does_not_add_to_history(
+        self, client: httpx.AsyncClient, seeded_varied: None
+    ) -> None:
+        await client.post(
+            "/api/v1/markets/ETCUSD/ml/dataset/export?format=csv",
+            json=dataset_body({"feature": "ohlcv"}),
+        )
+
+        response = await client.get("/api/v1/ml/dataset-builds")
+
+        assert response.json()["total"] == 0

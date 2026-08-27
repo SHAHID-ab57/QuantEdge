@@ -18,6 +18,8 @@ export interface TrainingSummaryPanelProps {
   experiment: Experiment | null;
   datasetVersion: string;
   modelLabel: string | null;
+  symbol?: string;
+  timeframe?: string;
 }
 
 function MissingChip({ label }: { label: string }) {
@@ -49,6 +51,8 @@ export function TrainingSummaryPanel({
   experiment,
   datasetVersion,
   modelLabel,
+  symbol,
+  timeframe,
 }: TrainingSummaryPanelProps) {
   const horizon = experiment ? describePredictionHorizon(experiment) : null;
   const featureCount = experiment?.feature_set?.length ?? null;
@@ -88,6 +92,14 @@ export function TrainingSummaryPanel({
           <MissingChip label="Select an experiment" />
         )}
       </SummaryRow>
+
+      {symbol || timeframe ? (
+        <SummaryRow label="Market">
+          <Typography variant="body2">
+            {symbol || '—'} {timeframe ? `(${timeframe})` : ''}
+          </Typography>
+        </SummaryRow>
+      ) : null}
 
       <SummaryRow label="Model">
         {modelLabel ? (

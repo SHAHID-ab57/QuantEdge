@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as experimentsApi from '@/lib/api/experiments';
+import * as marketApi from '@/lib/api/market';
 import * as trainingApi from '@/lib/api/training';
 import type { Experiment, ExperimentListResponse } from '@/types/api/experiments';
 import type {
@@ -24,10 +25,18 @@ vi.mock('@/lib/api/training', () => ({
   runTrainingJob: vi.fn(),
   cancelTrainingJob: vi.fn(),
   fetchModelAdapters: vi.fn(),
+  fetchTrainingArtifacts: vi.fn(),
+  downloadTrainingArtifact: vi.fn(),
+}));
+
+vi.mock('@/lib/api/market', () => ({
+  fetchMarkets: vi.fn(),
+  fetchTimeframes: vi.fn(),
 }));
 
 const mockedExperimentsApi = vi.mocked(experimentsApi);
 const mockedTrainingApi = vi.mocked(trainingApi);
+const mockedMarketApi = vi.mocked(marketApi);
 
 function experimentListResponse(
   overrides: Partial<ExperimentListResponse> = {},
@@ -96,6 +105,9 @@ function jobDetail(overrides: Partial<TrainingJob> = {}): TrainingJob {
     id: 'job-1',
     experiment_id: 'exp-1',
     dataset_version: 'ds-abc',
+    symbol: null,
+    timeframe: null,
+    target_column: null,
     model_type: 'placeholder',
     hyperparameters: {},
     status: 'pending',
@@ -138,7 +150,29 @@ function modelAdapters(): ModelAdapterCatalogResponse {
         label: 'Placeholder Model',
         description: 'Fabricates deterministic metrics.',
         framework: 'placeholder',
+        model_kind: 'placeholder',
+        requires_real_data: false,
         hyperparameter_hints: ['epochs', 'learning_rate'],
+        version: '1.0.0',
+      },
+      {
+        name: 'logistic_regression',
+        label: 'Logistic Regression (Baseline)',
+        description: 'A scikit-learn LogisticRegression baseline classifier.',
+        framework: 'scikit-learn',
+        model_kind: 'classification',
+        requires_real_data: true,
+        hyperparameter_hints: ['max_iter', 'C', 'random_seed'],
+        version: '1.0.0',
+      },
+      {
+        name: 'linear_regression',
+        label: 'Linear Regression (Baseline)',
+        description: 'A scikit-learn LinearRegression baseline regressor.',
+        framework: 'scikit-learn',
+        model_kind: 'regression',
+        requires_real_data: true,
+        hyperparameter_hints: ['fit_intercept'],
         version: '1.0.0',
       },
     ],
@@ -157,8 +191,31 @@ function renderPage() {
 beforeEach(() => {
   mockedTrainingApi.fetchTrainingJobs.mockResolvedValue(listResponse());
   mockedTrainingApi.fetchModelAdapters.mockResolvedValue(modelAdapters());
+  mockedTrainingApi.fetchTrainingArtifacts.mockResolvedValue({ job_id: 'job-1', artifacts: [] });
   mockedExperimentsApi.fetchExperiments.mockResolvedValue(experimentListResponse());
   mockedExperimentsApi.fetchExperiment.mockResolvedValue(experimentDetail());
+  mockedMarketApi.fetchMarkets.mockResolvedValue({
+    markets: [
+      {
+        id: 'market-1',
+        symbol: 'ETHUSD',
+        exchange: 'Delta Exchange',
+        exchange_id: '11111111-1111-4111-8111-111111111111',
+        base_asset: 'ETH',
+        quote_asset: 'USD',
+        market_type: 'perpetual',
+        is_active: true,
+        delta_product_id: null,
+        delta_contract_type: null,
+        tick_size: null,
+        funding_method: null,
+        funding_interval_seconds: null,
+        listing_date: null,
+      },
+    ],
+    total: 1,
+  });
+  mockedMarketApi.fetchTimeframes.mockResolvedValue({ symbol: 'ETHUSD', timeframes: ['1h', '1d'] });
 });
 
 afterEach(() => {
@@ -367,6 +424,9 @@ describe('MLTrainingPage — creating a training job', () => {
         experiment_id: 'exp-1',
         model_type: 'placeholder',
         dataset_version: 'ds-abc',
+        symbol: null,
+        timeframe: null,
+        target_column: null,
         hyperparameters: {
           epochs: 10,
           learning_rate: 0.001,
@@ -378,6 +438,93 @@ describe('MLTrainingPage — creating a training job', () => {
     );
     expect(await screen.findByText('Training Job')).toBeInTheDocument();
   });
+
+  it('reveals the configuration panel only for a model adapter that requires real data', async () => {
+    renderPage();
+    await screen.findByText('placeholder');
+    fireEvent.click(screen.getByRole('button', { name: 'New Training Job' }));
+    const dialog = screen.getByRole('dialog');
+
+    expect(within(dialog).queryByLabelText('Symbol')).not.toBeInTheDocument();
+
+    fireEvent.mouseDown(within(dialog).getByLabelText('Model type'));
+    fireEvent.click(await screen.findByRole('option', { name: 'Logistic Regression (Baseline)' }));
+
+    expect(await within(dialog).findByLabelText('Symbol')).toBeInTheDocument();
+    expect(within(dialog).getByLabelText('Timeframe')).toBeInTheDocument();
+    expect(within(dialog).getByLabelText('Target column')).toBeInTheDocument();
+  });
+
+  it('requires a symbol and timeframe for a model adapter that requires real data', async () => {
+    renderPage();
+    await screen.findByText('placeholder');
+    fireEvent.click(screen.getByRole('button', { name: 'New Training Job' }));
+    const dialog = screen.getByRole('dialog');
+    fireEvent.mouseDown(within(dialog).getByLabelText('Model type'));
+    fireEvent.click(await screen.findByRole('option', { name: 'Logistic Regression (Baseline)' }));
+
+    expect(await screen.findByText('Select a market symbol.')).toBeInTheDocument();
+    expect(screen.getByText('Select a timeframe.')).toBeInTheDocument();
+  });
+
+  it('populates the timeframe options once a symbol is selected', async () => {
+    renderPage();
+    await screen.findByText('placeholder');
+    fireEvent.click(screen.getByRole('button', { name: 'New Training Job' }));
+    const dialog = screen.getByRole('dialog');
+    fireEvent.mouseDown(within(dialog).getByLabelText('Model type'));
+    fireEvent.click(await screen.findByRole('option', { name: 'Logistic Regression (Baseline)' }));
+    const symbolField = await within(dialog).findByLabelText('Symbol');
+    fireEvent.mouseDown(symbolField);
+    fireEvent.click(await screen.findByRole('option', { name: 'ETHUSD' }));
+
+    fireEvent.mouseDown(within(dialog).getByLabelText('Timeframe'));
+    expect(await screen.findByRole('option', { name: '1h' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: '1d' })).toBeInTheDocument();
+
+    await waitFor(() =>
+      expect(screen.queryByText('Select a market symbol.')).not.toBeInTheDocument(),
+    );
+  });
+
+  it('creates a real-data training job with symbol, timeframe, and target column', async () => {
+    // A longer explicit timeout: this test drives several sequential MUI
+    // Autocomplete interactions and can exceed the 5s default under the
+    // CPU pressure of the full suite running in parallel, despite finishing
+    // in ~2s in isolation.
+    mockedTrainingApi.createTrainingJob.mockResolvedValue(jobDetail({ id: 'job-3' }));
+    mockedTrainingApi.fetchTrainingJob.mockResolvedValue(jobDetail({ id: 'job-3' }));
+    renderPage();
+    await screen.findByText('placeholder');
+    fireEvent.click(screen.getByRole('button', { name: 'New Training Job' }));
+    const dialog = screen.getByRole('dialog');
+    await within(dialog).findByLabelText('Experiment');
+    fireEvent.mouseDown(within(dialog).getByLabelText('Experiment'));
+    fireEvent.click(await screen.findByRole('option', { name: 'Baseline SMA' }));
+    fireEvent.mouseDown(within(dialog).getByLabelText('Model type'));
+    fireEvent.click(await screen.findByRole('option', { name: 'Logistic Regression (Baseline)' }));
+    const symbolField = await within(dialog).findByLabelText('Symbol');
+    fireEvent.mouseDown(symbolField);
+    fireEvent.click(await screen.findByRole('option', { name: 'ETHUSD' }));
+    fireEvent.mouseDown(within(dialog).getByLabelText('Timeframe'));
+    fireEvent.click(await screen.findByRole('option', { name: '1h' }));
+    fireEvent.change(within(dialog).getByLabelText('Target column'), {
+      target: { value: 'next_direction_1' },
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Create Training Job' }));
+
+    await waitFor(() =>
+      expect(mockedTrainingApi.createTrainingJob).toHaveBeenCalledWith(
+        expect.objectContaining({
+          model_type: 'logistic_regression',
+          symbol: 'ETHUSD',
+          timeframe: '1h',
+          target_column: 'next_direction_1',
+        }),
+      ),
+    );
+  }, 15000);
 });
 
 describe('MLTrainingPage — job detail, run, and cancel', () => {
@@ -474,5 +621,198 @@ describe('MLTrainingPage — job detail, run, and cancel', () => {
     fireEvent.click(await screen.findByText('placeholder'));
 
     expect(await screen.findByRole('alert')).toHaveTextContent('missing_dataset_version');
+  });
+
+  it('shows the structured error detail (affected feature, rows, suggested fix) for a failed job', async () => {
+    mockedTrainingApi.fetchTrainingJob.mockResolvedValue(
+      jobDetail({
+        status: 'failed',
+        error_message: "Feature column 'sma_20' has an undefined value (row 3)",
+        error_detail: {
+          reason: "Feature column 'sma_20' has an undefined value (row 3)",
+          affected_feature: 'sma_20',
+          affected_rows: [3],
+          suggested_fix: 'Check the upstream feature generator for this column.',
+        },
+      }),
+    );
+    renderPage();
+    fireEvent.click(await screen.findByText('placeholder'));
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('sma_20');
+    expect(alert).toHaveTextContent('Affected rows: 3');
+    expect(alert).toHaveTextContent('Check the upstream feature generator for this column.');
+  });
+
+  it('renders a confusion matrix for a completed classification job', async () => {
+    mockedTrainingApi.fetchTrainingJob.mockResolvedValue(
+      jobDetail({
+        model_type: 'logistic_regression',
+        status: 'completed',
+        current_stage: 'update_experiment',
+        result_summary: {
+          metrics: { accuracy: 0.9, precision: 0.85, recall: 0.8, f1: 0.82 },
+          artifact_uri: 'file:///tmp/model.joblib',
+          classes: ['down', 'up'],
+          confusion_matrix: [
+            [4, 1],
+            [0, 5],
+          ],
+        },
+      }),
+    );
+    renderPage();
+    fireEvent.click(await screen.findByText('placeholder'));
+
+    expect(await screen.findByText('Confusion Matrix')).toBeInTheDocument();
+    expect(screen.getByText('Accuracy')).toBeInTheDocument();
+    // The Train/Validation/Test table below also renders the validation column
+    // with this same value, so more than one match is expected here.
+    expect(screen.getAllByText('0.9000').length).toBeGreaterThan(0);
+  });
+
+  it('renders regression metrics for a completed regression job', async () => {
+    mockedTrainingApi.fetchTrainingJob.mockResolvedValue(
+      jobDetail({
+        model_type: 'linear_regression',
+        status: 'completed',
+        current_stage: 'update_experiment',
+        result_summary: {
+          metrics: { mae: 1.5, mse: 3.2, rmse: 1.79, r2: 0.91 },
+          artifact_uri: 'file:///tmp/model.joblib',
+        },
+      }),
+    );
+    renderPage();
+    fireEvent.click(await screen.findByText('placeholder'));
+
+    expect(await screen.findByText('MAE')).toBeInTheDocument();
+    expect(screen.getByText('R²')).toBeInTheDocument();
+    expect(screen.queryByText('Confusion Matrix')).not.toBeInTheDocument();
+  });
+
+  it('renders feature importance, ROC/PR curves, prediction samples, and model metadata for a completed classification job', async () => {
+    mockedTrainingApi.fetchTrainingJob.mockResolvedValue(
+      jobDetail({
+        model_type: 'logistic_regression',
+        status: 'completed',
+        current_stage: 'update_experiment',
+        result_summary: {
+          metrics: { accuracy: 0.9, precision: 0.85, recall: 0.8, f1: 0.82 },
+          artifact_uri: 'file:///tmp/model.joblib',
+          classes: ['down', 'up'],
+          confusion_matrix: [
+            [4, 1],
+            [0, 5],
+          ],
+          confusion_matrix_details: [
+            {
+              class: 'up',
+              true_positive: 5,
+              false_positive: 1,
+              true_negative: 4,
+              false_negative: 0,
+              support: 5,
+            },
+          ],
+          train_metrics: { accuracy: 0.99 },
+          test_metrics: { accuracy: 0.88 },
+          overfitting: {
+            flagged: false,
+            gap: 0.09,
+            threshold: 0.15,
+            message: 'No significant gap.',
+          },
+          roc_pr_curves: {
+            curves: {
+              up: {
+                roc: { fpr: [0, 1], tpr: [0, 1] },
+                pr: { precision: [1, 0.5], recall: [0, 1] },
+              },
+            },
+            auc: { up: 0.93 },
+            average_precision: { up: 0.9 },
+            macro_auc: 0.93,
+          },
+          feature_importance: [
+            { feature: 'sma_20', coefficient: 0.5, abs_importance: 0.5, sign: 'positive' },
+          ],
+          prediction_samples: [
+            {
+              actual: 'up',
+              predicted: 'up',
+              probability: 0.9,
+              confidence_level: 'high',
+              correct: true,
+            },
+          ],
+          model_metadata: {
+            sklearn_version: '1.5.0',
+            joblib_version: '1.4.2',
+            training_duration_seconds: 0.01,
+            cpu_time_seconds: 0.01,
+            memory_usage_mb: 50,
+            feature_count: 1,
+            sample_count: 10,
+          },
+        },
+      }),
+    );
+    mockedTrainingApi.fetchTrainingArtifacts.mockResolvedValue({
+      job_id: 'job-1',
+      artifacts: [
+        {
+          artifact_type: 'feature_importance_csv',
+          filename: 'feature_importance.csv',
+          content_type: 'text/csv',
+          download_url: '/api/v1/training-jobs/job-1/artifacts/feature_importance_csv',
+        },
+      ],
+    });
+    renderPage();
+    fireEvent.click(await screen.findByText('placeholder'));
+
+    expect(await screen.findByText('Confusion Matrix Details')).toBeInTheDocument();
+    expect(screen.getByText('Train / Validation / Test Metrics')).toBeInTheDocument();
+    expect(screen.getByText('No significant gap.')).toBeInTheDocument();
+    expect(screen.getByText('ROC & Precision-Recall Curves')).toBeInTheDocument();
+    expect(screen.getByText('Feature Importance')).toBeInTheDocument();
+    expect(screen.getByText('sma_20')).toBeInTheDocument();
+    expect(screen.getByText('Prediction Samples')).toBeInTheDocument();
+    expect(screen.getByText('Model Metadata')).toBeInTheDocument();
+    expect(
+      await screen.findByText('Feature importance (feature_importance.csv)'),
+    ).toBeInTheDocument();
+  });
+
+  it('highlights overfitting for a completed regression job with a large train/test gap', async () => {
+    mockedTrainingApi.fetchTrainingJob.mockResolvedValue(
+      jobDetail({
+        model_type: 'linear_regression',
+        status: 'completed',
+        current_stage: 'update_experiment',
+        result_summary: {
+          metrics: { mae: 0.5, mse: 0.3, rmse: 0.55, r2: 0.98 },
+          artifact_uri: 'file:///tmp/model.joblib',
+          train_metrics: { mae: 0.01, mse: 0.001, rmse: 0.03, r2: 0.999 },
+          test_metrics: { mae: 5.0, mse: 30.0, rmse: 5.5, r2: 0.4 },
+          overfitting: {
+            flagged: true,
+            gap: 0.599,
+            threshold: 0.15,
+            message: 'Train metric exceeds the held-out metric — possible overfitting.',
+          },
+          feature_importance: [
+            { feature: 'close', coefficient: -0.2, abs_importance: 0.2, sign: 'negative' },
+          ],
+        },
+      }),
+    );
+    mockedTrainingApi.fetchTrainingArtifacts.mockResolvedValue({ job_id: 'job-1', artifacts: [] });
+    renderPage();
+    fireEvent.click(await screen.findByText('placeholder'));
+
+    expect(await screen.findByText(/possible overfitting/)).toBeInTheDocument();
   });
 });

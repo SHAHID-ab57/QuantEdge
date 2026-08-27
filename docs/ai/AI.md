@@ -7,22 +7,27 @@ probabilistic predictions — what exists today, what does not, and the
 contracts the missing pieces will plug into.
 
 Written honestly about status: the platform is **AI-ready at the data
-layer, and now has a real training-job lifecycle, but still no real
-model**. Feature engineering, dataset validation, the ML Dataset Builder
-(target generation, chronological splitting, versioned export), Experiment
-Management, and the Machine Learning Training Framework (job lifecycle,
-pipeline orchestration, logging) are implemented; real model training,
-inference, and evaluation are not. Every section below says which it is,
-because a document that describes an aspirational pipeline in the present
-tense is worse than no document at all.
+layer, has a real training-job lifecycle, and now trains two real
+baseline models**. Feature engineering, dataset validation, the ML
+Dataset Builder (target generation, chronological splitting, versioned
+export), Experiment Management, the Machine Learning Training Framework
+(job lifecycle, pipeline orchestration, logging), and a Baseline Model
+Framework (real scikit-learn logistic/linear regression, real evaluation
+metrics, prediction) are implemented; anything beyond a linear baseline —
+a model registry, promotion to serving, backtesting — is not. Every
+section below says which it is, because a document that describes an
+aspirational pipeline in the present tense is worse than no document at
+all.
 
 ## Status
 
 Draft — Feature Engineering, the Dataset Validation Gate, the ML Dataset
-Builder, Experiment Management (the registry), and the Machine Learning
-Training Framework (job lifecycle + placeholder pipeline, not real model
-training) implemented; real Models, Inference, and Evaluation are design
-intent only.
+Builder, Experiment Management (the registry), the Machine Learning
+Training Framework (job lifecycle + pipeline), and the Baseline Model
+Framework (real logistic/linear regression, evaluation, prediction)
+implemented; a model registry, Inference beyond a completed job's own
+`predict` endpoint, and full Evaluation (backtesting) are design intent
+only.
 
 ## Overview
 
@@ -303,33 +308,48 @@ validation are tested.
 
 ## Models
 
-**No real model artifacts, no model registry, no real training code exists
-in this repository — the orchestration around where they would plug in now
-does.** `docs/architecture/DomainModel.md` § BC4 defines the intended
+**Two real baseline models exist; nothing beyond a linear baseline does
+yet.** `docs/architecture/DomainModel.md` § BC4 defines the intended
 bounded context (AI Research & Training) and `DataArchitecture.md` § D8–D9
-the intended artifacts. `app/training/base.py`'s `ModelAdapter` is the
-extension point a real model would implement (`initialize`/`train`,
-resolved by name through `app/training/registry.py`'s
-`ModelAdapterRegistry`); `app/training/adapters/placeholder.py`'s
-`PlaceholderModelAdapter` is the only adapter registered today, and it
-fabricates deterministic metrics rather than training anything. When a
-real model is built, its input is the dataset described above — which is
-why the dataset carries versioned provenance: a model artifact must be
-able to name the exact dataset definition it was trained on.
+the intended artifacts — a model registry and promotion-to-serving are
+still design intent, but the _models_ themselves are no longer entirely
+aspirational. `app/training/base.py`'s `ModelAdapter` is the extension
+point every model implements (`initialize`/`train`/`predict`, resolved by
+name through `app/training/registry.py`'s `ModelAdapterRegistry`). Three
+adapters are registered today:
+
+| Adapter               | `model_kind`     | Real training?                               | Pairs with                                        |
+| --------------------- | ---------------- | -------------------------------------------- | ------------------------------------------------- |
+| `placeholder`         | `placeholder`    | No — fabricates deterministic metrics        | any target                                        |
+| `logistic_regression` | `classification` | Yes — real scikit-learn `LogisticRegression` | a categorical target, e.g. `next_direction`       |
+| `linear_regression`   | `regression`     | Yes — real scikit-learn `LinearRegression`   | a numeric target, e.g. `next_close`/`next_return` |
+
+The two real adapters are **baselines by design, not a ceiling** — per
+`PROJECT.md`'s stated philosophy, professional quantitative research
+starts with a simple linear model, and every advanced model this platform
+adds later (a gradient-boosted tree, a neural network) is expected to
+prove it outperforms these before it's trusted. Their input is the dataset
+described above — a real one, this time: `app/training/dataset_loader.py`
+bridges a built `MLDataset` into the numeric `SplitMatrix` each adapter
+trains and evaluates on. See `ARCHITECTURE.md` § "Baseline Model
+Framework" for the full design (the model interface, registry reuse, both
+plugins, training integration, the prediction interface, and the model
+serialization abstraction that lets `train` and `predict` run in different
+requests, or even different processes).
 
 ## Machine Learning Training Framework
 
-**Implemented as orchestration and lifecycle management; implements no
-real model training** (`services/api/app/training/` + `app/models/
-training.py` + `app/services/training.py`; full design in `ARCHITECTURE.md`
-§ "Machine Learning Training Framework"). This is the seam
-`PROJECT.md`'s "experiment run" arrow (below) plugs into: a `TrainingJob`
-records which experiment it trains for, which registered model adapter runs
-it, its hyperparameters, its lifecycle status, and — once finished — a
-result summary copied onto that experiment.
+**Implemented as orchestration and lifecycle management — model-agnostic
+by design** (`services/api/app/training/` + `app/models/training.py` +
+`app/services/training.py`; full design in `ARCHITECTURE.md` § "Machine
+Learning Training Framework"). This is the seam `PROJECT.md`'s "experiment
+run" arrow (below) plugs into: a `TrainingJob` records which experiment it
+trains for, which registered model adapter runs it, its hyperparameters,
+its lifecycle status, and — once finished — a result summary copied onto
+that experiment.
 
 ```text
-Training Job: experiment_id, dataset_version, model_type, hyperparameters, status, current_stage, result_summary
+Training Job: experiment_id, dataset_version, symbol, timeframe, target_column, model_type, hyperparameters, status, current_stage, result_summary
               -> Job Logs (one row per pipeline-stage transition)
 ```
 
@@ -337,11 +357,16 @@ Training Job: experiment_id, dataset_version, model_type, hyperparameters, statu
 sequence — `validate_dataset -> load_dataset -> initialize_model ->
 execute_training -> save_results -> update_experiment` — run synchronously
 by `POST /training-jobs/{id}/run` (no worker/queue service exists on this
-platform yet, so the call blocks for the run's, currently near-instant,
-duration). `load_dataset` does not read any real rows — the ML Dataset
-Builder persists nothing to load from (§ above) — it only carries the
-dataset citation forward, the same honesty principle `TrainingDataset`'s
-own docstring states explicitly.
+platform yet, so the call blocks for the run's duration — near-instant for
+the placeholder, a real but small `fit`/`predict` for a baseline model).
+`load_dataset`'s behavior now depends on the resolved adapter's
+`requires_real_data`: `false` (the placeholder) carries the dataset
+citation forward with no real rows read, the same honesty principle
+`TrainingDataset`'s own docstring states explicitly; `true` (both baseline
+adapters) actually builds a real `MLDataset` from the job's `symbol`/
+`timeframe` and the linked experiment's own `feature_set`/`target_config`/
+`split_config` — see § "Models" above and `ARCHITECTURE.md` § "Baseline
+Model Framework" for exactly how.
 
 **`update_experiment` is the one place this framework reuses rather than
 reimplements**: it calls `ExperimentService.update`/`add_metric`/
@@ -381,22 +406,29 @@ Dataset Validation instead of fabricating a number or a pass/fail badge.
 
 ## Training Pipeline (dataset preparation → model)
 
-**Dataset preparation and job orchestration are implemented; real model
-training is not.** The intended full shape (`PROJECT.md` § objectives) is:
-dataset snapshot → experiment run → evaluation → model registry →
-promotion to serving. The first arrow — turning stored candles into a
-reproducible, versioned, labeled, chronologically split, exportable
-dataset — is built end to end by the ML Dataset Builder (§ above). The
-second arrow — registering and running an experiment attempt, end to end
-through a real lifecycle — is now built by the Machine Learning Training
-Framework (§ above), but the "run" it orchestrates is a placeholder, not a
-real model fit. Evaluation, a model registry, and promotion to serving do
-not exist.
+**Dataset preparation, job orchestration, and two real baseline models are
+implemented; a model registry and promotion to serving are not.** The
+intended full shape (`PROJECT.md` § objectives) is: dataset snapshot →
+experiment run → evaluation → model registry → promotion to serving. The
+first arrow — turning stored candles into a reproducible, versioned,
+labeled, chronologically split, exportable dataset — is built end to end
+by the ML Dataset Builder (§ above). The second arrow — registering and
+running an experiment attempt, end to end through a real lifecycle — is
+built by the Machine Learning Training Framework (§ above); for
+`logistic_regression`/`linear_regression` the "run" it orchestrates is now
+a real scikit-learn `fit` with real recorded evaluation metrics, not a
+fabricated number — the third arrow, "evaluation," exists for these two
+models specifically (accuracy/precision/recall/F1 or MAE/MSE/RMSE/R²,
+computed on a held-out validation/test split — see `ARCHITECTURE.md` §
+"Baseline Model Framework"). A model _registry_ (as opposed to the
+`ModelAdapter` _class_ registry, which is a different thing — see § "AI
+extension points" below) and promotion to serving still do not exist.
 
 Generators remain callable directly from Python (`FeaturePipeline.run`,
-`TargetPipeline.run`) without going through HTTP — the seam a real training
-job's `load_dataset` stage would eventually use, once one exists to load
-from. `app/features/ai_extensions.py`'s `SplitRatios`/`DatasetSplit`/
+`TargetPipeline.run`) without going through HTTP — the seam
+`app/training/dataset_loader.py` now actually uses (via `MLDatasetService.
+build_ml_dataset`) for a `requires_real_data` adapter's `load_dataset`
+stage. `app/features/ai_extensions.py`'s `SplitRatios`/`DatasetSplit`/
 `TrainValidationTestSplitter` Protocol now has a real implementer
 (`app/ml_datasets/split.py`'s `ChronologicalSplitter`); `LabelSpec`/
 `LabelGenerator` is likewise now realized in substance by the ML Dataset
@@ -409,24 +441,43 @@ sequence model.
 
 ## Inference
 
-**Not built.** No prediction service exists (`DomainModel.md` § BC5).
+**Not built as a platform-level service; a narrow, per-job capability now
+exists instead.** No standalone prediction service exists
+(`DomainModel.md` § BC5) — there is no "predict on live market data"
+capability. What does exist: `POST /training-jobs/{id}/predict`
+(`ARCHITECTURE.md` § "Baseline Model Framework"), which loads one
+_already-completed_ job's own serialized model and predicts for
+caller-supplied feature rows. This is a training-framework convenience
+for verifying a model actually predicts something sensible, not BC5's
+intended inference service (no live feature computation, no market
+selection, no serving infrastructure).
 
 The relevant design commitment already made: because feature generators are
-framework-free and have a single execution path, an inference path will
-compute features with the _same_ code that produced the training data,
-rather than a reimplementation. That is the property that has to be
-designed in from the start, and it has been.
+framework-free and have a single execution path, a future real inference
+path will compute features with the _same_ code that produced the
+training data, rather than a reimplementation. That is the property that
+has to be designed in from the start, and it has been.
 
 ## Evaluation
 
-**Not built.** No backtesting engine, no evaluation harness, no metrics
-store.
+**Not built as a platform-level backtesting engine; per-job evaluation
+metrics now exist instead.** No backtesting engine, no evaluation harness
+across jobs, no metrics store exists. What does exist: `logistic_regression`/
+`linear_regression` each evaluate their own fit on a held-out validation
+split (and, if present, test split) at training time — real
+accuracy/precision/recall/F1 or MAE/MSE/RMSE/R², recorded on the job and
+copied onto the experiment as real `ExperimentMetric` rows (§ "Baseline
+Model Framework"). This is per-job, single-model evaluation, not
+cross-model comparison, backtesting against historical trading outcomes,
+or a metrics store a researcher could query across every experiment ever
+run.
 
 The platform's stated commitment (`PROJECT.md`) is that predictions are
-probabilistic and that uncertainty is communicated honestly — no evaluation
-code exists yet to hold to that, and none of the current UI displays any
-prediction or confidence figure, precisely because there is nothing real to
-display.
+probabilistic and that uncertainty is communicated honestly — the two
+baseline models' metrics are real numbers, not fabricated ones, but
+neither the frontend nor the API yet expresses a _prediction_ as a
+probability distribution or confidence interval; a classifier's
+`predict()` returns a class label, not a probability.
 
 ## AI extension points
 

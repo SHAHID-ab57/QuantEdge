@@ -6,6 +6,8 @@ market/timeframe/range validation are covered against real rows, mirroring
 `tests/features/test_service.py`'s exact convention.
 """
 
+import uuid
+
 import pytest
 
 from app.dataset_validation.engine import DatasetValidator
@@ -16,13 +18,18 @@ from app.features.dataset import FeatureDatasetBuilder
 from app.features.pipeline import FeaturePipeline
 from app.features.registry import default_registry as feature_registry
 from app.ml_datasets.dataset import MLDatasetBuilder
-from app.ml_datasets.errors import TargetNotFoundError
+from app.ml_datasets.errors import (
+    InvalidMLDatasetBuildSortError,
+    MLDatasetBuildNotFoundError,
+    TargetNotFoundError,
+)
 from app.ml_datasets.pipeline import TargetPipeline
 from app.ml_datasets.registry import default_registry as target_registry
 from app.ml_datasets.split import ChronologicalSplitter
 from app.ml_datasets.targets import load_builtin_targets
 from app.repositories.candles import CandleRepository
 from app.repositories.markets import MarketRepository
+from app.repositories.ml_dataset_builds import MLDatasetBuildRepository
 from app.schemas.features import FeatureRequestItem
 from app.schemas.ml_datasets import MLDatasetRequest, MLTargetRequestItem
 from app.services.ml_datasets import MLDatasetService, _cap_rows
@@ -47,6 +54,7 @@ def build_service(session_factory: SessionFactory) -> MLDatasetService:
         ),
         default_limit=100,
         max_limit=1000,
+        build_repository=MLDatasetBuildRepository(session),
     )
 
 
@@ -120,6 +128,29 @@ class TestBuildDataset:
             + response.split_bounds.test_rows
             == 1
         )
+
+    async def test_preview_rows_truncates_the_response_but_not_dataset_history(
+        self, session_factory: SessionFactory, seeded_varied: None
+    ) -> None:
+        # seeded_varied leaves 2 rows after horizon trimming (see the test above).
+        service = build_service(session_factory)
+
+        response = await service.build_dataset("ETCUSD", request(preview_rows=1))
+
+        assert len(response.rows) == 1
+        assert response.meta.truncated is True
+
+        listing = await service.list_builds(
+            symbol=None,
+            timeframe=None,
+            quality_passed=None,
+            sort="created_at",
+            direction="desc",
+            limit=20,
+            offset=0,
+        )
+        detail = await service.get_build(uuid.UUID(listing.builds[0].id))
+        assert len(detail.dataset.rows) == 2
 
 
 class TestCapRows:
@@ -223,3 +254,220 @@ class TestExportDataset:
         exported = await build_service(session_factory).export_dataset("ETCUSD", request(), "json")
         assert exported.media_type.startswith("application/json")
         assert "ml_dataset_id" in exported.content
+
+
+class TestDatasetHistory:
+    """`build_dataset` persists to Dataset History; `build_ml_dataset`/`export_dataset`
+    (the Training Framework's and the Export dialog's own reuse of this service) must
+    not — only an explicit `/ml-datasets` build should grow that history."""
+
+    async def test_build_dataset_persists_a_history_entry(
+        self, session_factory: SessionFactory, seeded_varied: None
+    ) -> None:
+        service = build_service(session_factory)
+
+        await service.build_dataset("ETCUSD", request())
+
+        listing = await service.list_builds(
+            symbol=None,
+            timeframe=None,
+            quality_passed=None,
+            sort="created_at",
+            direction="desc",
+            limit=20,
+            offset=0,
+        )
+        assert listing.total == 1
+        assert listing.builds[0].symbol == "ETCUSD"
+        assert listing.builds[0].row_count > 0
+
+    async def test_build_ml_dataset_does_not_add_to_history(
+        self, session_factory: SessionFactory, seeded_varied: None
+    ) -> None:
+        service = build_service(session_factory)
+
+        await service.build_ml_dataset("ETCUSD", request())
+
+        listing = await service.list_builds(
+            symbol=None,
+            timeframe=None,
+            quality_passed=None,
+            sort="created_at",
+            direction="desc",
+            limit=20,
+            offset=0,
+        )
+        assert listing.total == 0
+
+    async def test_export_dataset_does_not_add_to_history(
+        self, session_factory: SessionFactory, seeded_varied: None
+    ) -> None:
+        service = build_service(session_factory)
+
+        await service.export_dataset("ETCUSD", request(), "csv")
+
+        listing = await service.list_builds(
+            symbol=None,
+            timeframe=None,
+            quality_passed=None,
+            sort="created_at",
+            direction="desc",
+            limit=20,
+            offset=0,
+        )
+        assert listing.total == 0
+
+    async def test_get_build_returns_the_full_stored_dataset_rows_included(
+        self, session_factory: SessionFactory, seeded_varied: None
+    ) -> None:
+        service = build_service(session_factory)
+        built = await service.build_dataset("ETCUSD", request())
+        listing = await service.list_builds(
+            symbol=None,
+            timeframe=None,
+            quality_passed=None,
+            sort="created_at",
+            direction="desc",
+            limit=20,
+            offset=0,
+        )
+        build_id = listing.builds[0].id
+
+        detail = await service.get_build(uuid.UUID(build_id))
+
+        assert detail.dataset.rows == built.rows
+        assert detail.dataset.ml_dataset_id == built.ml_dataset_id
+
+    async def test_get_build_raises_not_found_for_an_unknown_id(
+        self, session_factory: SessionFactory
+    ) -> None:
+        with pytest.raises(MLDatasetBuildNotFoundError):
+            await build_service(session_factory).get_build(uuid.uuid4())
+
+    async def test_deletes_a_build(
+        self, session_factory: SessionFactory, seeded_varied: None
+    ) -> None:
+        service = build_service(session_factory)
+        await service.build_dataset("ETCUSD", request())
+        listing = await service.list_builds(
+            symbol=None,
+            timeframe=None,
+            quality_passed=None,
+            sort="created_at",
+            direction="desc",
+            limit=20,
+            offset=0,
+        )
+        build_id = uuid.UUID(listing.builds[0].id)
+
+        await service.delete_build(build_id)
+
+        with pytest.raises(MLDatasetBuildNotFoundError):
+            await service.get_build(build_id)
+
+    async def test_delete_raises_not_found_for_an_unknown_id(
+        self, session_factory: SessionFactory
+    ) -> None:
+        with pytest.raises(MLDatasetBuildNotFoundError):
+            await build_service(session_factory).delete_build(uuid.uuid4())
+
+    async def test_filters_by_timeframe(
+        self, session_factory: SessionFactory, seeded_varied: None
+    ) -> None:
+        service = build_service(session_factory)
+        await service.build_dataset("ETCUSD", request())
+
+        matching = await service.list_builds(
+            symbol=None,
+            timeframe="1h",
+            quality_passed=None,
+            sort="created_at",
+            direction="desc",
+            limit=20,
+            offset=0,
+        )
+        not_matching = await service.list_builds(
+            symbol=None,
+            timeframe="1d",
+            quality_passed=None,
+            sort="created_at",
+            direction="desc",
+            limit=20,
+            offset=0,
+        )
+        assert matching.total == 1
+        assert not_matching.total == 0
+
+    async def test_filters_by_quality_passed(
+        self, session_factory: SessionFactory, seeded_varied: None
+    ) -> None:
+        service = build_service(session_factory)
+        await service.build_dataset("ETCUSD", request())
+
+        passed = await service.list_builds(
+            symbol=None,
+            timeframe=None,
+            quality_passed=True,
+            sort="created_at",
+            direction="desc",
+            limit=20,
+            offset=0,
+        )
+        failed = await service.list_builds(
+            symbol=None,
+            timeframe=None,
+            quality_passed=False,
+            sort="created_at",
+            direction="desc",
+            limit=20,
+            offset=0,
+        )
+        assert passed.total == 1
+        assert failed.total == 0
+
+    async def test_a_failed_persist_does_not_fail_the_build_itself(
+        self, session_factory: SessionFactory, seeded_varied: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`_record_build` is best-effort — a researcher must still get their dataset
+        back even if Dataset History fails to persist it."""
+        service = build_service(session_factory)
+
+        async def broken_create(*args: object, **kwargs: object) -> None:
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(service.build_repository, "create", broken_create)
+
+        response = await service.build_dataset("ETCUSD", request())
+
+        assert response.symbol == "ETCUSD"
+
+    async def test_filters_by_symbol(
+        self, session_factory: SessionFactory, seeded_varied: None
+    ) -> None:
+        service = build_service(session_factory)
+        await service.build_dataset("ETCUSD", request())
+
+        listing = await service.list_builds(
+            symbol="DOES-NOT-EXIST",
+            timeframe=None,
+            quality_passed=None,
+            sort="created_at",
+            direction="desc",
+            limit=20,
+            offset=0,
+        )
+        assert listing.total == 0
+
+    async def test_search_rejects_an_invalid_sort_column(
+        self, session_factory: SessionFactory
+    ) -> None:
+        with pytest.raises(InvalidMLDatasetBuildSortError):
+            await build_service(session_factory).list_builds(
+                symbol=None,
+                timeframe=None,
+                quality_passed=None,
+                sort="not_a_column",
+                direction="asc",
+                limit=20,
+                offset=0,
+            )

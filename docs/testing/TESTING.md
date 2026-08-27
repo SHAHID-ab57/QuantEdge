@@ -1096,6 +1096,42 @@ the bare `screen`, to avoid a "multiple elements found" ambiguity — the
 same scoping discipline `experiments`' own tests already established for a
 different ambiguity.
 
+**Baseline Model Framework additions.** The Baseline Model Framework work
+(scikit-learn Logistic/Linear Regression adapters behind the existing
+`ModelAdapter` registry) added a dedicated component test file plus new
+cases in the existing page-level suite, rather than growing unrelated
+files.
+
+`evaluation-summary.test.tsx` covers the new `EvaluationSummary` component
+in isolation: it renders a confusion matrix and classification metrics
+(accuracy/precision/recall/f1) for a `model_kind: 'classification'` result,
+renders a plain metrics table (mae/mse/rmse/r2) with no confusion matrix
+for `model_kind: 'regression'`, and falls back to a generic metrics table
+for the `placeholder` kind or an adapter the frontend doesn't recognize —
+using the same `isNumberMatrix`/`isStringArray` type guards the component
+itself uses, so a malformed metrics payload degrades to the generic table
+instead of throwing.
+
+`ml-training-page.test.tsx` gained a `vi.mock('@/lib/api/market', ...)`
+alongside its existing `@/lib/api/experiments` and `@/lib/api/training`
+mocks, stubbing `fetchMarkets`/`fetchTimeframes` the same way the Markets
+and History pages' own tests already do. New cases in the create-dialog
+suite: the Configuration panel (Symbol/Timeframe/Target column) only
+appears once a `requires_real_data` adapter is selected — choosing the
+placeholder adapter again hides it; Symbol and Timeframe are validated as
+required whenever the panel is visible; selecting a Symbol populates the
+Timeframe options from `fetchTimeframes` for that market; and a full
+real-data submission (Logistic Regression, a symbol, a timeframe, and a
+target column) is asserted against the exact `symbol`/`timeframe`/
+`target_column` values sent to `createTrainingJob`. New cases in the
+detail-dialog suite render a completed job whose result carries
+classification metrics and assert the confusion matrix and its labels
+appear, and separately render one with regression metrics and assert the
+plain metrics table appears with no confusion matrix — exercising
+`ResultSummaryCard`'s use of `useModelAdapters()` to resolve the
+completed job's `model_kind` before choosing which `EvaluationSummary`
+view to render.
+
 ## End-to-End Tests
 
 Not implemented. `tests/` at the repo root is reserved for this; no browser

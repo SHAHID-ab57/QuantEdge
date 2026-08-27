@@ -8,6 +8,239 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **ML Dataset Builder — Dataset History.** Every dataset
+  `POST /markets/{symbol}/ml/dataset` builds from the `/ml-datasets` page is
+  now also persisted — the platform's first departure from the ML Dataset
+  Builder's original "never stores a dataset to a table" design, made
+  because a researcher who builds a dataset now has a real place to come
+  back and reopen it later, not just the CSV/JSON export they happened to
+  save at the time. The builder's own build-and-preview behavior is
+  otherwise unchanged.
+
+  - **New table `ml_dataset_builds`** (migration `608e8ba1ef82`) stores the
+    **entire** `MLDatasetResponse` a build produced — every row, verbatim,
+    in one `payload` JSON column — plus a handful of denormalized columns
+    (symbol, timeframe, row/column/feature/target counts, the validation
+    verdict) so the history list stays cheap to query. Feasible at this
+    platform's current scale because every build is already row-capped by
+    `Settings.candles_max_limit` (1000 rows); documented as the one place
+    to revisit (e.g. moving `payload` to object storage) if dataset sizes
+    ever grow far beyond that.
+  - **`MLDatasetService.build_dataset`** now also records the full,
+    _untruncated_ build to history — independent of any `preview_rows` cap
+    on what that call itself returns, so reopening a history entry later
+    always shows every row, never merely what fit in the original preview.
+    Persistence is deliberately best-effort (a failure is logged, never
+    raised) — a researcher must still get their dataset back even if
+    history fails to save it. Reused only by the outward "build a dataset"
+    call: `build_ml_dataset` (the Machine Learning Training Framework's own
+    reuse of this service to load real training data) and `export_dataset`
+    do **not** add to history, so an internal training-data load or a
+    re-export of an already-built dataset never pollutes it.
+  - **New endpoints**: `GET /ml/dataset-builds` (paginated list, filterable
+    by symbol/timeframe/quality verdict, sortable), `GET
+/ml/dataset-builds/{id}` (one build's full stored record, rows included),
+    `DELETE /ml/dataset-builds/{id}` (removes the saved copy only — never
+    touches the underlying candles).
+  - **Frontend**: a new "Dataset History" section on `/ml-datasets`
+    (`DatasetHistoryTable`, mirroring `training-jobs-table.tsx`'s exact
+    sortable/paginated shape) lists every past build; selecting one opens
+    `DatasetHistoryDetailDialog`, reusing the exact same
+    `MLDatasetInfoCard`/`MLDatasetSummary`/`MLDatasetMetadataPanel`/
+    `DatasetPreviewTable`/`ValidationSummaryCards`/`ValidationReportPanel`
+    the main builder already renders for a fresh build — a reopened
+    history entry looks identical to the moment it was built, since no
+    candles are re-touched to render it. A newly built dataset appears in
+    the list immediately (query invalidation on a successful build).
+    `ConfirmActionDialog` (originally built for the ML Training page's
+    Delete/Cancel Job actions) was promoted from `features/ml-training/` to
+    `src/components/` once Dataset History's own delete-a-build action
+    needed the identical confirm-before-destructive-action behavior.
+  - 26 new backend tests (`tests/ml_datasets/test_service.py`'s new
+    `TestDatasetHistory` class, `tests/api/test_ml_datasets_api.py`'s new
+    `TestDatasetHistoryEndpoints` class) at 100% coverage of every new
+    backend module (`app/models/ml_dataset_build.py`,
+    `app/repositories/ml_dataset_builds.py`, and the extended
+    `app/services/ml_datasets.py`/`app/schemas/ml_datasets.py`/
+    `app/api/v1/endpoints/ml_datasets.py`); full backend suite still green
+    (97.12% overall). 5 new frontend test files
+    (`dataset-history-table.test.tsx`, `dataset-history-detail-dialog.test.tsx`,
+    `data-range-text.test.ts`, plus the relocated
+    `confirm-action-dialog.test.tsx`) and new `ml-datasets-page` integration
+    tests (listing, reopening, deleting with confirm/cancel, a fresh build
+    appearing immediately); full frontend suite passes (1738 tests) with a
+    clean lint, typecheck, and production build.
+
+- **Baseline Model Framework — production-grade interpretability, evaluation,
+  and artifact management pass.** Extends the two real scikit-learn baseline
+  adapters (`logistic_regression`/`linear_regression`) with the depth a
+  professional research workflow expects, **without changing** the training
+  pipeline's six stages, the model adapter registry, the model serialization
+  abstraction, or how a training run integrates with Experiment Management
+  (still `ExperimentService.update`/`add_metric`/`add_artifact`, called more
+  times, never differently).
+
+  - **Model interpretability**: `compute_feature_importance`
+    (`app/training/interpretability.py`) ranks every feature by mean absolute
+    coefficient magnitude, with a sign (`positive`/`negative`/`neutral`) —
+    shared by both adapters (a single-row coefficient vector for Linear
+    Regression, one row per class for Logistic Regression). Exposed in
+    `result_summary.feature_importance`, as a downloadable
+    `feature_importance.csv` artifact, and in the frontend as a sortable
+    table with a horizontal-bar visualization (`FeatureImportancePanel`).
+  - **Prediction confidence**: `POST /training-jobs/{id}/predict` now also
+    returns `classes`/`probabilities`/`confidence_levels` (`high`/`medium`/
+    `low`, from a fixed, documented probability threshold) whenever the
+    job's adapter supports `predict_proba` — a new, non-abstract
+    `ModelAdapter.predict_proba` defaulting to `None`, overridden only by
+    `LogisticRegressionAdapter`.
+  - **Model evaluation**: ROC and Precision-Recall curves (one-vs-rest per
+    class, with per-class and macro AUC/average precision) via
+    `compute_roc_pr_curves`, stored as both raw numeric curves
+    (`result_summary.roc_pr_curves`, rendered client-side as small SVG
+    charts by `RocPrCurveCharts`) and downloadable `roc_curve.png`/
+    `precision_recall_curve.png` artifacts (matplotlib, `Agg` backend).
+  - **Train / validation / test metrics**: both adapters now also predict
+    against `dataset.train` and compute `train_metrics` alongside the
+    existing validation `metrics`/`test_metrics`; `compute_overfitting_flag`
+    compares train against the held-out split (test when present, else
+    validation) against a fixed threshold and flags a large gap. Rendered
+    by a new `TrainValTestMetricsTable` with a warning banner.
+  - **Prediction inspection**: a capped (25-row) `prediction_samples` table
+    — Actual, Predicted, Probability, Confidence Level, Correct/Incorrect
+    for a classifier; Actual/Predicted only for a regressor, the rest
+    rendered as "—" rather than a fabricated value — via
+    `build_prediction_samples`, rendered by `PredictionSamplesTable`.
+  - **Confusion matrix detail**: `compute_confusion_details` adds a
+    per-class True/False Positive/Negative and Support breakdown
+    (`multilabel_confusion_matrix`) alongside the existing raw matrix grid,
+    rendered by `ConfusionMatrixDetailsTable`.
+  - **Model metadata**: `collect_model_metadata`
+    (`app/training/model_metadata.py`) records scikit-learn/joblib
+    versions, wall-clock training duration, CPU time, peak memory (POSIX
+    `resource.getrusage`), feature count, and sample count per run —
+    rendered by `ModelMetadataPanel`.
+  - **Artifact management**: a new `app/training/artifact_files.py` writes
+    `metrics.json`, `training_report.json`, and `feature_importance.csv`
+    for every real adapter, plus `confusion_matrix.png`/`roc_curve.png`/
+    `precision_recall_curve.png` for a classifier — deliberately a
+    separate module from `serialization.py`'s `ModelSerializer` (which
+    still only saves/loads the model object itself for `predict()`). New
+    `GET /training-jobs/{id}/artifacts` (list) and
+    `GET /training-jobs/{id}/artifacts/{artifact_type}` (download)
+    endpoints; the Training Framework's existing "update experiment" hook
+    now also registers each of these as an `Experiment` artifact (mapped
+    onto its existing fixed `report`/`plot` categories — no new category
+    was added to that DB-CHECK-constrained enum). A new
+    `TrainingArtifactsPanel` lists and downloads every artifact from the
+    job detail dialog.
+  - **Error reporting**: a new `app/training/error_reporting.py` turns any
+    exception a run raised into a structured `error_detail` (reason,
+    affected feature, affected rows, a suggested fix keyed by the error's
+    own domain `code`) recorded alongside the existing plain-text
+    `error_message` (new nullable `training_jobs.error_detail` JSON column,
+    migration `831eb3883543`); `UndefinedFeatureValueError` now also
+    carries the offending row's index. Rendered in the detail dialog's
+    failure alert.
+  - 4 new backend test files (`test_interpretability.py`,
+    `test_model_metadata.py`, `test_error_reporting.py`,
+    `test_artifact_files.py`) plus extensions to `test_service.py` and
+    `test_training_api.py` (artifact listing/download, richer real-data
+    assertions, prediction-confidence and no-probability cases, structured
+    error-detail assertions) — 100% coverage on every `app/training/`
+    module, `app/services/training.py`, and `app/schemas/training.py`;
+    full backend suite still green (97.06% overall). 7 new frontend test
+    files (`feature-importance-panel`, `prediction-samples-table`,
+    `train-val-test-metrics-table`, `confusion-matrix-details-table`,
+    `model-metadata-panel`, `roc-pr-curve-charts`,
+    `training-artifacts-panel`) plus new `ml-training-page`/
+    `evaluation-summary` cases; full frontend suite passes (1716 tests)
+    with a clean lint, typecheck, and production build.
+  - New dependency: `matplotlib` (backend), used only by
+    `app/training/artifact_files.py` for the three PNG artifact types.
+
+- **Baseline Model Framework** — the first real (non-placeholder) model
+  adapters registered against the Machine Learning Training Framework's
+  existing `ModelAdapter` registry: scikit-learn Logistic Regression
+  (classification) and Linear Regression (regression), plus the pieces
+  needed to actually fit them on real market data and serve a prediction
+  afterward. **No change** to the registry's shape, the pipeline's six
+  stages, or the state machine — this is a third and fourth adapter
+  plugging into an extension point the original framework already proved
+  out with `PlaceholderModelAdapter`.
+
+  - **`ModelAdapterMetadata` gained two fields**: `model_kind`
+    (`"placeholder" | "classification" | "regression"`, drives which
+    evaluation view the frontend renders) and `requires_real_data: bool`
+    (the one flag `load_dataset` checks to decide whether a job needs an
+    actual training matrix or can stay citation-only, exactly as
+    `PlaceholderModelAdapter` already worked).
+  - **`TrainingJob` gained three nullable columns** (migration
+    `ed0d4f9becf1`): `symbol`, `timeframe`, `target_column` — the market,
+    candle timeframe, and (optional) target column a real adapter trains
+    against. Left off `Experiment`, which stays an abstract "recipe"
+    citation; a training job is where "which market, which candles"
+    actually needs to be known.
+  - **`build_training_dataset`** (`app/training/dataset_loader.py`) is the
+    one new bridge module connecting the ML Dataset Builder's `MLDataset`
+    output to the Training Framework's `TrainingDataset` input: resolves
+    the target column, keeps only numeric (`float`/`int`/`bool`) feature
+    columns, checks the target's dtype is compatible with the requested
+    `model_kind` (`IncompatibleTargetDtypeError` otherwise — e.g. picking
+    `next_direction`, a categorical target, for Linear Regression), and
+    assembles a framework-free `SplitMatrix` (`X`/`y` as plain lists, no
+    numpy) per train/validation/test split. Reuses a new public
+    `MLDatasetService.build_ml_dataset()` (wrapping the existing private
+    `_build`) — the exact same code `POST /markets/{symbol}/ml/dataset`
+    already runs, with zero duplicated dataset-building logic.
+  - **Model serialization abstraction** (`app/training/serialization.py`):
+    a `ModelSerializer` Protocol behind `LocalDiskModelSerializer`
+    (joblib + local disk, `file://` artifact URIs), so a future swap to
+    object storage is a serializer swap with no adapter change.
+  - **Prediction interface**: a new abstract `predict(artifact_uri, rows)`
+    on `ModelAdapter`, deliberately decoupled from `train()` — it always
+    reloads the model via the serialization abstraction rather than
+    assuming in-memory state, so a prediction can happen in a later
+    request or process. Exposed via a new
+    `POST /training-jobs/{job_id}/predict` endpoint.
+  - **Metrics collection reuse**: both new adapters compute their metrics
+    (accuracy/precision/recall/f1 for classification; mae/mse/rmse/r2 for
+    regression) and report them through the exact same
+    `ExperimentService.add_metric`/`add_artifact` calls the placeholder
+    adapter already used — real numbers now flow into the same
+    `experiment_metrics` table.
+  - **Frontend** (`/ml/training`): the create dialog gained a
+    Symbol/Timeframe/Target column "Configuration" panel that appears only
+    once a `requires_real_data` adapter is selected (searchable
+    `Autocomplete`s reusing `fetchMarkets`/`fetchTimeframes` from the
+    Markets/History feature, timeframe options populated once a market is
+    chosen); the Training Summary Panel gained a "Market" row. The detail
+    dialog's result card gained a new `EvaluationSummary` component that
+    renders a confusion matrix + classification metrics table for a
+    `classification` job, a plain metrics table for a `regression` job, or
+    the prior generic table for `placeholder`/unrecognized kinds — chosen
+    via `useModelAdapters()` resolving the completed job's `model_kind`.
+  - 4 new backend test files (`test_dataset_loader.py`,
+    `test_serialization.py`, `test_logistic_regression.py`,
+    `test_linear_regression.py`) plus extensions to `test_registry.py`,
+    `test_pipeline.py`, `test_placeholder_adapter.py`, and
+    `test_service.py`/`test_training_api.py` (new real-data end-to-end and
+    predict test classes, using a "wobbling" seeded candle series so
+    `next_direction` produces both classes) — 100% coverage maintained on
+    every module under `app/training/`; full backend suite still green.
+    1 new frontend test file (`evaluation-summary.test.tsx`, 6 tests) plus
+    new cases in `ml-training-page.test.tsx` (configuration-panel
+    reveal/validation/timeframe-population, a full real-data job creation,
+    confusion-matrix rendering, regression-metrics rendering); full
+    frontend suite passes with a clean lint, typecheck, and production
+    build.
+  - See `ARCHITECTURE.md` § "Baseline Model Framework", `docs/ai/AI.md` §§
+    "Models", "Machine Learning Training Framework", "Inference",
+    "Evaluation", `docs/api/API.md` § "Machine Learning Training Framework"
+    (the model-adapter catalogue example and the new "Predict" subsection),
+    and both `TESTING.md`s' new/extended Baseline Model Framework
+    sections.
+
 - **Machine Learning Training Framework — ML Operations UX pass**
   (frontend-only; the backend CRUD/lifecycle API is unchanged). Transforms
   `/ml/training` from a functional but plain CRUD page into a

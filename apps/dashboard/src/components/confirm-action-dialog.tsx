@@ -22,9 +22,11 @@ export interface ConfirmActionDialogProps {
 /**
  * A generic "are you sure" dialog, mirroring
  * `experiments/components/delete-experiment-dialog.tsx`'s exact shape but
- * parameterized so both Delete Job and Cancel Job (two distinct
- * destructive-ish actions on this page) share one implementation rather
- * than two near-identical dialogs.
+ * parameterized so unrelated destructive-ish actions across features share
+ * one implementation rather than each declaring its own near-identical
+ * dialog — originally built for the ML Training page's Delete/Cancel Job
+ * actions, promoted here once Dataset History's delete-a-build action
+ * needed the identical behavior.
  */
 export function ConfirmActionDialog({
   open,

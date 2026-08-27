@@ -14,7 +14,7 @@ worth preserving even in a placeholder, since it is the same reproducibility
 discipline `app/features/`/`app/ml_datasets/` already hold themselves to.
 """
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from app.training.base import ModelAdapter, ModelAdapterMetadata, TrainingDataset, TrainingResult
@@ -33,6 +33,8 @@ class PlaceholderModelAdapter(ModelAdapter):
             "Not a real model — no framework runs behind it."
         ),
         framework="placeholder",
+        model_kind="placeholder",
+        requires_real_data=False,
         hyperparameter_hints=("epochs", "learning_rate"),
     )
 
@@ -69,3 +71,8 @@ class PlaceholderModelAdapter(ModelAdapter):
                 "note": "Fabricated by PlaceholderModelAdapter; not a real training run.",
             },
         )
+
+    def predict(self, artifact_uri: str, rows: Sequence[Sequence[float]]) -> list[Any]:
+        """Fabricates a constant prediction per row — there is no real model behind
+        `artifact_uri` to load."""
+        return [0.0 for _ in rows]

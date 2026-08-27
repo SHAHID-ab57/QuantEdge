@@ -1,11 +1,15 @@
 'use client';
 
-import { useMutation, useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   buildMLDataset,
+  deleteMLDatasetBuild,
   exportMLDataset,
+  fetchMLDatasetBuild,
+  fetchMLDatasetBuilds,
   fetchTargets,
   type BuildMLDatasetParams,
+  type MLDatasetBuildListParams,
 } from '@/lib/api/ml-datasets';
 
 /**
@@ -43,9 +47,17 @@ export interface MLDatasetRequest {
  * split all run server-side) — never something that should silently
  * re-run on remount or a stale-time expiry.
  */
+const DATASET_HISTORY_KEY = ['ml-datasets', 'history'] as const;
+
 export function useBuildMLDataset() {
+  const queryClient = useQueryClient();
   return useMutation({
     mutationFn: ({ symbol, params }: MLDatasetRequest) => buildMLDataset(symbol, params),
+    // Every successful build is also persisted to Dataset History
+    // server-side (see `MLDatasetService.build_dataset`) — invalidating here
+    // means a researcher who then opens the history list sees it immediately,
+    // without a manual refresh.
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: DATASET_HISTORY_KEY }),
   });
 }
 
@@ -57,5 +69,30 @@ export function useExportMLDataset() {
   return useMutation({
     mutationFn: ({ symbol, params, format }: MLDatasetExportRequest) =>
       exportMLDataset(symbol, params, format),
+  });
+}
+
+/** Dataset History's list view — every past ML dataset build, paginated. */
+export function useMLDatasetBuilds(params: MLDatasetBuildListParams) {
+  return useQuery({
+    queryKey: [...DATASET_HISTORY_KEY, 'list', params],
+    queryFn: () => fetchMLDatasetBuilds(params),
+  });
+}
+
+/** Reopen one past ML dataset build — its full, untruncated matrix. */
+export function useMLDatasetBuild(id: string | null) {
+  return useQuery({
+    queryKey: [...DATASET_HISTORY_KEY, 'detail', id],
+    queryFn: () => fetchMLDatasetBuild(id as string),
+    enabled: Boolean(id),
+  });
+}
+
+export function useDeleteMLDatasetBuild() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => deleteMLDatasetBuild(id),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: DATASET_HISTORY_KEY }),
   });
 }

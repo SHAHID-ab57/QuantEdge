@@ -1,22 +1,28 @@
 """Machine Learning Training Framework REST endpoints.
 
-CRUD over training jobs, plus lifecycle actions (`run`, `cancel`) and a
-model adapter catalogue — the orchestration surface described in
-`ARCHITECTURE.md` § "Machine Learning Training Framework". Implements no
-real model training; see `app/training/adapters/placeholder.py`.
+CRUD over training jobs, lifecycle actions (`run`, `cancel`), prediction,
+and a model adapter catalogue — the orchestration surface described in
+`ARCHITECTURE.md` § "Machine Learning Training Framework". The
+`placeholder` adapter performs no real training
+(`app/training/adapters/placeholder.py`); `logistic_regression` and
+`linear_regression` are real scikit-learn baseline models.
 """
 
 import uuid
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Path, Query, status
+from fastapi.responses import FileResponse
 
 from app.core.config import get_settings
 from app.dependencies.training import get_training_job_service
 from app.schemas.training import (
     ModelAdapterCatalogResponse,
+    TrainingArtifactListResponse,
     TrainingJobCreateRequest,
     TrainingJobListResponse,
+    TrainingJobPredictRequest,
+    TrainingJobPredictResponse,
     TrainingJobResponse,
 )
 from app.services.training import TrainingJobService
@@ -197,3 +203,59 @@ async def cancel_training_job(
 ) -> TrainingJobResponse:
     """Cancel one training job, if its current status allows it."""
     return await service.cancel(job_id)
+
+
+@router.post(
+    "/training-jobs/{job_id}/predict",
+    response_model=TrainingJobPredictResponse,
+    summary="Predict using a completed job's trained model",
+    description=(
+        "Loads the model a completed job serialized (`app/training/serialization.py`) and "
+        "predicts for each given feature row, in order. Only available once a job has "
+        "completed; each row must have exactly as many values as this job's feature_columns."
+    ),
+    responses=_ERROR_RESPONSES,
+)
+async def predict_training_job(
+    job_id: TrainingJobIdPath,
+    body: TrainingJobPredictRequest,
+    service: TrainingJobServiceDep,
+) -> TrainingJobPredictResponse:
+    """Predict for one or more feature rows using a completed job's trained model."""
+    return await service.predict(job_id, body.rows)
+
+
+@router.get(
+    "/training-jobs/{job_id}/artifacts",
+    response_model=TrainingArtifactListResponse,
+    summary="List a completed job's downloadable artifacts",
+    description=(
+        "Every report file this job's training run produced: the serialized model "
+        "(model.joblib), metrics.json, training_report.json, feature_importance.csv, "
+        "and — for a classifier — confusion_matrix.png, roc_curve.png, and "
+        "precision_recall_curve.png. Each entry's download_url resolves via "
+        "GET /training-jobs/{job_id}/artifacts/{artifact_type}."
+    ),
+    responses=_ERROR_RESPONSES,
+)
+async def list_training_job_artifacts(
+    job_id: TrainingJobIdPath, service: TrainingJobServiceDep
+) -> TrainingArtifactListResponse:
+    """List every downloadable artifact a completed job's training run produced."""
+    return await service.list_artifacts(job_id)
+
+
+@router.get(
+    "/training-jobs/{job_id}/artifacts/{artifact_type}",
+    summary="Download one training run artifact",
+    description="Streams the artifact file itself (JSON, CSV, or PNG) for download.",
+    responses=_ERROR_RESPONSES,
+)
+async def download_training_job_artifact(
+    job_id: TrainingJobIdPath,
+    artifact_type: Annotated[str, Path(description="One of the types GET .../artifacts lists")],
+    service: TrainingJobServiceDep,
+) -> FileResponse:
+    """Download one artifact file by its type."""
+    path, content_type = await service.get_artifact_file(job_id, artifact_type)
+    return FileResponse(path, media_type=content_type, filename=path.name)

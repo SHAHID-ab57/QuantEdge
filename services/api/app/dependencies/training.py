@@ -7,6 +7,7 @@ from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
+from app.dependencies.ml_datasets import get_ml_dataset_service
 from app.repositories.experiments import ExperimentRepository
 from app.repositories.training import TrainingJobRepository
 from app.services.experiments import ExperimentService
@@ -37,4 +38,8 @@ def get_training_job_service(
         repository=TrainingJobRepository(session),
         experiment_service=ExperimentService(repository=ExperimentRepository(session)),
         pipeline=get_training_pipeline(),
+        # The exact same `MLDatasetService` `/markets/{symbol}/ml/dataset` itself
+        # uses — a `requires_real_data` adapter's `load_dataset` stage builds a
+        # real dataset through this, never a second dataset-building path.
+        ml_dataset_service=get_ml_dataset_service(session),
     )

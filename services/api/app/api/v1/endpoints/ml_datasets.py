@@ -18,13 +18,17 @@ validation, and splitting all happen together, in a fixed order, every
 time) rather than a policy enforced elsewhere.
 """
 
+import uuid
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Path, Query, Response, status
 
+from app.core.config import get_settings
 from app.dependencies.ml_datasets import get_ml_dataset_service
 from app.ml_datasets.export import EXPORT_FORMATS
 from app.schemas.ml_datasets import (
+    MLDatasetBuildDetailResponse,
+    MLDatasetBuildListResponse,
     MLDatasetRequest,
     MLDatasetResponse,
     TargetCatalogResponse,
@@ -199,3 +203,99 @@ async def export_ml_dataset(
         media_type=exported.media_type,
         headers={"Content-Disposition": f'attachment; filename="{exported.filename}"'},
     )
+
+
+_BUILD_NOT_FOUND_RESPONSES: dict[int | str, dict[str, Any]] = {
+    status.HTTP_404_NOT_FOUND: {
+        "description": "Unknown ML dataset build id",
+        "content": {
+            "application/json": {
+                "examples": {
+                    "ml_dataset_build_not_found": {
+                        "summary": "Unknown build id",
+                        "value": {
+                            "code": "ml_dataset_build_not_found",
+                            "detail": (
+                                "ML dataset build 6f1e4a2c-3b8d-4c9a-9e2f-1a7c5d6b8e90 not found"
+                            ),
+                        },
+                    },
+                }
+            }
+        },
+    },
+}
+
+MLDatasetBuildIdPath = Annotated[uuid.UUID, Path(description="ML dataset build id")]
+
+
+@router.get(
+    "/ml/dataset-builds",
+    response_model=MLDatasetBuildListResponse,
+    summary="List past ML dataset builds (Dataset History)",
+    description=(
+        "Every dataset `POST /markets/{symbol}/ml/dataset` has built and persisted, most "
+        "recent first by default — the platform's Dataset History. Metadata only (row/"
+        "column counts, quality verdict); fetch one build's own detail endpoint for its "
+        "full matrix."
+    ),
+)
+async def list_ml_dataset_builds(
+    service: MLDatasetServiceDep,
+    symbol: Annotated[str | None, Query(description="Only builds for this market symbol")] = None,
+    timeframe: Annotated[str | None, Query(description="Only builds for this timeframe")] = None,
+    quality_passed: Annotated[
+        bool | None, Query(description="Only builds whose validation verdict matches")
+    ] = None,
+    sort: Annotated[
+        str, Query(description="Sort column; one of symbol, timeframe, row_count, created_at")
+    ] = "created_at",
+    dir: Annotated[str, Query(description="Sort direction; asc or desc")] = "desc",
+    limit: Annotated[
+        int,
+        Query(
+            ge=1,
+            le=get_settings().ml_dataset_builds_max_limit,
+            description="Maximum builds per page",
+        ),
+    ] = get_settings().ml_dataset_builds_default_limit,
+    offset: Annotated[int, Query(ge=0, description="Number of builds to skip")] = 0,
+) -> MLDatasetBuildListResponse:
+    """Return a page of past ML dataset builds matching the given filter/sort criteria."""
+    return await service.list_builds(
+        symbol=symbol,
+        timeframe=timeframe,
+        quality_passed=quality_passed,
+        sort=sort,
+        direction=dir,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get(
+    "/ml/dataset-builds/{build_id}",
+    response_model=MLDatasetBuildDetailResponse,
+    summary="Reopen one past ML dataset build",
+    description="Return one persisted build's full record — the exact matrix it produced.",
+    responses=_BUILD_NOT_FOUND_RESPONSES,
+)
+async def get_ml_dataset_build(
+    build_id: MLDatasetBuildIdPath, service: MLDatasetServiceDep
+) -> MLDatasetBuildDetailResponse:
+    """Return one persisted ML dataset build by id, rows included."""
+    return await service.get_build(build_id)
+
+
+@router.delete(
+    "/ml/dataset-builds/{build_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Remove one past build from Dataset History",
+    description="Deletes the persisted record only — never touches the underlying candles.",
+    responses=_BUILD_NOT_FOUND_RESPONSES,
+)
+async def delete_ml_dataset_build(
+    build_id: MLDatasetBuildIdPath, service: MLDatasetServiceDep
+) -> None:
+    """Delete one persisted ML dataset build by id."""
+    await service.delete_build(build_id)

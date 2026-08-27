@@ -47,6 +47,13 @@ class Settings(BaseSettings):
     training_jobs_default_limit: int = 50
     training_jobs_max_limit: int = 200
 
+    ml_dataset_builds_default_limit: int = 20
+    ml_dataset_builds_max_limit: int = 100
+
+    #: Where fitted baseline model artifacts are serialized to (joblib), relative
+    #: to the service's working directory unless given as an absolute path.
+    model_artifact_dir: str = "var/model_artifacts"
+
     delta_base_url: str = "https://api.india.delta.exchange"
     delta_api_key: str = ""
     delta_api_secret: str = ""

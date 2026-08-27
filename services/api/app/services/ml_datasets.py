@@ -8,18 +8,29 @@ both trims, not just one.
 """
 
 import logging
+import uuid
 from dataclasses import dataclass, replace
 
 from app.features.ai_extensions import SplitRatios
 from app.features.dataset import FeatureRequest
 from app.ml_datasets.dataset import MLDataset, MLDatasetBuilder, TargetRequest
+from app.ml_datasets.errors import InvalidMLDatasetBuildSortError, MLDatasetBuildNotFoundError
 from app.ml_datasets.export import EXPORT_FORMATS, dataset_filename
 from app.ml_datasets.split import ChronologicalSplitter
 from app.ml_datasets.targets import load_builtin_targets
+from app.models.ml_dataset_build import MLDatasetBuild
 from app.repositories.candles import CandleRepository
 from app.repositories.markets import MarketRepository
+from app.repositories.ml_dataset_builds import (
+    SORT_COLUMNS,
+    MLDatasetBuildFilters,
+    MLDatasetBuildRepository,
+)
 from app.schemas.features import FeatureRequestItem
 from app.schemas.ml_datasets import (
+    MLDatasetBuildDetailResponse,
+    MLDatasetBuildListResponse,
+    MLDatasetBuildSummaryDTO,
     MLDatasetRequest,
     MLDatasetResponse,
     MLTargetRequestItem,
@@ -50,6 +61,15 @@ class MLDatasetService:
     builder: MLDatasetBuilder
     default_limit: int
     max_limit: int
+    #: Persists every `build_dataset` call into Dataset History — see
+    #: `app/models/ml_dataset_build.py`. Deliberately not used by
+    #: `build_ml_dataset`/`export_dataset` (see their own docstrings): only an
+    #: explicit "Build ML Dataset" click from `/ml-datasets` should grow this
+    #: history, never a Training Framework job's internal reuse of this same
+    #: service, and never a re-export of an already-recorded build.
+    build_repository: MLDatasetBuildRepository
+    history_default_limit: int = 20
+    history_max_limit: int = 100
 
     def list_targets(self) -> TargetCatalogResponse:
         """Return the full target catalogue.
@@ -71,13 +91,39 @@ class MLDatasetService:
         return TargetDTO.from_metadata(self.builder.target_pipeline.describe(name))
 
     async def build_dataset(self, symbol: str, request: MLDatasetRequest) -> MLDatasetResponse:
-        """Build, validate, and split an ML dataset for one market/timeframe/range."""
+        """Build, validate, and split an ML dataset for one market/timeframe/range.
+
+        Also persists the *full, untruncated* build to Dataset History
+        (`app/models/ml_dataset_build.py`) — independent of `preview_rows`,
+        which only affects what this call itself returns — so a later visit
+        to Dataset History can reopen the exact same dataset, rows included,
+        never merely what happened to fit in that request's own preview cap.
+        """
         ml_dataset, database_time_ms = await self._build(symbol, request)
+        full = MLDatasetResponse.from_ml_dataset(
+            ml_dataset, database_time_ms=database_time_ms, preview_rows=None
+        )
+        await self._record_build(symbol, ml_dataset, full)
+        if request.preview_rows is None:
+            return full
         return MLDatasetResponse.from_ml_dataset(
             ml_dataset,
             database_time_ms=database_time_ms,
             preview_rows=request.preview_rows,
         )
+
+    async def build_ml_dataset(self, symbol: str, request: MLDatasetRequest) -> MLDataset:
+        """Build, validate, and split an ML dataset, returning the engine object itself.
+
+        The one seam the Machine Learning Training Framework uses to get
+        real training data (`app/training/dataset_loader.py`) — it needs
+        the raw `MLDataset` (its `split.train`/`validation`/`test` row
+        matrices), not a wire `MLDatasetResponse`. Calls the exact same
+        `_build` every REST endpoint on this service already goes through;
+        this is not a second dataset-building path.
+        """
+        ml_dataset, _ = await self._build(symbol, request)
+        return ml_dataset
 
     async def export_dataset(
         self, symbol: str, request: MLDatasetRequest, fmt: str
@@ -96,6 +142,77 @@ class MLDatasetService:
             media_type=export_format.media_type,
             filename=dataset_filename(ml_dataset, export_format.extension),
         )
+
+    async def list_builds(
+        self,
+        *,
+        symbol: str | None,
+        timeframe: str | None,
+        quality_passed: bool | None,
+        sort: str,
+        direction: str,
+        limit: int,
+        offset: int,
+    ) -> MLDatasetBuildListResponse:
+        """Dataset History's list view — every past build this session recorded, paginated."""
+        if sort not in SORT_COLUMNS or direction not in {"asc", "desc"}:
+            raise InvalidMLDatasetBuildSortError(sort, direction, tuple(SORT_COLUMNS))
+
+        filters = MLDatasetBuildFilters(
+            symbol=symbol, timeframe=timeframe, quality_passed=quality_passed
+        )
+        builds, total = await self.build_repository.search(
+            filters, sort=sort, direction=direction, limit=limit, offset=offset
+        )
+        return MLDatasetBuildListResponse(
+            builds=[MLDatasetBuildSummaryDTO.from_model(build) for build in builds],
+            total=total,
+            limit=limit,
+            offset=offset,
+        )
+
+    async def get_build(self, build_id: uuid.UUID) -> MLDatasetBuildDetailResponse:
+        """One past build's full record, rows included — Dataset History's detail view."""
+        build = await self.build_repository.get_by_id(build_id)
+        if build is None:
+            raise MLDatasetBuildNotFoundError(build_id)
+        return MLDatasetBuildDetailResponse.from_model(build)
+
+    async def delete_build(self, build_id: uuid.UUID) -> None:
+        """Remove one past build from Dataset History — the underlying candles are untouched."""
+        build = await self.build_repository.get_by_id(build_id)
+        if build is None:
+            raise MLDatasetBuildNotFoundError(build_id)
+        await self.build_repository.delete(build)
+
+    async def _record_build(
+        self, symbol: str, ml_dataset: MLDataset, full: MLDatasetResponse
+    ) -> None:
+        """Persist one `build_dataset` call to Dataset History.
+
+        Best-effort: a failure here must never fail the build itself (the
+        researcher already has their dataset on screen) — logged and
+        swallowed, matching `TrainingJobService._mark_experiment_failed`'s
+        own "don't let bookkeeping sink the primary outcome" precedent.
+        """
+        try:
+            await self.build_repository.create(
+                MLDatasetBuild(
+                    ml_dataset_id=ml_dataset.ml_dataset_id,
+                    symbol=symbol,
+                    timeframe=full.timeframe,
+                    row_count=full.meta.total_rows,
+                    column_count=len(full.columns),
+                    feature_count=len(full.feature_columns),
+                    target_count=len(full.target_columns),
+                    quality_passed=full.validation.passed,
+                    payload=full.model_dump(mode="json"),
+                )
+            )
+        except Exception:  # noqa: BLE001 - best-effort; the build itself already succeeded
+            logger.exception(
+                "Failed to record ML dataset build %s to Dataset History", ml_dataset.ml_dataset_id
+            )
 
     async def _build(self, symbol: str, request: MLDatasetRequest) -> tuple[MLDataset, float]:
         load_builtin_targets()

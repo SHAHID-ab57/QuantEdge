@@ -1,9 +1,11 @@
 import { apiClient } from './client';
 import {
   ModelAdapterCatalogResponseSchema,
+  TrainingArtifactListResponseSchema,
   TrainingJobListResponseSchema,
   TrainingJobSchema,
   type ModelAdapterCatalogResponse,
+  type TrainingArtifactListResponse,
   type TrainingJob,
   type TrainingJobListResponse,
   type TrainingJobStatus,
@@ -35,6 +37,9 @@ export interface TrainingJobCreateBody {
   experiment_id: string;
   model_type: string;
   dataset_version?: string | null;
+  symbol?: string | null;
+  timeframe?: string | null;
+  target_column?: string | null;
   hyperparameters?: Record<string, unknown>;
 }
 
@@ -60,4 +65,21 @@ export async function cancelTrainingJob(id: string): Promise<TrainingJob> {
 export async function fetchModelAdapters(): Promise<ModelAdapterCatalogResponse> {
   const { data } = await apiClient.get('/api/v1/training-jobs/models');
   return ModelAdapterCatalogResponseSchema.parse(data);
+}
+
+/** Every downloadable artifact (model.joblib, metrics.json, plots, ...) a completed
+ * job's training run produced — the Artifact Management download surface. */
+export async function fetchTrainingArtifacts(jobId: string): Promise<TrainingArtifactListResponse> {
+  const { data } = await apiClient.get(
+    `/api/v1/training-jobs/${encodeURIComponent(jobId)}/artifacts`,
+  );
+  return TrainingArtifactListResponseSchema.parse(data);
+}
+
+/** Download one artifact's raw file content, by its `download_url` from
+ * `fetchTrainingArtifacts` — the same `responseType: 'blob'` pattern
+ * `exportMLDataset` already uses for a server-generated file. */
+export async function downloadTrainingArtifact(downloadUrl: string): Promise<Blob> {
+  const { data } = await apiClient.get(downloadUrl, { responseType: 'blob' });
+  return data as Blob;
 }

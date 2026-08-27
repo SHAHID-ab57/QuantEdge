@@ -23,7 +23,7 @@ The API exposes historical market data and operational monitoring:
 - Dataset validation: `POST /api/v1/markets/{symbol}/features/validate`, `GET /api/v1/validation/rules`
 - ML dataset builder: `GET /api/v1/ml/targets`, `POST /api/v1/markets/{symbol}/ml/dataset|dataset/export`
 - Experiment management (full CRUD): `GET|POST /api/v1/experiments`, `GET|PATCH|DELETE /api/v1/experiments/{id}`, plus nested metrics/artifacts
-- Machine Learning Training Framework (full CRUD + lifecycle): `GET|POST /api/v1/training-jobs`, `GET|DELETE /api/v1/training-jobs/{id}`, `POST /api/v1/training-jobs/{id}/run|cancel`, `GET /api/v1/training-jobs/models`
+- Machine Learning Training Framework (full CRUD + lifecycle + baseline models): `GET|POST /api/v1/training-jobs`, `GET|DELETE /api/v1/training-jobs/{id}`, `POST /api/v1/training-jobs/{id}/run|cancel|predict`, `GET /api/v1/training-jobs/models`
 - Platform health monitoring: `GET /api/v1/system/health|status|metrics`
 
 ## Endpoints
@@ -854,55 +854,112 @@ omit it to leave tags untouched.
 
 ### Machine Learning Training Framework
 
-| Method | Path                                | Purpose                                                   |
-| ------ | ----------------------------------- | --------------------------------------------------------- |
-| GET    | `/api/v1/training-jobs/models`      | List every registered model adapter (the extension point) |
-| POST   | `/api/v1/training-jobs`             | Register a new training job against an experiment         |
-| GET    | `/api/v1/training-jobs`             | Search, filter, sort, and paginate training jobs          |
-| GET    | `/api/v1/training-jobs/{id}`        | Get one training job (with its full log trail)            |
-| DELETE | `/api/v1/training-jobs/{id}`        | Delete a training job (refuses a running job)             |
-| POST   | `/api/v1/training-jobs/{id}/run`    | Execute the six-stage placeholder pipeline synchronously  |
-| POST   | `/api/v1/training-jobs/{id}/cancel` | Cancel a pending job                                      |
+| Method | Path                                 | Purpose                                                   |
+| ------ | ------------------------------------ | --------------------------------------------------------- |
+| GET    | `/api/v1/training-jobs/models`       | List every registered model adapter (the extension point) |
+| POST   | `/api/v1/training-jobs`              | Register a new training job against an experiment         |
+| GET    | `/api/v1/training-jobs`              | Search, filter, sort, and paginate training jobs          |
+| GET    | `/api/v1/training-jobs/{id}`         | Get one training job (with its full log trail)            |
+| DELETE | `/api/v1/training-jobs/{id}`         | Delete a training job (refuses a running job)             |
+| POST   | `/api/v1/training-jobs/{id}/run`     | Execute the six-stage pipeline synchronously              |
+| POST   | `/api/v1/training-jobs/{id}/cancel`  | Cancel a pending job                                      |
+| POST   | `/api/v1/training-jobs/{id}/predict` | Predict using a completed job's trained model             |
 
 The orchestration layer BC4 adds on top of Experiment Management — see
-`ARCHITECTURE.md` § "Machine Learning Training Framework" for the full
-design. Implements **no real model training**: `POST .../run` executes a
-placeholder pipeline that fabricates deterministic metrics, so the
-lifecycle, logging, and experiment-integration contracts can be exercised
-before a real TensorFlow/PyTorch/scikit-learn adapter is wired in.
+`ARCHITECTURE.md` § "Machine Learning Training Framework" and § "Baseline
+Model Framework" for the full design. Three model adapters are registered:
+`placeholder` (fabricates deterministic metrics, trains nothing real),
+`logistic_regression` and `linear_regression` (real scikit-learn baseline
+models — `POST .../run` performs a real `fit` and evaluation for these
+two).
+
+**Model adapter catalogue** (`GET /training-jobs/models`):
+
+```jsonc
+{
+  "adapters": [
+    {
+      "name": "placeholder",
+      "label": "Placeholder Model",
+      "description": "Fabricates deterministic metrics...",
+      "framework": "placeholder",
+      "model_kind": "placeholder", // "placeholder" | "classification" | "regression"
+      "requires_real_data": false, // true means the job needs symbol/timeframe/target_column
+      "hyperparameter_hints": ["epochs", "learning_rate"],
+      "version": "1.0.0",
+    },
+    {
+      "name": "logistic_regression",
+      "label": "Logistic Regression (Baseline)",
+      "model_kind": "classification",
+      "requires_real_data": true,
+      "hyperparameter_hints": ["max_iter", "C", "random_seed"],
+      "...": "...",
+    },
+    {
+      "name": "linear_regression",
+      "label": "Linear Regression (Baseline)",
+      "model_kind": "regression",
+      "requires_real_data": true,
+      "hyperparameter_hints": ["fit_intercept"],
+      "...": "...",
+    },
+  ],
+}
+```
 
 **Create** (`POST /training-jobs`):
 
 ```jsonc
 {
   "experiment_id": "6f1e4a2c-3b8d-4c9a-9e2f-1a7c5d6b8e90",
-  "model_type": "placeholder", // must be a name from GET /training-jobs/models
+  "model_type": "logistic_regression", // must be a name from GET /training-jobs/models
   "dataset_version": null, // optional — defaults from the experiment's own dataset_version
-  "hyperparameters": { "epochs": 5, "learning_rate": 0.01 },
+  "symbol": "ETHUSD", // required if the chosen adapter's requires_real_data is true
+  "timeframe": "1h", // required alongside symbol
+  "target_column": null, // optional — defaults to the first target column the dataset build produces
+  "hyperparameters": { "max_iter": 200, "C": 1.0, "random_seed": 42 },
 }
 ```
 
 The job starts in `pending` status. `dataset_version` is not validated
 against a real dataset (the ML Dataset Builder never persists one) — it is
 a citation, exactly as `Experiment.dataset_version` already is.
+`symbol`/`timeframe`/`target_column` are only meaningful for a
+`requires_real_data` adapter — the placeholder ignores them entirely.
 
-**Response shape** — the full job record:
+**Response shape** — the full job record (shown here for a completed
+`logistic_regression` run):
 
 ```jsonc
 {
   "id": "...",
   "experiment_id": "6f1e4a2c-3b8d-4c9a-9e2f-1a7c5d6b8e90",
   "dataset_version": "9c1e4a2c-3b8d-4c9a-9e2f-1a7c5d6b8e90",
-  "model_type": "placeholder",
-  "hyperparameters": { "epochs": 5, "learning_rate": 0.01 },
+  "symbol": "ETHUSD",
+  "timeframe": "1h",
+  "target_column": "next_direction_1",
+  "model_type": "logistic_regression",
+  "hyperparameters": { "max_iter": 200, "C": 1.0, "random_seed": 42 },
   "status": "completed", // pending | running | completed | failed | cancelled
   "current_stage": "update_experiment", // the last pipeline stage entered
   "error_message": null,
   "result_summary": {
-    "metrics": { "placeholder_loss": 0.166667, "placeholder_accuracy": 0.833333 },
-    "artifact_uri": "placeholder://training-runs/9c1e4a2c-...",
-    "epochs": 5,
-    "learning_rate": 0.01,
+    "metrics": { "accuracy": 0.83, "precision": 0.81, "recall": 0.8, "f1": 0.805 },
+    "artifact_uri": "file:///.../var/model_artifacts/logistic_regression-....joblib",
+    "target_column": "next_direction_1",
+    "feature_columns": ["open", "high", "low", "close", "volume"],
+    "classes": ["down", "flat", "up"],
+    "confusion_matrix": [
+      [12, 1, 0],
+      [2, 8, 1],
+      [0, 2, 14],
+    ],
+    "n_train": 56,
+    "n_validation": 12,
+    "n_test": 12,
+    "test_metrics": { "accuracy": 0.83, "precision": 0.8, "recall": 0.79, "f1": 0.795 },
+    "hyperparameters": { "max_iter": 200, "C": 1.0, "random_seed": 42 },
   },
   "started_at": "2026-01-01T21:00:00Z",
   "completed_at": "2026-01-01T21:00:01Z",
@@ -920,23 +977,49 @@ a citation, exactly as `Experiment.dataset_version` already is.
 }
 ```
 
+`linear_regression`'s `result_summary.metrics` instead carries `mae`/
+`mse`/`rmse`/`r2`, and its `summary` carries `coefficients`/`intercept`
+rather than `classes`/`confusion_matrix`. `placeholder`'s shape is
+unchanged from before (`placeholder_loss`/`placeholder_accuracy`,
+`epochs`/`learning_rate`, a fabricated `placeholder://` artifact URI).
+
 **Lifecycle** (`app/training/state_machine.py`): `pending -> running ->
 completed | failed`, and `pending | running -> cancelled`. `completed`/
 `failed`/`cancelled` are terminal. `POST .../run` executes the pipeline
 **synchronously** — no worker/queue service exists on this platform yet
 (`AI.md` § "Current status"), so the call blocks for the run's duration
-(near-instant, since no real training happens).
+(near-instant for the placeholder; a real but small `fit`/evaluate for a
+baseline model).
 
 **The pipeline's six stages**, each logged as it starts and completes:
 `validate_dataset` (dataset citation present, model adapter registered) →
-`load_dataset` (resolves the citation into a `TrainingDataset` handle — no
-real rows are read) → `initialize_model` → `execute_training` (the
-adapter's fabricated metrics) → `save_results` (writes `result_summary`) →
-`update_experiment` — this last stage reuses `ExperimentService` directly:
-it sets the linked experiment's `status` to `completed` (or `failed`, if
-any earlier stage raised), and records the run's metrics/artifact through
-the _same_ `POST /experiments/{id}/metrics` / `.../artifacts` logic the
-Experiment Management API itself uses — no duplicated persistence code.
+`load_dataset` (for the placeholder, resolves the citation into a
+`TrainingDataset` handle with no real rows read; for a `requires_real_data`
+adapter, actually builds a real `MLDataset` from `symbol`/`timeframe` and
+the experiment's `feature_set`/`target_config`/`split_config`, then
+resolves `target_column` and numeric feature columns) → `initialize_model`
+→ `execute_training` (a real `fit`+evaluate for a baseline model) →
+`save_results` (writes `result_summary`) → `update_experiment` — this last
+stage reuses `ExperimentService` directly: it sets the linked experiment's
+`status` to `completed` (or `failed`, if any earlier stage raised), and
+records the run's metrics/artifact through the _same_ `POST /experiments/
+{id}/metrics` / `.../artifacts` logic the Experiment Management API itself
+uses — no duplicated persistence code.
+
+**Predict** (`POST /training-jobs/{id}/predict`) — only once a job has
+`status="completed"`:
+
+```jsonc
+// Request
+{ "rows": [[3050.0, 3060.0, 3040.0, 3055.0, 120.5]] } // each row matches result_summary.feature_columns
+
+// Response
+{ "predictions": ["up"], "feature_columns": ["open", "high", "low", "close", "volume"] }
+```
+
+Loads the model `train` serialized (via `app/training/serialization.py`)
+and predicts with the adapter's own `predict` — decoupled from the
+training run itself, so this works even in a later request or process.
 
 **Search, filter, sort** (`GET /training-jobs`): `experiment_id`, `status`,
 `model_type` filter exactly; `sort` is one of `status`, `model_type`,
@@ -945,11 +1028,16 @@ Experiment Management API itself uses — no duplicated persistence code.
 as every other list endpoint on this platform.
 
 **Error codes**: `training_job_not_found` / `model_adapter_not_found` (404),
-`invalid_training_job_transition` / `training_job_not_cancellable` (409 —
-an illegal lifecycle move, e.g. running a completed job or deleting a
-running one), `missing_dataset_version` (400 — raised mid-pipeline, surfaces
-as a `failed` job rather than an HTTP error since `/run` always returns
-200 with the job's final state), `invalid_sort` (400).
+`invalid_training_job_transition` / `training_job_not_cancellable` /
+`prediction_not_available` (409 — no completed model to predict with yet),
+`missing_dataset_version` / `missing_training_data_source` (no symbol/
+timeframe) / `missing_feature_or_target_config` / `incompatible_target_dtype`
+/ `no_numeric_feature_columns` / `no_target_columns` /
+`unknown_target_column` / `empty_training_split` (400 — all raised
+mid-pipeline, surfacing as a `failed` job rather than an HTTP error, since
+`/run` always returns 200 with the job's final state), `invalid_sort` /
+`invalid_prediction_input` (400 — a predict row's length doesn't match
+`feature_columns`).
 
 ### Platform health
 

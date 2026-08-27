@@ -444,6 +444,36 @@ training.py`, `app/repositories/training.py`, `app/services/training.py`,
 `app/schemas/training.py`, `app/dependencies/training.py`, `app/api/v1/
 endpoints/training.py`, and every module under `app/training/`).
 
+## Testing the Baseline Model Framework
+
+Covers `ARCHITECTURE.md` § "Baseline Model Framework" — the two real
+scikit-learn adapters and the bridge that gives them real data. Split
+between adapter-isolated unit tests (no database) and full real-data
+end-to-end tests (in-memory SQLite, real candles seeded, a real `fit`).
+
+| File                                     | Covers                                                                                                                                                                                                                                                                                                                                                                                                               |
+| ---------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `test_dataset_loader.py`                 | Target column resolution (default-to-first, explicit override, unknown override), numeric-feature-column filtering, the dtype-compatibility check (a regression adapter over a categorical target), an empty split, and an unexpectedly-undefined value — all built with a real `MLDatasetBuilder` over synthetic in-memory candles, no database                                                                     |
+| `test_serialization.py`                  | `LocalDiskModelSerializer` save/load round-trips a fitted model, returns a `file://` URI, gives every save a unique URI, creates its directory if missing, and rejects a non-`file://` URI                                                                                                                                                                                                                           |
+| `test_logistic_regression.py`            | `initialize`'s hyperparameter defaults, `train` on deterministic perfectly-separable data (exact accuracy/F1, confusion matrix, recorded hyperparameters), `predict` loading the just-saved model, and a scikit-learn `fit` failure wrapped as `TrainingExecutionError`                                                                                                                                              |
+| `test_linear_regression.py`              | The regression counterpart — deterministic perfectly-linear data (near-zero MAE/RMSE, R²≈1, recorded coefficients/intercept), `predict`, and the same failure-wrapping test                                                                                                                                                                                                                                          |
+| `test_placeholder_adapter.py` (extended) | Now also covers `predict` (a fabricated constant per row) and that its `metadata.model_kind`/`requires_real_data` are `"placeholder"`/`False`                                                                                                                                                                                                                                                                        |
+| `test_service.py` (extended)             | End-to-end `run()` for both real adapters against seeded candles and a real feature/target-built experiment (real metrics, confusion matrix, `file://` artifact, real `ExperimentMetric` rows); every real-data failure path (missing symbol/timeframe, missing feature_set/target_config, incompatible target dtype); `predict()` (success, not-yet-completed, row-length mismatch, and the adapter itself raising) |
+
+`tests/api/test_training_api.py` adds the same real-data create → run →
+predict flow end to end over ASGI, plus the model adapter catalogue now
+asserting `model_kind`/`requires_real_data` for all three registered
+adapters. Real candles are seeded directly through `app.models.Candle`/
+`Exchange`/`Market` (the same factories `tests/ml_datasets/` and
+`tests/helpers/factories.py` already use) — a "wobbling" (not monotonic)
+hourly price series, deliberately not increasing on every row like
+`tests/ml_datasets/conftest.py`'s own `candles()` helper, so `next_direction`
+has both `"up"` and `"down"` labels for a classifier to actually learn
+from.
+
+**100% test coverage** on every module under `app/training/`, including
+the two new adapters, `dataset_loader.py`, and `serialization.py`.
+
 ## Gates
 
 Before pushing, run:

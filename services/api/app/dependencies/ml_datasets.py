@@ -17,6 +17,7 @@ from app.ml_datasets.split import ChronologicalSplitter
 from app.ml_datasets.targets import load_builtin_targets
 from app.repositories.candles import CandleRepository
 from app.repositories.markets import MarketRepository
+from app.repositories.ml_dataset_builds import MLDatasetBuildRepository
 from app.services.ml_datasets import MLDatasetService
 
 
@@ -57,4 +58,7 @@ def get_ml_dataset_service(
         builder=get_ml_dataset_builder(),
         default_limit=settings.candles_default_limit,
         max_limit=settings.candles_max_limit,
+        build_repository=MLDatasetBuildRepository(session),
+        history_default_limit=settings.ml_dataset_builds_default_limit,
+        history_max_limit=settings.ml_dataset_builds_max_limit,
     )

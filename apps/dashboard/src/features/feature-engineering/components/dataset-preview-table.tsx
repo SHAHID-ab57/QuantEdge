@@ -253,7 +253,21 @@ function DatasetPreviewTableInner({
           component={Paper}
           variant="outlined"
           onScroll={handleScroll}
-          sx={{ maxHeight: TABLE_HEIGHT, overflowX: 'auto', overflowY: 'auto' }}
+          sx={{
+            maxHeight: TABLE_HEIGHT,
+            overflowX: 'auto',
+            overflowY: 'auto',
+            // Virtualization renders spacer rows whose height changes on every
+            // scroll-driven re-render. Without this, the browser's native
+            // "scroll anchoring" (which auto-corrects scrollTop whenever
+            // content above the viewport shifts) fights our own scrollTop
+            // state in a feedback loop — each correction fires another
+            // `scroll` event, which sets state again, which resizes the
+            // spacers again, forever ("Maximum update depth exceeded").
+            // Disabling it here is the standard fix for this exact class of
+            // bug in any spacer-based virtualized list.
+            overflowAnchor: 'none',
+          }}
         >
           <Table size="small" stickyHeader aria-label="Feature dataset preview">
             <TableHead>

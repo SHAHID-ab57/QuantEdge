@@ -13,7 +13,7 @@ import * as marketApi from '@/lib/api/market';
 import * as featuresApi from '@/lib/api/features';
 import * as mlDatasetsApi from '@/lib/api/ml-datasets';
 import type { Market } from '@/types/api/market';
-import type { MLDatasetResponse } from '@/types/api/ml-datasets';
+import type { MLDatasetBuildSummary, MLDatasetResponse } from '@/types/api/ml-datasets';
 import { MLDatasetsPage } from './ml-datasets-page';
 import { useRecentFeaturesStore } from '@/features/feature-engineering/store/use-recent-features-store';
 
@@ -34,6 +34,9 @@ vi.mock('@/lib/api/ml-datasets', () => ({
   fetchTarget: vi.fn(),
   buildMLDataset: vi.fn(),
   exportMLDataset: vi.fn(),
+  fetchMLDatasetBuilds: vi.fn(),
+  fetchMLDatasetBuild: vi.fn(),
+  deleteMLDatasetBuild: vi.fn(),
 }));
 
 const markets: Market[] = [
@@ -199,6 +202,22 @@ function mlDataset(overrides: Partial<MLDatasetResponse> = {}): MLDatasetRespons
   };
 }
 
+function buildSummary(overrides: Partial<MLDatasetBuildSummary> = {}): MLDatasetBuildSummary {
+  return {
+    id: '33333333-3333-4333-8333-333333333333',
+    ml_dataset_id: '22222222-2222-4222-8222-222222222222',
+    symbol: 'ETHUSD',
+    timeframe: '1h',
+    row_count: 2,
+    column_count: 2,
+    feature_count: 1,
+    target_count: 1,
+    quality_passed: true,
+    created_at: '2026-01-01T02:00:00Z',
+    ...overrides,
+  };
+}
+
 const mockedMarkets = vi.mocked(marketApi);
 const mockedFeatures = vi.mocked(featuresApi);
 const mockedMlDatasets = vi.mocked(mlDatasetsApi);
@@ -276,6 +295,12 @@ beforeEach(() => {
   mockedMlDatasets.fetchTargets.mockResolvedValue(targetCatalogue as never);
   mockedMlDatasets.buildMLDataset.mockResolvedValue(mlDataset());
   mockedMlDatasets.exportMLDataset.mockResolvedValue(new Blob(['col\n1']));
+  mockedMlDatasets.fetchMLDatasetBuilds.mockResolvedValue({
+    builds: [],
+    total: 0,
+    limit: 10,
+    offset: 0,
+  });
 });
 
 afterEach(() => {
@@ -549,5 +574,96 @@ describe('MLDatasetsPage — metadata and reproducibility', () => {
     );
     await waitFor(() => expect(screen.getAllByText('1 of 1 selected')).toHaveLength(2));
     expect(screen.getByRole('button', { name: 'Build ML Dataset' })).not.toBeDisabled();
+  });
+});
+
+describe('MLDatasetsPage — Dataset History', () => {
+  it('lists past builds', async () => {
+    mockedMlDatasets.fetchMLDatasetBuilds.mockResolvedValue({
+      builds: [buildSummary()],
+      total: 1,
+      limit: 10,
+      offset: 0,
+    });
+    renderPage();
+
+    expect(await screen.findByText('ETHUSD')).toBeInTheDocument();
+    expect(screen.getByText('Passed')).toBeInTheDocument();
+  });
+
+  it('shows the empty state when nothing has been built yet', async () => {
+    renderPage();
+    expect(
+      await screen.findByText(
+        'No datasets built yet — use the builder above, and it will appear here.',
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it('reopens a past build in a detail dialog', async () => {
+    mockedMlDatasets.fetchMLDatasetBuilds.mockResolvedValue({
+      builds: [buildSummary()],
+      total: 1,
+      limit: 10,
+      offset: 0,
+    });
+    mockedMlDatasets.fetchMLDatasetBuild.mockResolvedValue({
+      id: '33333333-3333-4333-8333-333333333333',
+      created_at: '2026-01-01T02:00:00Z',
+      dataset: mlDataset(),
+    });
+    renderPage();
+
+    fireEvent.click(await screen.findByText('ETHUSD'));
+
+    expect(await screen.findByText('ML Dataset Information')).toBeInTheDocument();
+    expect(screen.getByText('Dataset Preview')).toBeInTheDocument();
+  });
+
+  it('deletes a past build after confirming', async () => {
+    mockedMlDatasets.fetchMLDatasetBuilds.mockResolvedValue({
+      builds: [buildSummary()],
+      total: 1,
+      limit: 10,
+      offset: 0,
+    });
+    mockedMlDatasets.deleteMLDatasetBuild.mockResolvedValue(undefined);
+    renderPage();
+    await screen.findByText('ETHUSD');
+
+    fireEvent.click(screen.getByLabelText('Delete ML dataset build ETHUSD 1h'));
+    expect(await screen.findByText('Delete Dataset Build')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
+
+    await waitFor(() =>
+      expect(mockedMlDatasets.deleteMLDatasetBuild).toHaveBeenCalledWith(
+        '33333333-3333-4333-8333-333333333333',
+      ),
+    );
+  });
+
+  it('backing out of the delete confirmation does not delete the build', async () => {
+    mockedMlDatasets.fetchMLDatasetBuilds.mockResolvedValue({
+      builds: [buildSummary()],
+      total: 1,
+      limit: 10,
+      offset: 0,
+    });
+    renderPage();
+    await screen.findByText('ETHUSD');
+
+    fireEvent.click(screen.getByLabelText('Delete ML dataset build ETHUSD 1h'));
+    await screen.findByText('Delete Dataset Build');
+    fireEvent.click(screen.getByRole('button', { name: 'Back' }));
+
+    await waitFor(() => expect(screen.queryByText('Delete Dataset Build')).not.toBeInTheDocument());
+    expect(mockedMlDatasets.deleteMLDatasetBuild).not.toHaveBeenCalled();
+  });
+
+  it('a newly built dataset appears in history once building succeeds', async () => {
+    renderPage();
+    await buildDataset();
+
+    await waitFor(() => expect(mockedMlDatasets.fetchMLDatasetBuilds).toHaveBeenCalledTimes(2));
   });
 });

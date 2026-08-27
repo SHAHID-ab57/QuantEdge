@@ -1,8 +1,10 @@
-"""Tests for `ModelAdapterRegistry` and the builtin placeholder adapter's registration."""
+"""Tests for `ModelAdapterRegistry` and the builtin adapters' registration."""
 
 import pytest
 
 from app.training.adapters import load_builtin_model_adapters
+from app.training.adapters.linear_regression import LinearRegressionAdapter
+from app.training.adapters.logistic_regression import LogisticRegressionAdapter
 from app.training.adapters.placeholder import PlaceholderModelAdapter
 from app.training.base import ModelAdapter, ModelAdapterMetadata
 from app.training.errors import DuplicateModelAdapterError, ModelAdapterNotFoundError
@@ -18,6 +20,9 @@ class _FakeAdapter(ModelAdapter):
         return None
 
     def train(self, dataset, hyperparameters):  # noqa: ANN001, ANN201 - test double
+        raise NotImplementedError
+
+    def predict(self, artifact_uri, rows):  # noqa: ANN001, ANN201 - test double
         raise NotImplementedError
 
 
@@ -36,6 +41,9 @@ class TestRegister:
                 return None
 
             def train(self, dataset, hyperparameters):  # noqa: ANN001, ANN201
+                raise NotImplementedError
+
+            def predict(self, artifact_uri, rows):  # noqa: ANN001, ANN201
                 raise NotImplementedError
 
         with pytest.raises(TypeError):
@@ -70,6 +78,9 @@ class TestDescribeAll:
             def train(self, dataset, hyperparameters):  # noqa: ANN001, ANN201
                 raise NotImplementedError
 
+            def predict(self, artifact_uri, rows):  # noqa: ANN001, ANN201
+                raise NotImplementedError
+
         registry.register(_FakeAdapter)
         registry.register(ZAdapter)
         names = [m.name for m in registry.describe_all()]
@@ -82,11 +93,27 @@ class TestDescribeAll:
         assert [a.metadata.name for a in registry] == ["fake"]
 
 
-class TestBuiltinPlaceholderAdapter:
+class TestBuiltinAdapters:
     def test_load_builtin_model_adapters_registers_placeholder(self) -> None:
         load_builtin_model_adapters()
         assert default_registry.has("placeholder") is True
         assert isinstance(default_registry.get("placeholder"), PlaceholderModelAdapter)
+
+    def test_load_builtin_model_adapters_registers_logistic_regression(self) -> None:
+        load_builtin_model_adapters()
+        assert default_registry.has("logistic_regression") is True
+        adapter = default_registry.get("logistic_regression")
+        assert isinstance(adapter, LogisticRegressionAdapter)
+        assert adapter.metadata.model_kind == "classification"
+        assert adapter.metadata.requires_real_data is True
+
+    def test_load_builtin_model_adapters_registers_linear_regression(self) -> None:
+        load_builtin_model_adapters()
+        assert default_registry.has("linear_regression") is True
+        adapter = default_registry.get("linear_regression")
+        assert isinstance(adapter, LinearRegressionAdapter)
+        assert adapter.metadata.model_kind == "regression"
+        assert adapter.metadata.requires_real_data is True
 
     def test_is_idempotent(self) -> None:
         load_builtin_model_adapters()

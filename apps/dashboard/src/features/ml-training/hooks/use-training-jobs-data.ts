@@ -6,6 +6,7 @@ import {
   createTrainingJob,
   deleteTrainingJob,
   fetchModelAdapters,
+  fetchTrainingArtifacts,
   fetchTrainingJob,
   fetchTrainingJobs,
   runTrainingJob,
@@ -81,5 +82,15 @@ export function useCancelTrainingJob() {
   return useMutation({
     mutationFn: (id: string) => cancelTrainingJob(id),
     onSuccess: invalidate,
+  });
+}
+
+/** Every downloadable artifact a completed job's training run produced — the
+ * Artifact Management panel's data source. */
+export function useTrainingArtifacts(jobId: string | null, enabled: boolean) {
+  return useQuery({
+    queryKey: [...TRAINING_JOBS_KEY, 'artifacts', jobId],
+    queryFn: () => fetchTrainingArtifacts(jobId as string),
+    enabled: Boolean(jobId) && enabled,
   });
 }

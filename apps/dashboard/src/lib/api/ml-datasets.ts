@@ -1,9 +1,13 @@
 import { apiClient } from './client';
 import type { BuildDatasetParams } from './features';
 import {
+  MLDatasetBuildDetailResponseSchema,
+  MLDatasetBuildListResponseSchema,
   MLDatasetResponseSchema,
   TargetCatalogResponseSchema,
   TargetDTOSchema,
+  type MLDatasetBuildDetailResponse,
+  type MLDatasetBuildListResponse,
   type MLDatasetResponse,
   type TargetCatalogResponse,
   type TargetDTO,
@@ -76,4 +80,33 @@ export async function exportMLDataset(
     { responseType: 'blob' },
   );
   return data as Blob;
+}
+
+export interface MLDatasetBuildListParams {
+  symbol?: string;
+  timeframe?: string;
+  quality_passed?: boolean;
+  sort?: 'symbol' | 'timeframe' | 'row_count' | 'created_at';
+  dir?: 'asc' | 'desc';
+  limit?: number;
+  offset?: number;
+}
+
+/** Dataset History's list view — every past ML dataset build, paginated. */
+export async function fetchMLDatasetBuilds(
+  params: MLDatasetBuildListParams = {},
+): Promise<MLDatasetBuildListResponse> {
+  const { data } = await apiClient.get('/api/v1/ml/dataset-builds', { params });
+  return MLDatasetBuildListResponseSchema.parse(data);
+}
+
+/** Reopen one past ML dataset build — its full, untruncated matrix. */
+export async function fetchMLDatasetBuild(id: string): Promise<MLDatasetBuildDetailResponse> {
+  const { data } = await apiClient.get(`/api/v1/ml/dataset-builds/${encodeURIComponent(id)}`);
+  return MLDatasetBuildDetailResponseSchema.parse(data);
+}
+
+/** Remove one past build from Dataset History. Never touches the underlying candles. */
+export async function deleteMLDatasetBuild(id: string): Promise<void> {
+  await apiClient.delete(`/api/v1/ml/dataset-builds/${encodeURIComponent(id)}`);
 }

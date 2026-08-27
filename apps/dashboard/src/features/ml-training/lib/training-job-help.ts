@@ -52,15 +52,68 @@ export const MODEL_TYPE_FIELD_HELP: InfoTooltipSection[] = [
   },
   {
     heading: 'Why it matters',
-    body: 'Only "Placeholder Model" is registered today — it fabricates deterministic metrics and trains nothing real, so this framework can be exercised before a real model exists.',
+    body: '"Placeholder Model" fabricates deterministic metrics and trains nothing real. "Logistic Regression" and "Linear Regression" are real scikit-learn baselines every advanced model must outperform — they need a market/timeframe to actually train on.',
   },
   {
     heading: 'Acceptable values',
-    body: 'Any adapter from the catalogue below. Future TensorFlow, PyTorch, and scikit-learn integrations will register here and appear in this same list with no other change.',
+    body: 'Any adapter from the catalogue below. Future TensorFlow and PyTorch integrations will register here and appear in this same list with no other change.',
   },
   {
     heading: 'Where the value comes from',
     body: 'GET /training-jobs/models — never free text, so an unregistered name can never be submitted.',
+  },
+];
+
+export const SYMBOL_FIELD_HELP: InfoTooltipSection[] = [
+  {
+    heading: 'What it is',
+    body: 'The market this job loads real candles from to build a training matrix.',
+  },
+  {
+    heading: 'Why it matters',
+    body: 'A real model adapter (one whose "requires real data" is true) has nothing to fit without it — the placeholder adapter ignores this field entirely.',
+  },
+  {
+    heading: 'Acceptable values',
+    body: 'Any market this platform already tracks candles for.',
+  },
+  {
+    heading: 'Where the value comes from',
+    body: 'GET /markets — the same catalogue the Markets and History pages use.',
+  },
+];
+
+export const TIMEFRAME_FIELD_HELP: InfoTooltipSection[] = [
+  {
+    heading: 'What it is',
+    body: 'The candle timeframe (e.g. 1h) to load from the selected market.',
+  },
+  {
+    heading: 'Why it matters',
+    body: 'Required alongside Symbol for a real model adapter — features and targets are computed over candles of exactly this timeframe.',
+  },
+  {
+    heading: 'Acceptable values',
+    body: 'Any timeframe this market actually has stored candles for.',
+  },
+  {
+    heading: 'Where the value comes from',
+    body: 'GET /markets/{symbol}/timeframes, once a market is selected.',
+  },
+];
+
+export const TARGET_COLUMN_FIELD_HELP: InfoTooltipSection[] = [
+  {
+    heading: 'What it is',
+    body: "Which built target column this job predicts, when the experiment's target_config produced more than one.",
+  },
+  {
+    heading: 'Why it matters',
+    body: 'A regression adapter needs a numeric target (e.g. next_close); a classification adapter needs a categorical one (e.g. next_direction) — the wrong pairing fails the job with a clear error.',
+  },
+  {
+    heading: 'Acceptable values',
+    body: 'Optional. Leave blank to use the first target column the dataset build produces.',
   },
 ];
 

@@ -70,3 +70,20 @@ class TestTrain:
         loss = result.metrics["placeholder_loss"]
         accuracy = result.metrics["placeholder_accuracy"]
         assert round(loss + accuracy, 6) == 1.0
+
+
+class TestMetadata:
+    def test_declares_itself_placeholder_and_not_requiring_real_data(self) -> None:
+        assert PlaceholderModelAdapter.metadata.model_kind == "placeholder"
+        assert PlaceholderModelAdapter.metadata.requires_real_data is False
+
+
+class TestPredict:
+    def test_fabricates_a_constant_prediction_per_row(self) -> None:
+        adapter = PlaceholderModelAdapter()
+        predictions = adapter.predict("placeholder://training-runs/ds-1", [[1.0], [2.0], [3.0]])
+        assert predictions == [0.0, 0.0, 0.0]
+
+    def test_returns_an_empty_list_for_no_rows(self) -> None:
+        adapter = PlaceholderModelAdapter()
+        assert adapter.predict("placeholder://training-runs/ds-1", []) == []

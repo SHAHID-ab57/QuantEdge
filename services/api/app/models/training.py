@@ -60,6 +60,21 @@ class TrainingJob(BaseModel, TimestampMixin):
         nullable=True,
         comment="The dataset citation this job trains over; defaults from the experiment.",
     )
+    symbol: Mapped[str | None] = mapped_column(
+        String(50),
+        nullable=True,
+        comment="Market symbol to load real candles from; required by a requires_real_data model.",
+    )
+    timeframe: Mapped[str | None] = mapped_column(
+        String(20),
+        nullable=True,
+        comment="Candle timeframe to load, e.g. '1h'; required by a requires_real_data adapter.",
+    )
+    target_column: Mapped[str | None] = mapped_column(
+        String(100),
+        nullable=True,
+        comment="Which built target column to predict; defaults to the first one built.",
+    )
     model_type: Mapped[str] = mapped_column(
         String(100),
         nullable=False,
@@ -82,6 +97,11 @@ class TrainingJob(BaseModel, TimestampMixin):
         comment="The pipeline stage last entered; set while running, frozen on failure.",
     )
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_detail: Mapped[dict | None] = mapped_column(
+        JSON,
+        nullable=True,
+        comment="Structured failure report (reason/affected_feature/affected_rows/suggested_fix).",
+    )
     result_summary: Mapped[dict | None] = mapped_column(
         JSON,
         nullable=True,

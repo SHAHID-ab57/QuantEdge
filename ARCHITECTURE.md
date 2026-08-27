@@ -1452,11 +1452,13 @@ inventory.
 The AI Research & Training bounded context's (BC4) orchestration layer,
 sitting directly on top of Experiment Management: "run a training attempt
 against an experiment, track its lifecycle, log its progress, and record
-its outcome back onto that experiment." Implements **no real model
-training** — the framework's stated purpose is orchestration, lifecycle
-management, and extensibility, so a future TensorFlow, PyTorch, or
-scikit-learn integration can be added without touching the pipeline,
-service, repository, or API.
+its outcome back onto that experiment." The framework's own machinery
+(pipeline, lifecycle, registry, service, API) is model-agnostic by
+design, so a future TensorFlow or PyTorch integration can be added
+without touching any of it — see § "Baseline Model Framework" below for
+the two real scikit-learn adapters now registered alongside the
+placeholder, and how the pipeline was extended to load real training data
+for them without changing its own six-stage shape.
 
 **Entities**, matching `docs/database/DATABASE.md` § "Machine Learning
 Training Framework schema" exactly:
@@ -1589,6 +1591,137 @@ same surface end to end over ASGI; `tests/repository/test_training_postgres.py`
 (opt-in, `postgres` marker) exercises the real `ON DELETE CASCADE` the
 in-memory SQLite test engine cannot. 100% test coverage on every new
 backend module. See `docs/testing/TESTING.md` for the full inventory.
+
+### Baseline Model Framework
+
+Professional quantitative research starts with baseline models — every
+advanced model this platform eventually adds must be able to outperform
+a simple linear one, or it isn't earning its complexity. This is the
+first genuinely real training capability on the platform, built entirely
+as new `ModelAdapter` implementations plus one new bridge module — the
+Machine Learning Training Framework's job lifecycle, pipeline, registry,
+service, and API needed **zero changes** to support it.
+
+**Model interface** (`app/training/base.py`). `ModelAdapter` gained a
+third abstract method, `predict(artifact_uri, rows) -> list`, alongside
+`initialize`/`train` — training and prediction are deliberately decoupled:
+`predict` loads whatever `train` serialized, assuming nothing about
+in-memory state a training run left behind, since a prediction may run in
+a different process, long after the job that produced the model finished.
+`ModelAdapterMetadata` gained `model_kind` (`"placeholder" |
+"classification" | "regression"`) and `requires_real_data: bool` — the two
+facts the frontend and `TrainingJobService` each need to know about an
+adapter without running it: which evaluation view to render, and whether
+a job needs a real market/timeframe to build a dataset from at all.
+`TrainingDataset` gained optional `train`/`validation`/`test: SplitMatrix
+| None` fields (`SplitMatrix` = plain `X: list[list[float]]` / `y:
+list[Any]`, no numpy import — this module stays framework-free, matching
+`FeatureGenerator`'s own "framework-free inputs" discipline) — `None` for
+the placeholder, populated for a `requires_real_data` adapter.
+
+**Model registry** (`app/training/registry.py`) — unchanged. The two new
+adapters register into the exact same `ModelAdapterRegistry` the
+placeholder already uses, via the same `@register` decorator and the same
+`load_builtin_model_adapters()` discovery loader
+(`app/training/adapters/__init__.py`), so `GET /training-jobs/models`
+lists all three with no endpoint change.
+
+**Logistic Regression plugin** (`app/training/adapters/
+logistic_regression.py`) — `sklearn.linear_model.LogisticRegression`,
+`model_kind="classification"`. Trains on the built train split, evaluates
+on validation (accuracy/precision/recall/F1, `average="weighted"`,
+`zero_division=0`) and, if present, test; records a confusion matrix and
+class labels in `summary`. Hyperparameters: `max_iter` (default 200), `C`
+(default 1.0), `random_seed` (default 42). Pairs naturally with a
+categorical target such as `next_direction`.
+
+**Linear Regression plugin** (`app/training/adapters/
+linear_regression.py`) — `sklearn.linear_model.LinearRegression`,
+`model_kind="regression"`. Same train/validation/test evaluation shape,
+reporting MAE/MSE/RMSE/R² and recording learned coefficients/intercept in
+`summary`. Hyperparameter: `fit_intercept` (default `true`). Requires a
+numeric target such as `next_close`/`next_return` —
+`IncompatibleTargetDtypeError` if given a categorical one instead.
+
+**Training integration** (`app/training/dataset_loader.py`,
+`app/services/training.py`). `TrainingJob` gained three new nullable
+columns — `symbol`, `timeframe`, `target_column` (migration
+`ed0d4f9becf1`) — the concrete market/timeframe/target a real adapter
+needs, which an `Experiment` has no reason to carry (it only cites a
+`dataset_version` by value). `TrainingJobService`'s `load_dataset` stage
+now checks the resolved adapter's `requires_real_data`: `false` keeps the
+original citation-only behavior; `true` builds a real `MLDataset` by
+calling `MLDatasetService.build_ml_dataset` (a new public method wrapping
+that service's existing, private `_build` — the _exact_ same code
+`POST /markets/{symbol}/ml/dataset` itself runs, never a second
+dataset-building path) using the linked experiment's own recorded
+`feature_set`/`target_config`/`split_config`, then hands the result to
+`build_training_dataset` (`dataset_loader.py`) to resolve a target column
+(defaulting to the first one built), restrict feature columns to numeric
+dtypes (`float`/`int`/`bool` — a `"categorical"` feature column is
+excluded; encoding one is `app/features/ai_extensions.py`'s documented,
+not-yet-implemented `CategoricalEncoder` extension point), and reshape
+each split into a `SplitMatrix`.
+
+**Prediction interface** — `POST /training-jobs/{id}/predict`, new. Takes
+`{"rows": [[...], ...]}` (each row already restricted to the job's own
+`feature_columns`, recorded in `result_summary`), loads the completed
+job's serialized model via the adapter's own `predict`, and returns
+`{"predictions": [...], "feature_columns": [...]}`. Only available once a
+job has `status="completed"` and recorded an `artifact_uri`
+(`PredictionNotAvailableError` otherwise); a row-length mismatch is
+rejected with `InvalidPredictionInputError` before ever reaching the
+adapter.
+
+**Model serialization abstraction** (`app/training/serialization.py`).
+`ModelSerializer` is a two-method protocol (`save(model, name) -> uri`,
+`load(uri) -> model`) behind which `LocalDiskModelSerializer` writes a
+fitted estimator to `Settings.model_artifact_dir` (default
+`var/model_artifacts/`, gitignored) via `joblib.dump`/`joblib.load` — this
+platform has no object storage wired in yet (§ "Known Limitations"). A
+future S3/object-storage-backed serializer implements the same protocol
+and swaps in behind `default_serializer` with no adapter change. `train()`
+calls `.save()` and returns the resulting `file://` URI as
+`TrainingResult.artifact_uri` — the _same_ field the placeholder adapter
+already fabricates a `placeholder://` URI for, so `update_experiment`'s
+`add_artifact(artifact_type="model_checkpoint", ...)` call needs no
+change to record a real one.
+
+**Metrics collection** — reuses the existing mechanism outright.
+`TrainingResult.metrics` (now real: accuracy/precision/recall/F1 or
+MAE/MSE/RMSE/R², not fabricated numbers) flows through the same
+`save_results`/`update_experiment` pipeline stages already built for the
+placeholder, landing in `TrainingJob.result_summary` and, on success, as
+real `ExperimentMetric` rows via `ExperimentService.add_metric` — zero new
+persistence code.
+
+**Extension workflow for a future adapter**: subclass `ModelAdapter`,
+declare `metadata` (including `model_kind` and `requires_real_data`),
+implement `initialize`/`train`/`predict`, add one file under
+`app/training/adapters/`, and `@register` it. If it needs real data, use
+`dataset.train`/`validation`/`test` (already-built `SplitMatrix`es); if
+not, ignore them exactly as the placeholder does. No pipeline, service,
+repository, or API code changes are needed either way — the same
+extension guarantee every Strategy + Registry context on this platform
+already makes.
+
+**Testing.** `tests/training/test_dataset_loader.py` covers target/
+feature-column resolution and every failure mode (unknown target column,
+no numeric feature columns, an empty split, a dtype-incompatible target,
+an unexpectedly-undefined value) using a real `MLDatasetBuilder` over
+synthetic candles — no database. `tests/training/test_serialization.py`
+covers the local-disk save/load round trip. `tests/training/
+test_logistic_regression.py`/`test_linear_regression.py` cover each
+adapter's `initialize`/`train`/`predict` in isolation (deterministic,
+perfectly-fittable synthetic data, so metrics are exact) plus scikit-learn
+failure wrapping. `tests/training/test_service.py` and `tests/api/
+test_training_api.py` each add a full real-data path end to end — real
+candles seeded into the database, a real feature/target build, a real
+`fit`, real recorded metrics/confusion-matrix, and a real prediction —
+alongside the missing-symbol/missing-config/incompatible-dtype failure
+paths. 100% test coverage on every module in `app/training/`. See
+`docs/testing/TESTING.md`/`services/api/TESTING.md` for the full
+inventory.
 
 ### Feature Store
 

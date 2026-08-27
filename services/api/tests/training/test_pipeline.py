@@ -38,6 +38,9 @@ class _RecordingAdapter(ModelAdapter):
             summary={"epochs": hyperparameters.get("epochs", 1)},
         )
 
+    def predict(self, artifact_uri, rows):  # noqa: ANN001, ANN201
+        raise NotImplementedError
+
 
 class _FailingInitAdapter(ModelAdapter):
     metadata = ModelAdapterMetadata(name="failing-init", label="", description="", framework="test")
@@ -47,6 +50,9 @@ class _FailingInitAdapter(ModelAdapter):
 
     def train(self, dataset, hyperparameters):  # noqa: ANN001, ANN201
         raise AssertionError("must not be reached")
+
+    def predict(self, artifact_uri, rows):  # noqa: ANN001, ANN201
+        raise NotImplementedError
 
 
 class _FailingTrainAdapter(ModelAdapter):
@@ -59,6 +65,9 @@ class _FailingTrainAdapter(ModelAdapter):
 
     def train(self, dataset, hyperparameters):  # noqa: ANN001, ANN201
         raise RuntimeError("boom")
+
+    def predict(self, artifact_uri, rows):  # noqa: ANN001, ANN201
+        raise NotImplementedError
 
 
 def build_registry(*adapters: type[ModelAdapter]) -> ModelAdapterRegistry:

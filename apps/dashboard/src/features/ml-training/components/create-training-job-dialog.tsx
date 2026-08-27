@@ -18,6 +18,7 @@ import { useQuery } from '@tanstack/react-query';
 import { InfoTooltip } from '@/components/info-tooltip';
 import { useExperiment } from '@/features/experiments/hooks/use-experiments-data';
 import { fetchExperiments } from '@/lib/api/experiments';
+import { fetchMarkets, fetchTimeframes } from '@/lib/api/market';
 import type { ExperimentSummary } from '@/types/api/experiments';
 import type { ModelAdapter } from '@/types/api/training';
 import { useModelAdapters, useCreateTrainingJob } from '../hooks/use-training-jobs-data';
@@ -25,6 +26,9 @@ import {
   DATASET_VERSION_FIELD_HELP,
   EXPERIMENT_FIELD_HELP,
   MODEL_TYPE_FIELD_HELP,
+  SYMBOL_FIELD_HELP,
+  TARGET_COLUMN_FIELD_HELP,
+  TIMEFRAME_FIELD_HELP,
 } from '../lib/training-job-help';
 import { EmptyStateNotice } from './empty-state-notice';
 import {
@@ -81,10 +85,24 @@ export function CreateTrainingJobDialog({
   const [datasetVersion, setDatasetVersion] = useState('');
   const [datasetVersionTouched, setDatasetVersionTouched] = useState(false);
   const [modelType, setModelType] = useState('');
+  const [symbol, setSymbol] = useState('');
+  const [timeframe, setTimeframe] = useState('');
+  const [targetColumn, setTargetColumn] = useState('');
   const [knownValues, setKnownValues] = useState<Record<string, string>>(() =>
     defaultKnownHyperparameterValues(),
   );
   const [customEntries, setCustomEntries] = useState<HyperparameterEntry[]>([]);
+
+  const markets = useQuery({
+    queryKey: ['markets', 'select-options'],
+    queryFn: () => fetchMarkets(),
+    enabled: open,
+  });
+  const timeframes = useQuery({
+    queryKey: ['timeframes', symbol],
+    queryFn: () => fetchTimeframes(symbol),
+    enabled: open && symbol.length > 0,
+  });
 
   const experimentOptions = useMemo(
     () => experiments.data?.experiments ?? EMPTY_EXPERIMENT_OPTIONS,
@@ -131,6 +149,9 @@ export function CreateTrainingJobDialog({
     setDatasetVersion('');
     setDatasetVersionTouched(false);
     setModelType('');
+    setSymbol('');
+    setTimeframe('');
+    setTargetColumn('');
     setKnownValues(defaultKnownHyperparameterValues());
     setCustomEntries([]);
     create.reset();
@@ -152,10 +173,13 @@ export function CreateTrainingJobDialog({
   };
 
   const hyperparametersValid = knownHyperparametersAreValid(knownValues);
+  const requiresRealData = selectedAdapter?.requires_real_data ?? false;
   const validationReasons: string[] = [];
   if (!experiment) validationReasons.push('Select an experiment.');
   if (!datasetVersion.trim()) validationReasons.push('Enter or select a dataset version.');
   if (!modelType) validationReasons.push('Select a model type.');
+  if (requiresRealData && !symbol) validationReasons.push('Select a market symbol.');
+  if (requiresRealData && !timeframe) validationReasons.push('Select a timeframe.');
   if (!hyperparametersValid) validationReasons.push('Fix the invalid hyperparameter values below.');
 
   const handleSubmit = async () => {
@@ -164,6 +188,9 @@ export function CreateTrainingJobDialog({
       experiment_id: experiment.id,
       model_type: modelType,
       dataset_version: datasetVersion.trim() || null,
+      symbol: symbol || null,
+      timeframe: timeframe || null,
+      target_column: targetColumn.trim() || null,
       hyperparameters: buildHyperparametersPayload(knownValues, customEntries),
     });
     reset();
@@ -288,10 +315,85 @@ export function CreateTrainingJobDialog({
             <InfoTooltip label="Model type" sections={MODEL_TYPE_FIELD_HELP} />
           </Stack>
 
+          {requiresRealData ? (
+            <Stack spacing={2}>
+              <Typography variant="subtitle2">Configuration</Typography>
+              <Stack direction="row" spacing={0.5} alignItems="flex-start">
+                <Autocomplete
+                  fullWidth
+                  options={markets.data?.markets ?? []}
+                  loading={markets.isLoading}
+                  value={markets.data?.markets.find((m) => m.symbol === symbol) ?? null}
+                  getOptionLabel={(option) => option.symbol}
+                  isOptionEqualToValue={(option, value) => option.symbol === value.symbol}
+                  onChange={(_, next) => {
+                    setSymbol(next?.symbol ?? '');
+                    setTimeframe('');
+                  }}
+                  noOptionsText="No markets match your search"
+                  renderInput={(params) => (
+                    <TextField
+                      {...params}
+                      label="Symbol"
+                      required
+                      helperText={
+                        markets.isLoading ? 'Loading markets…' : 'The market to train on.'
+                      }
+                      slotProps={{ htmlInput: { ...params.inputProps, 'aria-label': 'Symbol' } }}
+                    />
+                  )}
+                />
+                <InfoTooltip label="Symbol" sections={SYMBOL_FIELD_HELP} />
+              </Stack>
+
+              <Stack direction="row" spacing={0.5} alignItems="flex-start">
+                <Autocomplete
+                  fullWidth
+                  disabled={!symbol}
+                  options={timeframes.data?.timeframes ?? []}
+                  loading={timeframes.isLoading}
+                  value={timeframe || null}
+                  onChange={(_, next) => setTimeframe(next ?? '')}
+                  noOptionsText={
+                    symbol ? 'No timeframes match your search' : 'Select a symbol first'
+                  }
+                  renderInput={(params) => (
+                    <TextField
+                      {...params}
+                      label="Timeframe"
+                      required
+                      helperText={
+                        timeframes.isLoading
+                          ? 'Loading timeframes…'
+                          : 'The candle timeframe to load, e.g. 1h.'
+                      }
+                      slotProps={{ htmlInput: { ...params.inputProps, 'aria-label': 'Timeframe' } }}
+                    />
+                  )}
+                />
+                <InfoTooltip label="Timeframe" sections={TIMEFRAME_FIELD_HELP} />
+              </Stack>
+
+              <Stack direction="row" spacing={0.5} alignItems="flex-start">
+                <TextField
+                  fullWidth
+                  label="Target column"
+                  value={targetColumn}
+                  onChange={(event) => setTargetColumn(event.target.value)}
+                  helperText="Optional — defaults to the first built target column."
+                  slotProps={{ htmlInput: { 'aria-label': 'Target column' } }}
+                />
+                <InfoTooltip label="Target column" sections={TARGET_COLUMN_FIELD_HELP} />
+              </Stack>
+            </Stack>
+          ) : null}
+
           <TrainingSummaryPanel
             experiment={experimentDetail.data ?? null}
             datasetVersion={datasetVersion}
             modelLabel={selectedAdapter?.label ?? null}
+            symbol={requiresRealData ? symbol : undefined}
+            timeframe={requiresRealData ? timeframe : undefined}
           />
 
           <HyperparameterEditor

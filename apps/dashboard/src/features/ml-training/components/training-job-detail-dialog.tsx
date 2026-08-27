@@ -18,17 +18,21 @@ import Stack from '@mui/material/Stack';
 import Tooltip from '@mui/material/Tooltip';
 import Typography from '@mui/material/Typography';
 import { useState } from 'react';
+import { ConfirmActionDialog } from '@/components/confirm-action-dialog';
 import { InfoTooltip } from '@/components/info-tooltip';
 import { useExperiment } from '@/features/experiments/hooks/use-experiments-data';
+import { downloadTrainingArtifact, fetchTrainingArtifacts } from '@/lib/api/training';
 import type { TrainingJob } from '@/types/api/training';
 import {
   useCancelTrainingJob,
   useDeleteTrainingJob,
+  useModelAdapters,
   useRunTrainingJob,
   useTrainingJob,
 } from '../hooks/use-training-jobs-data';
 import { TRAINING_STATUS_LEGEND } from '../lib/training-job-help';
-import { ConfirmActionDialog } from './confirm-action-dialog';
+import { EvaluationSummary } from './evaluation-summary';
+import { TrainingArtifactsPanel } from './training-artifacts-panel';
 import { TrainingJobLogsPanel } from './training-job-logs-panel';
 import { TrainingJobStageTimeline } from './training-job-stage-timeline';
 import { TrainingJobStatusChip } from './training-job-status-chip';
@@ -52,13 +56,21 @@ function formatDuration(startedAt: string | null, completedAt: string | null): s
 
 function ResultSummaryCard({ job }: { job: TrainingJob }) {
   const experiment = useExperiment(job.experiment_id);
+  const modelAdapters = useModelAdapters();
+  const modelKind = modelAdapters.data?.adapters.find((a) => a.name === job.model_type)?.model_kind;
   const summary = job.result_summary;
   const metrics =
     summary && typeof summary.metrics === 'object' && summary.metrics !== null
       ? (summary.metrics as Record<string, unknown>)
       : null;
-  const artifactUri =
-    summary && typeof summary.artifact_uri === 'string' ? summary.artifact_uri : null;
+  const handleDownloadFeatureImportanceCsv = async () => {
+    const listing = await fetchTrainingArtifacts(job.id);
+    const entry = listing.artifacts.find((a) => a.artifact_type === 'feature_importance_csv');
+    if (!entry) {
+      throw new Error('feature_importance.csv is not available for this job');
+    }
+    return downloadTrainingArtifact(entry.download_url);
+  };
 
   return (
     <Stack spacing={0.5}>
@@ -86,32 +98,20 @@ function ResultSummaryCard({ job }: { job: TrainingJob }) {
           Generated: {formatTimestamp(job.completed_at)}
         </Typography>
       </Stack>
-      {metrics ? (
+      {metrics && summary ? (
         <Stack spacing={0.25}>
           <Typography variant="caption" sx={{ fontWeight: 700 }}>
-            Metrics
+            Evaluation
           </Typography>
-          {Object.entries(metrics).map(([name, value]) => (
-            <Typography key={name} variant="body2" color="text.secondary">
-              {name}: {String(value)}
-            </Typography>
-          ))}
+          <EvaluationSummary
+            modelKind={modelKind}
+            metrics={metrics}
+            summary={summary}
+            onDownloadFeatureImportanceCsv={handleDownloadFeatureImportanceCsv}
+          />
         </Stack>
       ) : null}
-      <Stack spacing={0.25}>
-        <Typography variant="caption" sx={{ fontWeight: 700 }}>
-          Artifacts
-        </Typography>
-        {artifactUri ? (
-          <Typography variant="body2" color="text.secondary" sx={{ wordBreak: 'break-all' }}>
-            {artifactUri}
-          </Typography>
-        ) : (
-          <Typography variant="body2" color="text.secondary">
-            None recorded yet.
-          </Typography>
-        )}
-      </Stack>
+      <TrainingArtifactsPanel jobId={job.id} enabled={job.status === 'completed'} />
     </Stack>
   );
 }
@@ -265,7 +265,26 @@ function renderDialogBody({ isLoading, data, mutationError, jobId }: DialogBodyP
 
         {data.error_message ? (
           <Alert severity="error" role="alert">
-            {data.error_message}
+            <Stack spacing={0.5}>
+              <Typography variant="body2">{data.error_message}</Typography>
+              {data.error_detail ? (
+                <Stack spacing={0.25}>
+                  {data.error_detail.affected_feature ? (
+                    <Typography variant="caption">
+                      Affected feature: <code>{data.error_detail.affected_feature}</code>
+                    </Typography>
+                  ) : null}
+                  {data.error_detail.affected_rows && data.error_detail.affected_rows.length > 0 ? (
+                    <Typography variant="caption">
+                      Affected rows: {data.error_detail.affected_rows.join(', ')}
+                    </Typography>
+                  ) : null}
+                  <Typography variant="caption" sx={{ fontWeight: 600 }}>
+                    Suggested fix: {data.error_detail.suggested_fix}
+                  </Typography>
+                </Stack>
+              ) : null}
+            </Stack>
           </Alert>
         ) : null}
 

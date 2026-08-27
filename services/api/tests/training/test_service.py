@@ -1,9 +1,13 @@
 """Tests for `TrainingJobService` — lifecycle, pipeline execution, and experiment integration."""
 
 import uuid
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 import pytest
 
+from app.models import Candle, Exchange, Market
+from app.models.experiment import Experiment
 from app.repositories.experiments import ExperimentRepository
 from app.repositories.training import TrainingJobRepository
 from app.schemas.experiments import ExperimentCreateRequest
@@ -12,13 +16,16 @@ from app.services.experiments import ExperimentService
 from app.services.training import TrainingJobService
 from app.training.adapters import load_builtin_model_adapters
 from app.training.errors import (
+    InvalidPredictionInputError,
     InvalidTrainingJobSortError,
+    PredictionNotAvailableError,
     TrainingJobNotCancellableError,
     TrainingJobNotFoundError,
 )
 from app.training.pipeline import TrainingPipeline
 from app.training.registry import default_registry
 from tests.conftest import SessionFactory
+from tests.ml_datasets.test_service import build_service as build_ml_dataset_service
 
 
 def build_service(session_factory: SessionFactory) -> TrainingJobService:
@@ -28,6 +35,7 @@ def build_service(session_factory: SessionFactory) -> TrainingJobService:
         repository=TrainingJobRepository(session),
         experiment_service=ExperimentService(repository=ExperimentRepository(session)),
         pipeline=TrainingPipeline(default_registry),
+        ml_dataset_service=build_ml_dataset_service(session_factory),
     )
 
 
@@ -37,6 +45,70 @@ async def seed_experiment(session_factory: SessionFactory, **overrides: object) 
     payload.update(overrides)
     experiment = await service.create(ExperimentCreateRequest(**payload))
     return experiment.id
+
+
+async def seed_real_candles(
+    session_factory: SessionFactory, *, symbol: str = "REALUSD", count: int = 80
+) -> None:
+    """A wobbling (not monotonic) hourly price series long enough to leave a non-empty
+    train/validation/test split after horizon trimming, with both 'up' and 'down'
+    next_direction labels present so a classifier has more than one class to learn."""
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    async with session_factory() as session:
+        exchange = Exchange(name="Delta Exchange", slug="delta", country="India")
+        session.add(exchange)
+        await session.flush()
+        market = Market(
+            exchange_id=exchange.id,
+            symbol=symbol,
+            base_asset=symbol[:3],
+            quote_asset=symbol[3:],
+            market_type="perpetual",
+        )
+        session.add(market)
+        await session.commit()
+
+        price = 100.0
+        for i in range(count):
+            # A deterministic wobble: up two, down one, repeating — guarantees both
+            # 'up' and 'down' next_direction labels occur across the series.
+            price += 3.0 if i % 3 != 0 else -4.0
+            open_time = base + timedelta(hours=i)
+            session.add(
+                Candle(
+                    market_id=market.id,
+                    timeframe="1h",
+                    open_time=open_time,
+                    close_time=open_time + timedelta(hours=1),
+                    open=Decimal(str(price)),
+                    high=Decimal(str(price + 2)),
+                    low=Decimal(str(price - 2)),
+                    close=Decimal(str(price)),
+                    volume=Decimal("100"),
+                    quote_volume=None,
+                    trade_count=None,
+                    source="delta",
+                )
+            )
+        await session.commit()
+
+
+async def seed_experiment_with_real_config(
+    session_factory: SessionFactory, *, target: str = "next_direction"
+) -> str:
+    """An experiment whose feature_set/target_config are real, resolvable requests —
+    what a `requires_real_data` adapter needs `load_dataset` to build a dataset from."""
+    async with session_factory() as session:
+        experiment = Experiment(
+            name="real data experiment",
+            dataset_version="ds-real",
+            feature_set=[{"feature": "ohlcv", "params": {}}],
+            target_config=[{"target": target, "params": {"horizon": "1"}}],
+            split_config={"train": 0.7, "validation": 0.15, "test": 0.15},
+        )
+        session.add(experiment)
+        await session.commit()
+        return str(experiment.id)
 
 
 @pytest.mark.asyncio
@@ -231,6 +303,9 @@ class TestRun:
         assert failed.status == "failed"
         assert failed.error_message is not None
         assert "dataset_version" in failed.error_message
+        assert failed.error_detail is not None
+        assert failed.error_detail["reason"] == failed.error_message
+        assert failed.error_detail["suggested_fix"]
 
         experiment = await ExperimentService(
             repository=ExperimentRepository(session_factory())
@@ -288,3 +363,441 @@ class TestListModelAdapters:
         catalog = service.list_model_adapters()
         names = [a.name for a in catalog.adapters]
         assert "placeholder" in names
+
+    def test_lists_the_real_baseline_adapters_with_their_model_kind(
+        self, session_factory: SessionFactory
+    ) -> None:
+        service = build_service(session_factory)
+        catalog = service.list_model_adapters()
+        by_name = {a.name: a for a in catalog.adapters}
+        assert by_name["logistic_regression"].model_kind == "classification"
+        assert by_name["logistic_regression"].requires_real_data is True
+        assert by_name["linear_regression"].model_kind == "regression"
+        assert by_name["linear_regression"].requires_real_data is True
+
+
+@pytest.mark.asyncio
+class TestRealDataTraining:
+    """End-to-end `run()` against real candles, exercising the baseline model framework."""
+
+    async def test_logistic_regression_trains_on_real_data_and_updates_the_experiment(
+        self, session_factory: SessionFactory
+    ) -> None:
+        await seed_real_candles(session_factory, symbol="LOGUSD")
+        experiment_id = await seed_experiment_with_real_config(
+            session_factory, target="next_direction"
+        )
+        service = build_service(session_factory)
+        job = await service.create(
+            TrainingJobCreateRequest(
+                experiment_id=experiment_id,
+                model_type="logistic_regression",
+                symbol="LOGUSD",
+                timeframe="1h",
+            )
+        )
+
+        completed = await service.run(uuid.UUID(job.id))
+
+        assert completed.status == "completed"
+        assert completed.result_summary is not None
+        metrics = completed.result_summary["metrics"]
+        assert "accuracy" in metrics
+        assert "precision" in metrics
+        assert "recall" in metrics
+        assert "f1" in metrics
+        assert "confusion_matrix" in completed.result_summary
+        assert completed.result_summary["artifact_uri"].startswith("file://")
+
+        summary = completed.result_summary
+        assert "train_metrics" in summary
+        assert "test_metrics" in summary
+        assert "overfitting" in summary
+        assert "confusion_matrix_details" in summary
+        assert "roc_pr_curves" in summary
+        assert "feature_importance" in summary
+        assert "prediction_samples" in summary
+        assert summary["model_metadata"]["feature_count"] == len(summary["feature_columns"])
+        assert summary["model_metadata"]["sample_count"] > 0
+        artifact_types = set(summary["artifacts"])
+        assert artifact_types == {
+            "metrics_json",
+            "training_report_json",
+            "feature_importance_csv",
+            "confusion_matrix_png",
+            "roc_curve_png",
+            "precision_recall_curve_png",
+        }
+
+        experiment = await ExperimentService(
+            repository=ExperimentRepository(session_factory())
+        ).get(uuid.UUID(experiment_id))
+        assert experiment.status == "completed"
+        assert any(m.name == "accuracy" for m in experiment.metrics)
+        assert any(a.artifact_type == "model_checkpoint" for a in experiment.artifacts)
+        assert any(a.artifact_type == "report" for a in experiment.artifacts)
+        assert any(a.artifact_type == "plot" for a in experiment.artifacts)
+
+    async def test_linear_regression_trains_on_real_data(
+        self, session_factory: SessionFactory
+    ) -> None:
+        await seed_real_candles(session_factory, symbol="LINUSD")
+        experiment_id = await seed_experiment_with_real_config(session_factory, target="next_close")
+        service = build_service(session_factory)
+        job = await service.create(
+            TrainingJobCreateRequest(
+                experiment_id=experiment_id,
+                model_type="linear_regression",
+                symbol="LINUSD",
+                timeframe="1h",
+            )
+        )
+
+        completed = await service.run(uuid.UUID(job.id))
+
+        assert completed.status == "completed"
+        metrics = completed.result_summary["metrics"]
+        assert "mae" in metrics
+        assert "mse" in metrics
+        assert "rmse" in metrics
+        assert "r2" in metrics
+        assert "coefficients" in completed.result_summary
+
+        summary = completed.result_summary
+        assert "train_metrics" in summary
+        assert "overfitting" in summary
+        assert "feature_importance" in summary
+        assert "prediction_samples" in summary
+        # Regression has no confusion matrix or ROC/PR curves — only report-type
+        # artifacts, no plot-type ones.
+        assert set(summary["artifacts"]) == {
+            "metrics_json",
+            "training_report_json",
+            "feature_importance_csv",
+        }
+
+    async def test_fails_without_a_symbol_and_timeframe(
+        self, session_factory: SessionFactory
+    ) -> None:
+        experiment_id = await seed_experiment_with_real_config(session_factory)
+        service = build_service(session_factory)
+        job = await service.create(
+            TrainingJobCreateRequest(experiment_id=experiment_id, model_type="logistic_regression")
+        )
+
+        failed = await service.run(uuid.UUID(job.id))
+
+        assert failed.status == "failed"
+        assert failed.error_message is not None
+        assert "symbol" in failed.error_message
+
+    async def test_fails_when_experiment_has_no_feature_or_target_config(
+        self, session_factory: SessionFactory
+    ) -> None:
+        await seed_real_candles(session_factory, symbol="NOCFGUSD")
+        experiment_id = await seed_experiment(session_factory, dataset_version="ds-1")
+        service = build_service(session_factory)
+        job = await service.create(
+            TrainingJobCreateRequest(
+                experiment_id=experiment_id,
+                model_type="logistic_regression",
+                symbol="NOCFGUSD",
+                timeframe="1h",
+            )
+        )
+
+        failed = await service.run(uuid.UUID(job.id))
+
+        assert failed.status == "failed"
+        assert failed.error_message is not None
+        assert "feature_set/target_config" in failed.error_message
+
+    async def test_fails_with_a_regression_adapter_over_a_categorical_target(
+        self, session_factory: SessionFactory
+    ) -> None:
+        await seed_real_candles(session_factory, symbol="BADTGTUSD")
+        experiment_id = await seed_experiment_with_real_config(
+            session_factory, target="next_direction"
+        )
+        service = build_service(session_factory)
+        job = await service.create(
+            TrainingJobCreateRequest(
+                experiment_id=experiment_id,
+                model_type="linear_regression",
+                symbol="BADTGTUSD",
+                timeframe="1h",
+            )
+        )
+
+        failed = await service.run(uuid.UUID(job.id))
+
+        assert failed.status == "failed"
+        assert failed.error_message is not None
+        assert "dtype" in failed.error_message
+
+
+@pytest.mark.asyncio
+class TestPredict:
+    async def test_predicts_using_a_completed_jobs_model(
+        self, session_factory: SessionFactory
+    ) -> None:
+        await seed_real_candles(session_factory, symbol="PREDUSD")
+        experiment_id = await seed_experiment_with_real_config(
+            session_factory, target="next_direction"
+        )
+        service = build_service(session_factory)
+        job = await service.create(
+            TrainingJobCreateRequest(
+                experiment_id=experiment_id,
+                model_type="logistic_regression",
+                symbol="PREDUSD",
+                timeframe="1h",
+            )
+        )
+        completed = await service.run(uuid.UUID(job.id))
+        feature_columns = completed.result_summary["feature_columns"]
+        row = [1.0] * len(feature_columns)
+
+        response = await service.predict(uuid.UUID(job.id), [row])
+
+        assert len(response.predictions) == 1
+        assert response.feature_columns == feature_columns
+        assert response.classes == completed.result_summary["classes"]
+        assert response.probabilities is not None
+        assert len(response.probabilities[0]) == len(response.classes)
+        assert response.confidence_levels[0] in {"high", "medium", "low"}
+
+    async def test_a_regression_adapter_returns_no_probabilities_or_confidence(
+        self, session_factory: SessionFactory
+    ) -> None:
+        """`LinearRegressionAdapter` never overrides `predict_proba` — the base
+        class's default `None` should flow all the way through to the response,
+        not be silently coerced into a fabricated value."""
+        await seed_real_candles(session_factory, symbol="PREDREGUSD")
+        experiment_id = await seed_experiment_with_real_config(session_factory, target="next_close")
+        service = build_service(session_factory)
+        job = await service.create(
+            TrainingJobCreateRequest(
+                experiment_id=experiment_id,
+                model_type="linear_regression",
+                symbol="PREDREGUSD",
+                timeframe="1h",
+            )
+        )
+        completed = await service.run(uuid.UUID(job.id))
+        feature_columns = completed.result_summary["feature_columns"]
+        row = [1.0] * len(feature_columns)
+
+        response = await service.predict(uuid.UUID(job.id), [row])
+
+        assert len(response.predictions) == 1
+        assert response.probabilities is None
+        assert response.confidence_levels is None
+        assert response.classes is None
+
+    async def test_raises_when_the_job_has_not_completed(
+        self, session_factory: SessionFactory
+    ) -> None:
+        experiment_id = await seed_experiment(session_factory)
+        service = build_service(session_factory)
+        job = await service.create(
+            TrainingJobCreateRequest(experiment_id=experiment_id, model_type="placeholder")
+        )
+
+        with pytest.raises(PredictionNotAvailableError):
+            await service.predict(uuid.UUID(job.id), [[1.0]])
+
+    async def test_raises_for_a_row_length_mismatch(self, session_factory: SessionFactory) -> None:
+        await seed_real_candles(session_factory, symbol="MISMATCHUSD")
+        experiment_id = await seed_experiment_with_real_config(
+            session_factory, target="next_direction"
+        )
+        service = build_service(session_factory)
+        job = await service.create(
+            TrainingJobCreateRequest(
+                experiment_id=experiment_id,
+                model_type="logistic_regression",
+                symbol="MISMATCHUSD",
+                timeframe="1h",
+            )
+        )
+        await service.run(uuid.UUID(job.id))
+
+        with pytest.raises(InvalidPredictionInputError):
+            await service.predict(uuid.UUID(job.id), [[1.0, 2.0, 3.0, 999.0]])
+
+    async def test_raises_prediction_execution_error_when_the_adapter_predict_raises(
+        self, session_factory: SessionFactory
+    ) -> None:
+        from app.training.errors import PredictionExecutionError
+
+        await seed_real_candles(session_factory, symbol="BROKENARTIFACTUSD")
+        experiment_id = await seed_experiment_with_real_config(
+            session_factory, target="next_direction"
+        )
+        service = build_service(session_factory)
+        job = await service.create(
+            TrainingJobCreateRequest(
+                experiment_id=experiment_id,
+                model_type="logistic_regression",
+                symbol="BROKENARTIFACTUSD",
+                timeframe="1h",
+            )
+        )
+        completed = await service.run(uuid.UUID(job.id))
+
+        # Corrupt the recorded artifact_uri so the adapter's own `joblib.load` fails —
+        # the one path that exercises `predict()`'s own exception-wrapping branch.
+        repo = TrainingJobRepository(session_factory())
+        stored = await repo.get_by_id(uuid.UUID(job.id))
+        assert stored is not None
+        broken_summary = dict(stored.result_summary or {})
+        broken_summary["artifact_uri"] = "file:///no/such/path.joblib"
+        await repo.update(stored, {"result_summary": broken_summary})
+
+        with pytest.raises(PredictionExecutionError):
+            await service.predict(
+                uuid.UUID(job.id), [[1.0] * len(completed.result_summary["feature_columns"])]
+            )
+
+
+@pytest.mark.asyncio
+class TestArtifacts:
+    """`list_artifacts`/`get_artifact_file` — the Artifact Management download surface."""
+
+    async def test_lists_every_artifact_for_a_completed_classification_job(
+        self, session_factory: SessionFactory
+    ) -> None:
+        await seed_real_candles(session_factory, symbol="ARTIFACTLISTUSD")
+        experiment_id = await seed_experiment_with_real_config(
+            session_factory, target="next_direction"
+        )
+        service = build_service(session_factory)
+        job = await service.create(
+            TrainingJobCreateRequest(
+                experiment_id=experiment_id,
+                model_type="logistic_regression",
+                symbol="ARTIFACTLISTUSD",
+                timeframe="1h",
+            )
+        )
+        await service.run(uuid.UUID(job.id))
+
+        listing = await service.list_artifacts(uuid.UUID(job.id))
+
+        types = {entry.artifact_type for entry in listing.artifacts}
+        assert types == {
+            "model_joblib",
+            "metrics_json",
+            "training_report_json",
+            "feature_importance_csv",
+            "confusion_matrix_png",
+            "roc_curve_png",
+            "precision_recall_curve_png",
+        }
+        model_entry = next(e for e in listing.artifacts if e.artifact_type == "model_joblib")
+        assert model_entry.download_url == f"/api/v1/training-jobs/{job.id}/artifacts/model_joblib"
+        csv_entry = next(
+            e for e in listing.artifacts if e.artifact_type == "feature_importance_csv"
+        )
+        assert csv_entry.content_type == "text/csv"
+        png_entry = next(e for e in listing.artifacts if e.artifact_type == "confusion_matrix_png")
+        assert png_entry.content_type == "image/png"
+
+    async def test_lists_no_artifacts_for_a_job_that_has_not_run(
+        self, session_factory: SessionFactory
+    ) -> None:
+        experiment_id = await seed_experiment(session_factory)
+        service = build_service(session_factory)
+        job = await service.create(
+            TrainingJobCreateRequest(experiment_id=experiment_id, model_type="placeholder")
+        )
+
+        listing = await service.list_artifacts(uuid.UUID(job.id))
+
+        assert listing.artifacts == []
+
+    async def test_get_artifact_file_resolves_a_real_file_on_disk(
+        self, session_factory: SessionFactory
+    ) -> None:
+        await seed_real_candles(session_factory, symbol="ARTIFACTGETUSD")
+        experiment_id = await seed_experiment_with_real_config(session_factory, target="next_close")
+        service = build_service(session_factory)
+        job = await service.create(
+            TrainingJobCreateRequest(
+                experiment_id=experiment_id,
+                model_type="linear_regression",
+                symbol="ARTIFACTGETUSD",
+                timeframe="1h",
+            )
+        )
+        await service.run(uuid.UUID(job.id))
+
+        path, content_type = await service.get_artifact_file(uuid.UUID(job.id), "metrics_json")
+
+        assert path.exists()
+        assert content_type == "application/json"
+
+    async def test_raises_not_found_for_an_unknown_artifact_type(
+        self, session_factory: SessionFactory
+    ) -> None:
+        await seed_real_candles(session_factory, symbol="ARTIFACT404USD")
+        experiment_id = await seed_experiment_with_real_config(session_factory, target="next_close")
+        service = build_service(session_factory)
+        job = await service.create(
+            TrainingJobCreateRequest(
+                experiment_id=experiment_id,
+                model_type="linear_regression",
+                symbol="ARTIFACT404USD",
+                timeframe="1h",
+            )
+        )
+        await service.run(uuid.UUID(job.id))
+
+        from app.training.errors import TrainingArtifactNotFoundError
+
+        with pytest.raises(TrainingArtifactNotFoundError):
+            await service.get_artifact_file(uuid.UUID(job.id), "roc_curve_png")
+
+    async def test_raises_not_found_when_the_recorded_file_is_missing_from_disk(
+        self, session_factory: SessionFactory
+    ) -> None:
+        await seed_real_candles(session_factory, symbol="ARTIFACTGONEUSD")
+        experiment_id = await seed_experiment_with_real_config(session_factory, target="next_close")
+        service = build_service(session_factory)
+        job = await service.create(
+            TrainingJobCreateRequest(
+                experiment_id=experiment_id,
+                model_type="linear_regression",
+                symbol="ARTIFACTGONEUSD",
+                timeframe="1h",
+            )
+        )
+        await service.run(uuid.UUID(job.id))
+
+        repo = TrainingJobRepository(session_factory())
+        stored = await repo.get_by_id(uuid.UUID(job.id))
+        assert stored is not None
+        broken_summary = dict(stored.result_summary or {})
+        broken_summary["artifacts"] = dict(broken_summary["artifacts"])
+        broken_summary["artifacts"]["metrics_json"] = "file:///no/such/metrics.json"
+        await repo.update(stored, {"result_summary": broken_summary})
+
+        from app.training.errors import TrainingArtifactNotFoundError
+
+        with pytest.raises(TrainingArtifactNotFoundError):
+            await service.get_artifact_file(uuid.UUID(job.id), "metrics_json")
+
+    async def test_raises_not_found_when_the_job_has_no_result_summary_yet(
+        self, session_factory: SessionFactory
+    ) -> None:
+        experiment_id = await seed_experiment(session_factory)
+        service = build_service(session_factory)
+        job = await service.create(
+            TrainingJobCreateRequest(experiment_id=experiment_id, model_type="placeholder")
+        )
+
+        from app.training.errors import TrainingArtifactNotFoundError
+
+        with pytest.raises(TrainingArtifactNotFoundError):
+            await service.get_artifact_file(uuid.UUID(job.id), "model_joblib")

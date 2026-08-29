@@ -34,6 +34,12 @@ vi.mock('@/lib/api/market', () => ({
   fetchTimeframes: vi.fn(),
 }));
 
+let searchParams = new URLSearchParams();
+
+vi.mock('next/navigation', () => ({
+  useSearchParams: () => searchParams,
+}));
+
 const mockedExperimentsApi = vi.mocked(experimentsApi);
 const mockedTrainingApi = vi.mocked(trainingApi);
 const mockedMarketApi = vi.mocked(marketApi);
@@ -189,6 +195,7 @@ function renderPage() {
 }
 
 beforeEach(() => {
+  searchParams = new URLSearchParams();
   mockedTrainingApi.fetchTrainingJobs.mockResolvedValue(listResponse());
   mockedTrainingApi.fetchModelAdapters.mockResolvedValue(modelAdapters());
   mockedTrainingApi.fetchTrainingArtifacts.mockResolvedValue({ job_id: 'job-1', artifacts: [] });
@@ -536,6 +543,14 @@ describe('MLTrainingPage — job detail, run, and cancel', () => {
     expect(await screen.findByText('Status Monitor')).toBeInTheDocument();
     expect(screen.getByLabelText('Training pipeline progress')).toBeInTheDocument();
     expect(screen.getByText('Dataset Validation')).toBeInTheDocument();
+  });
+
+  it('opens the detail dialog automatically for a ?jobId= deep link', async () => {
+    searchParams = new URLSearchParams({ jobId: 'job-1' });
+    mockedTrainingApi.fetchTrainingJob.mockResolvedValue(jobDetail());
+    renderPage();
+
+    expect(await screen.findByText('Status Monitor')).toBeInTheDocument();
   });
 
   it('shows logs and a result summary once completed', async () => {

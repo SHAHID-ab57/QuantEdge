@@ -15,6 +15,7 @@ import TextField from '@mui/material/TextField';
 import Typography from '@mui/material/Typography';
 import { useEffect, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
+import { EmptyStateNotice } from '@/components/empty-state-notice';
 import { InfoTooltip } from '@/components/info-tooltip';
 import { useExperiment } from '@/features/experiments/hooks/use-experiments-data';
 import { fetchExperiments } from '@/lib/api/experiments';
@@ -30,7 +31,6 @@ import {
   TARGET_COLUMN_FIELD_HELP,
   TIMEFRAME_FIELD_HELP,
 } from '../lib/training-job-help';
-import { EmptyStateNotice } from './empty-state-notice';
 import {
   HyperparameterEditor,
   buildHyperparametersPayload,

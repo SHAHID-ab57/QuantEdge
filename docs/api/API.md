@@ -24,6 +24,7 @@ The API exposes historical market data and operational monitoring:
 - ML dataset builder: `GET /api/v1/ml/targets`, `POST /api/v1/markets/{symbol}/ml/dataset|dataset/export`
 - Experiment management (full CRUD): `GET|POST /api/v1/experiments`, `GET|PATCH|DELETE /api/v1/experiments/{id}`, plus nested metrics/artifacts
 - Machine Learning Training Framework (full CRUD + lifecycle + baseline models): `GET|POST /api/v1/training-jobs`, `GET|DELETE /api/v1/training-jobs/{id}`, `POST /api/v1/training-jobs/{id}/run|cancel|predict`, `GET /api/v1/training-jobs/models`
+- Model Evaluation & Benchmarking Engine (read-only, plus persisted history): `GET /api/v1/evaluation/metrics`, `POST /api/v1/evaluation/benchmark`, `GET /api/v1/evaluation/history`, `GET|DELETE /api/v1/evaluation/history/{id}`
 - Platform health monitoring: `GET /api/v1/system/health|status|metrics`
 
 ## Endpoints
@@ -1038,6 +1039,155 @@ mid-pipeline, surfacing as a `failed` job rather than an HTTP error, since
 `/run` always returns 200 with the job's final state), `invalid_sort` /
 `invalid_prediction_input` (400 — a predict row's length doesn't match
 `feature_columns`).
+
+### Model Evaluation & Benchmarking Engine
+
+| Method | Path                              | Purpose                                                   |
+| ------ | --------------------------------- | --------------------------------------------------------- |
+| GET    | `/api/v1/evaluation/metrics`      | List every registered metric (the extension point)        |
+| POST   | `/api/v1/evaluation/benchmark`    | Compare completed training jobs by their recorded metrics |
+| GET    | `/api/v1/evaluation/history`      | List past benchmark comparisons (Benchmark History)       |
+| GET    | `/api/v1/evaluation/history/{id}` | Reopen one past comparison — its exact request/response   |
+| DELETE | `/api/v1/evaluation/history/{id}` | Remove one past comparison from Benchmark History         |
+
+Full design in `ARCHITECTURE.md` § "Model Evaluation & Benchmarking
+Engine". This engine computes nothing new at request time — every metric
+value it serves or compares was already produced during training
+(`app/evaluation/engine.py`'s `default_engine`, called from
+`logistic_regression.py`/`linear_regression.py`).
+
+**Metric catalogue** (`GET /evaluation/metrics`):
+
+```jsonc
+{
+  "metrics": [
+    {
+      "name": "accuracy",
+      "label": "Accuracy",
+      "description": "Overall fraction of predictions that match the true label.",
+      "category": "classification",
+      "higher_is_better": true,
+      "requires_probabilities": false,
+      "version": "1.0.0",
+    },
+    {
+      "name": "roc_auc",
+      "label": "ROC AUC",
+      "description": "Area under the ROC curve.",
+      "category": "classification",
+      "higher_is_better": true,
+      "requires_probabilities": true,
+      "version": "1.0.0",
+    },
+    // ... precision, recall, f1 (classification); mae, mse, rmse, r2 (regression)
+  ],
+}
+```
+
+**Benchmark** (`POST /evaluation/benchmark`) — at least one of
+`dataset_version`, `target_column`, or `experiment_ids` is required;
+`experiment_ids`, when given, narrows an already-matching set further, not
+an alternative to the other two:
+
+```jsonc
+// Request
+{ "dataset_version": "abc123", "target_column": "next_direction" }
+
+// Response
+{
+  "candidates": [
+    {
+      "training_job_id": "6f1e4a2c-3b8d-4c9a-9e2f-1a7c5d6b8e90",
+      "experiment_id": "…",
+      "experiment_name": "Baseline SMA",
+      "model_type": "logistic_regression",
+      "model_kind": "classification",
+      "dataset_version": "abc123",
+      "target_column": "next_direction",
+      "completed_at": "2026-01-01T00:00:00Z",
+      "metrics": { "accuracy": 0.82, "precision": 0.8, "recall": 0.79, "f1": 0.795, "roc_auc": 0.87 },
+      "symbol": "ETHUSD",
+      "timeframe": "1h",
+      "feature_count": 5,
+      "sample_count": 640,
+      "model_artifact_url": "/api/v1/training-jobs/6f1e4a2c-3b8d-4c9a-9e2f-1a7c5d6b8e90/artifacts/model_joblib",
+      "report": { "confusion_matrix": ["…"], "roc_pr_curves": { "…": "…" }, "…": "…" },
+    },
+    // ... one entry per completed training job matched
+  ],
+  "best_by_metric": [
+    {
+      "metric": "accuracy",
+      "training_job_id": "6f1e4a2c-3b8d-4c9a-9e2f-1a7c5d6b8e90",
+      "model_type": "logistic_regression",
+      "value": 0.82,
+      "higher_is_better": true,
+    },
+    // ... one entry per metric name appearing on at least one candidate
+  ],
+}
+```
+
+Only `status="completed"` jobs are considered; a completed job that
+recorded no metrics (e.g. the `placeholder` adapter) is silently excluded
+rather than shown as an empty row. `model_kind` is resolved from the
+current model adapter registry — a `model_type` no longer registered
+reports `"unknown"` rather than failing the whole comparison.
+
+`symbol`/`timeframe`/`feature_count`/`sample_count`/`model_artifact_url`
+are all read from data the training job itself already produced — never
+recomputed — and are `null`/absent when that job didn't record them
+(`feature_count`/`sample_count` need `result_summary.model_metadata`;
+`model_artifact_url` needs `result_summary.artifact_uri`). `report` is the
+job's own `result_summary`, verbatim, letting a client render the same
+confusion matrix / ROC-PR curves / feature importance / prediction samples
+`GET /training-jobs/{id}` itself would show, without a second request.
+
+**Error codes**: `no_benchmark_target` (400 — none of `dataset_version` /
+`target_column` / `experiment_ids` were given, so there is nothing to
+match), `empty_benchmark` (404 — the request was well-formed but matched
+zero completed training jobs), `metric_not_found` (404 — reserved for a
+future direct metric lookup; not raised by either endpoint above today).
+
+**Benchmark History** — every successful `POST /evaluation/benchmark` call
+is recorded (best-effort; a persistence failure never fails the comparison
+itself), so a past comparison can be reopened later exactly as it was:
+
+```jsonc
+// GET /evaluation/history?dataset_version=abc123
+{
+  "runs": [
+    {
+      "id": "9c2b1a3e-...",
+      "dataset_version": "abc123",
+      "target_column": "next_direction",
+      "candidate_count": 2,
+      "created_at": "2026-01-01T00:00:00Z",
+    },
+  ],
+  "total": 1,
+  "limit": 20,
+  "offset": 0,
+}
+
+// GET /evaluation/history/{id}
+{
+  "id": "9c2b1a3e-...",
+  "created_at": "2026-01-01T00:00:00Z",
+  "request": { "dataset_version": "abc123", "target_column": "next_direction", "experiment_ids": [] },
+  "response": { "candidates": ["…"], "best_by_metric": ["…"] }, // the exact BenchmarkResponse shape above
+}
+```
+
+`GET /evaluation/history` accepts `dataset_version`/`target_column` filters
+and `sort`/`dir`/`limit`/`offset` (one of `dataset_version`,
+`target_column`, `candidate_count`, `created_at`; default `created_at`
+descending) — the same list-endpoint shape every other history surface on
+this platform uses. `DELETE /evaluation/history/{id}` removes only the
+persisted record; the underlying `TrainingJob` rows are untouched.
+**Error codes**: `benchmark_run_not_found` (404 — unknown run id, on both
+`GET` and `DELETE`), `invalid_benchmark_run_sort` (400 — an unsupported
+`sort`/`dir` combination on the list endpoint).
 
 ### Platform health
 

@@ -19,10 +19,12 @@ export interface EmptyStateNoticeProps {
  * A compact, inline empty-state notice — lighter than the whole-page
  * `PlaceholderPage` (that component assumes it owns the entire content
  * area; these appear inside a dialog or above a table alongside other
- * content). Used for the four "there is nothing to select yet" cases this
- * page can hit: no experiments, no dataset citations recorded, no
- * validated datasets, and no registered model adapters — each explaining
- * what's missing and, where there is one, linking to the page that fixes it.
+ * content). Originally written for the ML Training Framework's "there is
+ * nothing to select yet" cases (no experiments, no dataset citations, no
+ * validated datasets, no registered model adapters); promoted here once
+ * the Model Evaluation & Benchmarking page needed the identical "nothing
+ * to show yet" notice for an empty benchmark, the same reuse
+ * `ConfirmActionDialog` already went through for Dataset History.
  */
 export function EmptyStateNotice({
   icon,

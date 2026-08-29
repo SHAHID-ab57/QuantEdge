@@ -6,6 +6,7 @@ import Button from '@mui/material/Button';
 import Stack from '@mui/material/Stack';
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
+import { useSearchParams } from 'next/navigation';
 import { Section } from '@/components/section';
 import { fetchExperiments } from '@/lib/api/experiments';
 import type { TrainingJobListParams } from '@/lib/api/training';
@@ -30,14 +31,22 @@ const INITIAL_FILTERS: TrainingJobFiltersValue = { experimentId: '', status: '' 
  * the placeholder pipeline (`app/training/pipeline.py`); this page is a
  * thin view over that CRUD + lifecycle API, exactly like `/experiments` is
  * over the Experiment Management API.
+ *
+ * A `?jobId=` query param opens that job's detail dialog on load — the
+ * Model Evaluation & Benchmarking page's comparison table links here this
+ * way for its "Open Training Job" deep link, rather than duplicating this
+ * page's own detail view.
  */
 export function MLTrainingPage() {
+  const searchParams = useSearchParams();
   const [filters, setFilters] = useState<TrainingJobFiltersValue>(INITIAL_FILTERS);
   const [page, setPage] = useState(1);
   const [sort, setSort] = useState<NonNullable<TrainingJobListParams['sort']>>('created_at');
   const [dir, setDir] = useState<'asc' | 'desc'>('desc');
   const [createOpen, setCreateOpen] = useState(false);
-  const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
+  const [selectedJobId, setSelectedJobId] = useState<string | null>(() =>
+    searchParams.get('jobId'),
+  );
 
   const params: TrainingJobListParams = {
     experiment_id: filters.experimentId || undefined,

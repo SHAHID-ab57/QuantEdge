@@ -20,14 +20,9 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import (
-    accuracy_score,
-    confusion_matrix,
-    f1_score,
-    precision_score,
-    recall_score,
-)
+from sklearn.metrics import confusion_matrix
 
+from app.evaluation.engine import default_engine as evaluation_engine
 from app.training.artifact_files import (
     write_confusion_matrix_png,
     write_feature_importance_csv,
@@ -48,23 +43,6 @@ from app.training.interpretability import (
 from app.training.model_metadata import collect_model_metadata
 from app.training.registry import register
 from app.training.serialization import default_serializer
-
-
-def _classification_metrics(y_true: Sequence[Any], y_pred: Sequence[Any]) -> dict[str, float]:
-    # scikit-learn's own type stubs declare `zero_division` as `str`-only, but its
-    # runtime also accepts the numeric `0`/`1` this module relies on (see its
-    # docstring) — the stub is simply incomplete here, not a real type mismatch.
-    zero_division: Any = 0
-    return {
-        "accuracy": float(accuracy_score(y_true, y_pred)),
-        "precision": float(
-            precision_score(y_true, y_pred, average="weighted", zero_division=zero_division)
-        ),
-        "recall": float(
-            recall_score(y_true, y_pred, average="weighted", zero_division=zero_division)
-        ),
-        "f1": float(f1_score(y_true, y_pred, average="weighted", zero_division=zero_division)),
-    }
 
 
 @register
@@ -111,6 +89,7 @@ class LogisticRegressionAdapter(ModelAdapter):
             )
             model.fit(dataset.train.X, dataset.train.y)
             train_predictions = model.predict(dataset.train.X)
+            train_probabilities = model.predict_proba(dataset.train.X)
             predictions = model.predict(dataset.validation.X)
             probabilities = model.predict_proba(dataset.validation.X)
         except Exception as exc:  # noqa: BLE001 - re-raised as a named domain error below
@@ -121,8 +100,19 @@ class LogisticRegressionAdapter(ModelAdapter):
         cpu_time_seconds = time.process_time() - cpu_started
 
         classes = model.classes_.tolist()
-        metrics = _classification_metrics(dataset.validation.y, predictions)
-        train_metrics = _classification_metrics(dataset.train.y, train_predictions)
+        # `EvaluationEngine.evaluate` (`app/evaluation/`) is the one place these
+        # numbers are actually computed — every metric it runs (including ROC-AUC,
+        # new here) is a registered `Metric`, so a future model adapter reuses the
+        # exact same engine rather than reimplementing this math a third time.
+        metrics = evaluation_engine.evaluate(
+            self.metadata.model_kind, dataset.validation.y, predictions, probabilities.tolist()
+        ).metrics
+        train_metrics = evaluation_engine.evaluate(
+            self.metadata.model_kind,
+            dataset.train.y,
+            train_predictions,
+            train_probabilities.tolist(),
+        ).metrics
         matrix = confusion_matrix(dataset.validation.y, predictions, labels=classes)
         confusion_details = compute_confusion_details(dataset.validation.y, predictions, classes)
         roc_pr = compute_roc_pr_curves(dataset.validation.y, probabilities.tolist(), classes)
@@ -142,7 +132,13 @@ class LogisticRegressionAdapter(ModelAdapter):
         held_out_metrics = metrics
         if dataset.test is not None and len(dataset.test.y) > 0:
             test_predictions = model.predict(dataset.test.X)
-            test_metrics = _classification_metrics(dataset.test.y, test_predictions)
+            test_probabilities = model.predict_proba(dataset.test.X)
+            test_metrics = evaluation_engine.evaluate(
+                self.metadata.model_kind,
+                dataset.test.y,
+                test_predictions,
+                test_probabilities.tolist(),
+            ).metrics
             held_out_metrics = test_metrics
         overfitting = compute_overfitting_flag(
             train_metrics["accuracy"], held_out_metrics["accuracy"], higher_is_better=True

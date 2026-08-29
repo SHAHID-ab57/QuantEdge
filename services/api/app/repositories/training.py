@@ -36,6 +36,12 @@ class TrainingJobFilters:
     experiment_id: uuid.UUID | None = None
     status: str | None = None
     model_type: str | None = None
+    #: Both added for the Model Evaluation & Benchmarking Engine
+    #: (`app/services/evaluation.py`), which selects the completed jobs a
+    #: benchmark compares by the dataset/target they share — the same two
+    #: columns `TrainingJob` already stores per job.
+    dataset_version: str | None = None
+    target_column: str | None = None
 
 
 class TrainingJobRepository:
@@ -77,6 +83,12 @@ class TrainingJobRepository:
         if filters.model_type:
             query = query.where(TrainingJob.model_type == filters.model_type)
             count_query = count_query.where(TrainingJob.model_type == filters.model_type)
+        if filters.dataset_version:
+            query = query.where(TrainingJob.dataset_version == filters.dataset_version)
+            count_query = count_query.where(TrainingJob.dataset_version == filters.dataset_version)
+        if filters.target_column:
+            query = query.where(TrainingJob.target_column == filters.target_column)
+            count_query = count_query.where(TrainingJob.target_column == filters.target_column)
 
         total = (await self.session.execute(count_query)).scalar_one()
 

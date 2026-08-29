@@ -8,6 +8,71 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Model Evaluation & Benchmarking Engine — production-readiness pass.**
+  Extends the engine and its `/ml/evaluation` page with the depth a
+  production comparison workflow needs, entirely by reusing what already
+  existed — **no change** to `EvaluationEngine`, `MetricRegistry`, any
+  registered metric, the training pipeline, the model adapter registry, or
+  the model serialization abstraction.
+
+  - **Confusion matrix, ROC curve, and Precision-Recall curve** for a
+    benchmark candidate now render via a "View details" button per
+    comparison row, opening `CandidateDetailDialog` — which reuses
+    `EvaluationSummary` **verbatim**, the exact component `/ml/training`'s
+    own job detail dialog already uses, imported across features rather
+    than duplicated. The ROC/PR charts already hid themselves gracefully
+    when no probabilities were available; that behavior needed no changes.
+  - **Dataset Summary Card**: Dataset Version, Symbol, Timeframe, Dataset
+    Size, Feature Count, and Target Column per candidate — all six read
+    from data a training job already produced (`TrainingJob.symbol`/
+    `timeframe`, and `result_summary.model_metadata`'s already-computed
+    `feature_count`/`sample_count`), added as new optional fields on
+    `BenchmarkCandidate`/`BenchmarkCandidateDTO`, never recalculated.
+  - **Multi-experiment comparison** confirmed already unlimited (no hidden
+    two-item assumption existed); added end-to-end test coverage comparing
+    three and four experiments in one benchmark request.
+  - **Ranking by any registered metric** and a **Metric Selector** to
+    change it — both frontend-only, using `best_by_metric`'s existing
+    per-metric `higher_is_better` for direction; the comparison table gains
+    a numbered "Rank" column once a metric is chosen.
+  - **Benchmark export as CSV or JSON**, via a small, explicit export
+    registry (`lib/benchmark-export.ts`'s `BENCHMARK_EXPORTERS`) sized for
+    a third (e.g. PDF) format without a redesign — reuses this codebase's
+    shared `csvLine`/`sanitizeFilenamePart` CSV helpers, no new escaping
+    logic.
+  - **Deep linking** on every comparison row: Experiment
+    (`/experiments/{id}`), Training Job (`/ml/training?jobId={id}` — the
+    Training Framework's own page gained a small, additive `?jobId=` read
+    that opens its _existing_ detail dialog, not a second one), and — when
+    recorded — the downloadable Model Artifact (the same deterministic
+    `/training-jobs/{id}/artifacts/model_joblib` URL the Artifact
+    Management panel already computes).
+  - **Benchmark History**: the one genuinely new backend table this pass
+    adds (`evaluation_benchmark_runs`, migration `34ade0f119b6`). Every
+    successful comparison is recorded best-effort (mirroring
+    `MLDatasetService`'s own "never let bookkeeping sink the primary
+    outcome" precedent), listable and reopenable via three new endpoints —
+    `GET /evaluation/history`, `GET /evaluation/history/{id}`,
+    `DELETE /evaluation/history/{id}` — with a new `BenchmarkHistoryTable`
+    on the frontend (mirroring Dataset History's own list/reopen/delete
+    shape) that reopens a past run's _exact_ persisted response into the
+    same comparison view a live run uses.
+  - **Metric Registry metadata rendered explicitly** in
+    `MetricCatalogPanel`: an explicit Category chip per metric (previously
+    only implicit in section grouping) and a text label ("Higher is
+    better"/"Lower is better") alongside the existing direction arrow — the
+    backend catalogue already carried this data; only the rendering
+    changed.
+  - 100% backend test coverage maintained on every touched/new module
+    (`app/evaluation/`, `app/services/evaluation.py`,
+    `app/repositories/evaluation_benchmark_runs.py`,
+    `app/models/evaluation_benchmark_run.py`); full backend suite green
+    (1297 tests, 97.29% overall). 7 new frontend component test files plus
+    2 new `lib/` test files, and new cases in `benchmark-comparison-table.test.tsx`,
+    `ml-evaluation-page.test.tsx`, and `ml-training-page.test.tsx` (the
+    `?jobId=` deep link); full frontend suite passes (1783 tests) with a
+    clean lint, typecheck, and production build.
+
 - **ML Dataset Builder — Dataset History.** Every dataset
   `POST /markets/{symbol}/ml/dataset` builds from the `/ml-datasets` page is
   now also persisted — the platform's first departure from the ML Dataset
@@ -70,6 +135,56 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
     tests (listing, reopening, deleting with confirm/cancel, a fresh build
     appearing immediately); full frontend suite passes (1738 tests) with a
     clean lint, typecheck, and production build.
+
+- **Model Evaluation & Benchmarking Engine.** A reusable, plugin-based
+  evaluation engine that works with any current or future model adapter —
+  the platform's sixth Strategy + Registry context (after feature
+  generators, indicators, prediction targets, validation rules, and model
+  adapters) — plus a benchmark comparison workflow answering "which model
+  performs best" across completed training jobs, all without adding a new
+  persisted table: a benchmark is a read-only comparison over
+  `TrainingJob.result_summary`/`Experiment` metrics the Training Framework
+  already writes.
+
+  - **New package `app/evaluation/`**: `MetricRegistry` (mirrors
+    `ModelAdapterRegistry` exactly), `EvaluationEngine.evaluate(model_kind,
+y_true, y_pred, y_proba)` (skips — never fails on — a metric that
+    raises or needs probabilities it wasn't given), and nine builtin
+    metrics: accuracy/precision/recall/F1/ROC-AUC (classification, ROC-AUC
+    handling both the binary and weighted-multiclass case) and
+    MAE/MSE/RMSE/R² (regression). `app/evaluation/benchmark.py`'s
+    `compare()` picks a winning candidate per metric using that metric's
+    own registered direction (`higher_is_better`), defaulting to `True`
+    for an unregistered metric name rather than excluding it.
+  - **`logistic_regression`/`linear_regression` refactored** to call the
+    shared `EvaluationEngine` instead of computing metrics inline — a
+    refactor, not a behavior change: every previously recorded metric
+    value is unchanged, and `roc_auc` is the one genuinely new headline
+    metric now recorded alongside accuracy/precision/recall/F1 for a
+    classification job.
+  - **New endpoints**: `GET /evaluation/metrics` (the full registered
+    catalogue) and `POST /evaluation/benchmark` (compares completed
+    training jobs by `dataset_version`/`target_column`/`experiment_ids`,
+    at least one required; returns every matched candidate plus the
+    best-scoring candidate per metric) — `no_benchmark_target` (400) and
+    `empty_benchmark` (404) as typed domain errors.
+    `TrainingJobFilters`/`TrainingJobRepository.search()` gained two new
+    optional filter fields (`dataset_version`, `target_column`) rather
+    than a second query method.
+  - **New frontend page `/ml/evaluation`**
+    (`apps/dashboard/src/features/ml-evaluation/`): a benchmark filter bar,
+    a model comparison table (winning cell per metric highlighted), a
+    best-model summary (one card per metric, direction-aware), small
+    inline SVG per-metric bar charts, and a standing metric-catalogue
+    reference panel. `EmptyStateNotice` was promoted from
+    `features/ml-training/` to `src/components/`, the same reuse
+    `ConfirmActionDialog` already went through for Dataset History.
+  - 100% backend test coverage on every module under `app/evaluation/` and
+    on `app/services/evaluation.py` (new `tests/evaluation/` package plus
+    `tests/api/test_evaluation_api.py`); full backend suite still green
+    (1280 tests, 97.24% overall). 6 new frontend test files (one per new
+    component plus the page, 18 tests) — full frontend suite passes (1756
+    tests) with a clean lint, typecheck, and production build.
 
 - **Baseline Model Framework — production-grade interpretability, evaluation,
   and artifact management pass.** Extends the two real scikit-learn baseline

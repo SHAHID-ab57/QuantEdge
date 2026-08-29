@@ -1048,8 +1048,10 @@ even with `unmountOnExit`, so a synchronous `queryBy*` right after the
 click still sees the old content). `training-summary-panel.test.tsx`
 covers every warning chip appearing when a field is unselected and the
 correct values once an experiment is supplied.
-`confirm-action-dialog.test.tsx` and `empty-state-notice.test.tsx` cover
-the two small generic components each in isolation.
+`confirm-action-dialog.test.tsx` and `empty-state-notice.test.tsx` (now
+`src/components/`, promoted out of this feature once Dataset History and,
+later, the Model Evaluation & Benchmarking page needed the identical
+patterns) cover the two small generic components each in isolation.
 
 **Two MUI gotchas specific to this feature, worth naming:**
 
@@ -1131,6 +1133,96 @@ plain metrics table appears with no confusion matrix — exercising
 `ResultSummaryCard`'s use of `useModelAdapters()` to resolve the
 completed job's `model_kind` before choosing which `EvaluationSummary`
 view to render.
+
+### Testing the Model Evaluation & Benchmarking Engine (frontend)
+
+`apps/dashboard/src/features/ml-evaluation/` follows the same layering as
+`ml-training/`: pure types/API client (Zod-validated, covered indirectly
+through the page-level mocks below), components in isolation, then the
+page composition root.
+
+**Components.** `benchmark-filters-bar.test.tsx` covers every field
+rendering, Compare being disabled until at least one of dataset version /
+target column / an experiment is given (mirroring the backend's own
+`no_benchmark_target` rule), typing a target column calling `onChange`,
+clicking Compare calling `onSubmit` once something is given, and selecting
+an experiment from the multi-select `Autocomplete` adding its id to
+`experimentIds`. `benchmark-comparison-table.test.tsx` covers one row per
+candidate with one column per metric, a placeholder cell (`—`) for a
+metric present on only some candidates, `completed_at`-descending default
+sort, metric-driven ranking (best-first for a higher-is-better metric,
+ascending for a lower-is-better one, with a numbered Rank column appearing
+only once a metric is chosen), the details callback firing with the
+clicked row's own candidate (not a stale/wrong one — rows re-sort, so the
+test clicks the first _rendered_ row and asserts against whichever
+candidate that resolves to), every row's Experiment/Training Job link
+`href`, and the Model Artifact link's presence/absence based on
+`model_artifact_url`. `best-model-summary.test.tsx` covers one card per
+metric and that the component renders nothing when there is nothing to
+summarize (an empty `container`, not a stray empty wrapper).
+`metric-comparison-chart.test.tsx` covers a labeled bar rendering only for
+a candidate that recorded the given metric, and rendering nothing when
+none did. `metric-selector.test.tsx` covers every given metric name plus a
+"None" option appearing, and `onChange` being called with the metric name
+or `null` in both directions. `dataset-summary-card.test.tsx` covers every
+field rendering from the candidate, and an em dash placeholder for a
+missing field rather than a crash. `candidate-detail-dialog.test.tsx`
+covers rendering nothing when no candidate is given, the model type/
+experiment name/deep links/Dataset Summary Card all appearing once one is,
+and the artifact link's absence when none was recorded.
+`benchmark-export-menu.test.tsx` covers both format options appearing in
+the menu and a download actually triggering — `URL.createObjectURL`/
+`URL.revokeObjectURL` stubbed via `Object.defineProperty` (the same pattern
+this codebase's other download-triggering tests already use) and
+`HTMLAnchorElement.prototype.click` spied on directly, since jsdom has no
+real anchor-click-triggered download to observe. `benchmark-history-table.test.tsx`
+covers one row per past run, an empty-history message, and the
+Reopen/Delete callbacks each firing with the clicked row's own run summary.
+`metric-catalog-panel.test.tsx` covers metrics grouping correctly into
+Classification/Regression sections. `lib/benchmark-export.test.ts` covers
+`buildBenchmarkCsv`/`buildBenchmarkJson` directly (header row, one data row
+per candidate, the best-metric summary lines, a verbatim JSON round-trip),
+the `BENCHMARK_EXPORTERS` registry having exactly the two registered
+formats, and `benchmarkExportFileName`'s sanitization. `lib/model-kind.test.ts`
+covers `toModelKind` passing through each of the three recognized values
+and returning `undefined` for anything else (including `"unknown"`, the
+value a candidate carries when its `model_type` is no longer registered).
+
+**One assertion-ambiguity gotcha, worth naming:** `logistic_regression`
+(the mocked model type) appears in both the best-model-summary card and
+the comparison table row simultaneously once a benchmark result renders —
+`ml-evaluation-page.test.tsx`'s benchmark-run test asserts with
+`(await screen.findAllByText(...)).length).toBeGreaterThan(0)` rather than
+the single-match `findByText`, the same fix this codebase's other
+dual-rendering pages (e.g. `evaluation-summary.test.tsx`) already needed.
+A second, unrelated ambiguity: `MetricCatalogPanel`'s "Classification
+metrics"/"Regression metrics" headings render unconditionally (the group
+title, not its row data, is static JSX) — a test awaiting the heading via
+`findByText` resolves before the mocked `fetchMetricCatalog` promise
+actually settles, so the metric-name assertion that follows must itself be
+a `findByText` (awaiting the async data), not a synchronous `getByText`
+chained after the heading.
+
+**Page-level.** `ml-evaluation-page.test.tsx` covers: the empty-state
+notice shown before any comparison has been run; the metric catalogue
+rendering (grouped, from the mocked `fetchMetricCatalog`); a full benchmark
+run (typing a target column, clicking Compare, asserting `runBenchmark` was
+called with the expected body, then asserting the comparison table and
+best-model-summary content appear); and an `empty_benchmark` rejection
+rendering as an informational (not error-styled) message using the API
+error's own `message` text directly, mirroring the backend's
+`EmptyBenchmarkError` detail string rather than a re-derived one.
+
+**The Machine Learning Training Framework's own page test gained one new
+case for the reciprocal side of the deep link:** `ml-training-page.test.tsx`'s
+"opens the detail dialog automatically for a `?jobId=` deep link" test sets
+a mocked `next/navigation` `useSearchParams()` to return `{ jobId: 'job-1'
+}` before rendering, and asserts the detail dialog's "Status Monitor"
+appears with no click needed — `next/navigation` is mocked at the top of
+that file the same way `history-page.test.tsx` already mocks it for its own
+`useSearchParams` usage, with a module-level `searchParams` variable reset
+to an empty `URLSearchParams` in `beforeEach` so every other existing test
+in that file is unaffected.
 
 ## End-to-End Tests
 

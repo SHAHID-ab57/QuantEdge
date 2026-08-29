@@ -474,6 +474,49 @@ from.
 **100% test coverage** on every module under `app/training/`, including
 the two new adapters, `dataset_loader.py`, and `serialization.py`.
 
+## Testing the Model Evaluation & Benchmarking Engine
+
+Covers `ARCHITECTURE.md` § "Model Evaluation & Benchmarking Engine" (and
+its "Production-Readiness Pass" follow-up) — `app/evaluation/` (metrics,
+registry, engine, benchmark comparison), `app/services/evaluation.py`,
+`app/repositories/evaluation_benchmark_runs.py`, and
+`app/models/evaluation_benchmark_run.py`. Every metric, the registry, and
+the engine are tested framework/database-free; the service and API layers
+add a real, seeded-database path.
+
+| File                | Covers                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `test_metrics.py`   | Every builtin metric's `compute` in isolation — accuracy/precision/recall/F1 on known inputs, ROC-AUC's binary case (positive-class column) and multiclass case (weighted OVR), ROC-AUC's guard against being called directly without probabilities, MAE/MSE/RMSE (RMSE = √MSE)/R², and each metric's declared `higher_is_better`/`category`/`requires_probabilities`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `test_registry.py`  | `MetricRegistry` register/duplicate/not-found/`has`/`for_category`/`describe_all` (sorted)/`__len__`/`__iter__`, plus that every documented builtin metric name is actually registered                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `test_engine.py`    | `EvaluationEngine.evaluate` — an unknown `model_kind` returns an empty report; a metric requiring probabilities is skipped (not errored) when none are given and runs when they are; a metric that raises is recorded as skipped with its exception message rather than propagating; a good and a bad metric coexist in one report without one sinking the other                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `test_benchmark.py` | `compare` — the max-scoring candidate wins an unregistered (default `higher_is_better=True`) metric; the min-scoring candidate wins a registered `higher_is_better=False` metric; a metric present on only some candidates still gets a winner; every candidate is returned unchanged; an empty candidate list yields an empty result                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `test_service.py`   | `EvaluationService.list_metrics`; `benchmark` — both error paths, comparing real seeded `TrainingJob` rows, narrowing by `experiment_ids` (including 4 experiments at once, confirming no hidden two-item assumption), excluding a metrics-less completed job, `model_kind="unknown"` for a deregistered `model_type`, every new `BenchmarkCandidate` field present when the job recorded them and absent/`None` when it didn't (`symbol`/`timeframe`/`feature_count`/`sample_count`/`model_artifact_url`/`report`); Benchmark History — a successful benchmark recorded automatically, reopening a run returning its exact persisted request/response, `dataset_version`/`target_column` list filters, `BenchmarkRunNotFoundError` on an unknown id (get and delete), `InvalidBenchmarkRunSortError` on a bad sort column, and a simulated history-persist failure not failing the benchmark itself (mirroring `MLDatasetService`'s own best-effort-persist test) |
+
+`tests/api/test_evaluation_api.py` adds the same benchmark flow end to end
+over ASGI: `GET /evaluation/metrics` (including the unversioned mount),
+`POST /evaluation/benchmark`'s `no_benchmark_target`/`empty_benchmark`
+error responses, comparing two (and, separately, three) real
+`logistic_regression` jobs trained on seeded candles through to a real
+response body (candidates now including `symbol`/`timeframe`/
+`feature_count`/`sample_count`/`model_artifact_url`/`report`, plus
+`best_by_metric`), and the full Benchmark History flow —
+`GET /evaluation/history` listing a just-recorded run,
+`GET /evaluation/history/{id}` reopening it, `DELETE /evaluation/history/{id}`
+removing it (then 404 on a re-fetch), and 404s for both `GET`/`DELETE` on
+an unknown id. `tests/training/test_logistic_regression.py`/
+`test_linear_regression.py` and `tests/api/test_training_api.py`'s
+`TestRealBaselineModels` were re-run after the adapter refactor to confirm
+every previously recorded metric value is unchanged and `roc_auc` now
+appears alongside them for a classifier.
+
+**100% test coverage** on every module under `app/evaluation/`,
+`app/services/evaluation.py`, `app/repositories/evaluation_benchmark_runs.py`,
+and `app/models/evaluation_benchmark_run.py` — one pre-existing, deliberately
+unreachable defensive branch in `app/evaluation/benchmark.py` remains the
+sole line not hit (a metric name derived from the union of every
+candidate's own keys can never fail to match at least one candidate; see
+that module's own comment).
+
 ## Gates
 
 Before pushing, run:

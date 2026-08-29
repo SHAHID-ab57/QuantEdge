@@ -32,22 +32,23 @@ All real pages live under the `(dashboard)` route group
 (`src/app/(dashboard)/`), wrapped by `AppShell` (sidebar + top bar,
 `src/components/layout/`). `/` redirects to `/dashboard`.
 
-| Route          | Status                                                                  |
-| -------------- | ----------------------------------------------------------------------- |
-| `/health`      | Implemented — platform/DB/bus/state health, polled REST                 |
-| `/markets`     | Implemented — filterable/sortable market table + detail panel           |
-| `/history`     | Implemented — historical candle browser, **Chart** and **Table** tabs   |
-| `/live-market` | Implemented — real-time price, chart, and trade tape (see below)        |
-| `/orderbook`   | Implemented — live depth tables, spread, and depth selector (see below) |
-| `/trades`      | Implemented — Live Trade Analytics Dashboard (see below)                |
-| `/replay`      | Implemented — Historical Market Replay Engine (see below)               |
-| `/indicators`  | Implemented — Technical Indicators calculator + chart overlays          |
-| `/features`    | Implemented — Feature Engineering dataset workbench (see below)         |
-| `/validation`  | Implemented — Dataset Validation & Quality Engine workbench (see below) |
-| `/ml/training` | Implemented — Machine Learning Training Framework dashboard (see below) |
-| `/dashboard`   | Placeholder                                                             |
-| `/research`    | Placeholder                                                             |
-| `/settings`    | Placeholder                                                             |
+| Route            | Status                                                                       |
+| ---------------- | ---------------------------------------------------------------------------- |
+| `/health`        | Implemented — platform/DB/bus/state health, polled REST                      |
+| `/markets`       | Implemented — filterable/sortable market table + detail panel                |
+| `/history`       | Implemented — historical candle browser, **Chart** and **Table** tabs        |
+| `/live-market`   | Implemented — real-time price, chart, and trade tape (see below)             |
+| `/orderbook`     | Implemented — live depth tables, spread, and depth selector (see below)      |
+| `/trades`        | Implemented — Live Trade Analytics Dashboard (see below)                     |
+| `/replay`        | Implemented — Historical Market Replay Engine (see below)                    |
+| `/indicators`    | Implemented — Technical Indicators calculator + chart overlays               |
+| `/features`      | Implemented — Feature Engineering dataset workbench (see below)              |
+| `/validation`    | Implemented — Dataset Validation & Quality Engine workbench (see below)      |
+| `/ml/training`   | Implemented — Machine Learning Training Framework dashboard (see below)      |
+| `/ml/evaluation` | Implemented — Model Evaluation & Benchmarking comparison surface (see below) |
+| `/dashboard`     | Placeholder                                                                  |
+| `/research`      | Placeholder                                                                  |
+| `/settings`      | Placeholder                                                                  |
 
 ## Feature module pattern
 
@@ -2624,13 +2625,18 @@ src/features/ml-training/
 │   ├── create-training-job-dialog.tsx     register a new job: Experiment/Dataset Version/Model Type comboboxes, live summary, hyperparameters
 │   ├── training-summary-panel.tsx         live, read-only preview of exactly what the job being created will train for
 │   ├── hyperparameter-editor.tsx          five validated numeric fields (known params) + a generic key/value list (custom params)
-│   ├── empty-state-notice.tsx             "there's nothing to select yet" notices, each linking to the page that fixes it
 │   ├── training-job-detail-dialog.tsx     status monitor + logs + result summary + lifecycle actions
 │   ├── training-job-stage-timeline.tsx    the 8-step pipeline checklist (Pending → … → Completed)
-│   ├── training-job-logs-panel.tsx        searchable, collapsible log trail with copy/download
-│   └── confirm-action-dialog.tsx          a generic "are you sure" dialog, shared by Delete Job and Cancel Job
+│   └── training-job-logs-panel.tsx        searchable, collapsible log trail with copy/download
 └── ml-training-page.tsx                    list page composition root
 ```
+
+`EmptyStateNotice` and `ConfirmActionDialog` are both shared components
+(`src/components/empty-state-notice.tsx`, `src/components/
+confirm-action-dialog.tsx`), promoted out of this feature once Dataset
+History and, later, the Model Evaluation & Benchmarking page each needed
+the identical "there's nothing to show yet" / "are you sure" pattern — not
+a second local copy per feature.
 
 **Every configurable field carries an `InfoTooltip`** (the same ⓘ
 component `experiments`/`ml-datasets`/`indicators` already use), explaining
@@ -2760,6 +2766,193 @@ plus the confirm-then-mutate flow for both Cancel and Delete. See
 Framework (frontend)" for the full inventory, including one MUI
 accessible-name gotcha this pass ran into (a required `TextField select`'s
 visible asterisk becomes part of its label's text in this MUI version).
+
+## Model Evaluation & Benchmarking Engine
+
+`/ml/evaluation` (`src/features/ml-evaluation/`) is the frontend for the
+Model Evaluation & Benchmarking Engine — a read-only comparison surface
+over metrics already recorded by completed training jobs. Backend design
+lives in [`ARCHITECTURE.md`](ARCHITECTURE.md) § "Model Evaluation &
+Benchmarking Engine"; the API surface is in
+[`docs/api/API.md`](docs/api/API.md) § "Model Evaluation & Benchmarking
+Engine".
+
+```text
+src/features/ml-evaluation/
+├── hooks/use-evaluation-data.ts           metric catalogue query + benchmark mutation + Benchmark History list/detail/delete
+├── lib/
+│   ├── model-kind.ts                      narrows a candidate's `model_kind` string to the three literals `EvaluationSummary` understands
+│   └── benchmark-export.ts                CSV/JSON export builders + the `BENCHMARK_EXPORTERS` registry
+├── components/
+│   ├── benchmark-filters-bar.tsx          dataset version (freeSolo, suggestions from every experiment's own citation) / target column / experiment multi-select
+│   ├── benchmark-comparison-table.tsx     one row per matched job, a Rank column when a metric is chosen, one column per metric (winning cell highlighted), deep links
+│   ├── best-model-summary.tsx             one card per metric naming the winning model, with a direction arrow
+│   ├── metric-comparison-chart.tsx        a small inline SVG bar chart per metric
+│   ├── metric-selector.tsx                choose which metric ranks the comparison table
+│   ├── dataset-summary-card.tsx           Dataset Version/Symbol/Timeframe/Dataset Size/Feature Count/Target Column for one candidate
+│   ├── candidate-detail-dialog.tsx        one candidate's full evaluation detail — reuses `EvaluationSummary` verbatim, plus deep links and the Dataset Summary Card
+│   ├── benchmark-export-menu.tsx          Export ▾ CSV/JSON, reading `BENCHMARK_EXPORTERS`
+│   ├── benchmark-history-table.tsx        Benchmark History's list view — reopen/delete a past comparison
+│   └── metric-catalog-panel.tsx           every registered metric, grouped by category (now an explicit column, not just a section title), as a standing reference
+└── ml-evaluation-page.tsx                  page composition root
+```
+
+**A benchmark is a mutation, not a query; Benchmark History is a real,
+listable resource.** `POST /evaluation/benchmark` is a request-response
+comparison over data that already exists, not itself a persisted resource
+with an id to fetch later — so `useBenchmark` (`hooks/use-evaluation-data.ts`)
+is a TanStack Query `useMutation`, the same choice `use-training-jobs-data.ts`
+already made for every non-idempotent training action; its `onSuccess`
+invalidates the history list query, since a successful benchmark is now
+also a new history entry. `useBenchmarkHistory`/`useBenchmarkRun` are real
+`useQuery`s over `GET /evaluation/history`/`GET /evaluation/history/{id}`.
+`GET /evaluation/metrics` remains fetched once via `useMetricCatalog`
+(`staleTime: Infinity`, the same choice `useModelAdapters` already makes
+for the model adapter catalogue: a registered metric's shape does not
+change without a deploy).
+
+**At least one filter must be given, and the request explains why if
+not.** `BenchmarkFiltersBar` disables Compare until `datasetVersion`,
+`targetColumn`, or at least one selected experiment is non-empty — mirroring
+`POST /evaluation/benchmark`'s own `no_benchmark_target` validation, so the
+same rule is enforced both before and after the network round trip. Dataset
+Version is a `freeSolo` `Autocomplete` whose suggestions are every distinct
+`dataset_version` already recorded across every experiment (the exact same
+convention `CreateTrainingJobDialog`'s own Dataset Version field
+established); Experiments is a multiple-select `Autocomplete` that narrows
+an already-matching set further, never replaces the other two filters.
+
+**The comparison table ranks by whichever metric is chosen, or falls back
+to recency.** `BenchmarkComparisonTable`'s columns are the union of every
+metric name present on any matched candidate (not a fixed list), so a
+classifier's `roc_auc` and a regressor's `rmse` can appear side by side in
+one table when a benchmark request spans both by target column rather than
+dataset version. With no metric chosen in `MetricSelector`, rows sort by
+`completed_at` descending; choosing one re-sorts by that metric's value
+(best first, direction-aware via `best_by_metric[].higher_is_better`) and
+adds a numbered "Rank" column. The winning cell per metric column (from
+`best_by_metric`) stays bolded and colored regardless of the current
+ranking metric, so "which model wins _this_ metric" and "how are rows
+currently ordered" are never conflated.
+
+**Every row deep-links to its Experiment, its Training Job, and (when
+recorded) its downloadable Model Artifact.** The Experiment link goes to
+`/experiments/{id}` (a route this platform already serves); the Training
+Job link goes to `/ml/training?jobId={id}` — `MLTrainingPage` gained a
+small, additive `useSearchParams` read that seeds `selectedJobId` from a
+`?jobId=` query param, opening that job's _existing_ detail dialog on load
+rather than this feature building a second one; the Model Artifact link
+(only rendered when `model_artifact_url` is present) opens the same
+`GET /training-jobs/{id}/artifacts/model_joblib` download the Artifact
+Management panel itself uses, as a plain anchor — the endpoint already
+sets `Content-Disposition: attachment`, so no client-side blob handling is
+needed. A dynamic Next.js route href built from a template literal needs an
+explicit `as Route` cast when passed through MUI's polymorphic `component`
+prop (a `Link`-wrapping `IconButton`/`Button`) — plain `next/link` usage
+elsewhere in this codebase infers this without a cast; the cast is only
+needed for this specific MUI-wrapper combination.
+
+**A "Details" button per row opens `CandidateDetailDialog`, which reuses
+`EvaluationSummary` verbatim** — the exact component `/ml/training`'s own
+job detail dialog already renders (confusion matrix, `ConfusionMatrixDetailsTable`,
+`RocPrCurveCharts`, feature importance, prediction samples, model
+metadata), imported across features rather than copied (the same
+cross-feature-import precedent `create-training-job-dialog.tsx` already set
+by importing `useExperiment` from the `experiments` feature). It's handed
+the candidate's own `metrics` and `report` (the training job's
+`result_summary`, returned verbatim by the benchmark API) — nothing is
+recomputed on the frontend, and `RocPrCurveCharts`/`ConfusionMatrixDetailsTable`
+already render nothing for a regressor or a job with no confusion-matrix
+data, so "gracefully hide when unavailable" needed no new code.
+`lib/model-kind.ts`'s `toModelKind` narrows a candidate's `model_kind`
+string (which can be `"unknown"`, unlike `EvaluationSummary`'s own
+three-literal `ModelKind` prop) before handing it over. `DatasetSummaryCard`
+sits above `EvaluationSummary` in the same dialog: Dataset Version, Symbol,
+Timeframe, Dataset Size, Feature Count, and Target Column, every value read
+directly off the candidate — no derivation.
+
+**Export is CSV or JSON today, and one registry entry away from a third
+format.** `BenchmarkExportMenu` (mirroring
+`features/indicators/components/export-menu.tsx`'s Button+Menu shape) reads
+`BENCHMARK_EXPORTERS` (`lib/benchmark-export.ts`) — `{ csv: {...}, json:
+{...} }`, each entry a `label` and a `build(response)` function returning
+`{ content, mimeType, extension }` from the **already-fetched**
+`BenchmarkResponse` (no new network request). CSV building reuses this
+codebase's shared `csvLine`/`sanitizeFilenamePart` helpers (`src/lib/csv.ts`)
+rather than a second escaping implementation. A future PDF exporter is one
+new registry entry whose `build` returns a `Blob`-producing result — no
+change to the menu component, which iterates the registry rather than
+hardcoding two formats.
+
+**Benchmark History is a real page section, not a claim the comparison
+table's own sort order stands in for.** `BenchmarkHistoryTable` lists every
+past comparison (`GET /evaluation/history`, paginated, most recent first)
+with Reopen and Delete actions — mirroring `dataset-history-table.tsx`'s
+exact shape and the same page/table ownership split (the table is
+presentation-only; the page owns the delete confirmation and mutation, via
+the shared `ConfirmActionDialog`). Reopening a run fetches its exact
+persisted request and response (`useBenchmarkRun`) and renders it through
+the _same_ comparison table/summary/chart components a live run uses — one
+rendering path, not two — while also restoring the filter bar to the
+request that produced it, so what's on screen and what the filters show
+never disagree.
+
+**`BestModelSummary` answers "which model performs best" directly** — one
+card per metric, naming the winning model type and its value, with an
+up/down arrow driven by that metric's own `higher_is_better` (never a
+hardcoded assumption that bigger is always better — RMSE's arrow points
+down). `MetricComparisonChart` renders one small inline SVG horizontal bar
+per candidate that recorded a given metric, this codebase's established
+"small on-page chart, not a charting library" approach (see
+`src/lib/svg-line-path.ts`, used by the line-based charts elsewhere) — bars
+scale against the largest value among the candidates shown, not a fixed
+`[0, 1]` domain, since a regression metric like RMSE can exceed 1.
+
+**`MetricCatalogPanel` is always visible, benchmark run or not** — the
+same registered metric catalogue `GET /evaluation/metrics` serves, grouped
+into Classification/Regression sections. Each row now shows an explicit
+Category chip (previously only implicit in which section it appeared
+under), a text label alongside the direction arrow ("Higher is better" /
+"Lower is better", not just an icon), and whether it requires
+probabilities. A future metric (a `Metric` subclass,
+`app/evaluation/metrics/`) appears here with no frontend change.
+
+**Errors are read from the API's own message, not re-derived.** A
+`no_benchmark_target` (400) or `empty_benchmark` (404) response's `detail`
+string is shown directly in an `Alert` — informational styling for "no
+completed training jobs matched" (an expectable, not-broken outcome) versus
+error styling for anything else, with a Retry action that re-runs the same
+request.
+
+**Testing.** Each component has its own test:
+`benchmark-filters-bar.test.tsx` (every field renders, Compare
+enable/disable logic, typing/selecting calls `onChange`, submit fires
+`onSubmit`), `benchmark-comparison-table.test.tsx` (one row per candidate, a
+placeholder cell for a metric missing on some candidates,
+`completed_at`-descending default sort, metric-driven ranking both
+directions with a Rank column, the details callback receiving the correct
+row's own candidate, every deep link's `href`, and the artifact link's
+presence/absence), `best-model-summary.test.tsx`, `metric-comparison-chart.test.tsx`,
+`metric-selector.test.tsx` (every metric plus a None option, `onChange`
+called with the right value in both directions), `dataset-summary-card.test.tsx`
+(every field, and placeholders for missing ones), `candidate-detail-dialog.test.tsx`
+(renders nothing with no candidate; renders the model type, deep links, and
+Dataset Summary Card; omits the artifact link when none was recorded),
+`benchmark-export-menu.test.tsx` (offers both formats; triggers a download,
+with `URL.createObjectURL`/`HTMLAnchorElement.prototype.click` stubbed the
+same way `feature-importance-panel.test.tsx` already does), `benchmark-history-table.test.tsx`
+(one row per run, an empty-history message, Reopen/Delete callbacks), and
+`metric-catalog-panel.test.tsx` (groups by category). `lib/benchmark-export.test.ts`
+and `lib/model-kind.test.ts` cover the pure logic directly. `ml-evaluation-page.test.tsx`
+covers the whole page end to end: the empty-state notice before any
+comparison runs, the standing metric catalogue, a full benchmark run
+rendering the comparison table and best-model summary, and the
+informational (not error-styled) message for an empty benchmark result.
+`ml-training-page.test.tsx` gained a case for the `?jobId=` deep link
+opening the detail dialog on load, with `next/navigation`'s
+`useSearchParams` mocked the same way `history-page.test.tsx` already
+mocks it. See `docs/testing/TESTING.md` § "Testing the Model Evaluation &
+Benchmarking Engine (frontend)" for the full inventory.
 
 ## State management
 

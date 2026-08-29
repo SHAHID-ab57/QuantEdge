@@ -335,7 +335,9 @@ trains and evaluates on. See `ARCHITECTURE.md` § "Baseline Model
 Framework" for the full design (the model interface, registry reuse, both
 plugins, training integration, the prediction interface, and the model
 serialization abstraction that lets `train` and `predict` run in different
-requests, or even different processes).
+requests, or even different processes). Both adapters now compute their
+metrics through the shared Model Evaluation & Benchmarking Engine rather
+than inline — see § "Evaluation" below.
 
 ## Machine Learning Training Framework
 
@@ -460,17 +462,61 @@ has to be designed in from the start, and it has been.
 
 ## Evaluation
 
-**Not built as a platform-level backtesting engine; per-job evaluation
-metrics now exist instead.** No backtesting engine, no evaluation harness
-across jobs, no metrics store exists. What does exist: `logistic_regression`/
-`linear_regression` each evaluate their own fit on a held-out validation
-split (and, if present, test split) at training time — real
-accuracy/precision/recall/F1 or MAE/MSE/RMSE/R², recorded on the job and
-copied onto the experiment as real `ExperimentMetric` rows (§ "Baseline
-Model Framework"). This is per-job, single-model evaluation, not
-cross-model comparison, backtesting against historical trading outcomes,
-or a metrics store a researcher could query across every experiment ever
-run.
+**Per-job metrics and cross-job benchmarking now both exist; a
+backtesting engine and a metrics store queryable by arbitrary criteria do
+not.** A dedicated `app/evaluation/` package (full design in
+`ARCHITECTURE.md` § "Model Evaluation & Benchmarking Engine") is this
+platform's sixth Strategy + Registry context: a `Metric` (accuracy,
+precision, recall, F1, ROC-AUC for classification; MAE, MSE, RMSE, R² for
+regression) is a small class registered via `@register` into a
+`MetricRegistry` that mirrors `ModelAdapterRegistry` exactly.
+`EvaluationEngine.evaluate(model_kind, y_true, y_pred, y_proba)` runs every
+metric applicable to a job's `model_kind`, skipping (never failing) a
+metric that raises or that needs probabilities it wasn't given.
+`logistic_regression`/`linear_regression` both now compute their
+validation/train/test metrics by calling this shared engine rather than
+each reimplementing the same math inline — a refactor, not a behavior
+change (every previously recorded value is unchanged; `roc_auc` is the one
+genuinely new metric now appearing alongside accuracy/precision/recall/F1
+for a classification job).
+
+**Benchmarking is a read-only comparison over data that already exists** —
+`POST /evaluation/benchmark` (`app/services/evaluation.py`) matches
+completed training jobs by `dataset_version`, `target_column`, and/or
+`experiment_ids` (any number of experiments, not just two), and picks a
+winning candidate per metric (`app/evaluation/benchmark.py`'s `compare`,
+using each metric's own registered `higher_is_better` direction). The
+comparison itself computes nothing new: it queries the same
+`TrainingJob.result_summary`/`Experiment` metrics rows the Training
+Framework already writes. This is genuine cross-model comparison — "which
+model performs best" now has a direct answer (`/ml/evaluation`, see §
+"Models" above, with a Rank column and a metric selector to change which
+metric drives that ranking) — but it is still not backtesting against
+historical trading outcomes, and there is no general-purpose metrics store
+a researcher could query by arbitrary criteria beyond dataset/target/
+experiment.
+
+**Benchmark History is the one place this workflow does persist
+something new** (`app/models/evaluation_benchmark_run.py`) — every
+successful comparison is recorded, best-effort, so a researcher can reopen
+a past benchmark run exactly as it was (`GET /evaluation/history`,
+`GET|DELETE /evaluation/history/{id}`). This is a _log of past
+comparisons_, not a metrics store queryable by arbitrary criteria — it is
+filterable only by the same `dataset_version`/`target_column` a benchmark
+request itself accepts, mirroring the ML Dataset Builder's own Dataset
+History design rather than inventing a new persistence pattern.
+
+**Each comparison row's detail reuses the Training Framework's own
+evaluation view, not a second one** — the frontend's per-candidate detail
+dialog renders `EvaluationSummary`, the exact component `/ml/training`'s
+job detail dialog already uses, against that candidate's own
+`result_summary` (returned verbatim as `report` on each
+`BenchmarkCandidateDTO`) — confusion matrix, ROC/PR curves, feature
+importance, and prediction samples, with nothing recomputed. A comparison
+can also be exported as CSV or JSON (`lib/benchmark-export.ts`'s small
+exporter registry, sized for a future PDF exporter without a redesign),
+and every row deep-links to its Experiment, its Training Job, and — when
+one was recorded — its downloadable model artifact.
 
 The platform's stated commitment (`PROJECT.md`) is that predictions are
 probabilistic and that uncertainty is communicated honestly — the two

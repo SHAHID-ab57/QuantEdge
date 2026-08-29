@@ -1723,6 +1723,299 @@ paths. 100% test coverage on every module in `app/training/`. See
 `docs/testing/TESTING.md`/`services/api/TESTING.md` for the full
 inventory.
 
+### Model Evaluation & Benchmarking Engine
+
+Before this milestone, each real model adapter
+(`logistic_regression`/`linear_regression`) computed its own
+accuracy/precision/recall/F1 or MAE/MSE/RMSE/R² inline, with no shared
+code between them — a pattern that does not scale to a third, fourth, or
+tenth model family. This engine is the platform's **sixth** instance of
+its Strategy + Registry pattern (after feature generators, indicators,
+prediction targets, dataset validation rules, and model adapters
+themselves): a `Metric` is a small stateless class declaring `metadata`
+(name, category, direction) and a `compute(y_true, y_pred, y_proba)`
+method, registered via `@register` into a `MetricRegistry` that mirrors
+`ModelAdapterRegistry` exactly (`register`/`get`/`has`/`names`/
+`describe_all`/`for_category`, a process-wide `default_registry`).
+
+**Package layout** (`app/evaluation/`) — framework-light and
+database-free throughout, the same discipline `app/training/pipeline.py`
+holds itself to:
+
+- `base.py` — `MetricMetadata` (`name`, `label`, `description`, `category:
+"classification" | "regression"`, `higher_is_better: bool`,
+  `requires_probabilities: bool`, `version`), `MetricResult` (a value, or a
+  `skipped_reason`), `EvaluationReport` (a list of results, plus `.metrics`
+  — the same flat `{name: value}` dict shape `TrainingResult.metrics` has
+  always used, and `.skipped` — `{name: reason}`), and the `Metric` ABC.
+- `registry.py` — `MetricRegistry`, an exact mirror of
+  `app/training/registry.py`'s `ModelAdapterRegistry`.
+- `metrics/classification.py` — `AccuracyMetric`, `PrecisionMetric`,
+  `RecallMetric`, `F1Metric` (all `average="weighted"`, `zero_division=0`,
+  `higher_is_better=True`) and `RocAucMetric` (`requires_probabilities=True`,
+  `higher_is_better=True`; binary case uses the positive-class probability
+  column, multiclass case uses `roc_auc_score(..., multi_class="ovr",
+average="weighted")` — the same distinction `compute_roc_pr_curves`
+  already makes for the confusion-matrix/curve report, now centralized here
+  too).
+- `metrics/regression.py` — `MaeMetric`, `MseMetric`, `RmseMetric` (all
+  `higher_is_better=False`) and `R2Metric` (`higher_is_better=True`), each a
+  thin wrapper over the equivalent `sklearn.metrics` function.
+- `engine.py` — `EvaluationEngine.evaluate(model_kind, y_true, y_pred,
+y_proba=None) -> EvaluationReport` runs every registered metric whose
+  `category` matches `model_kind`. A metric that raises, or that declares
+  `requires_probabilities=True` when `y_proba` is `None`, is recorded as
+  **skipped** with a reason rather than aborting the rest — the same
+  partial-success contract every other engine on this platform already
+  holds itself to (e.g. `candle_validation`'s per-check independence). An
+  unrecognized `model_kind` (e.g. `"placeholder"`) returns an empty report,
+  not an error. `default_engine`, built over `default_registry`, is the one
+  shared instance every real adapter imports.
+- `benchmark.py` — `compare(candidates, metric_registry) -> BenchmarkResult`.
+  `BenchmarkCandidate` is a plain dataclass (training job id, experiment id/
+  name, model type/kind, dataset version, target column, completed-at, and
+  its recorded `metrics` dict) — this module never touches SQLAlchemy or
+  `TrainingJob`; the service layer builds these from already-persisted rows.
+  For every metric name appearing on at least one candidate, `compare` picks
+  the max- or min-scoring candidate according to that metric's registered
+  `higher_is_better` (defaulting to `True`, conservatively, for an
+  unregistered/unknown metric name rather than excluding it silently).
+- `errors.py` — `MetricNotFoundError` (404), `DuplicateMetricError`
+  (startup-only, mirrors `DuplicateModelAdapterError`),
+  `NoBenchmarkTargetError` (400 — a benchmark request naming none of
+  `dataset_version`/`target_column`/`experiment_ids` has nothing to match),
+  `EmptyBenchmarkError` (404 — a well-formed request matching zero completed
+  jobs).
+
+**No new persistence.** A benchmark comparison is a **read-only** view over
+data that already exists: `TrainingJob.result_summary["metrics"]`, written
+by the unchanged `_make_save_results_hook`, and copied onto the linked
+`Experiment` as real `ExperimentMetric` rows by the unchanged
+`_make_update_experiment_hook` — see § "Machine Learning Training
+Framework" above. There is deliberately no new "evaluation run" table;
+`app/services/evaluation.py`'s `EvaluationService.benchmark` queries
+`TrainingJobRepository.search()` (extended with two new optional filter
+fields, `dataset_version`/`target_column`, on the existing
+`TrainingJobFilters` dataclass — no new query method) for every
+`status="completed"` job matching the request, further narrows by
+`experiment_ids` if given, resolves each job's `model_kind` via the
+existing `ModelAdapterRegistry` (falling back to `"unknown"` for a
+model_type no longer registered), looks up each distinct experiment's name
+through the unchanged `ExperimentService.get`, and hands the resulting
+`BenchmarkCandidate` list to `app.evaluation.benchmark.compare`. A
+completed job that recorded no metrics (e.g. the placeholder adapter) is
+excluded from the comparison rather than shown as an empty row.
+
+**Adapter refactor.** `logistic_regression.py`/`linear_regression.py` no
+longer compute metrics inline — each now calls
+`evaluation_engine.evaluate(self.metadata.model_kind, y_true, y_pred,
+y_proba)` and reads `.metrics` off the report, for the validation split,
+the train split, and (when present) the test split alike. This is a
+refactor to a shared engine, not a behavior change: every previously
+recorded metric value is unchanged, and `roc_auc` is a genuinely new
+headline metric now appearing in `metrics`/`train_metrics`/`test_metrics`
+for a classification job (previously only a per-class AUC existed inside
+`roc_pr_curves`).
+
+**API** — `GET /evaluation/metrics` (the full registered catalogue —
+`MetricMetadataDTO` per entry) and `POST /evaluation/benchmark` (accepts
+`dataset_version`/`target_column`/`experiment_ids`, at least one required;
+returns every matched `BenchmarkCandidateDTO` plus a `BenchmarkBestEntryDTO`
+per metric) — see `API.md` § "Model Evaluation & Benchmarking Engine" for
+the full request/response shapes and error codes.
+
+**Extension workflow for a future metric**: subclass `Metric`, declare
+`metadata` (including `category` and `higher_is_better`), implement
+`compute`, add one file under `app/evaluation/metrics/`, and `@register`
+it. No engine, service, repository, or API code changes are needed — the
+metric appears in `GET /evaluation/metrics`, runs automatically for every
+job of its category, and participates in every future benchmark
+comparison, the same extension guarantee every Strategy + Registry context
+on this platform already makes.
+
+**Frontend** (`apps/dashboard/src/features/ml-evaluation/`, `/ml/evaluation`
+— full detail in `FRONTEND.md` § "Model Evaluation & Benchmarking Engine"):
+a benchmark filter bar (dataset version, target column, a multi-select
+experiment picker), a model comparison table (one row per matched job, one
+column per metric, the winning cell per column highlighted), a best-model
+summary (one card per metric, naming the winning model), small inline SVG
+bar charts per metric (this codebase's established "small on-page chart,
+not a charting library" approach), and a standing metric-catalogue
+reference table. There is no separate persisted "evaluation history" —
+the comparison table's own `completed_at`-descending ordering over
+already-real training jobs is that history.
+
+**Testing.** `tests/evaluation/` covers every metric in isolation
+(including the binary/multiclass ROC-AUC split and the direct-call guard
+when `y_proba` is omitted), the registry (register/duplicate/not-found/
+`for_category`), the engine's partial-success contract (a raising metric,
+a probability-requiring metric with none given, both skipped rather than
+propagated), `compare` (correct winner per direction, the unregistered-
+metric fallback, an empty-candidates no-op), and the service layer (both
+`NoBenchmarkTargetError`/`EmptyBenchmarkError` paths, narrowing by
+`experiment_ids`, an `"unknown"` `model_kind` for an unregistered
+`model_type`). `tests/api/test_evaluation_api.py` adds the same benchmark
+flow end to end over ASGI, training two real jobs and comparing them.
+100% test coverage on every module under `app/evaluation/` and on
+`app/services/evaluation.py`. See `docs/testing/TESTING.md`/
+`services/api/TESTING.md` for the full inventory.
+
+### Model Evaluation & Benchmarking Engine — Production-Readiness Pass
+
+A follow-up pass over the engine above, entirely additive: **no change to
+`EvaluationEngine`, `MetricRegistry`, the metric registrations, the
+training pipeline, the adapter registry, or the model serialization
+abstraction.** Every addition below either (a) surfaces data a training run
+already produced, through a widened `BenchmarkCandidate`, or (b) adds one
+new, narrowly-scoped persisted table for history — nothing recomputes a
+metric, a confusion matrix, or a curve a second time.
+
+**`BenchmarkCandidate` widened, read-only** (`app/evaluation/benchmark.py`).
+Six new optional fields, all sourced from data the training job's own
+`result_summary` already carries — `app/services/evaluation.py`'s
+`benchmark()` populates them once per candidate, no new computation:
+
+- `symbol`/`timeframe` — read straight off the `TrainingJob` row itself.
+- `feature_count`/`sample_count` — read from `result_summary["model_metadata"]`
+  (`app/training/model_metadata.py`'s `collect_model_metadata`, already
+  computed at training time).
+- `model_artifact_url` — the exact same deterministic
+  `/training-jobs/{id}/artifacts/model_joblib` path
+  `TrainingArtifactDTO.build` already computes for the Artifact Management
+  panel, built here from the same `(job_id, "model_joblib")` pair whenever
+  `result_summary["artifact_uri"]` is present — `None` otherwise (a
+  completed job need not have produced a savable artifact).
+- `report` — the job's own `result_summary` dict, **verbatim**. This is the
+  one field that lets the frontend show a candidate's confusion matrix,
+  ROC/PR curves, feature importance, and prediction samples without this
+  engine (or the frontend) recomputing any of them — see "Visualization
+  architecture" below.
+
+**Visualization architecture — reuse, not reimplementation.** The frontend
+(`apps/dashboard/src/features/ml-evaluation/components/
+candidate-detail-dialog.tsx`) renders one candidate's full detail by handing
+its `metrics` and `report` straight to `EvaluationSummary` — the _exact_
+component `/ml/training`'s own job detail dialog already uses
+(`apps/dashboard/src/features/ml-training/components/evaluation-summary.tsx`),
+imported across features rather than copied (the same cross-feature-import
+convention `create-training-job-dialog.tsx` already established by
+importing `useExperiment` from the `experiments` feature). `EvaluationSummary`
+itself is unchanged: it already renders a raw confusion-matrix grid, the
+per-class `ConfusionMatrixDetailsTable`, and `RocPrCurveCharts` (ROC **and**
+Precision-Recall together, one component) for a `model_kind: "classification"`
+result, and gracefully renders neither for a regressor or an unrecognized
+kind — "gracefully hide when probabilities are unavailable" was already this
+component's own behavior (`RocPrCurveCharts` returns `null` when its input
+doesn't parse), not something this pass had to add. A `model_kind` value
+this frontend doesn't recognize (`"unknown"`, for a job whose model_type
+is no longer registered) is narrowed to `undefined` via a small helper
+(`lib/model-kind.ts`) before reaching `EvaluationSummary`, which already
+knows how to fall back to a generic metrics list for that case.
+
+**Dataset Summary Card** (`components/dataset-summary-card.tsx`) — a small,
+pure-display component: Dataset Version, Symbol, Timeframe, Dataset Size
+(`sample_count`), Feature Count, and Target Column, all read directly off
+one `BenchmarkCandidate`. No new backend field beyond the six above; no
+client-side derivation.
+
+**Ranking and the Metric Selector** — entirely frontend, using data the
+comparison already returns. `MetricSelector` offers every metric name
+present on at least one candidate; choosing one re-sorts
+`BenchmarkComparisonTable`'s rows by that metric's value and adds a "Rank"
+column, direction-aware via the existing `best_by_metric[].higher_is_better`
+(no new backend field — the direction was already being sent for the
+"best" highlight). Choosing no metric keeps the original `completed_at`
+descending order.
+
+**Multi-experiment comparison** — already supported by the original design
+(`experiment_ids: list[uuid.UUID]`, no cap beyond
+`evaluation_benchmark_max_candidates`); this pass added end-to-end test
+coverage (backend and API) comparing four and three experiments
+respectively, confirming no hidden two-item assumption existed anywhere in
+`compare()` or the comparison table.
+
+**Deep linking** — every comparison row (and the candidate detail dialog)
+now links to: the Experiment (`/experiments/{id}`, a route this platform
+already serves), the Training Job (`/ml/training?jobId={id}` — `MLTrainingPage`
+gained a small, additive `?jobId=` read via `useSearchParams` that opens
+that job's existing detail dialog on load, rather than building a second
+detail view), and — when recorded — the downloadable Model Artifact
+(`model_artifact_url` above, opened directly; `GET .../artifacts/{type}`
+already serves the file with a `Content-Disposition: attachment` header via
+FastAPI's `FileResponse`, so a plain anchor triggers a save, no client-side
+blob handling needed).
+
+**Export architecture** (`lib/benchmark-export.ts`) — a small, explicit
+Strategy + Registry of its own, sized for two formats today and designed
+for a third:
+
+```ts
+export const BENCHMARK_EXPORTERS: Record<BenchmarkExportFormat, BenchmarkExporter> = {
+  csv: { label: 'CSV', build: buildBenchmarkCsv },
+  json: { label: 'JSON', build: buildBenchmarkJson },
+};
+```
+
+Each `BenchmarkExporter.build(response)` returns `{ content, mimeType,
+extension }` from the **already-fetched** `BenchmarkResponse` — no new
+backend endpoint, no re-fetch. `BenchmarkExportMenu` renders one menu item
+per registry entry, so a future PDF exporter is one new entry (its `build`
+returning a `Blob`-producing result works unchanged with the same
+`downloadBlob` call every export on this platform already uses) — no
+component change. CSV building reuses this codebase's shared `csvLine`/
+`sanitizeFilenamePart` helpers (`src/lib/csv.ts`), the same ones
+`features/indicators/lib/export.ts` already uses — no second
+escaping/quoting implementation.
+
+**Benchmark History — the one new backend table this pass adds**
+(`app/models/evaluation_benchmark_run.py`, migration
+`34ade0f119b6_add_evaluation_benchmark_runs_table`). Mirrors
+`MLDatasetBuild`'s own "persist the exact request/response, verbatim"
+design: every successful `benchmark()` call is recorded — best-effort,
+mirroring `MLDatasetService._record_build`'s "never let bookkeeping sink
+the primary outcome" precedent (a `try`/`except Exception` around the
+persist, logged on failure, the comparison itself still returned) —
+storing the `BenchmarkRequest` and full `BenchmarkResponse` as JSON, plus
+denormalized `dataset_version`/`target_column`/`candidate_count` columns
+for a cheap list view. `EvaluationBenchmarkRunRepository` mirrors
+`MLDatasetBuildRepository`'s exact CRUD/search shape. New endpoints:
+`GET /evaluation/history` (paginated list, filterable by
+`dataset_version`/`target_column`), `GET /evaluation/history/{id}`
+(reopen — the exact request and response, unchanged), `DELETE
+/evaluation/history/{id}` (removes only the history record; the underlying
+`TrainingJob` rows are untouched). The frontend's `BenchmarkHistoryTable` +
+a "Reopen" action reload a past comparison's _exact_ persisted response
+(no re-query against possibly-since-changed `TrainingJob` rows) into the
+same comparison table/summary/charts a live run renders — one rendering
+path for both, not two.
+
+**Metric Registry metadata, rendered explicitly.** `GET /evaluation/metrics`
+already returned `category`/`higher_is_better`/`requires_probabilities` per
+metric; `MetricCatalogPanel` previously only showed the direction (as an
+icon) and a Yes/No probabilities column, with category implicit in which
+of the two grouped tables a row appeared under. This pass added an explicit
+`Category` chip per row and a text label ("Higher is better"/"Lower is
+better") alongside the direction arrow — the same data, made legible
+without requiring a reader to infer meaning from an icon or a table's
+position on the page.
+
+**Testing.** All of the above is covered without touching a single existing
+test's expectations: `tests/evaluation/test_service.py` gained cases for
+every new `BenchmarkCandidate` field (present when the training job
+recorded them, `None`/absent when it didn't), the four/three-experiment
+comparison, and Benchmark History's list/get/delete/best-effort-persist
+paths (including the `target_column` filter and a simulated persist
+failure); `tests/api/test_evaluation_api.py` gained the same at the HTTP
+layer, plus a `>2`-experiment end-to-end run. On the frontend, every new
+component (`DatasetSummaryCard`, `CandidateDetailDialog`, `MetricSelector`,
+`BenchmarkExportMenu` + `lib/benchmark-export.ts`, `BenchmarkHistoryTable`)
+has its own test file, `BenchmarkComparisonTable`'s tests gained ranking
+and deep-link cases, and `MLTrainingPage` gained a `?jobId=` deep-link
+case. 100% backend coverage maintained on `app/evaluation/`,
+`app/services/evaluation.py`, `app/repositories/evaluation_benchmark_runs.py`,
+and `app/models/evaluation_benchmark_run.py`. See `docs/testing/TESTING.md`/
+`services/api/TESTING.md` for the full inventory.
+
 ### Feature Store
 
 > Not built. Features are computed on demand and exported; no persisted,

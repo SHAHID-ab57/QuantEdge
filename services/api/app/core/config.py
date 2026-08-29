@@ -50,6 +50,18 @@ class Settings(BaseSettings):
     ml_dataset_builds_default_limit: int = 20
     ml_dataset_builds_max_limit: int = 100
 
+    #: How many completed training jobs a single benchmark comparison
+    #: (`app/services/evaluation.py`) will ever fetch and compare at once —
+    #: a benchmark has no page/offset concept of its own, so this is a flat
+    #: cap rather than a default/max pair.
+    evaluation_benchmark_max_candidates: int = 100
+
+    #: Benchmark History's list pagination — every successful benchmark
+    #: comparison is recorded (best-effort), and this bounds how many past
+    #: runs `GET /evaluation/history` returns per page.
+    evaluation_history_default_limit: int = 20
+    evaluation_history_max_limit: int = 100
+
     #: Where fitted baseline model artifacts are serialized to (joblib), relative
     #: to the service's working directory unless given as an absolute path.
     model_artifact_dir: str = "var/model_artifacts"

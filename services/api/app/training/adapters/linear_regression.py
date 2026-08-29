@@ -17,14 +17,13 @@ classification-only concepts, so only `metrics.json`/`training_report.json`/
 categorical target is given instead).
 """
 
-import math
 import time
 from collections.abc import Mapping, Sequence
 from typing import Any
 
 from sklearn.linear_model import LinearRegression
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
+from app.evaluation.engine import default_engine as evaluation_engine
 from app.training.artifact_files import (
     write_feature_importance_csv,
     write_metrics_json,
@@ -40,16 +39,6 @@ from app.training.interpretability import (
 from app.training.model_metadata import collect_model_metadata
 from app.training.registry import register
 from app.training.serialization import default_serializer
-
-
-def _regression_metrics(y_true: Sequence[float], y_pred: Sequence[float]) -> dict[str, float]:
-    mse = float(mean_squared_error(y_true, y_pred))
-    return {
-        "mae": float(mean_absolute_error(y_true, y_pred)),
-        "mse": mse,
-        "rmse": math.sqrt(mse),
-        "r2": float(r2_score(y_true, y_pred)),
-    }
 
 
 @register
@@ -98,8 +87,16 @@ class LinearRegressionAdapter(ModelAdapter):
         training_duration_seconds = time.perf_counter() - wall_started
         cpu_time_seconds = time.process_time() - cpu_started
 
-        metrics = _regression_metrics(dataset.validation.y, predictions)
-        train_metrics = _regression_metrics(dataset.train.y, train_predictions)
+        # `EvaluationEngine.evaluate` (`app/evaluation/`) is the one place these
+        # numbers are actually computed — every metric it runs is a registered
+        # `Metric`, so a future model adapter reuses the exact same engine rather
+        # than reimplementing this math a third time.
+        metrics = evaluation_engine.evaluate(
+            self.metadata.model_kind, dataset.validation.y, predictions
+        ).metrics
+        train_metrics = evaluation_engine.evaluate(
+            self.metadata.model_kind, dataset.train.y, train_predictions
+        ).metrics
         # `model.coef_` is a 1-D ndarray for single-output regression; wrapped in a
         # one-row list so `compute_feature_importance` sees the same "one row per
         # class" shape `LogisticRegressionAdapter` gives it. sklearn's stubs type
@@ -118,7 +115,9 @@ class LinearRegressionAdapter(ModelAdapter):
         held_out_metrics = metrics
         if dataset.test is not None and len(dataset.test.y) > 0:
             test_predictions = model.predict(dataset.test.X)
-            test_metrics = _regression_metrics(dataset.test.y, test_predictions)
+            test_metrics = evaluation_engine.evaluate(
+                self.metadata.model_kind, dataset.test.y, test_predictions
+            ).metrics
             held_out_metrics = test_metrics
         overfitting = compute_overfitting_flag(
             train_metrics["r2"], held_out_metrics["r2"], higher_is_better=True

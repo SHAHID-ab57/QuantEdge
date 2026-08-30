@@ -182,17 +182,21 @@ typos fail collection.
 `tests/features/` covers the engine described in `ARCHITECTURE.md`
 § "Feature Engineering Engine", split by the guarantee each layer owns:
 
-| File                         | Covers                                                                                                                                                                 |
-| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `test_registry.py`           | Registration (class and instance), duplicate rejection, lookup, catalogue ordering, isolation, and (`TestDependencyValidation`) startup-time dependency/cycle checking |
-| `test_pipeline.py`           | Parameter validation, warmup, alignment/uniqueness guarantees, error wrapping                                                                                          |
-| `test_builtin_generators.py` | Each generator's maths, discovery, and the indicator-delegation contract                                                                                               |
-| `test_dataset.py`            | Assembly, column collisions, warmup trimming, provenance, dataset ID/quality report, and (`TestPartialSuccess`) per-feature failure recording                          |
-| `test_validation.py`         | Request-time dependency validation — a feature requested without its declared dependency is rejected, order-independent                                                |
-| `test_export.py`             | CSV and JSON round-trip fidelity, provenance, dataset ID/export timestamp, and the quality summary                                                                     |
-| `test_service.py`            | The candle-load join, row/limit semantics, preview truncation, export completeness, and one failing feature not blocking the others                                    |
-| `test_ai_extensions.py`      | Pins the AI extension points' (`ai_extensions.py`) dataclass defaults and proves each Protocol is implementable                                                        |
-| `test_performance.py`        | Opt-in (`--run-performance`) — builds a 100k-row, 5-feature dataset within budget; asserts the quality report's duplicate/missing-candle counting scales linearly      |
+| File                         | Covers                                                                                                                                                                                                                                                      |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `test_registry.py`           | Registration (class and instance), duplicate rejection, lookup, catalogue ordering, isolation, and (`TestDependencyValidation`) startup-time dependency/cycle checking                                                                                      |
+| `test_pipeline.py`           | Parameter validation, warmup, alignment/uniqueness guarantees, error wrapping                                                                                                                                                                               |
+| `test_builtin_generators.py` | Each generator's maths, discovery, and the indicator-delegation contract                                                                                                                                                                                    |
+| `test_dataset.py`            | Assembly, column collisions, warmup trimming, provenance, dataset ID/quality report, and (`TestPartialSuccess`) per-feature failure recording                                                                                                               |
+| `test_validation.py`         | Request-time dependency validation — a feature requested without its declared dependency is rejected, order-independent                                                                                                                                     |
+| `test_export.py`             | CSV and JSON round-trip fidelity, provenance, dataset ID/export timestamp, and the quality summary                                                                                                                                                          |
+| `test_service.py`            | The candle-load join, row/limit semantics, preview truncation, export completeness, and one failing feature not blocking the others                                                                                                                         |
+| `test_ai_extensions.py`      | Pins the AI extension points' (`ai_extensions.py`) dataclass defaults and proves each Protocol is implementable                                                                                                                                             |
+| `test_performance.py`        | Opt-in (`--run-performance`) — builds a 100k-row, 5-feature dataset within budget; asserts the quality report's duplicate/missing-candle counting scales linearly                                                                                           |
+| `test_cache.py`              | `FeatureCache`/`FeatureCacheKey` — mirrors `tests/unit/indicators/test_cache.py` test-for-test (key equality/hashing, get/put/clear, hit/miss stats, bounded LRU eviction)                                                                                  |
+| `test_correlation.py`        | `compute_correlation_matrix` — perfect/inverse correlation, the diagonal always `1.0`, a constant column returning `0.0` (never `NaN`), non-numeric columns excluded, empty result for fewer than two numeric columns, pairwise-complete-rows null handling |
+| `test_statistics.py`         | `compute_dataset_statistics` — exact mean/min/max, population variance/std against a known worked example, null counting kept separate from the numeric stats, an all-null column not raising, per-column independence                                      |
+| `test_lineage.py`            | `build_lineage_graph` — today's real edgeless graph, direct/transitive ancestors and descendants once a throwaway generator declares `dependencies`, topological order, and `FeatureDependencyCycleError` on an artificial cycle                            |
 
 `tests/api/test_features_api.py` covers the same surface end to end over
 ASGI, including the export endpoint's file-download headers and the
@@ -233,6 +237,35 @@ Four conventions in these tests are worth keeping:
   (see `API.md` § "Feature engineering" for the exact before/after) and the
   tests were renamed to say so (e.g.
   `test_records_an_unknown_feature_as_a_quality_failure_not_a_404`).
+
+**Feature cache, correlation, statistics, and lineage** extend the tests
+above without changing any of the four conventions just listed:
+
+- `test_pipeline.py` gained a `Counting` generator (a class-level call
+  counter — the "cache probe") and a `cached_pipeline` fixture wiring a real
+  `FeatureCache` in, plus a new `TestCache` class asserting a first run
+  misses and actually computes, an identical second call hits and skips
+  recomputation, different params or different candle ranges never collide,
+  and a cache hit still reports the generator's own metadata (warmup,
+  description) correctly.
+- `tests/api/test_features_api.py` gained `TestLineageEndpoint` (5 tests,
+  including a route-ordering regression test proving `GET /features/lineage`
+  is never captured by `GET /features/{feature}`'s path parameter),
+  `TestCorrelationEndpoint` and `TestStatisticsEndpoint` (5 tests each, using
+  the `seeded_varied` fixture's exact 10x-correlated open/volume columns),
+  and `test_reports_provenance_metadata` now also asserts
+  `cache_status in ("hit", "miss", "disabled")`.
+- **The repeated-request cache-hit test is deliberately order-independent.**
+  `get_feature_pipeline()` is `functools.lru_cache`'d for the whole pytest
+  process, so its `FeatureCache` instance is shared across every test in the
+  session — an earlier test building the identical `candle_shape`/`sma`
+  combination over the same fixture can leave a matching entry in the cache
+  before this test even runs. `test_an_identical_repeated_request_hits_the_
+feature_cache` therefore only asserts the _second_ identical call reports
+  `cache_status: "hit"`, never that the first is a "miss" — the exhaustive
+  miss/hit semantics are already covered exactly by the isolated
+  `cached_pipeline` fixture in `test_pipeline.py::TestCache` and
+  `test_cache.py` above, which don't share process-wide state.
 
 ## Dataset Validation tests
 

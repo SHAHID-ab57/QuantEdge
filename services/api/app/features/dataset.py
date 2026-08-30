@@ -84,6 +84,12 @@ class DatasetFeatureInfo:
     columns: list[str]
     warmup: int
     execution_time_ms: float
+    #: ``"hit"``, ``"miss"``, or ``"disabled"`` — see ``FeaturePipeline.run``'s
+    #: own ``FeatureRun.cache_status``, which this is copied from verbatim.
+    #: Defaulted (rather than required) so existing direct constructions of
+    #: this dataclass (e.g. in ``tests/dataset_validation/``, built without
+    #: ever running a real pipeline) keep working unchanged.
+    cache_status: str = "disabled"
 
 
 @dataclass(frozen=True, slots=True)
@@ -234,6 +240,7 @@ class FeatureDatasetBuilder:
                     params=run.params,
                     columns=produced,
                     warmup=run.warmup,
+                    cache_status=run.cache_status,
                     execution_time_ms=run.execution_time_ms,
                 )
             )

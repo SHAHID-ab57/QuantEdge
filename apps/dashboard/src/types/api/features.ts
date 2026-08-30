@@ -69,6 +69,8 @@ export const DatasetFeatureInfoSchema = z.object({
   columns: z.array(z.string()),
   warmup: z.number().int().nonnegative(),
   execution_time_ms: z.number(),
+  /** "hit" | "miss" | "disabled" — see the Feature Cache. */
+  cache_status: z.string().optional(),
 });
 
 export type DatasetFeatureInfo = z.infer<typeof DatasetFeatureInfoSchema>;
@@ -139,3 +141,57 @@ export type FeatureDataset = z.infer<typeof FeatureDatasetSchema>;
 
 /** One cell of a dataset row. */
 export type FeatureCell = FeatureDataset['rows'][number][number];
+
+/** Pairwise Pearson correlation across a built dataset's numeric columns. */
+export const FeatureCorrelationSchema = z.object({
+  symbol: z.string(),
+  timeframe: z.string(),
+  columns: z.array(z.string()),
+  matrix: z.array(z.array(z.number())),
+  row_count: z.number().int().nonnegative(),
+});
+
+export type FeatureCorrelation = z.infer<typeof FeatureCorrelationSchema>;
+
+/** Summary statistics for one column over a full (non-preview-capped) dataset. */
+export const ColumnStatisticsSchema = z.object({
+  column: z.string(),
+  count: z.number().int().nonnegative(),
+  null_count: z.number().int().nonnegative(),
+  mean: z.number().nullable(),
+  std: z.number().nullable(),
+  minimum: z.number().nullable(),
+  maximum: z.number().nullable(),
+});
+
+export type ColumnStatistics = z.infer<typeof ColumnStatisticsSchema>;
+
+export const FeatureStatisticsSchema = z.object({
+  symbol: z.string(),
+  timeframe: z.string(),
+  columns: z.array(ColumnStatisticsSchema),
+  row_count: z.number().int().nonnegative(),
+});
+
+export type FeatureStatistics = z.infer<typeof FeatureStatisticsSchema>;
+
+/** One feature's place in the whole registry's dependency graph. */
+export const FeatureLineageNodeSchema = z.object({
+  name: z.string(),
+  label: z.string(),
+  category: z.string(),
+  dependencies: z.array(z.string()),
+  depended_on_by: z.array(z.string()),
+  ancestors: z.array(z.string()),
+  descendants: z.array(z.string()),
+});
+
+export type FeatureLineageNode = z.infer<typeof FeatureLineageNodeSchema>;
+
+export const FeatureLineageSchema = z.object({
+  nodes: z.array(FeatureLineageNodeSchema),
+  edges: z.array(z.tuple([z.string(), z.string()])),
+  topological_order: z.array(z.string()),
+});
+
+export type FeatureLineage = z.infer<typeof FeatureLineageSchema>;

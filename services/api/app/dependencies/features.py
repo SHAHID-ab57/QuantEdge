@@ -10,6 +10,7 @@ from app.core.config import get_settings
 from app.db.session import get_db
 from app.dependencies.indicators import get_indicator_engine
 from app.features.builtin import load_builtin_features
+from app.features.cache import FeatureCache
 from app.features.dataset import FeatureDatasetBuilder
 from app.features.pipeline import FeaturePipeline
 from app.features.registry import default_registry
@@ -30,10 +31,14 @@ def get_feature_pipeline() -> FeaturePipeline:
     Builtin generators are loaded against the *same* ``IndicatorEngine``
     the indicator API uses, so the moving-average features delegate to an
     engine whose result cache is already warm from chart and overlay
-    traffic rather than to a second, cold one.
+    traffic rather than to a second, cold one. The pipeline itself is given
+    its own process-wide ``FeatureCache`` (see ``app/features/cache.py``) —
+    a second, independently-bounded cache at the same per-generator
+    granularity, which is what lets ``ohlcv``/``candle_shape`` (not
+    indicator-backed) benefit from a repeated identical request too.
     """
     load_builtin_features(engine=get_indicator_engine())
-    return FeaturePipeline(default_registry)
+    return FeaturePipeline(default_registry, FeatureCache())
 
 
 @functools.lru_cache(maxsize=1)

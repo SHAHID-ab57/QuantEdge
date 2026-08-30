@@ -1,11 +1,17 @@
 import { apiClient } from './client';
 import {
   FeatureCatalogSchema,
+  FeatureCorrelationSchema,
   FeatureDatasetSchema,
+  FeatureLineageSchema,
   FeatureSchema,
+  FeatureStatisticsSchema,
   type Feature,
   type FeatureCatalog,
+  type FeatureCorrelation,
   type FeatureDataset,
+  type FeatureLineage,
+  type FeatureStatistics,
 } from '@/types/api/features';
 
 /** The full feature catalogue, including each generator's parameter specs. */
@@ -73,4 +79,37 @@ export async function exportFeatureDataset(
     { responseType: 'blob' },
   );
   return data as Blob;
+}
+
+/** Every registered feature's dependency graph — ancestors, descendants, and a
+ * topological order. Edgeless today (no builtin feature declares a dependency
+ * yet), but the graph itself is real. */
+export async function fetchFeatureLineage(): Promise<FeatureLineage> {
+  const { data } = await apiClient.get('/api/v1/features/lineage');
+  return FeatureLineageSchema.parse(data);
+}
+
+/** Build the same dataset `buildFeatureDataset` would and correlate its numeric columns. */
+export async function computeFeatureCorrelation(
+  symbol: string,
+  params: BuildDatasetParams,
+): Promise<FeatureCorrelation> {
+  const { data } = await apiClient.post(
+    `/api/v1/markets/${encodeURIComponent(symbol)}/features/correlation`,
+    params,
+  );
+  return FeatureCorrelationSchema.parse(data);
+}
+
+/** Build the same dataset `buildFeatureDataset` would and summarize every column,
+ * over the complete dataset — never capped by `preview_rows`. */
+export async function computeFeatureStatistics(
+  symbol: string,
+  params: BuildDatasetParams,
+): Promise<FeatureStatistics> {
+  const { data } = await apiClient.post(
+    `/api/v1/markets/${encodeURIComponent(symbol)}/features/statistics`,
+    params,
+  );
+  return FeatureStatisticsSchema.parse(data);
 }

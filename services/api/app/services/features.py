@@ -15,16 +15,22 @@ import logging
 from dataclasses import dataclass, replace
 
 from app.features.builtin import load_builtin_features
+from app.features.correlation import compute_correlation_matrix
 from app.features.dataset import FeatureDataset, FeatureDatasetBuilder, FeatureRequest
 from app.features.export import EXPORT_FORMATS, dataset_filename
+from app.features.lineage import build_lineage_graph
+from app.features.statistics import compute_dataset_statistics
 from app.repositories.candles import CandleRepository
 from app.repositories.markets import MarketRepository
 from app.schemas.features import (
     FeatureCatalogResponse,
+    FeatureCorrelationResponse,
     FeatureDatasetRequest,
     FeatureDatasetResponse,
     FeatureDTO,
+    FeatureLineageResponse,
     FeatureRequestItem,
+    FeatureStatisticsResponse,
 )
 from app.services.candle_points import load_candle_points
 from app.services.market_query import validate_limit
@@ -80,6 +86,18 @@ class FeatureService:
         load_builtin_features()
         return FeatureDTO.from_metadata(self.builder.pipeline.describe(name))
 
+    def get_lineage(self) -> FeatureLineageResponse:
+        """Resolve the whole registry's dependency graph.
+
+        Reads straight from the registry (the same "no second query"
+        posture ``list_features`` already takes), so a generator that later
+        declares a real dependency appears here with no change to this
+        service.
+        """
+        load_builtin_features()
+        graph = build_lineage_graph(self.builder.pipeline.registry)
+        return FeatureLineageResponse.from_graph(graph)
+
     async def build_dataset(
         self, symbol: str, request: FeatureDatasetRequest
     ) -> FeatureDatasetResponse:
@@ -112,6 +130,32 @@ class FeatureService:
             media_type=export_format.media_type,
             filename=dataset_filename(dataset, export_format.extension),
         )
+
+    async def compute_correlation(
+        self, symbol: str, request: FeatureDatasetRequest
+    ) -> FeatureCorrelationResponse:
+        """Build the same dataset `/features/dataset` would and correlate its numeric columns.
+
+        Reuses `build_raw` wholesale rather than a second candle-loading/
+        generation path — the same "one dataset-building path" contract
+        `build_raw`'s own docstring states, applied to a third consumer.
+        """
+        dataset, _ = await self.build_raw(symbol, request)
+        matrix = compute_correlation_matrix(dataset.columns, dataset.rows)
+        return FeatureCorrelationResponse.from_matrix(symbol, request.timeframe, matrix)
+
+    async def compute_statistics(
+        self, symbol: str, request: FeatureDatasetRequest
+    ) -> FeatureStatisticsResponse:
+        """Build the same dataset `/features/dataset` would and summarize every column.
+
+        The full-dataset counterpart of the frontend's own preview-scoped
+        per-column stats popover — this always covers every row `build_raw`
+        returns, never just what a preview happened to render.
+        """
+        dataset, _ = await self.build_raw(symbol, request)
+        statistics = compute_dataset_statistics(dataset.columns, dataset.rows)
+        return FeatureStatisticsResponse.from_statistics(symbol, request.timeframe, statistics)
 
     async def build_raw(
         self, symbol: str, request: FeatureDatasetRequest

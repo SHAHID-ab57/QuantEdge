@@ -8,6 +8,56 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Feature Engineering Engine — versioning, lineage, correlation, cache,
+  and statistics.** Extends the `/features` page with four read-only
+  research capabilities, entirely by reusing what already existed —
+  reused `build_raw()` as the one dataset-building path, reused
+  `fingerprint_candles` from the Technical Indicator Engine's own cache
+  rather than duplicating it, and reused the frontend's existing
+  population-variance formula so backend and preview statistics never
+  disagree. **No breaking API change**; `cache_status` is additive and
+  defaulted on every affected schema/dataclass.
+
+  - **Feature Versioning** was already fully implemented — this pass only
+    confirmed it and left `DatasetSummary`'s existing per-feature version
+    chips as the one place it's shown, rather than building a second,
+    redundant version panel.
+  - **Feature Cache**: a bounded in-process LRU (`app/features/cache.py`'s
+    `FeatureCache`/`FeatureCacheKey`), mirroring `IndicatorEngine`'s own
+    cache exactly and wired into `FeaturePipeline` via a new optional
+    constructor argument. Every generated feature now reports
+    `cache_status: "hit" | "miss" | "disabled"`, surfaced on the frontend
+    as a tinted, tooltipped chip in `DatasetSummary` (`<ms> · cache
+<status>`) rather than a separate cache dashboard.
+  - **Feature Correlation Matrix** (`POST /markets/{symbol}/features/
+correlation`): a pairwise-complete-rows Pearson matrix over a built
+    dataset's numeric columns, rendered as a coloured `Table` heatmap
+    (`FeatureCorrelationMatrix`, no charting library) that renders nothing
+    for fewer than two numeric columns rather than an empty shell.
+  - **Feature Statistics** (`POST /markets/{symbol}/features/statistics`):
+    per-column count/null-count/mean/std/min/max over the _complete_ built
+    dataset (not the 200-row preview `ColumnStatsPopover` already
+    summarizes) — same population-variance formula on both sides
+    deliberately.
+  - **Feature Dependency Graph / Lineage** (`GET /features/lineage`): one
+    shared module (`app/features/lineage.py`) serving both framings, since
+    they're the same edge set read two ways. Rendered as grouped
+    Depends-on/Used-by chips plus a topological-order sentence
+    (`FeatureLineagePanel`) rather than a drawn node-link graph — this
+    codebase has no graph-drawing library, and the graph is genuinely
+    edgeless today (no shipped generator declares a dependency).
+  - A single new `FeatureAnalysisPanel` "Analyze"/"Re-analyze" action
+    triggers the correlation and statistics requests together, since a
+    researcher who wants one typically wants the other.
+  - No database migration — all four capabilities compute in-memory over
+    already-loaded candles/features.
+  - Full backend suite green (1353 tests, 97.32% overall) and full
+    frontend suite passes with a clean lint, typecheck, and production
+    build; 12 new frontend component tests across 4 new test files plus
+    `test_cache.py`/`test_correlation.py`/`test_statistics.py`/
+    `test_lineage.py` and new cases in `test_pipeline.py` and
+    `test_features_api.py` on the backend.
+
 - **Model Evaluation & Benchmarking Engine — production-readiness pass.**
   Extends the engine and its `/ml/evaluation` page with the depth a
   production comparison workflow needs, entirely by reusing what already

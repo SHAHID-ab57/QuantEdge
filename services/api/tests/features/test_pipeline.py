@@ -21,6 +21,7 @@ from app.features.base import (
     OHLCVPoint,
     ParameterSpec,
 )
+from app.features.cache import FeatureCache
 from app.features.errors import (
     FeatureExecutionError,
     FeatureNotFoundError,
@@ -187,6 +188,24 @@ class NegativeWarmup(FeatureGenerator):
         return one_column("value", [1.0] * len(ctx.candles))
 
 
+class Counting(FeatureGenerator):
+    """Counts how many times `generate()` actually ran — the cache probe.
+
+    A cache hit must skip `generate()` entirely, not merely return an
+    equal-looking value; this is what lets a test tell "recomputed and
+    happened to match" from "never recomputed at all".
+    """
+
+    metadata = FeatureMetadata(
+        name="counting", label="Counting", description="Counts its own calls.", category="test"
+    )
+    calls: int = 0
+
+    def generate(self, ctx: FeatureContext) -> FeatureOutput:
+        Counting.calls += 1
+        return one_column("count", [float(Counting.calls)] * len(ctx.candles))
+
+
 @pytest.fixture
 def pipeline() -> FeaturePipeline:
     """An isolated pipeline holding only this module's test generators."""
@@ -200,9 +219,20 @@ def pipeline() -> FeaturePipeline:
         NoColumns,
         RepeatedColumn,
         NegativeWarmup,
+        Counting,
     ):
         registry.register(cls)
     return FeaturePipeline(registry)
+
+
+@pytest.fixture
+def cached_pipeline() -> FeaturePipeline:
+    """The same test registry, wired to a real `FeatureCache`."""
+    Counting.calls = 0
+    registry = FeatureRegistry()
+    for cls in (Doubler, Counting):
+        registry.register(cls)
+    return FeaturePipeline(registry, FeatureCache())
 
 
 class TestExecution:
@@ -235,6 +265,9 @@ class TestExecution:
 
     def test_pipeline_version_is_reported_for_reproducibility(self) -> None:
         assert PIPELINE_VERSION
+
+    def test_reports_cache_disabled_when_no_cache_is_wired(self, pipeline: FeaturePipeline) -> None:
+        assert pipeline.run("doubler", candles(2)).cache_status == "disabled"
 
 
 class TestCatalogue:
@@ -363,3 +396,42 @@ class TestGuarantees:
         assert exc_info.value.status_code == 500
         assert "exploding" in exc_info.value.message
         assert "ValueError" in exc_info.value.message
+
+
+class TestCache:
+    def test_first_run_is_a_miss_and_actually_computes(
+        self, cached_pipeline: FeaturePipeline
+    ) -> None:
+        run = cached_pipeline.run("counting", candles(3))
+        assert run.cache_status == "miss"
+        assert Counting.calls == 1
+
+    def test_identical_second_call_is_a_hit_and_skips_recomputation(
+        self, cached_pipeline: FeaturePipeline
+    ) -> None:
+        first = cached_pipeline.run("counting", candles(3))
+        second = cached_pipeline.run("counting", candles(3))
+        assert second.cache_status == "hit"
+        assert Counting.calls == 1  # generate() ran exactly once, not twice
+        assert second.output.series[0].values == first.output.series[0].values
+
+    def test_different_params_do_not_collide(self, cached_pipeline: FeaturePipeline) -> None:
+        cached_pipeline.run("doubler", candles(3), {"factor": "2"})
+        run = cached_pipeline.run("doubler", candles(3), {"factor": "3"})
+        assert run.cache_status == "miss"
+
+    def test_different_candle_ranges_do_not_collide(
+        self, cached_pipeline: FeaturePipeline
+    ) -> None:
+        cached_pipeline.run("counting", candles(3))
+        run = cached_pipeline.run("counting", candles(4))
+        assert run.cache_status == "miss"
+        assert Counting.calls == 2
+
+    def test_a_cache_hit_still_reports_the_generators_metadata(
+        self, cached_pipeline: FeaturePipeline
+    ) -> None:
+        cached_pipeline.run("counting", candles(2))
+        run = cached_pipeline.run("counting", candles(2))
+        assert run.metadata.name == "counting"
+        assert run.warmup == 0

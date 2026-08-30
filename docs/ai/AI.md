@@ -72,6 +72,21 @@ engineering". In short:
 Eight generators ship today: `ohlcv` (5 columns), `candle_shape` (body,
 upper wick, lower wick, direction), and `sma`/`ema`/`wma`.
 
+**Beyond generation itself, four read-only capabilities sit on top of an
+already-built dataset** (`ARCHITECTURE.md` § "Feature Engineering Engine —
+Versioning, Lineage, Correlation, Cache, and Statistics"): a full
+dependency graph (`GET /features/lineage` — real today, simply edgeless,
+since no shipped generator declares a dependency yet), a pairwise Pearson
+correlation matrix and per-column statistics over the _complete_ dataset
+(`POST .../features/correlation`/`.../features/statistics`, both reusing
+the same dataset-build path `/features/dataset` itself uses — nothing here
+recomputes a feature), and an optional per-generator result cache
+(`app/features/cache.py`) at the same granularity `IndicatorEngine`
+already caches at, extending that benefit to `ohlcv`/`candle_shape` rather
+than only the indicator-backed generators. Feature-level and
+pipeline-level versioning (`FeatureMetadata.version`, `PIPELINE_VERSION`)
+already existed before this pass and are unchanged.
+
 ### Training/serving consistency
 
 The single most damaging failure mode in an ML system is _training/serving

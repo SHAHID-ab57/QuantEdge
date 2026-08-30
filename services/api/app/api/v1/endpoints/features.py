@@ -30,9 +30,12 @@ from app.dependencies.features import get_feature_service
 from app.features.export import EXPORT_FORMATS
 from app.schemas.features import (
     FeatureCatalogResponse,
+    FeatureCorrelationResponse,
     FeatureDatasetRequest,
     FeatureDatasetResponse,
     FeatureDTO,
+    FeatureLineageResponse,
+    FeatureStatisticsResponse,
 )
 from app.services.features import FeatureService
 
@@ -137,6 +140,22 @@ async def list_features(service: FeatureServiceDep) -> FeatureCatalogResponse:
 
 
 @router.get(
+    "/features/lineage",
+    response_model=FeatureLineageResponse,
+    summary="The full feature dependency graph",
+    description=(
+        "Every registered feature's dependency edges, resolved into transitive "
+        "ancestors/descendants and a topological order. Registered under a "
+        "static path *before* `/features/{feature}` so 'lineage' is never "
+        "mistaken for a feature name."
+    ),
+)
+async def get_feature_lineage(service: FeatureServiceDep) -> FeatureLineageResponse:
+    """Return the whole registry's dependency graph."""
+    return service.get_lineage()
+
+
+@router.get(
     "/features/{feature}",
     response_model=FeatureDTO,
     summary="Describe one feature generator",
@@ -177,6 +196,48 @@ async def build_feature_dataset(
 ) -> FeatureDatasetResponse:
     """Build a feature dataset for one market/timeframe/range."""
     return await service.build_dataset(symbol, body)
+
+
+@router.post(
+    "/markets/{symbol}/features/correlation",
+    response_model=FeatureCorrelationResponse,
+    summary="Correlate a feature dataset's numeric columns",
+    description=(
+        "Build the exact same dataset `/features/dataset` would (same request "
+        "body) and return the pairwise Pearson correlation matrix across its "
+        "numeric columns. Empty (`columns: []`) when fewer than two numeric "
+        "columns are present — not an error."
+    ),
+    responses=_ERROR_RESPONSES,
+)
+async def correlate_feature_dataset(
+    symbol: SymbolPath,
+    body: FeatureDatasetRequest,
+    service: FeatureServiceDep,
+) -> FeatureCorrelationResponse:
+    """Build a dataset and correlate its numeric columns."""
+    return await service.compute_correlation(symbol, body)
+
+
+@router.post(
+    "/markets/{symbol}/features/statistics",
+    response_model=FeatureStatisticsResponse,
+    summary="Per-column statistics for a feature dataset",
+    description=(
+        "Build the exact same dataset `/features/dataset` would (same request "
+        "body) and return count/null-count/mean/std/min/max per column, over "
+        "the *complete* dataset — never capped by `preview_rows` the way the "
+        "dataset endpoint's own response can be."
+    ),
+    responses=_ERROR_RESPONSES,
+)
+async def feature_dataset_statistics(
+    symbol: SymbolPath,
+    body: FeatureDatasetRequest,
+    service: FeatureServiceDep,
+) -> FeatureStatisticsResponse:
+    """Build a dataset and summarize every column."""
+    return await service.compute_statistics(symbol, body)
 
 
 @router.post(

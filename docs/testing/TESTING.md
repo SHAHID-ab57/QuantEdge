@@ -839,6 +839,43 @@ section assertions collapsed into one "Validation Report" section check,
 and a new empty-state test asserts the "What validation does"/"How to
 start"/"Example workflow" copy renders before anything has been validated.
 
+### Testing the Feature Engineering Engine — versioning, lineage, correlation, cache, and statistics
+
+A further pass added four new components under
+`apps/dashboard/src/features/feature-engineering/components/` plus a cache-
+status extension to the existing `dataset-summary.tsx`. Each new component
+is tested in isolation before the page-level integration.
+
+**Components.** `feature-analysis-panel.test.tsx` covers the Analyze button
+rendering before anything has been computed, both `useComputeCorrelation`/
+`useComputeStatistics` mutations firing with the identical `{ symbol,
+params }` request when clicked, both results rendering together once
+available (with the button relabeling to "Re-analyze"), and a correlation
+error surfacing via `role="alert"`. Both hooks are mocked with a shared,
+loosely-typed `mutationResult()` helper cast with `as never` at each
+`mockReturnValue` call site — an earlier version pre-cast the helper's
+return value once and spread it per test, which stopped type-checking
+correctly the moment two tests needed different `data` shapes (correlation's
+`{columns, matrix}` versus statistics' `{columns: ColumnStatisticsDTO[]}`);
+casting individually at the call site instead resolved it cleanly.
+`feature-correlation-matrix.test.tsx` and `feature-statistics-panel.test.tsx`
+each cover normal rendering plus the "gracefully absent" case (fewer than
+two numeric columns, or no columns at all) rendering nothing rather than an
+empty table shell. `feature-lineage-panel.test.tsx` covers three cases: an
+edgeless graph rendering its "no dependency" note plus a single-node
+computed order, a connected graph rendering both Depends-on/Used-by chip
+groups and the arrow-joined topological-order sentence, and an empty
+catalogue rendering nothing at all (`toBeEmptyDOMElement()`).
+
+**Page-level.** `feature-engineering-page.test.tsx`'s `vi.mock('@/lib/api/
+features', ...)` block gained `fetchFeatureLineage` / `computeFeature-
+Correlation` / `computeFeatureStatistics` stubs, with `fetchFeatureLineage`
+defaulted to an empty graph in `beforeEach` — the page now calls
+`useFeatureLineage()` unconditionally on every render, and without these
+three names the mock module has no export matching what the hook imports,
+which broke all 23 pre-existing tests in this file with a single missing-
+export error until the mock was extended.
+
 ### Testing the ML Dataset Builder (frontend)
 
 `apps/dashboard/src/features/ml-datasets/` follows the same layering as

@@ -2033,8 +2033,12 @@ src/features/feature-engineering/
 │   ├── feature-selector.tsx         search, category filter, keyboard nav, recently used
 │   ├── dataset-preview-table.tsx    virtualized matrix, with per-column dtype tooltips
 │   ├── dataset-info-card.tsx        identity/reproducibility (Dataset ID, versions, shape)
-│   ├── dataset-summary.tsx          quality report: row accounting, warmup, failures
-│   └── dataset-export.tsx           CSV / JSON download
+│   ├── dataset-summary.tsx          quality report: row accounting, warmup, failures, cache tint
+│   ├── dataset-export.tsx           CSV / JSON download
+│   ├── feature-analysis-panel.tsx   one "Analyze" action driving correlation + statistics together
+│   ├── feature-correlation-matrix.tsx  Pearson heatmap over the built dataset's numeric columns
+│   ├── feature-statistics-panel.tsx    per-column count/null/mean/std/min/max over the full dataset
+│   └── feature-lineage-panel.tsx    dependency graph as grouped chips, not a drawn graph
 └── feature-engineering-page.tsx     composition root
 ```
 
@@ -2106,6 +2110,69 @@ a row count that looks wrong. `null` cells render as an em dash so a gap is
 visibly a gap, and each column header carries its `dtype` — a researcher
 needs to know whether a column is continuous or categorical before deciding
 how to model it.
+
+### Versioning, lineage, correlation, cache, and statistics
+
+A second pass extended the built dataset with read-only research tooling —
+see `ARCHITECTURE.md` § "Feature Engineering Engine — Versioning, Lineage,
+Correlation, Cache, and Statistics" for the backend half. Every piece here
+is additive: no existing component's props changed shape, and the new
+panels only render once there is something real to show.
+
+**Versioning was already there — it just wasn't visible enough.** Each
+generator has always carried a version string; `DatasetSummary`'s per-
+feature chips already showed it. Nothing new was built for this — the
+work was confirming the data was already flowing and leaving it in place
+rather than inventing a second, parallel "version panel."
+
+**Cache visibility, not a cache UI.** `DatasetSummary`'s feature chips now
+wrap in a `Tooltip` reporting `<execution_time_ms> ms · cache <status>`,
+and tint green when the backend reports `cache_status: "hit"`. There is no
+separate cache dashboard — a researcher only needs to know "was this
+recomputed or reused" at the point where they're already looking at the
+feature, not in a new place they'd have to think to check.
+
+**One "Analyze" action, not two.** `FeatureAnalysisPanel` fires
+`useComputeCorrelation` and `useComputeStatistics` together behind a single
+button, because a researcher who wants a correlation matrix over a dataset
+almost always wants its column statistics in the same breath, and the two
+results share nothing that would justify separate triggers. Both are
+`useMutation`s (matching `useBuildDataset`'s precedent above) — explicit,
+potentially expensive, user-initiated, not something to refetch on
+remount. The button reads "Analyze" the first time and "Re-analyze" once a
+result exists; either mutation's error surfaces inline via `Alert` rather
+than silently leaving the other panel populated and one missing.
+
+**The correlation matrix is a coloured `Table`, not a charting library.**
+`FeatureCorrelationMatrix` renders a plain MUI `Table` with each cell's
+background tinted green or red by the sign and magnitude of its Pearson
+coefficient (`cellColor`) — matching this codebase's established
+precedent of small on-page visualizations built from `sx` rather than a
+drawing dependency (`DatasetPreviewTable`'s split-label coloring is the
+same idea). It renders nothing when the dataset has fewer than two numeric
+columns, the same "gracefully absent" convention the Evaluation Engine's
+ROC/PR charts use — an empty state here would be noise, not information.
+
+**`FeatureStatisticsPanel` is not `ColumnStatsPopover`.** The preview table
+already has a per-column stats popover, but it only ever summarizes the
+`preview_rows: 200` rows rendered on screen. `FeatureStatisticsPanel`
+summarizes the complete built dataset the backend computed statistics
+over — same population-variance formula as the popover
+(`compute_dataset_statistics` mirrors `computeColumnStats` deliberately, so
+the two never disagree for a shared column), just over every row rather
+than a truncated preview. Both are kept, because they answer different
+questions: "what does the visible sample look like" versus "what does the
+dataset actually look like."
+
+**`FeatureLineagePanel` renders chips, not a node-link diagram.** This
+codebase has no graph-drawing library, and the dependency graph is
+genuinely edgeless today — no shipped generator declares a dependency on
+another — so building an interactive graph visualization for a graph with
+zero edges would be speculative complexity with nothing to show. Instead
+each node lists its Depends-on and Used-by chips (empty groups render a
+plain "no dependency" note rather than nothing, so the absence itself is
+legible) plus one sentence stating the computed topological order. The
+panel renders nothing when the catalogue itself has no features.
 
 ### Production hardening: identity, quality, search, and scale
 
@@ -2196,6 +2263,16 @@ common expectation that a full reset should not depend on what happens to
 be on screen. Each row also now shows its generator's version, category,
 and produced-column count (`v1.0.0 · trend · 1 column`) — all read from the
 catalogue response already fetched for the row, never a new request.
+
+**Testing.** `feature-analysis-panel.test.tsx`, `feature-correlation-
+matrix.test.tsx`, `feature-statistics-panel.test.tsx`, and `feature-
+lineage-panel.test.tsx` each cover their component in isolation (the empty
+states, the two-mutations-fire-together behaviour, error surfacing, chip
+rendering for both the edgeless and connected graph cases). `feature-
+engineering-page.test.tsx`'s API mock was extended with
+`fetchFeatureLineage` / `computeFeatureCorrelation` / `computeFeature-
+Statistics` so the page's unconditional `useFeatureLineage()` call doesn't
+break its 23 existing tests.
 
 ## Dataset Validation
 

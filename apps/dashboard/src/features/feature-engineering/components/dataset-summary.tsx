@@ -4,9 +4,18 @@ import Alert from '@mui/material/Alert';
 import Chip from '@mui/material/Chip';
 import Divider from '@mui/material/Divider';
 import Stack from '@mui/material/Stack';
+import Tooltip from '@mui/material/Tooltip';
 import Typography from '@mui/material/Typography';
 import { InfoTooltip } from '@/components/info-tooltip';
 import type { FeatureDataset } from '@/types/api/features';
+
+/** "hit" tints green (a repeated identical request was served from the
+ * Feature Cache without recomputing); "miss"/"disabled" stay neutral —
+ * a miss is the normal, expected case for a first-time request, not a
+ * problem to flag. */
+function cacheChipColor(status: string | undefined): 'success' | 'default' {
+  return status === 'hit' ? 'success' : 'default';
+}
 
 export interface DatasetSummaryProps {
   dataset: FeatureDataset;
@@ -117,12 +126,17 @@ export function DatasetSummary({ dataset }: DatasetSummaryProps) {
       </Typography>
       <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap>
         {dataset.features.map((info) => (
-          <Chip
+          <Tooltip
             key={info.feature}
-            size="small"
-            variant="outlined"
-            label={`${info.label} v${info.version}`}
-          />
+            title={`${info.execution_time_ms.toFixed(2)} ms · cache ${info.cache_status ?? 'disabled'}`}
+          >
+            <Chip
+              size="small"
+              variant="outlined"
+              color={cacheChipColor(info.cache_status)}
+              label={`${info.label} v${info.version}`}
+            />
+          </Tooltip>
         ))}
       </Stack>
 

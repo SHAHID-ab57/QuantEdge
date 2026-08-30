@@ -234,12 +234,15 @@ unchanged.
 
 ### Feature engineering
 
-| Method | Path                                        | Purpose                                                       |
-| ------ | ------------------------------------------- | ------------------------------------------------------------- |
-| GET    | `/api/v1/features`                          | Catalogue of every registered generator, with parameter specs |
-| GET    | `/api/v1/features/{feature}`                | One generator's metadata, parameters, and output columns      |
-| POST   | `/api/v1/markets/{symbol}/features/dataset` | Build a feature dataset (optionally truncated for preview)    |
-| POST   | `/api/v1/markets/{symbol}/features/export`  | Build the same dataset and stream it as a CSV or JSON file    |
+| Method | Path                                            | Purpose                                                       |
+| ------ | ----------------------------------------------- | ------------------------------------------------------------- |
+| GET    | `/api/v1/features`                              | Catalogue of every registered generator, with parameter specs |
+| GET    | `/api/v1/features/lineage`                      | The whole registry's dependency graph, resolved               |
+| GET    | `/api/v1/features/{feature}`                    | One generator's metadata, parameters, and output columns      |
+| POST   | `/api/v1/markets/{symbol}/features/dataset`     | Build a feature dataset (optionally truncated for preview)    |
+| POST   | `/api/v1/markets/{symbol}/features/export`      | Build the same dataset and stream it as a CSV or JSON file    |
+| POST   | `/api/v1/markets/{symbol}/features/correlation` | Build the same dataset and correlate its numeric columns      |
+| POST   | `/api/v1/markets/{symbol}/features/statistics`  | Build the same dataset and summarize every column, complete   |
 
 Registered today: `ohlcv` (`category: "raw"`), `candle_shape`
 (`price_action`), and `sma`/`ema`/`wma` (`trend`). The set is queried from
@@ -323,6 +326,7 @@ wide dataset.
       "columns": ["sma_20"],
       "warmup": 20,
       "execution_time_ms": 0.06,
+      "cache_status": "miss", // "hit" | "miss" | "disabled" — see the Feature Cache
     },
   ],
   "meta": {
@@ -442,6 +446,96 @@ outright (that case is instead a `200` with zero columns and a fully
 populated `quality.feature_failures`). The shared `market_not_found`,
 `candle_not_found`, `invalid_timeframe`, `invalid_range`, and
 `limit_exceeded` codes apply here too.
+
+**Feature dependency graph** (`GET /features/lineage`) — resolves every
+registered generator's `dependencies` into a full graph. Registered
+_before_ `GET /features/{feature}` in the router so the literal path
+`lineage` is never matched as a `{feature}` path parameter.
+
+```jsonc
+{
+  "nodes": [
+    {
+      "name": "sma",
+      "label": "Simple Moving Average",
+      "category": "trend",
+      "dependencies": [], // this feature's own declared dependencies
+      "depended_on_by": [], // features that declare a dependency on this one
+      "ancestors": [], // the full transitive closure of `dependencies`
+      "descendants": [], // the full transitive closure of `depended_on_by`
+    },
+    // ... one entry per registered generator
+  ],
+  "edges": [], // (dependency, dependent) pairs — empty today, see below
+  "topological_order": ["candle_shape", "ema", "ohlcv", "sma", "wma"],
+}
+```
+
+No shipped generator declares a dependency today (see `FeatureMetadata.dependencies`'s
+own docstring), so a real response has `"edges": []` and every node's
+`dependencies`/`depended_on_by`/`ancestors`/`descendants` empty — the
+honest current state, not a placeholder. The graph, cycle detection, and
+topological order are all real and already exercised by the registry's own
+startup validation.
+
+**Feature correlation matrix** (`POST /markets/{symbol}/features/correlation`)
+and **feature statistics** (`POST /markets/{symbol}/features/statistics`) —
+both accept the exact same request body as `/features/dataset` and build
+the identical dataset server-side (via the same `FeatureService.build_raw`
+every dataset/export request already shares), then run a pure, read-only
+computation over it — nothing here recomputes a feature or issues a
+second database query.
+
+```jsonc
+// POST .../features/correlation
+{
+  "symbol": "ETHUSD",
+  "timeframe": "1h",
+  "columns": ["open", "high", "low", "close", "volume"], // numeric columns only
+  "matrix": [[1.0, 0.99, 0.98, 0.97, 0.42], ["..."]], // matrix[i][j] = correlation(columns[i], columns[j])
+  "row_count": 481, // rows actually used (pairwise-complete per column pair)
+}
+```
+
+Empty (`"columns": []`) when fewer than two numeric columns are present —
+not an error, since a single-feature or all-categorical dataset is a
+perfectly valid dataset to have built.
+
+```jsonc
+// POST .../features/statistics
+{
+  "symbol": "ETHUSD",
+  "timeframe": "1h",
+  "columns": [
+    {
+      "column": "close",
+      "count": 481,
+      "null_count": 0,
+      "mean": 3061.4,
+      "std": 42.7,
+      "minimum": 2980.1,
+      "maximum": 3199.9,
+    },
+    {
+      "column": "candle_direction",
+      "count": 481,
+      "null_count": 0,
+      "mean": null, // categorical/boolean columns get count/null_count only
+      "std": null,
+      "minimum": null,
+      "maximum": null,
+    },
+  ],
+  "row_count": 481,
+}
+```
+
+Unlike `/features/dataset`'s own response, `/features/statistics` is
+**never** capped by `preview_rows` — it always describes the complete
+dataset, the same "preview vs. export" distinction this API already draws
+for CSV/JSON downloads. Both endpoints surface the exact same error codes
+as `/features/dataset` (`market_not_found`, `invalid_feature_parameter`,
+etc.), since both build through the identical path.
 
 ### Dataset validation
 

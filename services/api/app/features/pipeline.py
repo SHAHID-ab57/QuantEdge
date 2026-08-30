@@ -10,13 +10,19 @@ generator it is running and imports no concrete generator — that is what
 makes the "add a feature without modifying the pipeline core" guarantee
 structural rather than a convention someone has to remember.
 
-No result cache lives here, unlike ``IndicatorEngine``. That is deliberate,
-not an omission: a feature request is a *dataset* request, its output is
-proportional to the whole candle range rather than a single number, and the
-expensive part (loading candles) happens once per dataset upstream. Caching
-whole datasets in-process would trade a large amount of memory for a
-saving the batched candle load already captures. The generators that wrap
-indicators still get the indicator engine's own cache for free, underneath.
+A whole-dataset result cache deliberately does **not** live here: a feature
+request is a *dataset* request, its output is proportional to the whole
+candle range rather than a single number, and the expensive part (loading
+candles) happens once per dataset upstream — caching whole datasets
+in-process would trade a large amount of memory for a saving the batched
+candle load already captures. What *does* live here, at the same
+per-generator granularity ``IndicatorEngine`` already caches at, is an
+optional ``FeatureCache`` (``app/features/cache.py``): one entry per
+(feature, params, candle-range) triple, not per dataset. Indicator-backed
+generators (``sma``/``ema``/``wma``) already get this for free from the
+shared ``IndicatorEngine`` cache underneath; this is what extends the same
+benefit to ``ohlcv``/``candle_shape`` and any future non-indicator-backed
+generator.
 """
 
 import logging
@@ -32,6 +38,7 @@ from app.features.base import (
     FeatureOutput,
     OHLCVPoint,
 )
+from app.features.cache import FeatureCache, FeatureCacheKey, build_feature_cache_key
 from app.features.errors import (
     FeatureExecutionError,
     InsufficientFeatureDataError,
@@ -60,13 +67,17 @@ class FeatureRun:
     output: FeatureOutput
     warmup: int
     execution_time_ms: float
+    #: ``"hit"``, ``"miss"``, or ``"disabled"`` — mirrors ``IndicatorRun``'s
+    #: own field of the same name and meaning.
+    cache_status: str = "disabled"
 
 
 class FeaturePipeline:
     """Runs registered feature generators through a single, uniform pipeline."""
 
-    def __init__(self, registry: FeatureRegistry) -> None:
+    def __init__(self, registry: FeatureRegistry, cache: FeatureCache | None = None) -> None:
         self._registry = registry
+        self._cache = cache
 
     @property
     def registry(self) -> FeatureRegistry:
@@ -118,9 +129,23 @@ class FeaturePipeline:
         if len(candles) < warmup:
             raise InsufficientFeatureDataError(name, warmup, len(candles))
 
+        cached, key = self._lookup(name, params, candles)
+        if cached is not None:
+            return FeatureRun(
+                metadata=metadata,
+                params=params,
+                output=cached,
+                warmup=warmup,
+                cache_status="hit",
+                execution_time_ms=(perf_counter() - started) * 1000,
+            )
+
         output = self._generate(generator, FeatureContext(candles=candles, params=params))
         self._verify_alignment(name, output, len(candles))
         self._verify_unique_columns(name, output)
+
+        if self._cache is not None and key is not None:
+            self._cache.put(key, output)
 
         elapsed_ms = (perf_counter() - started) * 1000
         logger.debug(
@@ -135,8 +160,21 @@ class FeaturePipeline:
             params=params,
             output=output,
             warmup=warmup,
+            cache_status="miss" if self._cache is not None else "disabled",
             execution_time_ms=elapsed_ms,
         )
+
+    def _lookup(
+        self,
+        name: str,
+        params: Mapping[str, Any],
+        candles: Sequence[OHLCVPoint],
+    ) -> tuple[FeatureOutput | None, FeatureCacheKey | None]:
+        """Check the cache, returning the hit (if any) and the key to store under."""
+        if self._cache is None:
+            return None, None
+        key = build_feature_cache_key(name, params, candles)
+        return self._cache.get(key), key
 
     def _validate(
         self, generator: FeatureGenerator, raw_params: Mapping[str, Any]

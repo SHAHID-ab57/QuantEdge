@@ -17,8 +17,11 @@ from typing import Any
 from pydantic import BaseModel, Field, field_serializer
 
 from app.features.base import FeatureColumn, FeatureMetadata
+from app.features.correlation import FeatureCorrelationMatrix
 from app.features.dataset import DatasetFeatureInfo, FeatureDataset
+from app.features.lineage import FeatureLineageGraph, FeatureLineageNode
 from app.features.quality import DatasetQualityReport, FeatureFailure
+from app.features.statistics import ColumnStatistics, DatasetStatistics
 from app.schemas.indicators import ParameterSpecDTO
 
 
@@ -136,6 +139,10 @@ class DatasetFeatureInfoDTO(BaseModel):
     columns: list[str]
     warmup: int
     execution_time_ms: float
+    cache_status: str = Field(
+        default="disabled",
+        description='"hit", "miss", or "disabled" — see the Feature Cache',
+    )
 
     @classmethod
     def from_info(cls, info: DatasetFeatureInfo) -> "DatasetFeatureInfoDTO":
@@ -148,6 +155,7 @@ class DatasetFeatureInfoDTO(BaseModel):
             columns=info.columns,
             warmup=info.warmup,
             execution_time_ms=info.execution_time_ms,
+            cache_status=info.cache_status,
         )
 
 
@@ -347,3 +355,140 @@ class FeatureDatasetRequest(BaseModel):
         le=5000,
         description="Cap rows in the response for preview; `meta` still describes the full dataset",
     )
+
+
+class FeatureCorrelationResponse(BaseModel):
+    """Pairwise Pearson correlation across every numeric column in a built dataset."""
+
+    symbol: str
+    timeframe: str
+    columns: list[str] = Field(
+        default_factory=list, description="Numeric columns compared, in matrix row/column order"
+    )
+    matrix: list[list[float]] = Field(
+        default_factory=list,
+        description="matrix[i][j] is the correlation between columns[i] and columns[j]",
+    )
+    row_count: int = Field(
+        default=0, description="Rows actually used (pairwise-complete per column pair)"
+    )
+
+    @classmethod
+    def from_matrix(
+        cls, symbol: str, timeframe: str, matrix: FeatureCorrelationMatrix
+    ) -> "FeatureCorrelationResponse":
+        """Map an engine ``FeatureCorrelationMatrix`` onto the wire DTO."""
+        return cls(
+            symbol=symbol,
+            timeframe=timeframe,
+            columns=matrix.columns,
+            matrix=matrix.matrix,
+            row_count=matrix.row_count,
+        )
+
+
+class ColumnStatisticsDTO(BaseModel):
+    """Summary statistics for one column over a full (non-preview-capped) dataset."""
+
+    column: str
+    count: int
+    null_count: int
+    mean: float | None = None
+    std: float | None = None
+    minimum: float | None = None
+    maximum: float | None = None
+
+    @classmethod
+    def from_statistics(cls, stats: ColumnStatistics) -> "ColumnStatisticsDTO":
+        """Map an engine ``ColumnStatistics`` onto the wire DTO."""
+        return cls(
+            column=stats.column,
+            count=stats.count,
+            null_count=stats.null_count,
+            mean=stats.mean,
+            std=stats.std,
+            minimum=stats.minimum,
+            maximum=stats.maximum,
+        )
+
+
+class FeatureStatisticsResponse(BaseModel):
+    """Per-column statistics for every column in a built dataset."""
+
+    symbol: str
+    timeframe: str
+    columns: list[ColumnStatisticsDTO] = Field(default_factory=list)
+    row_count: int = 0
+
+    @classmethod
+    def from_statistics(
+        cls, symbol: str, timeframe: str, statistics: DatasetStatistics
+    ) -> "FeatureStatisticsResponse":
+        """Map an engine ``DatasetStatistics`` onto the wire DTO."""
+        return cls(
+            symbol=symbol,
+            timeframe=timeframe,
+            columns=[ColumnStatisticsDTO.from_statistics(entry) for entry in statistics.columns],
+            row_count=statistics.row_count,
+        )
+
+
+class FeatureLineageNodeDTO(BaseModel):
+    """One feature's place in the dependency graph."""
+
+    name: str
+    label: str
+    category: str
+    dependencies: list[str] = Field(
+        default_factory=list, description="Features this one directly depends on"
+    )
+    depended_on_by: list[str] = Field(
+        default_factory=list, description="Features that directly depend on this one"
+    )
+    ancestors: list[str] = Field(
+        default_factory=list, description="Every feature this one transitively depends on"
+    )
+    descendants: list[str] = Field(
+        default_factory=list, description="Every feature that transitively depends on this one"
+    )
+
+    @classmethod
+    def from_node(cls, node: FeatureLineageNode) -> "FeatureLineageNodeDTO":
+        """Map an engine ``FeatureLineageNode`` onto the wire DTO."""
+        return cls(
+            name=node.name,
+            label=node.label,
+            category=node.category,
+            dependencies=list(node.dependencies),
+            depended_on_by=list(node.depended_on_by),
+            ancestors=list(node.ancestors),
+            descendants=list(node.descendants),
+        )
+
+
+class FeatureLineageResponse(BaseModel):
+    """The whole registry's dependency structure, resolved.
+
+    Every registered feature's own metadata declares no dependency today
+    (see ``FeatureMetadata.dependencies``'s own docstring) — a real
+    response from this endpoint therefore has zero ``edges`` until a future
+    generator declares one, which is the honest, current state rather than
+    a placeholder: the graph, cycle detection, and topological order are
+    all real and already exercised by the registry's own startup
+    validation, simply over an edgeless graph today.
+    """
+
+    nodes: list[FeatureLineageNodeDTO] = Field(default_factory=list)
+    edges: list[tuple[str, str]] = Field(
+        default_factory=list, description="(dependency, dependent) pairs"
+    )
+    topological_order: list[str] = Field(default_factory=list)
+
+    @classmethod
+    def from_graph(cls, graph: FeatureLineageGraph) -> "FeatureLineageResponse":
+        """Map an engine ``FeatureLineageGraph`` onto the wire DTO."""
+        return cls(
+            nodes=[FeatureLineageNodeDTO.from_node(node) for node in graph.nodes],
+            edges=graph.edges,
+            topological_order=graph.topological_order,
+        )

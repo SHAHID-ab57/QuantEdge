@@ -964,6 +964,139 @@ code path — it exists so the _next_ milestone (AI Research, per
   existing, reused `InfoTooltip` component — never a new tooltip
   implementation.
 
+### Feature Engineering Engine — Versioning, Lineage, Correlation, Cache, and Statistics
+
+A fourth pass over the same system, entirely additive on top of the
+Production Hardening pass above: **no change to the registry, pipeline
+core, dataset builder's assembly logic, export layer, or any builtin
+generator's `generate()`.** Every item below either surfaces data that
+already existed (versioning), adds a pure read-only computation over an
+already-built dataset (correlation, statistics, lineage), or adds an
+optional, narrowly-scoped cache at the exact seam `IndicatorEngine` already
+caches at (the Feature Cache).
+
+**Feature Versioning — already fully implemented; this pass changed
+nothing.** `FeatureMetadata.version` (per-generator semver),
+`PIPELINE_VERSION` (pipeline-level), `FeatureDataset.dataset_id`, and
+per-feature `DatasetFeatureInfo.version` were all already recorded and
+echoed through `FeatureDTO`/`FeatureDatasetMeta`/`DatasetFeatureInfoDTO`
+into every dataset response and CSV/JSON export (see the Production
+Hardening pass above). The one gap was visibility, not existence: the
+frontend's `DatasetSummary` chip row already showed `"{label} v{version}"`
+per feature — now extended (see below) to also show cache status, rather
+than adding a second, redundant versioning surface.
+
+**Feature Lineage and Feature Dependency Graph — one shared module, not
+two.** `app/features/lineage.py` (new) resolves
+`FeatureMetadata.dependencies` — already declared and already validated at
+startup by `FeatureRegistry.validate_dependencies()` — into a traversable
+graph: `build_lineage_graph(registry)` returns every node's direct
+dependencies, direct dependents (`depended_on_by`, the reverse edge, not
+declared anywhere and derived here), the full transitive closure in both
+directions (`ancestors`/`descendants`), the edge list, and a topological
+order (a fresh DFS, `_topological_order`, conceptually mirroring
+`FeatureRegistry._check_cycle`'s own three-color traversal but producing
+an order rather than validating one — since the registry already
+guarantees the graph is acyclic at startup, this only re-raises
+`FeatureDependencyCycleError` defensively, for a hand-built registry that
+was never validated). "Lineage" (what feeds one feature) and "dependency
+graph" (the whole registry's structure) are deliberately the same
+underlying edge set, read two ways, rather than two parallel graph
+representations — exactly the duplication this platform's Strategy +
+Registry contexts already avoid elsewhere. New endpoint: `GET
+/features/lineage`, registered in the router **before**
+`GET /features/{feature}` so the literal path `lineage` is never matched as
+a `{feature}` path parameter. Honest current state: no shipped generator
+declares a real dependency (`FeatureMetadata.dependencies` remains
+`()` everywhere), so a real response today has zero `edges` — the graph,
+cycle detection, and topological order are all real and already exercised
+by the registry's own startup validation, simply over an edgeless graph
+until a future generator declares one.
+
+**Feature Correlation Matrix (`app/features/correlation.py`, new).**
+`compute_correlation_matrix(columns, rows)` is a pure function over an
+already-built `FeatureDataset` — the same "no second database query, use
+what the builder already produced" discipline `quality.py` holds itself
+to — computing pairwise Pearson correlation across numeric columns only
+(`dtype in ("float", "int")`; a categorical column's "correlation" is
+meaningless, the same gate `column-stats.ts`'s own `isNumericDtype` already
+applies client-side). Uses pairwise-complete rows per column pair (skips a
+row for one pair only if either of _that pair's_ values is `None`, not if
+any value anywhere in the row is `None`) so a dataset built with
+`drop_warmup=false` still produces a meaningful result. Returns an empty
+result (`columns: []`) rather than raising when fewer than two numeric
+columns are present — not an error, the same "gracefully absent, not a
+placeholder" convention `RocPrCurveCharts` already established for a job
+with no probabilities. New endpoint: `POST
+/markets/{symbol}/features/correlation`, same request body as
+`/features/dataset`, reusing `FeatureService.build_raw` wholesale (the
+existing "one dataset-building path every consumer shares" contract, now
+serving a third consumer alongside the dataset and export endpoints).
+
+**Feature Statistics (`app/features/statistics.py`, new).** The backend
+counterpart of the frontend's own preview-scoped `column-stats.ts`:
+`compute_dataset_statistics(columns, rows)` reports `count`/`null_count`
+for every column, plus `mean`/`std`/`minimum`/`maximum` (population
+variance, the same formula `column-stats.ts` uses, so a value computed
+here and a value the frontend's own preview popover shows for the same
+column always agree) for numeric columns only — `None` for a
+categorical/boolean column, never a fabricated number. Field names
+(`mean`, `std`, `minimum`, `maximum`) deliberately match
+`ai_extensions.py`'s `NormalizationStats`, though the two remain distinct
+types: this is a full descriptive report over every column of an
+already-built dataset, not a normalizer's fit-on-train-split statistics.
+New endpoint: `POST /markets/{symbol}/features/statistics`, same request
+body shape, also reusing `build_raw` — and, unlike the dataset endpoint's
+own response, never capped by `preview_rows`, since it always describes
+the complete dataset.
+
+**Feature Cache (`app/features/cache.py`, new) — extends caching
+coverage, does not reverse the pipeline's own prior decision.** The
+Production Hardening pass's pipeline docstring correctly rejected caching
+a _whole dataset_ (memory cost proportional to the requested range, and
+the real cost — loading candles — happens once upstream regardless). This
+is a different, narrower cache, at the same per-generator granularity
+`IndicatorEngine` already caches at: `FeatureCache`/`FeatureCacheKey`
+mirror `IndicatorCache`/`CacheKey` exactly (a bounded in-process LRU dict,
+`hits`/`misses`/`entries` stats, not thread-safe by the same
+single-event-loop assumption), reusing `fingerprint_candles` from
+`app/indicators/cache.py` directly rather than a second candle-identity
+implementation. `FeaturePipeline` gained an optional `cache: FeatureCache
+| None` constructor argument; `run()` now checks it before generating
+(mirroring `IndicatorEngine.run()`'s own resolve → validate → warmup check
+→ cache lookup → generate → verify → cache store sequence) and records
+`cache_status: "hit" | "miss" | "disabled"` on `FeatureRun`, threaded
+through to `DatasetFeatureInfo`/`DatasetFeatureInfoDTO` (both fields
+defaulted, so every existing direct construction of either dataclass keeps
+working unchanged). `get_feature_pipeline()` now wires one process-wide
+`FeatureCache()` in, alongside the already-shared `IndicatorEngine`.
+Indicator-backed features (`sma`/`ema`/`wma`) already got caching for free
+from that shared engine; this is what extends the same benefit to
+`ohlcv`/`candle_shape` and any future non-indicator-backed generator. The
+frontend's `DatasetSummary` feature chips now tint green on a cache hit
+(via a `Tooltip` showing the exact execution time and cache status) rather
+than adding a second, separate per-feature info table.
+
+**Frontend: three new panels, one existing component extended, one route
+change.** `FeatureCorrelationMatrix` (heatmap table, green/red `sx`
+background-color intensity by correlation strength and sign — this
+codebase's established "plain background color, not a charting library"
+approach, the same convention `dataset-preview-table.tsx`'s own split-label
+coloring already uses) and `FeatureStatisticsPanel` (a table, one row per
+column) are both driven by `FeatureAnalysisPanel`'s single "Analyze" button
+— triggering both `useComputeCorrelation`/`useComputeStatistics` mutations
+together rather than two separate buttons, since both rebuild the same
+dataset server-side and a researcher who wants one typically wants the
+other. Deliberately **not** computed automatically alongside every dataset
+build, which would silently double or triple the work for a researcher who
+never opens this panel. `FeatureLineagePanel` renders the dependency graph
+as a grouped list of chips (dependencies/dependents per feature, plus the
+topological order as a sentence) rather than a drawn node-link graph — this
+platform has no graph-drawing library, and every node has zero edges
+today; this view is fully correct and immediately useful the day a real
+dependency is declared, with no code change. `DatasetSummary`'s existing
+feature-version chips gained the cache-status tint described above.
+
 ### Dataset Validation & Quality Engine
 
 `services/api/app/dataset_validation/` is a mandatory quality gate that

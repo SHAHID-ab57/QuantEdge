@@ -18,8 +18,15 @@ import { DatasetForm, type DatasetFormValues } from './components/dataset-form';
 import { DatasetInfoCard } from './components/dataset-info-card';
 import { DatasetPreviewTable } from './components/dataset-preview-table';
 import { DatasetSummary } from './components/dataset-summary';
+import { FeatureAnalysisPanel } from './components/feature-analysis-panel';
+import { FeatureLineagePanel } from './components/feature-lineage-panel';
 import { FeatureSelector } from './components/feature-selector';
-import { PREVIEW_ROWS, useBuildDataset, useFeatureCatalog } from './hooks/use-feature-data';
+import {
+  PREVIEW_ROWS,
+  useBuildDataset,
+  useFeatureCatalog,
+  useFeatureLineage,
+} from './hooks/use-feature-data';
 import {
   toRequestBodies,
   toggleSelection,
@@ -84,6 +91,7 @@ export function FeatureEngineeringPage() {
   const markets = useMarkets();
   const catalogue = useFeatureCatalog();
   const build = useBuildDataset();
+  const lineage = useFeatureLineage();
 
   const [form, setForm] = useState<DatasetFormValues>(INITIAL_FORM);
   const [selections, setSelections] = useState<FeatureSelection[]>([]);
@@ -193,6 +201,24 @@ export function FeatureEngineeringPage() {
                   timeframe={dataset.timeframe}
                   params={built.params}
                 />
+              </Section>
+            ) : null}
+
+            {dataset && built ? (
+              <Section
+                title="Analysis"
+                subtitle="Full-dataset statistics and a numeric correlation matrix"
+              >
+                <FeatureAnalysisPanel symbol={built.symbol} params={built.params} />
+              </Section>
+            ) : null}
+
+            {lineage.data ? (
+              <Section
+                title="Dependency Graph"
+                subtitle="Every registered feature's dependencies, resolved"
+              >
+                <FeatureLineagePanel lineage={lineage.data} />
               </Section>
             ) : null}
           </Stack>

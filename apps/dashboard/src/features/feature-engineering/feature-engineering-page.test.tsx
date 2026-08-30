@@ -17,6 +17,9 @@ vi.mock('@/lib/api/features', () => ({
   fetchFeatures: vi.fn(),
   buildFeatureDataset: vi.fn(),
   exportFeatureDataset: vi.fn(),
+  fetchFeatureLineage: vi.fn(),
+  computeFeatureCorrelation: vi.fn(),
+  computeFeatureStatistics: vi.fn(),
 }));
 
 const markets: Market[] = [
@@ -185,6 +188,11 @@ beforeEach(() => {
   mockedFeatures.fetchFeatures.mockResolvedValue(catalogue as never);
   mockedFeatures.buildFeatureDataset.mockResolvedValue(dataset as never);
   mockedFeatures.exportFeatureDataset.mockResolvedValue(new Blob(['col\n1']));
+  mockedFeatures.fetchFeatureLineage.mockResolvedValue({
+    nodes: [],
+    edges: [],
+    topological_order: [],
+  });
 });
 
 afterEach(() => {

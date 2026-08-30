@@ -4,11 +4,21 @@ The one bridge between the ML Dataset Builder (`app/ml_datasets/`) and the
 Training Framework's own `TrainingDataset` contract (`app/training/base.py`)
 — nothing here builds features, generates targets, validates, or splits;
 all of that is `MLDatasetBuilder`'s job, already done by the time an
-`MLDataset` reaches this module. This module only picks a target column,
+`MLDataset` reaches this module. This module picks a target column,
 restricts feature columns to numeric dtypes (categorical encoding is a
 documented, not-yet-implemented extension point — see
-`app/features/ai_extensions.py`'s `CategoricalEncoder`), and reshapes each
-split's rows into a `SplitMatrix`.
+`app/features/ai_extensions.py`'s `CategoricalEncoder`), optionally
+normalizes every feature column (`normalize=True`, see
+`app/training/normalization.py`), and reshapes each split's rows into a
+`SplitMatrix`.
+
+Normalization, when requested, runs in exactly one place in this whole
+pipeline: `ColumnNormalizer.fit` against `ml_dataset.split.train` alone
+(never validation/test — see that module's own docstring for why), and
+`ColumnNormalizer.transform` against all three splits, **before** they are
+converted into a `SplitMatrix` — a model adapter's own `train()` only ever
+sees an already-normalized (or, if `normalize=False`, still-raw) numeric
+matrix, and never has to know which.
 """
 
 from app.features.base import FeatureValue
@@ -23,6 +33,11 @@ from app.training.errors import (
     UndefinedFeatureValueError,
     UnknownTargetColumnError,
 )
+from app.training.normalization import (
+    DEFAULT_NORMALIZATION_METHOD,
+    ColumnNormalizer,
+    NormalizationMethod,
+)
 
 _NUMERIC_DTYPES = frozenset({"float", "int", "bool"})
 
@@ -32,8 +47,19 @@ def build_training_dataset(
     *,
     model_kind: ModelKind,
     target_column: str | None = None,
+    normalize: bool = False,
+    normalization_method: NormalizationMethod = DEFAULT_NORMALIZATION_METHOD,
 ) -> TrainingDataset:
-    """Resolve a target column and numeric feature columns, then build the three splits."""
+    """Resolve a target column and numeric feature columns, then build the three splits.
+
+    `normalize=True` fits per-column statistics on `ml_dataset.split.train`
+    alone and applies them to all three splits before they become numeric
+    matrices — see this module's own docstring and
+    `app/training/normalization.py` for the full rationale. Defaults `False`
+    so a direct caller (a test, a future non-training consumer) gets the raw
+    matrix unless it explicitly asks otherwise; `TrainingJobService` always
+    passes an explicit value from the job's own `normalize_features` field.
+    """
     if not ml_dataset.target_columns:
         raise NoTargetColumnsError()
 
@@ -84,11 +110,27 @@ def build_training_dataset(
         y = [row[target_index] for row in dataset.rows]
         return SplitMatrix(X=X, y=y)
 
+    train_dataset = ml_dataset.split.train
+    validation_dataset = ml_dataset.split.validation
+    test_dataset = ml_dataset.split.test
+
+    normalization_stats = None
+    if normalize:
+        normalizer = ColumnNormalizer(method=normalization_method)
+        # Fit on the TRAIN split alone — see `ColumnNormalizer.fit`'s own
+        # docstring for why validation/test must never influence these stats.
+        normalization_stats = normalizer.fit(train_dataset, numeric_feature_columns)
+        train_dataset = normalizer.transform(train_dataset, normalization_stats)
+        validation_dataset = normalizer.transform(validation_dataset, normalization_stats)
+        test_dataset = normalizer.transform(test_dataset, normalization_stats)
+
     return TrainingDataset(
         dataset_version=ml_dataset.ml_dataset_id,
         feature_columns=tuple(numeric_feature_columns),
         target_column=resolved_target,
-        train=to_split_matrix(ml_dataset.split.train, "train"),
-        validation=to_split_matrix(ml_dataset.split.validation, "validation"),
-        test=to_split_matrix(ml_dataset.split.test, "test"),
+        train=to_split_matrix(train_dataset, "train"),
+        validation=to_split_matrix(validation_dataset, "validation"),
+        test=to_split_matrix(test_dataset, "test"),
+        normalization=normalization_stats,
+        normalization_method=normalization_method if normalize else None,
     )

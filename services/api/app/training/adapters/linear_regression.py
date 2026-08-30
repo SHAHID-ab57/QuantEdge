@@ -37,6 +37,7 @@ from app.training.interpretability import (
     compute_overfitting_flag,
 )
 from app.training.model_metadata import collect_model_metadata
+from app.training.normalization import normalization_stats_to_dicts
 from app.training.registry import register
 from app.training.serialization import default_serializer
 
@@ -105,6 +106,7 @@ class LinearRegressionAdapter(ModelAdapter):
         feature_importance = compute_feature_importance(
             dataset.feature_columns,
             [model.coef_.tolist()],  # type: ignore[reportAttributeAccessIssue]
+            normalized=dataset.normalization is not None,
         )
         prediction_samples = build_prediction_samples(
             actual=dataset.validation.y, predicted=predictions.tolist()
@@ -148,6 +150,8 @@ class LinearRegressionAdapter(ModelAdapter):
             "n_validation": len(dataset.validation.y),
             "n_test": len(dataset.test.y) if dataset.test is not None else 0,
             "hyperparameters": {"fit_intercept": fit_intercept},
+            "normalization": normalization_stats_to_dicts(dataset.normalization),
+            "normalization_method": dataset.normalization_method,
         }
         artifacts = {
             "metrics_json": write_metrics_json(

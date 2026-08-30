@@ -71,6 +71,16 @@ class TrainingJobCreateRequest(BaseModel):
         description="Which built target column to predict; defaults to the first one built",
     )
     hyperparameters: dict[str, Any] = Field(default_factory=dict)
+    normalize_features: bool = Field(
+        default=True,
+        description=(
+            "Z-score normalize numeric feature columns (fit on the train split alone) "
+            "before a requires_real_data adapter trains/predicts. Both real baseline "
+            "adapters (logistic_regression, linear_regression) are scale-sensitive, so "
+            "this defaults on; ignored entirely by an adapter whose requires_real_data "
+            "is false."
+        ),
+    )
 
 
 class TrainingJobLogDTO(BaseModel):
@@ -106,6 +116,7 @@ class TrainingJobResponse(BaseModel):
     target_column: str | None
     model_type: str
     hyperparameters: dict[str, Any]
+    normalize_features: bool
     status: TrainingJobStatus
     current_stage: TrainingJobStage | None
     error_message: str | None
@@ -138,6 +149,7 @@ class TrainingJobResponse(BaseModel):
             target_column=job.target_column,
             model_type=job.model_type,
             hyperparameters=job.hyperparameters or {},
+            normalize_features=job.normalize_features,
             status=job.status,  # type: ignore[arg-type]
             current_stage=job.current_stage,  # type: ignore[arg-type]
             error_message=job.error_message,

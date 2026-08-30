@@ -1,35 +1,31 @@
 """AI extension-point tests.
 
-Nothing in `ai_extensions.py` is wired into the engine — these tests exist
-to pin the *shape* of the contract (importable, constructible, a real class
-can implement the Protocols) so a future implementer's first PR extends a
-verified interface rather than discovering a typo in an unused module.
+Most of `ai_extensions.py` is not wired into the engine — these tests exist
+to pin the *shape* of each remaining contract (importable, constructible, a
+real class can implement the Protocols) so a future implementer's first PR
+extends a verified interface rather than discovering a typo in an unused
+module. Two symbols this file used to test — `LabelSpec`/`LabelGenerator`
+and `TrainValidationTestSplitter` — have been removed from `ai_extensions.py`
+itself (superseded by `app.ml_datasets`'s real `TargetGenerator`/
+`TargetPipeline` and `ChronologicalSplitter` respectively; see that
+module's own docstring) rather than kept here as tests of dead code —
+their real tests live at `tests/ml_datasets/test_targets.py`,
+`tests/ml_datasets/test_pipeline.py`, and `tests/ml_datasets/test_split.py`.
+`FeatureNormalizer` is the one Protocol that has since gained a real
+implementer (`app.training.normalization.ColumnNormalizer`) while *staying*
+here — see `tests/training/test_normalization.py` for that implementer's
+own tests; this file keeps pinning the Protocol's shape itself.
 """
 
 from app.features.ai_extensions import (
     CategoricalEncoder,
-    DatasetSplit,
     FeatureNormalizer,
-    LabelGenerator,
-    LabelSpec,
     NormalizationStats,
     SequenceWindower,
     SplitRatios,
-    TrainValidationTestSplitter,
     WindowSpec,
 )
 from app.features.dataset import FeatureDataset
-
-
-class TestLabelSpec:
-    def test_declares_a_forward_looking_horizon(self) -> None:
-        spec = LabelSpec(
-            name="future_return_5",
-            label="5-Candle Forward Return",
-            description="Percent change from this candle's close to 5 candles ahead.",
-            horizon_candles=5,
-        )
-        assert spec.horizon_candles == 5
 
 
 class TestWindowSpec:
@@ -68,16 +64,6 @@ class TestSplitRatios:
 class TestProtocolsAreImplementable:
     """A concrete class can satisfy each Protocol — the contract is real, not aspirational."""
 
-    def test_label_generator_protocol(self) -> None:
-        class _Labeler:
-            spec = LabelSpec(name="x", label="X", description="", horizon_candles=1)
-
-            def generate_labels(self, candles: object) -> list:
-                return [None]
-
-        labeler: LabelGenerator = _Labeler()
-        assert labeler.generate_labels([]) == [None]
-
     def test_sequence_windower_protocol(self) -> None:
         class _Windower:
             def window(self, dataset: FeatureDataset, spec: WindowSpec) -> list:
@@ -96,15 +82,6 @@ class TestProtocolsAreImplementable:
 
         normalizer: FeatureNormalizer = _Normalizer()
         assert normalizer.fit(None, []) == []  # type: ignore[arg-type]
-
-    def test_train_validation_test_splitter_protocol(self) -> None:
-        class _Splitter:
-            def split(self, dataset: FeatureDataset, ratios: SplitRatios) -> DatasetSplit:
-                return DatasetSplit(train=dataset, validation=dataset, test=dataset)
-
-        splitter: TrainValidationTestSplitter = _Splitter()
-        result = splitter.split(None, SplitRatios())  # type: ignore[arg-type]
-        assert result.train is None
 
     def test_categorical_encoder_protocol(self) -> None:
         class _Encoder:

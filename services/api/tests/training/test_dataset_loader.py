@@ -198,3 +198,102 @@ class TestBuildTrainingDataset:
 
         with pytest.raises(EmptyTrainingSplitError):
             build_training_dataset(ml_dataset, model_kind="regression")
+
+
+class TestNormalization:
+    def test_defaults_to_no_normalization(self, builder: MLDatasetBuilder) -> None:
+        ml_dataset = builder.build(
+            "ETHUSD", "1h", candles(100), [FeatureRequest("ohlcv")], [TargetRequest("next_close")]
+        )
+
+        dataset = build_training_dataset(ml_dataset, model_kind="regression")
+
+        assert dataset.normalization is None
+        assert dataset.normalization_method is None
+
+    def test_normalize_true_populates_stats_and_method(self, builder: MLDatasetBuilder) -> None:
+        ml_dataset = builder.build(
+            "ETHUSD", "1h", candles(100), [FeatureRequest("ohlcv")], [TargetRequest("next_close")]
+        )
+
+        dataset = build_training_dataset(ml_dataset, model_kind="regression", normalize=True)
+
+        assert dataset.normalization is not None
+        assert {entry.column for entry in dataset.normalization} == set(dataset.feature_columns)
+        assert dataset.normalization_method == "zscore"
+
+    def test_train_split_has_zero_mean_and_unit_std_after_normalization(
+        self, builder: MLDatasetBuilder
+    ) -> None:
+        ml_dataset = builder.build(
+            "ETHUSD", "1h", candles(200), [FeatureRequest("ohlcv")], [TargetRequest("next_close")]
+        )
+
+        dataset = build_training_dataset(ml_dataset, model_kind="regression", normalize=True)
+
+        assert dataset.train is not None
+        for column_index in range(len(dataset.feature_columns)):
+            values = [row[column_index] for row in dataset.train.X]
+            mean = sum(values) / len(values)
+            variance = sum((v - mean) ** 2 for v in values) / len(values)
+            assert mean == pytest.approx(0.0, abs=1e-9)
+            assert variance**0.5 == pytest.approx(1.0)
+
+    def test_stats_are_computed_from_the_train_split_only(self, builder: MLDatasetBuilder) -> None:
+        """`candles()` produces a strictly monotonic series, so the train split's
+        own mean is analytically computable and provably different from the
+        mean over validation/test or the whole series — if `fit()` ever
+        leaked those in, this would catch it."""
+        ml_dataset = builder.build(
+            "ETHUSD", "1h", candles(200), [FeatureRequest("ohlcv")], [TargetRequest("next_close")]
+        )
+        close_index = next(i for i, c in enumerate(ml_dataset.dataset.columns) if c.name == "close")
+        train_rows = ml_dataset.split.train.rows
+        expected_mean = sum(
+            float(row[close_index])  # type: ignore[arg-type]
+            for row in train_rows
+        ) / len(train_rows)
+        whole_series_mean = sum(
+            float(row[close_index])  # type: ignore[arg-type]
+            for row in ml_dataset.dataset.rows
+        ) / len(ml_dataset.dataset.rows)
+        assert expected_mean != pytest.approx(whole_series_mean)
+
+        dataset = build_training_dataset(ml_dataset, model_kind="regression", normalize=True)
+
+        by_name = {entry.column: entry for entry in dataset.normalization or []}
+        assert by_name["close"].mean == pytest.approx(expected_mean)
+
+    def test_validation_and_test_are_transformed_with_the_trains_own_stats(
+        self, builder: MLDatasetBuilder
+    ) -> None:
+        ml_dataset = builder.build(
+            "ETHUSD", "1h", candles(200), [FeatureRequest("ohlcv")], [TargetRequest("next_close")]
+        )
+
+        dataset = build_training_dataset(ml_dataset, model_kind="regression", normalize=True)
+
+        assert dataset.validation is not None
+        # The validation split is later in time than train, so its raw `close`
+        # values are larger — after normalizing with train's own (smaller) mean,
+        # validation's z-scores should land clearly above zero, not re-centered
+        # around their own mean.
+        close_index = dataset.feature_columns.index("close")
+        validation_values = [row[close_index] for row in dataset.validation.X]
+        assert all(value > 0 for value in validation_values)
+
+    def test_supports_minmax(self, builder: MLDatasetBuilder) -> None:
+        ml_dataset = builder.build(
+            "ETHUSD", "1h", candles(100), [FeatureRequest("ohlcv")], [TargetRequest("next_close")]
+        )
+
+        dataset = build_training_dataset(
+            ml_dataset, model_kind="regression", normalize=True, normalization_method="minmax"
+        )
+
+        assert dataset.normalization_method == "minmax"
+        assert dataset.train is not None
+        close_index = dataset.feature_columns.index("close")
+        train_values = [row[close_index] for row in dataset.train.X]
+        assert min(train_values) == pytest.approx(0.0)
+        assert max(train_values) == pytest.approx(1.0)

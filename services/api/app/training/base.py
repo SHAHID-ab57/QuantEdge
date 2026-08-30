@@ -29,6 +29,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Literal
 
+from app.features.ai_extensions import NormalizationStats
+
 
 @dataclass(frozen=True, slots=True)
 class SplitMatrix:
@@ -74,6 +76,16 @@ class TrainingDataset:
     train: SplitMatrix | None = None
     validation: SplitMatrix | None = None
     test: SplitMatrix | None = None
+    #: Per-column statistics fit on `train` alone (`app/training/normalization.py`),
+    #: if this dataset was built with `normalize=True` — `None` otherwise. Carried
+    #: on the dataset itself (rather than threaded as a separate argument) so a
+    #: model adapter's own `train()` can read it directly to label its own
+    #: `compute_feature_importance` call, and so `TrainingJobService` can persist
+    #: it onto `result_summary` for `predict()` to reapply later.
+    normalization: list[NormalizationStats] | None = None
+    #: Which transform `normalization` was fit/applied under — `None` when
+    #: `normalization` is `None`, otherwise `"zscore"` or `"minmax"`.
+    normalization_method: str | None = None
 
 
 ModelKind = Literal["placeholder", "classification", "regression"]

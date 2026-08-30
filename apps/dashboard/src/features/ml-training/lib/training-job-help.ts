@@ -117,6 +117,21 @@ export const TARGET_COLUMN_FIELD_HELP: InfoTooltipSection[] = [
   },
 ];
 
+export const NORMALIZE_FEATURES_FIELD_HELP: InfoTooltipSection[] = [
+  {
+    heading: 'What it is',
+    body: 'Z-score normalizes every numeric feature column (mean/std fit on the train split alone) before the model trains or predicts.',
+  },
+  {
+    heading: 'Why it matters',
+    body: 'Without it, Feature Importance is scale-biased — a feature measured in the thousands (close, sma_20) shows a smaller coefficient than an equally predictive feature measured in single digits (candle_body), purely from scale, and L2 regularization (C) implicitly under-penalizes large-magnitude features for the same reason.',
+  },
+  {
+    heading: 'Acceptable values',
+    body: 'On by default for both real baseline adapters (Logistic Regression, Linear Regression) — both are scale-sensitive. Has no effect on the Placeholder Model, which never sees a real feature matrix.',
+  },
+];
+
 export const HYPERPARAMETERS_FIELD_HELP: InfoTooltipSection[] = [
   {
     heading: 'What it is',

@@ -41,6 +41,7 @@ from app.training.interpretability import (
     compute_roc_pr_curves,
 )
 from app.training.model_metadata import collect_model_metadata
+from app.training.normalization import normalization_stats_to_dicts
 from app.training.registry import register
 from app.training.serialization import default_serializer
 
@@ -116,7 +117,9 @@ class LogisticRegressionAdapter(ModelAdapter):
         matrix = confusion_matrix(dataset.validation.y, predictions, labels=classes)
         confusion_details = compute_confusion_details(dataset.validation.y, predictions, classes)
         roc_pr = compute_roc_pr_curves(dataset.validation.y, probabilities.tolist(), classes)
-        feature_importance = compute_feature_importance(dataset.feature_columns, model.coef_)
+        feature_importance = compute_feature_importance(
+            dataset.feature_columns, model.coef_, normalized=dataset.normalization is not None
+        )
         prediction_samples = build_prediction_samples(
             actual=dataset.validation.y,
             # sklearn's stubs infer an incomplete return type for `predict()` here (a
@@ -175,6 +178,8 @@ class LogisticRegressionAdapter(ModelAdapter):
                 "C": regularization,
                 "random_seed": random_seed,
             },
+            "normalization": normalization_stats_to_dicts(dataset.normalization),
+            "normalization_method": dataset.normalization_method,
         }
         artifacts = {
             "metrics_json": write_metrics_json(

@@ -19,7 +19,17 @@ relationship here.
 import uuid
 from datetime import datetime
 
-from sqlalchemy import JSON, CheckConstraint, DateTime, ForeignKey, Index, String, Text, func
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    String,
+    Text,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import BaseModel, TimestampMixin
@@ -84,6 +94,17 @@ class TrainingJob(BaseModel, TimestampMixin):
         JSON,
         nullable=True,
         comment="Arbitrary hyperparameters passed verbatim to the model adapter.",
+    )
+    normalize_features: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default="true",
+        comment=(
+            "Whether to z-score normalize numeric feature columns (fit on the train "
+            "split alone) before a requires_real_data adapter trains/predicts. "
+            "Ignored by an adapter that declares requires_real_data=False."
+        ),
     )
     status: Mapped[str] = mapped_column(
         String(24),

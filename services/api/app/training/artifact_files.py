@@ -61,7 +61,10 @@ def write_training_report_json(name: str, report: dict[str, Any]) -> str:
 def write_feature_importance_csv(name: str, rows: list[dict[str, Any]]) -> str:
     """`feature_importance.csv` — one row per feature, ranked by absolute importance."""
     buffer = io.StringIO()
-    writer = csv.DictWriter(buffer, fieldnames=["feature", "coefficient", "abs_importance", "sign"])
+    writer = csv.DictWriter(
+        buffer,
+        fieldnames=["feature", "coefficient", "abs_importance", "sign", "normalized"],
+    )
     writer.writeheader()
     for row in rows:
         writer.writerow(row)

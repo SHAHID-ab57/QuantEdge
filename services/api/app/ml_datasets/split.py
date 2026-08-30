@@ -1,11 +1,12 @@
 """Chronological train/validation/test splitting.
 
-Implements `app.features.ai_extensions.TrainValidationTestSplitter` — the
-documented-but-unwired extension point the Feature Engineering Engine's
-usability review scaffolded for exactly this purpose. `SplitRatios` and
-`DatasetSplit` are imported from there and used as-is, not redeclared: this
-is that extension point's first real implementer, not a second, parallel
-splitting mechanism.
+Implements the `split(dataset, ratios) -> DatasetSplit` contract
+`app.features.ai_extensions` documents (see that module's own § 4 —
+its now-superseded `TrainValidationTestSplitter` Protocol has been removed
+in favor of pointing here directly, so the file states one contract rather
+than two). `SplitRatios` and `DatasetSplit` are imported from there and used
+as-is, not redeclared: this is that contract's one real implementer, not a
+second, parallel splitting mechanism.
 
 The one rule this whole module exists to enforce: **splits are contiguous,
 chronologically-ordered slices — train, then validation, then test, never

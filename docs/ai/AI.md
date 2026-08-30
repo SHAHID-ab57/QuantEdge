@@ -366,7 +366,7 @@ its lifecycle status, and — once finished — a result summary copied onto
 that experiment.
 
 ```text
-Training Job: experiment_id, dataset_version, symbol, timeframe, target_column, model_type, hyperparameters, status, current_stage, result_summary
+Training Job: experiment_id, dataset_version, symbol, timeframe, target_column, model_type, hyperparameters, normalize_features, status, current_stage, result_summary
               -> Job Logs (one row per pipeline-stage transition)
 ```
 
@@ -392,6 +392,30 @@ metrics` and `.../artifacts` themselves call — so a training run's outcome
 lands in the experiment's existing metrics/artifacts tables with no
 duplicated persistence logic.
 
+**Feature normalization corrects a real scale bias, not just a missing
+capability.** `normalize_features` (a job field, default `true`) z-score
+normalizes every numeric feature column — fit on the train split alone,
+never validation/test — before a `requires_real_data` adapter's `train()`
+or `predict()` ever sees the matrix (`app/training/normalization.py`'s
+`ColumnNormalizer`, wired in at `app/training/dataset_loader.py`, between
+`ChronologicalSplitter` and the adapter). Without it, a feature naturally
+measured in the thousands (`close`, `sma_20`) needs only a tiny raw
+coefficient to matter as much as an equally predictive feature measured in
+single digits (`candle_body`) needs a much larger one — so Feature
+Importance (mean |coefficient|) systematically undervalues large-scale
+features, and L2 regularization (`C`) implicitly under-penalizes them for
+the identical reason. The fitted per-column stats are persisted onto the
+completed job's `result_summary` (`normalization`/`normalization_method`)
+so `POST /training-jobs/{id}/predict` applies the identical transform to a
+caller-supplied row before predicting — never on unnormalized input against
+a model fit on normalized input. `compute_feature_importance` tags every
+row with `normalized: true/false` so a raw (scale-biased) report and a
+normalized (scale-comparable) one are never visually confused, surfaced on
+the frontend as a "Coefficients on normalized features" caption. Deliberately
+a training-time-only concern: `FeatureDatasetRequest`/`FeatureDatasetResponse`
+and every ML Dataset Builder export/history entry stay raw and
+human-readable.
+
 **The job lifecycle is a state machine** (`app/training/state_machine.py`):
 `pending -> running -> completed | failed`, and `pending | running ->
 cancelled`, with the value set additionally `CHECK`-constrained at the
@@ -412,7 +436,8 @@ lifecycle statuses means), searchable comboboxes for Experiment/Dataset
 Version/Model Type, auto-population of Dataset Version/Target/Feature
 Set/Split Configuration from the selected experiment, a live pre-submit
 summary panel, dedicated validated fields for the five hyperparameters a
-real model adapter is expected to read, an 8-step pipeline timeline
+real model adapter is expected to read, a "Normalize features" checkbox
+(default checked) beside them, an 8-step pipeline timeline
 replacing the plain status chip, a searchable/downloadable log panel, and
 confirm-before-delete/cancel dialogs. Two fields in that summary panel are
 deliberately reported as unavailable rather than invented: **Estimated
@@ -445,16 +470,23 @@ Generators remain callable directly from Python (`FeaturePipeline.run`,
 `TargetPipeline.run`) without going through HTTP — the seam
 `app/training/dataset_loader.py` now actually uses (via `MLDatasetService.
 build_ml_dataset`) for a `requires_real_data` adapter's `load_dataset`
-stage. `app/features/ai_extensions.py`'s `SplitRatios`/`DatasetSplit`/
-`TrainValidationTestSplitter` Protocol now has a real implementer
-(`app/ml_datasets/split.py`'s `ChronologicalSplitter`); `LabelSpec`/
-`LabelGenerator` is likewise now realized in substance by the ML Dataset
-Builder's target-generation pipeline, though not through that exact
-Protocol type (target generators use `TargetGenerator`, described above, for
-the leakage-prevention reasons documented there). `WindowSpec`/
-`SequenceWindower` remains the next, still-unimplemented arrow: turning a
-labeled feature matrix into fixed-size, strided sequence windows for a
-sequence model.
+stage. `app/features/ai_extensions.py` has since been cleaned up to match:
+its `LabelSpec`/`LabelGenerator` declarations were deleted outright (fully
+superseded by the ML Dataset Builder's own `TargetGenerator`/`TargetPipeline`
+— a distinct type, for the leakage-prevention reasons documented there, not
+a second copy of the same contract), and its `TrainValidationTestSplitter`
+Protocol was deleted the same way once `app/ml_datasets/split.py`'s
+`ChronologicalSplitter` became its one real implementer — `SplitRatios`/
+`DatasetSplit` are kept, imported and used unchanged by both. `FeatureNormalizer`
+(same module) has since gained its own first real implementer,
+`app/training/normalization.py`'s `ColumnNormalizer` — z-score (default) or
+min-max per-column normalization, fit on the train split alone and wired in
+at exactly one seam (`build_training_dataset`, between `ChronologicalSplitter`
+and a model adapter's own `train()`/`predict()`) so Feature Importance and L2
+regularization are no longer scale-biased toward large-magnitude features.
+`WindowSpec`/`SequenceWindower` remains the next, still-unimplemented arrow:
+turning a labeled feature matrix into fixed-size, strided sequence windows
+for a sequence model.
 
 ## Inference
 
@@ -542,18 +574,28 @@ probability distribution or confidence interval; a classifier's
 
 ## AI extension points
 
-**Documented, typed, and testable — one now has a real implementer.**
-`services/api/app/features/ai_extensions.py` declares six `Protocol`/
-`dataclass` pairs so that when the workstreams above are actually built,
-they have a contract to implement rather than a blank page:
+**Documented, typed, and testable — two now have real implementers; a third
+was deleted outright once it was fully superseded.**
+`services/api/app/features/ai_extensions.py` originally declared six
+`Protocol`/`dataclass` pairs so that when the workstreams above are
+actually built, they'd have a contract to implement rather than a blank
+page. Its `LabelSpec`/`LabelGenerator` declarations have since been removed
+from the file entirely — not merely marked stale — once it became clear
+they were fully superseded by the ML Dataset Builder's own real
+`TargetGenerator`/`TargetPipeline` (a distinct type, for the
+leakage-prevention reasons documented under "Prediction targets" above),
+and keeping both a real implementation and an unimplemented "future" stub
+describing the same concept would have left the file implying two
+competing ways to do targets. `TrainValidationTestSplitter` was deleted the
+same way, once `ChronologicalSplitter` (below) became its one real
+implementer — the four remaining, current extension points:
 
-| Extension point                                                | Purpose                                                                                                                                                     | Status                                                                                                                                                                    |
-| -------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `LabelSpec` / `LabelGenerator`                                 | Deriving a training target/label from a dataset (e.g. next-candle direction)                                                                                | Realized in substance by `app/ml_datasets/` (a distinct `TargetGenerator` contract — see § "ML Dataset Builder")                                                          |
-| `WindowSpec` / `SequenceWindower`                              | Slicing a feature matrix into fixed-size, strided sequence windows                                                                                          | Not implemented                                                                                                                                                           |
-| `NormalizationStats` / `FeatureNormalizer`                     | Per-column scaling, with `fit`/`transform` kept as two separate methods so a normalizer fit on training data can never leak test-set statistics into itself | Not implemented                                                                                                                                                           |
-| `SplitRatios` / `DatasetSplit` / `TrainValidationTestSplitter` | Chronological (never random) train/validation/test splitting — a random split of time-series data leaks future information into training                    | **Implemented** — `app/ml_datasets/split.py`'s `ChronologicalSplitter` is the first real implementer; `SplitRatios`/`DatasetSplit` are imported unchanged, not redeclared |
-| `CategoricalEncoding` / `CategoricalEncoder`                   | One-hot or ordinal encoding, driven by a column's declared `dtype`, never a hardcoded column list                                                           | Not implemented                                                                                                                                                           |
+| Extension point                              | Purpose                                                                                                                                                     | Status                                                                                                                                                                  |
+| -------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `WindowSpec` / `SequenceWindower`            | Slicing a feature matrix into fixed-size, strided sequence windows                                                                                          | Not implemented                                                                                                                                                         |
+| `NormalizationStats` / `FeatureNormalizer`   | Per-column scaling, with `fit`/`transform` kept as two separate methods so a normalizer fit on training data can never leak test-set statistics into itself | **Implemented** — `app/training/normalization.py`'s `ColumnNormalizer` is the first real implementer (z-score default, min-max also supported); see § "Training"        |
+| `SplitRatios` / `DatasetSplit`               | Chronological (never random) train/validation/test splitting — a random split of time-series data leaks future information into training                    | **Implemented** — `app/ml_datasets/split.py`'s `ChronologicalSplitter` is the one real implementer; `SplitRatios`/`DatasetSplit` are imported unchanged, not redeclared |
+| `CategoricalEncoding` / `CategoricalEncoder` | One-hot or ordinal encoding, driven by a column's declared `dtype`, never a hardcoded column list                                                           | Not implemented                                                                                                                                                         |
 
 These mirror the frontend's own established pattern for the same purpose:
 `apps/dashboard/src/features/replay/extension-points.ts` documents replay's

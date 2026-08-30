@@ -116,6 +116,7 @@ function jobDetail(overrides: Partial<TrainingJob> = {}): TrainingJob {
     target_column: null,
     model_type: 'placeholder',
     hyperparameters: {},
+    normalize_features: true,
     status: 'pending',
     current_stage: null,
     error_message: null,
@@ -441,9 +442,55 @@ describe('MLTrainingPage — creating a training job', () => {
           random_seed: 42,
           validation_frequency: 1,
         },
+        normalize_features: true,
       }),
     );
     expect(await screen.findByText('Training Job')).toBeInTheDocument();
+  });
+
+  it('defaults "Normalize features" to checked and sends it with the create request', async () => {
+    mockedTrainingApi.createTrainingJob.mockResolvedValue(jobDetail({ id: 'job-4' }));
+    mockedTrainingApi.fetchTrainingJob.mockResolvedValue(jobDetail({ id: 'job-4' }));
+    renderPage();
+    await screen.findByText('placeholder');
+    fireEvent.click(screen.getByRole('button', { name: 'New Training Job' }));
+    const dialog = screen.getByRole('dialog');
+    await within(dialog).findByLabelText('Experiment');
+
+    expect(within(dialog).getByRole('checkbox', { name: 'Normalize features' })).toBeChecked();
+
+    fireEvent.mouseDown(within(dialog).getByLabelText('Experiment'));
+    fireEvent.click(await screen.findByRole('option', { name: 'Baseline SMA' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Create Training Job' }));
+
+    await waitFor(() =>
+      expect(mockedTrainingApi.createTrainingJob).toHaveBeenCalledWith(
+        expect.objectContaining({ normalize_features: true }),
+      ),
+    );
+  });
+
+  it('unchecking "Normalize features" sends false with the create request', async () => {
+    mockedTrainingApi.createTrainingJob.mockResolvedValue(jobDetail({ id: 'job-5' }));
+    mockedTrainingApi.fetchTrainingJob.mockResolvedValue(jobDetail({ id: 'job-5' }));
+    renderPage();
+    await screen.findByText('placeholder');
+    fireEvent.click(screen.getByRole('button', { name: 'New Training Job' }));
+    const dialog = screen.getByRole('dialog');
+    await within(dialog).findByLabelText('Experiment');
+    fireEvent.mouseDown(within(dialog).getByLabelText('Experiment'));
+    fireEvent.click(await screen.findByRole('option', { name: 'Baseline SMA' }));
+
+    fireEvent.click(within(dialog).getByRole('checkbox', { name: 'Normalize features' }));
+    expect(within(dialog).getByRole('checkbox', { name: 'Normalize features' })).not.toBeChecked();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Create Training Job' }));
+
+    await waitFor(() =>
+      expect(mockedTrainingApi.createTrainingJob).toHaveBeenCalledWith(
+        expect.objectContaining({ normalize_features: false }),
+      ),
+    );
   });
 
   it('reveals the configuration panel only for a model adapter that requires real data', async () => {

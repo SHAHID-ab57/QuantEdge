@@ -6,6 +6,7 @@ from decimal import Decimal
 
 import pytest
 
+from app.features.ai_extensions import NormalizationStats
 from app.models import Candle, Exchange, Market
 from app.models.experiment import Experiment
 from app.repositories.experiments import ExperimentRepository
@@ -22,6 +23,7 @@ from app.training.errors import (
     TrainingJobNotCancellableError,
     TrainingJobNotFoundError,
 )
+from app.training.normalization import apply_normalization
 from app.training.pipeline import TrainingPipeline
 from app.training.registry import default_registry
 from tests.conftest import SessionFactory
@@ -139,6 +141,32 @@ class TestCreate:
         )
 
         assert job.dataset_version == "ds-override"
+
+    async def test_normalize_features_defaults_to_true(
+        self, session_factory: SessionFactory
+    ) -> None:
+        experiment_id = await seed_experiment(session_factory, dataset_version="ds-abc")
+        service = build_service(session_factory)
+
+        job = await service.create(
+            TrainingJobCreateRequest(experiment_id=experiment_id, model_type="placeholder")
+        )
+
+        assert job.normalize_features is True
+
+    async def test_normalize_features_can_be_disabled(
+        self, session_factory: SessionFactory
+    ) -> None:
+        experiment_id = await seed_experiment(session_factory, dataset_version="ds-abc")
+        service = build_service(session_factory)
+
+        job = await service.create(
+            TrainingJobCreateRequest(
+                experiment_id=experiment_id, model_type="placeholder", normalize_features=False
+            )
+        )
+
+        assert job.normalize_features is False
 
     async def test_raises_experiment_not_found_for_an_unknown_experiment(
         self, session_factory: SessionFactory
@@ -566,6 +594,77 @@ class TestPredict:
         assert response.probabilities is not None
         assert len(response.probabilities[0]) == len(response.classes)
         assert response.confidence_levels[0] in {"high", "medium", "low"}
+
+    async def test_predict_applies_the_same_normalization_transform_it_trained_with(
+        self, session_factory: SessionFactory
+    ) -> None:
+        """The concrete proof: reproducing the identical transform by hand and
+        predicting directly through the adapter (bypassing the service
+        entirely) must agree exactly with what `service.predict` returns."""
+        await seed_real_candles(session_factory, symbol="NORMPREDUSD")
+        experiment_id = await seed_experiment_with_real_config(
+            session_factory, target="next_direction"
+        )
+        service = build_service(session_factory)
+        job = await service.create(
+            TrainingJobCreateRequest(
+                experiment_id=experiment_id,
+                model_type="logistic_regression",
+                symbol="NORMPREDUSD",
+                timeframe="1h",
+                normalize_features=True,
+            )
+        )
+        completed = await service.run(uuid.UUID(job.id))
+        assert completed.result_summary is not None
+        assert completed.result_summary["normalization"] is not None
+        feature_columns = completed.result_summary["feature_columns"]
+        # Deliberately far outside any normalized column's range, so the
+        # transform actually moves the numbers rather than happening to be a
+        # near-no-op at this particular value.
+        raw_row = [1234.5] * len(feature_columns)
+
+        response = await service.predict(uuid.UUID(job.id), [raw_row])
+
+        stats = [NormalizationStats(**entry) for entry in completed.result_summary["normalization"]]
+        method = completed.result_summary["normalization_method"]
+        normalized_row = apply_normalization([raw_row], stats, method=method)
+        assert normalized_row != [raw_row]  # confirms the transform did something
+        adapter = default_registry.get("logistic_regression")
+        expected_predictions = adapter.predict(
+            completed.result_summary["artifact_uri"], normalized_row
+        )
+
+        assert response.predictions == expected_predictions
+
+    async def test_predict_does_not_normalize_when_the_job_disabled_it(
+        self, session_factory: SessionFactory
+    ) -> None:
+        await seed_real_candles(session_factory, symbol="NONORMPREDUSD")
+        experiment_id = await seed_experiment_with_real_config(
+            session_factory, target="next_direction"
+        )
+        service = build_service(session_factory)
+        job = await service.create(
+            TrainingJobCreateRequest(
+                experiment_id=experiment_id,
+                model_type="logistic_regression",
+                symbol="NONORMPREDUSD",
+                timeframe="1h",
+                normalize_features=False,
+            )
+        )
+        completed = await service.run(uuid.UUID(job.id))
+        assert completed.result_summary is not None
+        assert completed.result_summary["normalization"] is None
+        feature_columns = completed.result_summary["feature_columns"]
+        raw_row = [1.0] * len(feature_columns)
+
+        response = await service.predict(uuid.UUID(job.id), [raw_row])
+
+        adapter = default_registry.get("logistic_regression")
+        expected_predictions = adapter.predict(completed.result_summary["artifact_uri"], [raw_row])
+        assert response.predictions == expected_predictions
 
     async def test_a_regression_adapter_returns_no_probabilities_or_confidence(
         self, session_factory: SessionFactory

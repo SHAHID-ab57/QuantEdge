@@ -48,16 +48,38 @@ class TestWriteTrainingReportJson:
 class TestWriteFeatureImportanceCsv:
     def test_writes_a_header_and_one_row_per_feature(self) -> None:
         rows = [
-            {"feature": "open", "coefficient": 0.5, "abs_importance": 0.5, "sign": "positive"},
-            {"feature": "close", "coefficient": -0.2, "abs_importance": 0.2, "sign": "negative"},
+            {
+                "feature": "open",
+                "coefficient": 0.5,
+                "abs_importance": 0.5,
+                "sign": "positive",
+                "normalized": True,
+            },
+            {
+                "feature": "close",
+                "coefficient": -0.2,
+                "abs_importance": 0.2,
+                "sign": "negative",
+                "normalized": True,
+            },
         ]
 
         uri = artifact_files.write_feature_importance_csv("logistic_regression", rows)
         lines = _read(uri).decode().splitlines()
 
-        assert lines[0] == "feature,coefficient,abs_importance,sign"
-        assert lines[1] == "open,0.5,0.5,positive"
-        assert lines[2] == "close,-0.2,0.2,negative"
+        assert lines[0] == "feature,coefficient,abs_importance,sign,normalized"
+        assert lines[1] == "open,0.5,0.5,positive,True"
+        assert lines[2] == "close,-0.2,0.2,negative,True"
+
+    def test_tolerates_a_row_missing_the_normalized_key(self) -> None:
+        """A report recorded before `normalized` existed still writes a valid
+        (if blank in that column) CSV rather than raising."""
+        rows = [{"feature": "open", "coefficient": 0.5, "abs_importance": 0.5, "sign": "positive"}]
+
+        uri = artifact_files.write_feature_importance_csv("logistic_regression", rows)
+        lines = _read(uri).decode().splitlines()
+
+        assert lines[1] == "open,0.5,0.5,positive,"
 
 
 class TestWriteConfusionMatrixPng:

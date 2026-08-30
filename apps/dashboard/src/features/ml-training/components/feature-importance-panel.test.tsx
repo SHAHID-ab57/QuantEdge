@@ -83,4 +83,23 @@ describe('FeatureImportancePanel', () => {
     );
     expect(screen.queryByRole('button', { name: 'Download CSV' })).not.toBeInTheDocument();
   });
+
+  it('shows the normalized-features caption when any row is normalized', () => {
+    const normalizedRows = ROWS.map((row) => ({ ...row, normalized: true }));
+    render(
+      <ThemeProvider theme={theme}>
+        <FeatureImportancePanel rows={normalizedRows} />
+      </ThemeProvider>,
+    );
+    expect(screen.getByText('Coefficients on normalized features')).toBeInTheDocument();
+  });
+
+  it('omits the normalized-features caption for a raw (or pre-existing, unlabeled) report', () => {
+    render(
+      <ThemeProvider theme={theme}>
+        <FeatureImportancePanel rows={ROWS} />
+      </ThemeProvider>,
+    );
+    expect(screen.queryByText('Coefficients on normalized features')).not.toBeInTheDocument();
+  });
 });

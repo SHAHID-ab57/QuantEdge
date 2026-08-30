@@ -41,6 +41,10 @@ export interface TrainingJobCreateBody {
   timeframe?: string | null;
   target_column?: string | null;
   hyperparameters?: Record<string, unknown>;
+  /** Z-score normalize numeric feature columns (fit on the train split alone)
+   * before a requires_real_data adapter trains/predicts. Defaults to `true`
+   * server-side if omitted. */
+  normalize_features?: boolean;
 }
 
 export async function createTrainingJob(body: TrainingJobCreateBody): Promise<TrainingJob> {

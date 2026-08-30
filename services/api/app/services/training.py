@@ -18,6 +18,7 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
+from app.features.ai_extensions import NormalizationStats
 from app.models.training import TrainingJob, TrainingJobLog
 from app.repositories.training import SORT_COLUMNS, TrainingJobFilters, TrainingJobRepository
 from app.schemas.experiments import (
@@ -56,6 +57,7 @@ from app.training.errors import (
     TrainingJobNotFoundError,
 )
 from app.training.interpretability import confidence_level
+from app.training.normalization import DEFAULT_NORMALIZATION_METHOD, apply_normalization
 from app.training.pipeline import TrainingPipeline
 from app.training.state_machine import assert_transition_allowed
 
@@ -101,6 +103,7 @@ class TrainingJobService:
             target_column=payload.target_column,
             model_type=payload.model_type,
             hyperparameters=payload.hyperparameters,
+            normalize_features=payload.normalize_features,
         )
         created = await self.repository.create(job)
         return TrainingJobResponse.from_model(created)
@@ -228,10 +231,12 @@ class TrainingJobService:
         if feature_columns is not None and any(len(row) != len(feature_columns) for row in rows):
             raise InvalidPredictionInputError(len(feature_columns))
 
+        rows_to_predict = self._normalize_prediction_rows(summary, rows)
+
         adapter = self.pipeline.registry.get(job.model_type)
         try:
-            predictions = adapter.predict(artifact_uri, rows)
-            probabilities = adapter.predict_proba(artifact_uri, rows)
+            predictions = adapter.predict(artifact_uri, rows_to_predict)
+            probabilities = adapter.predict_proba(artifact_uri, rows_to_predict)
         except Exception as exc:  # noqa: BLE001 - surfaced as a named domain error
             raise PredictionExecutionError(job.model_type, f"{type(exc).__name__}: {exc}") from exc
 
@@ -249,6 +254,28 @@ class TrainingJobService:
             probabilities=probabilities,
             confidence_levels=confidence_levels,
         )
+
+    def _normalize_prediction_rows(
+        self, summary: dict[str, object], rows: list[list[float]]
+    ) -> list[list[float]]:
+        """Apply the identical transform this job trained with, if any.
+
+        `summary["normalization"]` is `None` for a job trained with
+        `normalize_features=False` (or the placeholder adapter, which never
+        sets it at all) — `rows` pass through unchanged in that case.
+        Reconstructs `NormalizationStats` from the plain-dict shape
+        `normalization_stats_to_dicts` recorded them in, so a prediction on
+        raw, human-scale input is transformed exactly the way training data
+        was before ever reaching the model — predicting on unnormalized
+        input against a model fit on normalized input would otherwise be
+        silently wrong.
+        """
+        raw_stats = summary.get("normalization")
+        if not raw_stats:
+            return rows
+        stats = [NormalizationStats(**entry) for entry in raw_stats]  # type: ignore[arg-type]
+        method = summary.get("normalization_method") or DEFAULT_NORMALIZATION_METHOD
+        return apply_normalization(rows, stats, method=method)  # type: ignore[arg-type]
 
     def list_model_adapters(self) -> ModelAdapterCatalogResponse:
         """The model adapter catalogue — the frontend's model-type dropdown source."""
@@ -327,6 +354,7 @@ class TrainingJobService:
                 ml_dataset,
                 model_kind=adapter.metadata.model_kind,
                 target_column=job.target_column,
+                normalize=job.normalize_features,
             )
 
         return load_dataset

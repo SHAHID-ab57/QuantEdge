@@ -20,6 +20,10 @@ export interface FeatureImportanceRow {
   coefficient: number;
   abs_importance: number;
   sign: 'positive' | 'negative' | 'neutral';
+  /** Whether this coefficient was fit on already-normalized features
+   * (`app/training/normalization.py`) — absent on a report recorded before
+   * that field existed, in which case it's treated as `false`/unlabeled. */
+  normalized?: boolean;
 }
 
 export interface FeatureImportancePanelProps {
@@ -54,6 +58,14 @@ function signColor(sign: string): 'success.main' | 'error.main' | 'text.disabled
  * the Model Interpretability view for `logistic_regression`/`linear_regression`
  * jobs. Renders nothing when `rows` isn't the shape the backend's
  * `compute_feature_importance` produces, rather than guessing a fallback.
+ *
+ * Shows a one-line "Coefficients on normalized features" caption whenever
+ * the backend's own `normalized` flag (set per row, from
+ * `TrainingDataset.normalization is not None` at training time) is `true` —
+ * so a pre-fix (raw, scale-biased) run and a post-fix (normalized,
+ * scale-comparable) run are never visually confused for the same thing.
+ * Absent entirely on a report recorded before that field existed, which
+ * renders exactly as before (no caption) rather than erroring.
  */
 export function FeatureImportancePanel({ rows, onDownloadCsv }: FeatureImportancePanelProps) {
   const [sortKey, setSortKey] = useState<SortKey>('abs_importance');
@@ -79,6 +91,7 @@ export function FeatureImportancePanel({ rows, onDownloadCsv }: FeatureImportanc
   }
 
   const maxAbsImportance = Math.max(...parsed.map((row) => row.abs_importance), 1e-9);
+  const normalized = parsed.some((row) => row.normalized === true);
 
   const handleSort = (key: SortKey) => {
     if (key === sortKey) {
@@ -107,6 +120,11 @@ export function FeatureImportancePanel({ rows, onDownloadCsv }: FeatureImportanc
           </Button>
         ) : null}
       </Stack>
+      {normalized ? (
+        <Typography variant="caption" color="text.secondary">
+          Coefficients on normalized features
+        </Typography>
+      ) : null}
       <TableContainer>
         <Table size="small" aria-label="Feature importance">
           <TableHead>

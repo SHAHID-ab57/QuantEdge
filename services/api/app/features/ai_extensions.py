@@ -3,23 +3,25 @@
 Documents the seams a training/inference pipeline would need, without
 speculatively implementing any of them — the same discipline
 `apps/dashboard/src/features/replay/extension-points.ts` already applies to
-the Replay engine's own unbuilt capabilities, and for the same reason:
-nothing below is wired into `FeatureDatasetBuilder`, `FeaturePipeline`, or
-any API endpoint today. It exists so a future implementer has a concrete
-contract to extend rather than needing to re-architect the dataset builder
-around requirements nobody has stated yet (`docs/ai/AI.md` § "Training
-Pipeline"/"Inference"/"Evaluation" — all "not built").
+the Replay engine's own unbuilt capabilities, and for the same reason.
+Two of the four sections below (train/validation/test splitting, feature
+normalization) have since gained real implementers elsewhere on this
+platform — each says so explicitly where it is declared, rather than this
+module quietly going stale. A third (labels/targets) was fully superseded
+by the real `app.ml_datasets` context and has been removed outright, not
+merely marked stale, so this file never implies two competing ways to do
+the same thing. Only sliding-window sequencing and categorical encoding
+remain genuinely unimplemented, speculative extension points today.
 
-## Why these six and not others
+## Why these and not others
 
 ``PROJECT.md``'s stated ML pipeline is: engineered features → labelled,
 windowed training examples → a trained model → backtested/evaluated
-predictions. Everything below is a step on that path that has not been
-built. Each interface is deliberately the *smallest* contract that would
-let a real implementation slot in beside ``FeatureDataset`` without
-changing its shape — every one of them consumes or produces a
+predictions. Each interface below is deliberately the *smallest* contract
+that would let a real implementation slot in beside ``FeatureDataset``
+without changing its shape — every one of them consumes or produces a
 ``FeatureDataset`` (or the row/column primitives it's built from) rather
-than a parallel data structure, so a future training job reuses the exact
+than a parallel data structure, so a future consumer reuses the exact
 matrix a researcher already inspected and exported, not a re-derived copy
 that could silently disagree with it.
 """
@@ -32,54 +34,21 @@ from app.features.base import FeatureValue
 from app.features.dataset import FeatureDataset
 
 # --------------------------------------------------------------------------
-# 1. Labels and targets
+# 1. Labels and targets — REMOVED, superseded by a real implementation
 # --------------------------------------------------------------------------
 #
-# A `FeatureDataset` has no notion of "the thing being predicted" — every
-# column is an input. A future label generator would add exactly one more
-# column to the same matrix (e.g. "close price N candles ahead", "did price
-# rise more than X% within N candles"), computed the same way every other
-# feature is: one pass over candles, aligned index-for-index. It is
-# deliberately *not* a `FeatureGenerator` today, because a label is defined
-# relative to the *future* — it looks ahead of the row it is attached to,
-# which none of the eight warmup-only (look-behind) generators do, and
-# mixing that assumption into the existing contract without a real
-# consumer to validate it against would be exactly the kind of speculative
-# change this module exists to avoid making silently.
-
-
-@dataclass(frozen=True, slots=True)
-class LabelSpec:
-    """What a future label generator would need to declare about itself.
-
-    Deliberately parallel to `FeatureColumn`/`FeatureMetadata`: a label is
-    a column like any other, plus one fact nothing else needs — how far
-    into the future it looks, so a consumer knows how many trailing rows
-    have no valid label yet (the mirror image of a feature's *warmup*).
-    """
-
-    name: str
-    label: str
-    description: str
-    horizon_candles: int
-
-
-class LabelGenerator(Protocol):
-    """A future counterpart to `FeatureGenerator`, for target columns.
-
-    Given the same candles a feature generator would receive, produce one
-    aligned column whose trailing `horizon_candles` positions are `None`
-    (the label needs candles that haven't happened yet within the loaded
-    range) — the same "null marks undefined, never fabricated" contract
-    `FeatureOutput` already uses, mirrored at the other end of the series.
-    """
-
-    spec: LabelSpec
-
-    def generate_labels(
-        self, candles: Sequence[object]
-    ) -> list[FeatureValue]: ...  # pragma: no cover - contract only
-
+# This section used to document a future `LabelSpec`/`LabelGenerator`
+# extension point: a forward-looking column, aligned to candles, whose
+# trailing `horizon_candles` positions are undefined. That is exactly what
+# `app.ml_datasets.base`'s `TargetMetadata`/`TargetGenerator`/`TargetPipeline`
+# already build, in their own registry, deliberately separate from the
+# feature registry (see that module's own docstring for why a target lives
+# apart from a feature). Keeping both a
+# real implementation and an unimplemented "future" stub describing the
+# same concept invited exactly the "two competing ways to do targets" this
+# module's own docstring warns against, so the stub was deleted rather than
+# left to drift out of sync with what actually shipped. The real tests live
+# at `tests/ml_datasets/test_targets.py` and `tests/ml_datasets/test_pipeline.py`.
 
 # --------------------------------------------------------------------------
 # 2. Sliding windows and sequence generation
@@ -124,6 +93,15 @@ class SequenceWindower(Protocol):
 # 3. Feature normalization
 # --------------------------------------------------------------------------
 #
+# `app.training.normalization.ColumnNormalizer` is this Protocol's first real
+# implementer — see that module's own docstring. Unlike section 4 below,
+# this Protocol is kept here deliberately: it stays the one contract a
+# caller programs against (`fit`/`transform`, over a whole `FeatureDataset`),
+# and `ColumnNormalizer` is a training-time-only consumer of it, wired in at
+# exactly one seam (`app/training/dataset_loader.py`) rather than inside any
+# generator — see the paragraph below for why it is still never applied to
+# `FeatureDatasetRequest`/`FeatureDatasetResponse` themselves.
+#
 # Deliberately *not* applied inside any generator today — `docs/api/API.md`
 # states the platform's existing convention plainly: no rounding, scaling,
 # or transformation is ever applied server-side to a value a researcher can
@@ -159,8 +137,10 @@ class FeatureNormalizer(Protocol):
 
     Split into `fit`/`transform` (never a combined `fit_transform`)
     specifically so the extension point cannot be used in a way that leaks
-    validation/test statistics into training — see `TrainValidationTestSplit`
-    below, which this is meant to be used downstream of, not instead of.
+    validation/test statistics into training — see § 4 below
+    (`app.ml_datasets.split.ChronologicalSplitter`), which this is meant to
+    be used downstream of, not instead of: split first, fit only on the
+    resulting train slice, then transform every slice with those stats.
     """
 
     def fit(
@@ -173,16 +153,23 @@ class FeatureNormalizer(Protocol):
 
 
 # --------------------------------------------------------------------------
-# 4. Train / validation / test splitting
+# 4. Train / validation / test splitting — ALREADY IMPLEMENTED
 # --------------------------------------------------------------------------
 #
-# A time-series split, not a random one: shuffling rows before splitting
-# would leak future information into a "training" row sitting next to a
-# "test" row from earlier in time — the same look-ahead bias
-# `InsufficientFeatureDataError`'s warmup enforcement already exists to
-# keep out of a single dataset, now at the split boundary instead. All
-# three splits are contiguous, chronologically ordered slices of one
-# dataset — train, then validation, then test — never interleaved.
+# Unlike every other section in this module, this one is no longer a future
+# extension point: `app.ml_datasets.split.ChronologicalSplitter` is a real,
+# shipped implementer of the `split(dataset, ratios) -> DatasetSplit`
+# contract this section used to describe only as a `TrainValidationTestSplitter`
+# Protocol — that Protocol class has been removed so this file doesn't imply
+# two competing ways to split a dataset; `SplitRatios`/`DatasetSplit` below
+# are kept exactly as they were, since `ChronologicalSplitter` and every
+# consumer of it (`app.ml_datasets.dataset.MLDatasetBuilder`,
+# `app.services.ml_datasets`, `app.services.training`) import and construct
+# these two dataclasses directly, unchanged. See `app/ml_datasets/split.py`'s
+# own module docstring for the split's full rationale (a time-series split,
+# not a random one — shuffling rows before splitting would leak future
+# information into a "training" row sitting next to a "test" row from
+# earlier in time) and `tests/ml_datasets/test_split.py` for its tests.
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,21 +188,6 @@ class DatasetSplit:
     train: FeatureDataset
     validation: FeatureDataset
     test: FeatureDataset
-
-
-class TrainValidationTestSplitter(Protocol):
-    """Splits one dataset into three chronologically-ordered slices.
-
-    Every output dataset keeps the *same* `dataset_id`-worthy provenance
-    fields (`pipeline_version`, each feature's resolved parameters) as the
-    dataset it was split from — a split is a view over one build, not three
-    independent ones, so nothing about *how the data was generated*
-    changes at the split boundary, only which rows are visible.
-    """
-
-    def split(
-        self, dataset: FeatureDataset, ratios: SplitRatios
-    ) -> DatasetSplit: ...  # pragma: no cover - contract only
 
 
 # --------------------------------------------------------------------------

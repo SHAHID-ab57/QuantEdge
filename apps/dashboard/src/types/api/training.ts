@@ -58,6 +58,10 @@ export const TrainingJobSchema = z.object({
   target_column: z.string().nullable(),
   model_type: z.string(),
   hyperparameters: z.record(z.string(), z.unknown()),
+  /** Whether numeric feature columns were (or will be) z-score normalized —
+   * fit on the train split alone — before this job's model trains/predicts.
+   * Ignored by an adapter whose requires_real_data is false. */
+  normalize_features: z.boolean(),
   status: TrainingJobStatusSchema,
   current_stage: TrainingJobStageSchema.nullable(),
   error_message: z.string().nullable(),

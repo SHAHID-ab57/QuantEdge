@@ -113,6 +113,16 @@ class TestCreateTrainingJob:
         assert body["model_type"] == "placeholder"
         assert body["dataset_version"] == "ds-abc"
         assert body["logs"] == []
+        assert body["normalize_features"] is True
+
+    async def test_normalize_features_can_be_disabled(self, client: httpx.AsyncClient) -> None:
+        experiment = await create_experiment(client, dataset_version="ds-abc")
+        response = await client.post(
+            "/api/v1/training-jobs",
+            json=job_body(experiment["id"], normalize_features=False),
+        )
+        assert response.status_code == 201
+        assert response.json()["normalize_features"] is False
 
     async def test_returns_404_for_an_unknown_experiment(self, client: httpx.AsyncClient) -> None:
         response = await client.post(

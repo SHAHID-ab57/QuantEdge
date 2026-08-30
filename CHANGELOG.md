@@ -8,6 +8,64 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Per-column feature normalization for the Machine Learning Training
+  Framework — fixes a real scale bias, not just a missing capability.**
+  Without it, a feature naturally measured in the thousands (`close`,
+  `sma_20`) needed only a tiny raw coefficient to matter as much as an
+  equally predictive feature measured in single digits (`candle_body`)
+  needed a much larger one, so Feature Importance (mean |coefficient|)
+  systematically undervalued large-scale features, and L2 regularization
+  (`C`) implicitly under-penalized them for the identical reason.
+  - **`app/training/normalization.py`'s `ColumnNormalizer`** is the first
+    real implementer of `app/features/ai_extensions.py`'s
+    `FeatureNormalizer` Protocol (z-score default, min-max also
+    implemented). Fits per-column mean/std/min/max on the train split
+    alone — never validation/test, the same look-ahead-bias discipline
+    chronological splitting already holds itself to — and applies the
+    identical transform to all three splits.
+  - **Wired in at exactly one seam**: `app/training/dataset_loader.py`'s
+    `build_training_dataset`, between `ChronologicalSplitter` (needs split
+    membership first) and a model adapter's own `train()`/`predict()`.
+    `FeatureDatasetRequest`/`FeatureDatasetResponse` and every ML Dataset
+    Builder export/history entry stay raw and human-readable — this is
+    deliberately a training-time-only concern.
+  - **New `TrainingJobCreateRequest.normalize_features: bool`**, default
+    `true` (migration `d58d9f8bdab6`) — both real baseline adapters
+    (`logistic_regression`, `linear_regression`) are scale-sensitive, so
+    this defaults on; ignored entirely by `placeholder`. Exposed as a
+    "Normalize features" checkbox in the training-job create dialog.
+  - **Persisted onto the completed job's `result_summary`**
+    (`normalization`/`normalization_method`) so `POST /training-jobs/{id}/
+predict` reconstructs the exact fitted stats and applies the identical
+    transform to a caller-supplied row before predicting — predicting on
+    unnormalized input against a model fit on normalized input would
+    otherwise be silently wrong.
+  - **`compute_feature_importance` tags every row `normalized: true/false`**
+    so a raw (scale-biased) report and a normalized (scale-comparable) one
+    are never visually confused; `FeatureImportancePanel` surfaces this as
+    a "Coefficients on normalized features" caption.
+  - **`app/features/ai_extensions.py` cleanup, in the same pass**: its
+    `LabelSpec`/`LabelGenerator` declarations were deleted outright — fully
+    superseded by the ML Dataset Builder's own `TargetGenerator`/
+    `TargetPipeline` (a distinct type, for its own leakage-prevention
+    reasons) — and its `TrainValidationTestSplitter` Protocol was likewise
+    deleted now that `app/ml_datasets/split.py`'s `ChronologicalSplitter`
+    is its one real implementer (`SplitRatios`/`DatasetSplit` are kept,
+    imported and used unchanged by both). Neither was merely marked stale;
+    both were removed so the file never implies two competing ways to do
+    the same thing.
+  - Full backend test suite green — new `tests/training/
+test_normalization.py` (100% coverage on the new module), an extended
+    `TestNormalization` class in `test_dataset_loader.py`, a real-sklearn
+    `TestFeatureImportanceScaleBias` proof in `test_logistic_regression.py`
+    (two independent, equally-informative, differently-scaled features
+    rank >150x apart by raw coefficient and land at near-parity once
+    normalized), and a `test_service.py` test proving `predict` applies the
+    exact persisted transform, byte-for-byte matching a manual replication
+    that bypasses the service entirely. Full frontend suite passes with a
+    clean lint, typecheck, and the new checkbox covered in
+    `ml-training-page.test.tsx`.
+
 - **Feature Engineering Engine — versioning, lineage, correlation, cache,
   and statistics.** Extends the `/features` page with four read-only
   research capabilities, entirely by reusing what already existed —

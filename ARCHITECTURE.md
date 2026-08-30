@@ -905,23 +905,29 @@ comment lines (including one `# feature.<name>,version=... params=(...)
 columns=(...) warmup=...` line per feature and one `# quality.*` line per
 metric), so `read_csv(comment='#')` still round-trips cleanly.
 
-**AI extension points, documented and typed but not wired
-(`app/features/ai_extensions.py`).** Six `Protocol`/`dataclass` pairs mirror
-the frontend's own established precedent
-(`apps/dashboard/src/features/replay/extension-points.ts`) for describing a
-future capability without building it prematurely: `LabelSpec`/
-`LabelGenerator` (target/label generation), `WindowSpec`/`SequenceWindower`
-(sliding-window sequence generation), `NormalizationStats`/
-`FeatureNormalizer` (`fit`/`transform` kept as two separate methods,
-deliberately never combined, so a normalizer fit on training data can never
-leak test-set statistics into itself), `SplitRatios`/`DatasetSplit`/
-`TrainValidationTestSplitter` (chronological splitting only — a random split
-of time-series data leaks future information into training), and
+**AI extension points, documented and typed — two now have real
+implementers (`app/features/ai_extensions.py`).** Originally six
+`Protocol`/`dataclass` pairs mirroring the frontend's own established
+precedent (`apps/dashboard/src/features/replay/extension-points.ts`) for
+describing a future capability without building it prematurely. Two have
+since been deleted from this file outright, not merely marked stale, once
+fully superseded by a real implementation elsewhere: `LabelSpec`/
+`LabelGenerator` (target/label generation) by the ML Dataset Builder's own
+`TargetGenerator`/`TargetPipeline`, and `TrainValidationTestSplitter` by
+`app/ml_datasets/split.py`'s `ChronologicalSplitter` (`SplitRatios`/
+`DatasetSplit` are kept, imported and used unchanged by both this file and
+`ChronologicalSplitter`). A third, `NormalizationStats`/`FeatureNormalizer`
+(`fit`/`transform` kept as two separate methods, deliberately never
+combined, so a normalizer fit on training data can never leak test-set
+statistics into itself), is kept here as the live contract and has gained
+its own first real implementer: `app/training/normalization.py`'s
+`ColumnNormalizer` — see § "Machine Learning Training Framework" below for
+why (Feature Importance and L2 regularization are otherwise scale-biased
+toward large-magnitude features). Remaining genuinely unimplemented:
+`WindowSpec`/`SequenceWindower` (sliding-window sequence generation) and
 `CategoricalEncoding`/`CategoricalEncoder` (reads a column's declared
 `dtype` rather than a hardcoded column list, so it generalizes to any future
-categorical feature). Nothing in this module is imported by any production
-code path — it exists so the _next_ milestone (AI Research, per
-`TASKBOOK.md`) has a contract to implement against rather than a blank page.
+categorical feature) — neither is imported by any production code path yet.
 
 **Frontend: search, keyboard navigation, recently-used, and virtualization
 — all additive to the existing `feature-engineering` module.**
@@ -1311,9 +1317,11 @@ rules, same verdict contract), and finally to the new `ChronologicalSplitter`.
 Targets are appended as ordinary columns onto the same `FeatureDataset.columns`/
 `.rows` — not a parallel data structure — with `MLDataset.feature_columns`/
 `.target_columns` (name tuples) tracking which is which, exactly matching
-what `app/features/ai_extensions.py`'s own `LabelGenerator` docstring
-anticipated: "a label generator would add exactly one more column to the
-same matrix." Partial-success mirrors the feature/indicator batch contract
+what `app/features/ai_extensions.py`'s own `LabelGenerator` docstring used
+to anticipate before it was deleted (fully superseded by `TargetGenerator`
+here — see § "AI extension points" above): "a label generator would add
+exactly one more column to the same matrix." Partial-success mirrors the
+feature/indicator batch contract
 precisely — one failing target (`TargetNotFoundError`,
 `InvalidTargetParameterError`, `InsufficientTargetDataError`,
 `TargetExecutionError`) is recorded as a `FeatureFailure` rather than
@@ -1325,10 +1333,13 @@ outright) is a valid result, not an error, mirroring the Feature Engineering
 Engine's identical precedent for an all-failed feature request.
 
 **Chronological, non-shuffled splitting.** `ChronologicalSplitter`
-(`split.py`) is the first real implementer of the `TrainValidationTestSplitter`
-Protocol `ai_extensions.py` declared and left unwired in an earlier task; it
-reuses that module's own `SplitRatios`/`DatasetSplit` rather than
-redeclaring either. A split is three contiguous index slices of an
+(`split.py`) is the one real implementer of the `split(dataset, ratios) ->
+DatasetSplit` contract `ai_extensions.py` declared and left unwired in an
+earlier task — that module's own `TrainValidationTestSplitter` Protocol has
+since been deleted now that this is its one implementer, so the file states
+one contract rather than two (see § "AI extension points" above); this
+class reuses `ai_extensions.py`'s own `SplitRatios`/`DatasetSplit` rather
+than redeclaring either. A split is three contiguous index slices of an
 already-time-ordered matrix — train, then validation, then test, in that
 order, never shuffled — and `dataset_id` stays identical across all three
 slices, since "a split is a view over one build, not three independent
@@ -1796,6 +1807,40 @@ excluded; encoding one is `app/features/ai_extensions.py`'s documented,
 not-yet-implemented `CategoricalEncoder` extension point), and reshape
 each split into a `SplitMatrix`.
 
+**Feature normalization** (`app/training/normalization.py`) — corrects a
+real scale bias, not just a missing capability. `TrainingJobCreateRequest.
+normalize_features` (default `true`) drives `build_training_dataset` to fit
+`ColumnNormalizer` (z-score default, min-max also implemented) on
+`ml_dataset.split.train` alone — never validation/test, the same
+look-ahead-bias discipline chronological splitting already holds itself
+to — and apply it to all three splits before they become numeric
+`SplitMatrix`es. Without it, a feature naturally measured in the thousands
+(`close`, `sma_20`) needs only a tiny raw coefficient to matter as much as
+an equally predictive feature measured in single digits (`candle_body`)
+needs a much larger one, so `compute_feature_importance`'s mean
+|coefficient| ranking is scale-biased and L2 regularization (`C`)
+implicitly under-penalizes large-magnitude features for the identical
+reason. `TrainingDataset` gained `normalization: list[NormalizationStats] |
+None` and `normalization_method: str | None` fields (`NormalizationStats`
+imported from `app/features/ai_extensions.py`, not redeclared — see § "AI
+extension points" above); both adapters record them onto `TrainingResult.
+summary` (`normalization`/`normalization_method`, JSON-plain via
+`normalization_stats_to_dicts`) and tag every `compute_feature_importance`
+row with `normalized: true/false`, so a raw (scale-biased) report and a
+normalized (scale-comparable) one are never confused —
+`FeatureImportancePanel` surfaces this as a "Coefficients on normalized
+features" caption. `TrainingJobService.predict` reconstructs the persisted
+stats and applies the identical transform to a caller-supplied row before
+predicting, via the free function `apply_normalization` (the same
+per-value transform `ColumnNormalizer.transform` uses, over a plain numeric
+matrix instead of a whole `FeatureDataset` — a live prediction request has
+no columns/timestamps to carry). Deliberately training-time-only:
+`FeatureDatasetRequest`/`FeatureDatasetResponse` and every ML Dataset
+Builder export/history entry stay raw and human-readable, matching this
+platform's existing "no server-side transform a researcher can't inspect"
+convention (`docs/api/API.md`). Migration `d58d9f8bdab6` adds the
+`normalize_features` column (`NOT NULL DEFAULT true`).
+
 **Prediction interface** — `POST /training-jobs/{id}/predict`, new. Takes
 `{"rows": [[...], ...]}` (each row already restricted to the job's own
 `feature_columns`, recorded in `result_summary`), loads the completed
@@ -1804,7 +1849,9 @@ job's serialized model via the adapter's own `predict`, and returns
 job has `status="completed"` and recorded an `artifact_uri`
 (`PredictionNotAvailableError` otherwise); a row-length mismatch is
 rejected with `InvalidPredictionInputError` before ever reaching the
-adapter.
+adapter. A caller-supplied row is normalized identically to how the job's
+own training data was, immediately before this step, if the job was
+trained with `normalize_features=true` — see "Feature normalization" above.
 
 **Model serialization abstraction** (`app/training/serialization.py`).
 `ModelSerializer` is a two-method protocol (`save(model, name) -> uri`,
@@ -1842,17 +1889,29 @@ already makes.
 feature-column resolution and every failure mode (unknown target column,
 no numeric feature columns, an empty split, a dtype-incompatible target,
 an unexpectedly-undefined value) using a real `MLDatasetBuilder` over
-synthetic candles — no database. `tests/training/test_serialization.py`
-covers the local-disk save/load round trip. `tests/training/
-test_logistic_regression.py`/`test_linear_regression.py` cover each
-adapter's `initialize`/`train`/`predict` in isolation (deterministic,
-perfectly-fittable synthetic data, so metrics are exact) plus scikit-learn
-failure wrapping. `tests/training/test_service.py` and `tests/api/
-test_training_api.py` each add a full real-data path end to end — real
-candles seeded into the database, a real feature/target build, a real
-`fit`, real recorded metrics/confusion-matrix, and a real prediction —
-alongside the missing-symbol/missing-config/incompatible-dtype failure
-paths. 100% test coverage on every module in `app/training/`. See
+synthetic candles — no database — plus a `TestNormalization` class proving
+stats are computed from the train split alone and that a normalized train
+split lands at ~0 mean/~1 std. `tests/training/test_normalization.py`
+covers `ColumnNormalizer`/`apply_normalization` directly: fit-uses-only-
+its-own-dataset, z-score/min-max transform correctness, and the
+zero-variance-returns-0.0-not-NaN degenerate case. `tests/training/
+test_serialization.py` covers the local-disk save/load round trip.
+`tests/training/test_logistic_regression.py`/`test_linear_regression.py`
+cover each adapter's `initialize`/`train`/`predict` in isolation
+(deterministic, perfectly-fittable synthetic data, so metrics are exact)
+plus scikit-learn failure wrapping — the former's
+`TestFeatureImportanceScaleBias` is the concrete, real-sklearn proof of the
+scale-bias fix: two independent, equally-informative, differently-scaled
+features rank hugely disparately (>150x) by raw |coefficient| and land at
+near-parity once normalized. `tests/training/test_service.py` and
+`tests/api/test_training_api.py` each add a full real-data path end to
+end — real candles seeded into the database, a real feature/target build,
+a real `fit`, real recorded metrics/confusion-matrix, and a real
+prediction — alongside the missing-symbol/missing-config/incompatible-dtype
+failure paths, plus (`test_service.py`) a test proving `predict` applies
+the exact persisted normalization transform to a raw row before predicting,
+byte-for-byte matching a manual replication that bypasses the service
+entirely. 100% test coverage on every module in `app/training/`. See
 `docs/testing/TESTING.md`/`services/api/TESTING.md` for the full
 inventory.
 

@@ -36,7 +36,10 @@ def confidence_level(probability: float) -> str:
 
 
 def compute_feature_importance(
-    feature_columns: Sequence[str], coefficients: Sequence[Sequence[float]]
+    feature_columns: Sequence[str],
+    coefficients: Sequence[Sequence[float]],
+    *,
+    normalized: bool = False,
 ) -> list[dict[str, Any]]:
     """Rank features by mean absolute coefficient magnitude.
 
@@ -46,6 +49,16 @@ def compute_feature_importance(
     `coefficient`/`sign` average across classes — a feature that pushes strongly
     toward one class and against another nets out near zero, which is an accurate
     (if conservative) summary for a single ranked table, not a per-class breakdown.
+
+    `normalized` records (per row, never changing the ranking math itself) whether
+    `coefficients` were fit on already-normalized features
+    (`app/training/normalization.py`) — a caller-supplied fact about the input,
+    not something this function can detect on its own. This is the one thing that
+    actually makes a cross-feature magnitude comparison meaningful: comparing raw
+    coefficients across features of different natural scale (`close` vs.
+    `candle_body`) is scale-biased regardless of how they're ranked here, so every
+    row is tagged so a report reader (and `FeatureImportancePanel`'s own label)
+    can tell a scale-comparable run from a scale-biased one at a glance.
     """
     n_features = len(feature_columns)
     n_rows = len(coefficients) or 1
@@ -72,6 +85,7 @@ def compute_feature_importance(
                 "coefficient": mean_coefficient,
                 "abs_importance": abs_importance,
                 "sign": sign,
+                "normalized": normalized,
             }
         )
     rows.sort(key=lambda row: row["abs_importance"], reverse=True)

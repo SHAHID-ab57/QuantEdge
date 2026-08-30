@@ -54,9 +54,68 @@ class TestComputeFeatureImportance:
         rows = compute_feature_importance(["x", "y"], [])
 
         assert rows == [
-            {"feature": "x", "coefficient": 0.0, "abs_importance": 0.0, "sign": "neutral"},
-            {"feature": "y", "coefficient": 0.0, "abs_importance": 0.0, "sign": "neutral"},
+            {
+                "feature": "x",
+                "coefficient": 0.0,
+                "abs_importance": 0.0,
+                "sign": "neutral",
+                "normalized": False,
+            },
+            {
+                "feature": "y",
+                "coefficient": 0.0,
+                "abs_importance": 0.0,
+                "sign": "neutral",
+                "normalized": False,
+            },
         ]
+
+    def test_defaults_every_row_to_not_normalized(self) -> None:
+        rows = compute_feature_importance(["a"], [[1.0]])
+
+        assert rows[0]["normalized"] is False
+
+    def test_tags_every_row_as_normalized_when_requested(self) -> None:
+        rows = compute_feature_importance(["a", "b"], [[1.0, -2.0]], normalized=True)
+
+        assert all(row["normalized"] is True for row in rows)
+
+    def test_ranking_flips_between_raw_and_normalized_coefficients_for_differently_scaled_features(
+        self,
+    ) -> None:
+        """The concrete scenario this platform's scale bias actually produces: a
+        `close`-scale feature (thousands) needs only a tiny raw coefficient to
+        matter as much as a `candle_body`-scale feature (single digits) needs a
+        much larger one for the identical real contribution — so ranking by raw
+        coefficient magnitude alone says `candle_body` is more important, and
+        ranking by the *normalized*-space coefficient (which cancels the scale
+        difference out) says the opposite."""
+        # Raw fit: close's coefficient is tiny (it needs to be, at its scale) —
+        # 0.0008 * ~1000 and 0.3 * ~2 both describe roughly the same real
+        # contribution to the decision boundary, just expressed very differently.
+        raw_rows = compute_feature_importance(["close", "candle_body"], [[0.0008, 0.3]])
+        raw_ranking = [
+            row["feature"] for row in sorted(raw_rows, key=lambda r: -r["abs_importance"])
+        ]
+        assert raw_ranking == ["candle_body", "close"]
+
+        # Normalized-space coefficients for the identical underlying model (each
+        # raw coefficient scaled by its own column's std — the standard
+        # relationship between a raw and a z-scored coefficient): close's
+        # std ~1000 -> 0.0008*1000=0.8; candle_body's std ~2 -> 0.3*2=0.6.
+        normalized_rows = compute_feature_importance(
+            ["close", "candle_body"], [[0.8, 0.6]], normalized=True
+        )
+        normalized_ranking = [
+            row["feature"] for row in sorted(normalized_rows, key=lambda r: -r["abs_importance"])
+        ]
+        assert normalized_ranking == ["close", "candle_body"]
+
+        # The whole point: the two rankings disagree, and only the normalized
+        # one is scale-comparable — each row says so explicitly.
+        assert raw_ranking != normalized_ranking
+        assert all(row["normalized"] is False for row in raw_rows)
+        assert all(row["normalized"] is True for row in normalized_rows)
 
 
 class TestComputeConfusionDetails:

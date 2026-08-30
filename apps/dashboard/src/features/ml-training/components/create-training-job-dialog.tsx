@@ -6,10 +6,12 @@ import SmartToyIcon from '@mui/icons-material/SmartToy';
 import Alert from '@mui/material/Alert';
 import Autocomplete from '@mui/material/Autocomplete';
 import Button from '@mui/material/Button';
+import Checkbox from '@mui/material/Checkbox';
 import Dialog from '@mui/material/Dialog';
 import DialogActions from '@mui/material/DialogActions';
 import DialogContent from '@mui/material/DialogContent';
 import DialogTitle from '@mui/material/DialogTitle';
+import FormControlLabel from '@mui/material/FormControlLabel';
 import Stack from '@mui/material/Stack';
 import TextField from '@mui/material/TextField';
 import Typography from '@mui/material/Typography';
@@ -27,6 +29,7 @@ import {
   DATASET_VERSION_FIELD_HELP,
   EXPERIMENT_FIELD_HELP,
   MODEL_TYPE_FIELD_HELP,
+  NORMALIZE_FEATURES_FIELD_HELP,
   SYMBOL_FIELD_HELP,
   TARGET_COLUMN_FIELD_HELP,
   TIMEFRAME_FIELD_HELP,
@@ -88,6 +91,7 @@ export function CreateTrainingJobDialog({
   const [symbol, setSymbol] = useState('');
   const [timeframe, setTimeframe] = useState('');
   const [targetColumn, setTargetColumn] = useState('');
+  const [normalizeFeatures, setNormalizeFeatures] = useState(true);
   const [knownValues, setKnownValues] = useState<Record<string, string>>(() =>
     defaultKnownHyperparameterValues(),
   );
@@ -152,6 +156,7 @@ export function CreateTrainingJobDialog({
     setSymbol('');
     setTimeframe('');
     setTargetColumn('');
+    setNormalizeFeatures(true);
     setKnownValues(defaultKnownHyperparameterValues());
     setCustomEntries([]);
     create.reset();
@@ -192,6 +197,7 @@ export function CreateTrainingJobDialog({
       timeframe: timeframe || null,
       target_column: targetColumn.trim() || null,
       hyperparameters: buildHyperparametersPayload(knownValues, customEntries),
+      normalize_features: normalizeFeatures,
     });
     reset();
     onCreated(created.id);
@@ -387,6 +393,20 @@ export function CreateTrainingJobDialog({
               </Stack>
             </Stack>
           ) : null}
+
+          <Stack direction="row" spacing={0.5} alignItems="center">
+            <FormControlLabel
+              control={
+                <Checkbox
+                  checked={normalizeFeatures}
+                  onChange={(event) => setNormalizeFeatures(event.target.checked)}
+                  slotProps={{ input: { 'aria-label': 'Normalize features' } }}
+                />
+              }
+              label="Normalize features"
+            />
+            <InfoTooltip label="Normalize features" sections={NORMALIZE_FEATURES_FIELD_HELP} />
+          </Stack>
 
           <TrainingSummaryPanel
             experiment={experimentDetail.data ?? null}

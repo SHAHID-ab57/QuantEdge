@@ -14,9 +14,11 @@ duplicated persistence logic.
 """
 
 import logging
+import math
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from app.features.ai_extensions import NormalizationStats
 from app.models.training import TrainingJob, TrainingJobLog
@@ -75,6 +77,32 @@ _EXPERIMENT_ARTIFACT_CATEGORY: dict[str, ArtifactType] = {
     "roc_curve_png": "plot",
     "precision_recall_curve_png": "plot",
 }
+
+
+def _sanitize_for_json(value: Any) -> Any:
+    """Replace a non-finite float (`NaN`/`Infinity`/`-Infinity`) with `None`,
+    recursively, before a result summary is persisted to `training_jobs.result_summary`
+    (a Postgres `JSON` column).
+
+    JSON has no literal for a non-finite float (RFC 8259) — Python's own
+    `json.dumps` still emits the bare tokens `NaN`/`Infinity`/`-Infinity` by
+    default, which asyncpg passes straight through, and Postgres's JSON parser
+    correctly rejects (`invalid input syntax for type json ... Token "NaN" is
+    invalid`), failing the entire `UPDATE`. A `NaN` here is not a bug in any one
+    metric's math — it's scikit-learn's own well-documented behavior for a
+    one-vs-rest ROC-AUC/average-precision computed over a split where one class
+    never appears as a negative (or positive) example, which a small or
+    class-imbalanced dataset can produce easily. `None` (JSON `null`) is the
+    honest value for "not computable here", not a fabricated number — every
+    frontend panel already renders a `null` metric as "—"/"Not available".
+    """
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {key: _sanitize_for_json(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_for_json(item) for item in value]
+    return value
 
 
 class TrainingJobService:
@@ -363,16 +391,14 @@ class TrainingJobService:
         async def save_results(result: TrainingResult) -> None:
             job = await self.repository.get_by_id(job_id)
             if job is not None:
-                await self.repository.update(
-                    job,
+                summary = _sanitize_for_json(
                     {
-                        "result_summary": {
-                            "metrics": result.metrics,
-                            "artifact_uri": result.artifact_uri,
-                            **result.summary,
-                        }
-                    },
+                        "metrics": result.metrics,
+                        "artifact_uri": result.artifact_uri,
+                        **result.summary,
+                    }
                 )
+                await self.repository.update(job, {"result_summary": summary})
 
         return save_results
 

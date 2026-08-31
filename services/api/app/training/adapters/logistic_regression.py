@@ -19,6 +19,7 @@ import time
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+import numpy as np
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import confusion_matrix
 
@@ -39,6 +40,9 @@ from app.training.interpretability import (
     compute_feature_importance,
     compute_overfitting_flag,
     compute_roc_pr_curves,
+    to_float_matrix,
+    to_int_matrix,
+    to_label_list,
 )
 from app.training.model_metadata import collect_model_metadata
 from app.training.normalization import normalization_stats_to_dicts
@@ -82,17 +86,32 @@ class LogisticRegressionAdapter(ModelAdapter):
         regularization = float(hyperparameters.get("C", 1.0))
         random_seed = int(hyperparameters.get("random_seed", 42))
 
+        # `SplitMatrix.X` is a plain `list[list[float]]` by design — this module
+        # stays framework-free (`app/training/base.py`'s own docstring) — so each
+        # split is converted to a real `numpy.ndarray` once, here, at the one seam
+        # where a scikit-learn adapter actually needs one. This changes nothing at
+        # runtime (scikit-learn converts a nested list through `numpy.asarray`
+        # internally on every call anyway); it just does that conversion with a
+        # precisely-typed result instead of leaving it implicit.
+        train_x = np.asarray(dataset.train.X)
+        validation_x = np.asarray(dataset.validation.X)
+
         wall_started = time.perf_counter()
         cpu_started = time.process_time()
         try:
             model = LogisticRegression(
                 max_iter=max_iter, C=regularization, random_state=random_seed
             )
-            model.fit(dataset.train.X, dataset.train.y)
-            train_predictions = model.predict(dataset.train.X)
-            train_probabilities = model.predict_proba(dataset.train.X)
-            predictions = model.predict(dataset.validation.X)
-            probabilities = model.predict_proba(dataset.validation.X)
+            model.fit(train_x, dataset.train.y)
+            # Every value scikit-learn hands back is converted through
+            # `interpretability.py`'s typed helpers immediately — `to_label_list`/
+            # `to_float_matrix` — so nothing downstream ever touches a raw
+            # numpy/scikit-learn value again (see that module's own `NumpyArrayLike`
+            # docstring for why: scikit-learn ships no type information of its own).
+            train_predictions = to_label_list(model.predict(train_x))
+            train_probabilities = to_float_matrix(model.predict_proba(train_x))
+            predictions = to_label_list(model.predict(validation_x))
+            probabilities = to_float_matrix(model.predict_proba(validation_x))
         except Exception as exc:  # noqa: BLE001 - re-raised as a named domain error below
             raise TrainingExecutionError(
                 self.metadata.name, f"{type(exc).__name__}: {exc}"
@@ -100,33 +119,29 @@ class LogisticRegressionAdapter(ModelAdapter):
         training_duration_seconds = time.perf_counter() - wall_started
         cpu_time_seconds = time.process_time() - cpu_started
 
-        classes = model.classes_.tolist()
+        classes = to_label_list(model.classes_)
         # `EvaluationEngine.evaluate` (`app/evaluation/`) is the one place these
         # numbers are actually computed — every metric it runs (including ROC-AUC,
         # new here) is a registered `Metric`, so a future model adapter reuses the
         # exact same engine rather than reimplementing this math a third time.
         metrics = evaluation_engine.evaluate(
-            self.metadata.model_kind, dataset.validation.y, predictions, probabilities.tolist()
+            self.metadata.model_kind, dataset.validation.y, predictions, probabilities
         ).metrics
         train_metrics = evaluation_engine.evaluate(
-            self.metadata.model_kind,
-            dataset.train.y,
-            train_predictions,
-            train_probabilities.tolist(),
+            self.metadata.model_kind, dataset.train.y, train_predictions, train_probabilities
         ).metrics
-        matrix = confusion_matrix(dataset.validation.y, predictions, labels=classes)
+        matrix = to_int_matrix(confusion_matrix(dataset.validation.y, predictions, labels=classes))
         confusion_details = compute_confusion_details(dataset.validation.y, predictions, classes)
-        roc_pr = compute_roc_pr_curves(dataset.validation.y, probabilities.tolist(), classes)
+        roc_pr = compute_roc_pr_curves(dataset.validation.y, probabilities, classes)
         feature_importance = compute_feature_importance(
-            dataset.feature_columns, model.coef_, normalized=dataset.normalization is not None
+            dataset.feature_columns,
+            to_float_matrix(model.coef_),
+            normalized=dataset.normalization is not None,
         )
         prediction_samples = build_prediction_samples(
             actual=dataset.validation.y,
-            # sklearn's stubs infer an incomplete return type for `predict()` here (a
-            # known stub-completeness gap, same as `zero_division` above) — the
-            # runtime value is always an ndarray with a real `.tolist()`.
-            predicted=predictions.tolist(),  # type: ignore[reportAttributeAccessIssue]
-            probabilities=probabilities.tolist(),
+            predicted=predictions,
+            probabilities=probabilities,
             classes=classes,
         )
         artifact_uri = default_serializer.save(model, self.metadata.name)
@@ -134,13 +149,14 @@ class LogisticRegressionAdapter(ModelAdapter):
         test_metrics: dict[str, float] = {}
         held_out_metrics = metrics
         if dataset.test is not None and len(dataset.test.y) > 0:
-            test_predictions = model.predict(dataset.test.X)
-            test_probabilities = model.predict_proba(dataset.test.X)
+            test_x = np.asarray(dataset.test.X)
+            test_predictions = to_label_list(model.predict(test_x))
+            test_probabilities = to_float_matrix(model.predict_proba(test_x))
             test_metrics = evaluation_engine.evaluate(
                 self.metadata.model_kind,
                 dataset.test.y,
                 test_predictions,
-                test_probabilities.tolist(),
+                test_probabilities,
             ).metrics
             held_out_metrics = test_metrics
         overfitting = compute_overfitting_flag(
@@ -161,7 +177,7 @@ class LogisticRegressionAdapter(ModelAdapter):
             "target_column": dataset.target_column,
             "feature_columns": list(dataset.feature_columns),
             "classes": classes,
-            "confusion_matrix": matrix.tolist(),
+            "confusion_matrix": matrix,
             "confusion_matrix_details": confusion_details,
             "roc_pr_curves": roc_pr,
             "train_metrics": train_metrics,
@@ -191,7 +207,7 @@ class LogisticRegressionAdapter(ModelAdapter):
                 self.metadata.name, feature_importance
             ),
             "confusion_matrix_png": write_confusion_matrix_png(
-                self.metadata.name, matrix.tolist(), [str(c) for c in classes]
+                self.metadata.name, matrix, [str(c) for c in classes]
             ),
             "roc_curve_png": write_roc_curve_png(
                 self.metadata.name, roc_pr["curves"], roc_pr["auc"]

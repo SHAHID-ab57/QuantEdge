@@ -21,6 +21,7 @@ import time
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+import numpy as np
 from sklearn.linear_model import LinearRegression
 
 from app.evaluation.engine import default_engine as evaluation_engine
@@ -35,6 +36,7 @@ from app.training.interpretability import (
     build_prediction_samples,
     compute_feature_importance,
     compute_overfitting_flag,
+    to_float_list,
 )
 from app.training.model_metadata import collect_model_metadata
 from app.training.normalization import normalization_stats_to_dicts
@@ -74,13 +76,27 @@ class LinearRegressionAdapter(ModelAdapter):
 
         fit_intercept = bool(hyperparameters.get("fit_intercept", True))
 
+        # `SplitMatrix.X` is a plain `list[list[float]]` by design — this module
+        # stays framework-free (`app/training/base.py`'s own docstring) — so each
+        # split is converted to a real `numpy.ndarray` once, here, at the one seam
+        # where a scikit-learn adapter actually needs one. This changes nothing at
+        # runtime (scikit-learn converts a nested list through `numpy.asarray`
+        # internally on every call anyway); it just does that conversion with a
+        # precisely-typed result instead of leaving it implicit.
+        train_x = np.asarray(dataset.train.X)
+        validation_x = np.asarray(dataset.validation.X)
+
         wall_started = time.perf_counter()
         cpu_started = time.process_time()
         try:
             model = LinearRegression(fit_intercept=fit_intercept)
-            model.fit(dataset.train.X, dataset.train.y)
-            train_predictions = model.predict(dataset.train.X)
-            predictions = model.predict(dataset.validation.X)
+            model.fit(train_x, dataset.train.y)
+            # Every value scikit-learn hands back is converted through
+            # `interpretability.py`'s typed `to_float_list` immediately — see that
+            # module's own `NumpyArrayLike` docstring for why: scikit-learn ships
+            # no type information of its own.
+            train_predictions = to_float_list(model.predict(train_x))
+            predictions = to_float_list(model.predict(validation_x))
         except Exception as exc:  # noqa: BLE001 - re-raised as a named domain error below
             raise TrainingExecutionError(
                 self.metadata.name, f"{type(exc).__name__}: {exc}"
@@ -98,25 +114,25 @@ class LinearRegressionAdapter(ModelAdapter):
         train_metrics = evaluation_engine.evaluate(
             self.metadata.model_kind, dataset.train.y, train_predictions
         ).metrics
-        # `model.coef_` is a 1-D ndarray for single-output regression; wrapped in a
+        # `model.coef_` is a 1-D array for single-output regression; wrapped in a
         # one-row list so `compute_feature_importance` sees the same "one row per
-        # class" shape `LogisticRegressionAdapter` gives it. sklearn's stubs type
-        # `coef_` as incompatible with `Sequence[float]` despite behaving as one at
-        # runtime (a known stub-completeness gap, same as `zero_division` elsewhere).
+        # class" shape `LogisticRegressionAdapter` gives it.
+        coefficients = to_float_list(model.coef_)
         feature_importance = compute_feature_importance(
             dataset.feature_columns,
-            [model.coef_.tolist()],  # type: ignore[reportAttributeAccessIssue]
+            [coefficients],
             normalized=dataset.normalization is not None,
         )
         prediction_samples = build_prediction_samples(
-            actual=dataset.validation.y, predicted=predictions.tolist()
+            actual=dataset.validation.y, predicted=predictions
         )
         artifact_uri = default_serializer.save(model, self.metadata.name)
 
         test_metrics: dict[str, float] = {}
         held_out_metrics = metrics
         if dataset.test is not None and len(dataset.test.y) > 0:
-            test_predictions = model.predict(dataset.test.X)
+            test_x = np.asarray(dataset.test.X)
+            test_predictions = to_float_list(model.predict(test_x))
             test_metrics = evaluation_engine.evaluate(
                 self.metadata.model_kind, dataset.test.y, test_predictions
             ).metrics
@@ -138,7 +154,7 @@ class LinearRegressionAdapter(ModelAdapter):
         report = {
             "target_column": dataset.target_column,
             "feature_columns": list(dataset.feature_columns),
-            "coefficients": model.coef_.tolist(),
+            "coefficients": coefficients,
             "intercept": float(model.intercept_),
             "train_metrics": train_metrics,
             "test_metrics": test_metrics,

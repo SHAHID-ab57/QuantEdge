@@ -1,5 +1,7 @@
 'use client';
 
+import EditIcon from '@mui/icons-material/Edit';
+import Button from '@mui/material/Button';
 import MenuItem from '@mui/material/MenuItem';
 import Stack from '@mui/material/Stack';
 import TextField from '@mui/material/TextField';
@@ -15,6 +17,8 @@ import { statusLabel } from '../lib/experiment-status';
 export interface ExperimentMetadataPanelProps {
   experiment: Experiment;
   onStatusChange: (status: ExperimentStatus) => void;
+  /** Opens `ExperimentConfigDialog` — see that component's own docstring. */
+  onEditConfig: () => void;
   statusUpdating?: boolean;
 }
 
@@ -78,17 +82,21 @@ export function describePredictionHorizon(experiment: Experiment): string | null
 
 /**
  * The experiment's reproducibility record — dataset version, feature set,
- * target configuration, and split configuration, exactly as recorded at
- * creation time. These fields are deliberately read-only here: an
- * experiment's whole purpose is to say what was actually built and run,
- * so editing them after the fact would misrepresent that record. Status
- * is the one field this panel lets a researcher change, since a status
- * transition (draft → running → completed/failed) is the experiment
- * lifecycle itself, not a correction to history.
+ * target configuration, and split configuration. Dataset version is set at
+ * creation time and shown read-only here. Feature set/target/split are
+ * editable via "Edit configuration" (`ExperimentConfigDialog`): before that
+ * dialog existed, the only way to set them was a hand-written
+ * `curl -X PATCH`, so most experiments simply never had them recorded — a
+ * training job could reach `Run` several pipeline stages deep before
+ * discovering that. Status is the other field this panel lets a researcher
+ * change directly, since a status transition (draft → running →
+ * completed/failed) is the experiment lifecycle itself, not a correction
+ * to history.
  */
 export function ExperimentMetadataPanel({
   experiment,
   onStatusChange,
+  onEditConfig,
   statusUpdating = false,
 }: ExperimentMetadataPanelProps) {
   return (
@@ -133,6 +141,15 @@ export function ExperimentMetadataPanel({
         value={describeSplitConfig(experiment)}
         help="Train / validation / test split ratios, in that order."
       />
+      <Button
+        size="small"
+        variant="outlined"
+        startIcon={<EditIcon fontSize="small" />}
+        onClick={onEditConfig}
+        sx={{ alignSelf: 'flex-start' }}
+      >
+        Edit configuration
+      </Button>
       <Field label="Model type" value={experiment.model_type ?? 'Not recorded'} />
       <Field label="Created" value={new Date(experiment.created_at).toLocaleString()} />
       <Field label="Last updated" value={new Date(experiment.updated_at).toLocaleString()} />

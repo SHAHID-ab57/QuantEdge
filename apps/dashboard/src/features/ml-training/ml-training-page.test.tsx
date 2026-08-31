@@ -579,6 +579,44 @@ describe('MLTrainingPage — creating a training job', () => {
       ),
     );
   }, 15000);
+
+  it('warns and disables Create when the selected experiment has no feature_set/target_config, with a link to the experiment', async () => {
+    mockedExperimentsApi.fetchExperiment.mockResolvedValue(
+      experimentDetail({ feature_set: [], target_config: [] }),
+    );
+    renderPage();
+    await screen.findByText('placeholder');
+    fireEvent.click(screen.getByRole('button', { name: 'New Training Job' }));
+    const dialog = screen.getByRole('dialog');
+    await within(dialog).findByLabelText('Experiment');
+    fireEvent.mouseDown(within(dialog).getByLabelText('Experiment'));
+    fireEvent.click(await screen.findByRole('option', { name: 'Baseline SMA' }));
+
+    expect(
+      await screen.findByText('This experiment has no feature_set/target_config recorded'),
+    ).toBeInTheDocument();
+    const link = screen.getByRole('link', { name: 'Open experiment' });
+    expect(link).toHaveAttribute('href', '/experiments/exp-1');
+    expect(screen.getByRole('button', { name: 'Create Training Job' })).toBeDisabled();
+  });
+
+  it('shows no warning and keeps Create enabled when the experiment has a real feature_set/target_config', async () => {
+    renderPage();
+    await screen.findByText('placeholder');
+    fireEvent.click(screen.getByRole('button', { name: 'New Training Job' }));
+    const dialog = screen.getByRole('dialog');
+    await within(dialog).findByLabelText('Experiment');
+    fireEvent.mouseDown(within(dialog).getByLabelText('Experiment'));
+    fireEvent.click(await screen.findByRole('option', { name: 'Baseline SMA' }));
+
+    await waitFor(() =>
+      expect(within(dialog).getByLabelText('Model type')).toHaveValue('Placeholder Model'),
+    );
+    expect(
+      screen.queryByText('This experiment has no feature_set/target_config recorded'),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Create Training Job' })).not.toBeDisabled();
+  });
 });
 
 describe('MLTrainingPage — job detail, run, and cancel', () => {

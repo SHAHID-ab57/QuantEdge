@@ -8,7 +8,7 @@ itself a `ModelAdapter`.
 """
 
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 #: Prediction-confidence thresholds — a fixed, documented heuristic (not derived from
 #: any dataset), matching the same "explicitly-labeled heuristic" spirit the Dataset
@@ -24,6 +24,117 @@ DEFAULT_OVERFITTING_THRESHOLD = 0.15
 #: keep — enough to be useful, small enough that `result_summary` (a single JSON
 #: column) never grows unbounded on a large validation split.
 DEFAULT_PREDICTION_SAMPLE_CAP = 25
+
+
+@runtime_checkable
+class NumpyArrayLike(Protocol):
+    """Structural contract for whatever scikit-learn/numpy actually hands back at
+    runtime — a `numpy.ndarray` — for the one method every conversion helper below
+    needs from it.
+
+    scikit-learn ships no type information of its own (no `py.typed` marker), so
+    a value that comes back from a model attribute (`model.coef_`,
+    `model.classes_`) or a `sklearn.metrics`/`sklearn.preprocessing` function
+    (`confusion_matrix`, `roc_curve`, `precision_recall_curve`,
+    `multilabel_confusion_matrix`, `label_binarize`) is only ever as precisely
+    typed as whichever stub set (if any) happens to be installed — and even with
+    one installed, tracing an untyped call graph can still produce an inferred
+    type describing more runtime shapes than the call actually takes (e.g. a
+    `tuple` branch merged in from a generic base-class method this platform's
+    two real model adapters never actually reach). Every `to_*` helper below
+    therefore accepts plain `object` and narrows to this Protocol itself, via
+    `_ensure_array` — `@runtime_checkable` makes that a real structural check at
+    runtime, not just an assumption — so each one is correct regardless of which
+    of those situations applies at its own call site.
+    """
+
+    # numpy's own stubs type `tolist()` `-> Any` too — the nested shape genuinely
+    # can't be expressed statically, so `object` is the honest upper bound here;
+    # `_ensure_array` narrows it explicitly before it's ever called.
+    def tolist(self) -> object: ...
+
+
+def _ensure_array(value: object, *, what: str = "an array-like with .tolist()") -> NumpyArrayLike:
+    """The one narrowing check every conversion helper below shares: confirm
+    `value` actually has a real `.tolist()` before calling it, rather than
+    trusting whatever static type it happened to arrive with. See
+    `NumpyArrayLike`'s own docstring for why this can't just be assumed from the
+    parameter's declared type."""
+    if isinstance(value, NumpyArrayLike):
+        return value
+    raise TypeError(f"expected {what}, got {type(value).__name__}")
+
+
+def _as_list(raw: object, *, what: str) -> list[object]:
+    """The common second step every conversion helper needs: confirm `tolist()`
+    actually produced a `list` before indexing/iterating it — raising with a clear
+    message rather than trusting an unknown-shaped value silently."""
+    if not isinstance(raw, list):
+        raise TypeError(f"expected {what}, got {type(raw).__name__}")
+    return raw
+
+
+def _as_float(item: object) -> float:
+    """Narrow one already-unpacked array element to `float`, the same
+    `isinstance(value, int | float)` discipline `app/training/normalization.py`'s
+    own numeric-column narrowing already uses — `object` has no `__float__` of its
+    own, so `float(item)` is only ever valid once `item` is actually narrowed."""
+    if isinstance(item, int | float):
+        return float(item)
+    raise TypeError(f"expected a numeric array element, got {type(item).__name__}")
+
+
+def _as_int(item: object) -> int:
+    """`_as_float`'s integer counterpart — a count (a confusion-matrix cell, a
+    true/false positive/negative) is always whole, but still arrives as `object`."""
+    if isinstance(item, int | float):
+        return int(item)
+    raise TypeError(f"expected a numeric array element, got {type(item).__name__}")
+
+
+def to_float_list(value: object) -> list[float]:
+    """One 1-D numpy array's values as a real, validated `list[float]` — e.g. a
+    `roc_curve`/`precision_recall_curve` output column."""
+    raw = _ensure_array(value, what="a 1-D array-like").tolist()
+    return [_as_float(item) for item in _as_list(raw, what="a 1-D array-like")]
+
+
+def to_int_list(value: object) -> list[int]:
+    """One 1-D numpy array's values as a real, validated `list[int]` — e.g. one
+    `multilabel_confusion_matrix` entry's own `.ravel()`."""
+    raw = _ensure_array(value, what="a 1-D array-like").tolist()
+    return [_as_int(item) for item in _as_list(raw, what="a 1-D array-like")]
+
+
+def to_float_matrix(value: object) -> list[list[float]]:
+    """One 2-D numpy array's values as a real, validated `list[list[float]]` — e.g.
+    `model.predict_proba(...)` or a (never-sparse-in-practice) `label_binarize`
+    result."""
+    rows = _as_list(_ensure_array(value, what="a 2-D array-like").tolist(), what="a 2-D array-like")
+    return [
+        [_as_float(item) for item in _as_list(row, what="a 2-D array-like row")] for row in rows
+    ]
+
+
+def to_int_matrix(value: object) -> list[list[int]]:
+    """One 2-D numpy integer array's values as a real, validated
+    `list[list[int]]` — e.g. `sklearn.metrics.confusion_matrix`'s output."""
+    rows = _as_list(_ensure_array(value, what="a 2-D array-like").tolist(), what="a 2-D array-like")
+    return [[_as_int(item) for item in _as_list(row, what="a 2-D array-like row")] for row in rows]
+
+
+def to_label_list(value: object) -> list[Any]:
+    """One 1-D numpy array of classification labels/predictions as a real Python
+    `list` — e.g. `model.predict(X)` or `model.classes_`.
+
+    Unlike the numeric helpers above, a label has no single concrete element type
+    to validate against (a classification target's categories are typically
+    strings, but nothing here requires that) — `SplitMatrix.y`/`ModelAdapter.predict`
+    already declare `list[Any]` for the identical reason. This still confirms the
+    one real invariant that matters: `tolist()` actually produced a `list`.
+    """
+    raw = _ensure_array(value, what="a 1-D array-like").tolist()
+    return _as_list(raw, what="a 1-D array-like")
 
 
 def confidence_level(probability: float) -> str:
@@ -101,15 +212,15 @@ def compute_confusion_details(
     matrices = multilabel_confusion_matrix(y_true, y_pred, labels=list(labels))
     details = []
     for label, matrix in zip(labels, matrices, strict=True):
-        true_negative, false_positive, false_negative, true_positive = matrix.ravel().tolist()
+        true_negative, false_positive, false_negative, true_positive = to_int_list(matrix.ravel())
         details.append(
             {
                 "class": label,
-                "true_positive": int(true_positive),
-                "false_positive": int(false_positive),
-                "true_negative": int(true_negative),
-                "false_negative": int(false_negative),
-                "support": int(true_positive + false_negative),
+                "true_positive": true_positive,
+                "false_positive": false_positive,
+                "true_negative": true_negative,
+                "false_negative": false_negative,
+                "support": true_positive + false_negative,
             }
         )
     return details
@@ -129,7 +240,14 @@ def compute_roc_pr_curves(
     from sklearn.preprocessing import label_binarize
 
     labels = list(labels)
-    binarized = label_binarize(y_true, classes=labels)
+    # `sparse_output=False` is the default, but is named explicitly here so the
+    # dense/sparse choice is pinned at the call site rather than left implicit —
+    # `label_binarize` therefore never returns a scipy sparse matrix at runtime,
+    # only the `ndarray | spmatrix` union sklearn's own stubs (where installed)
+    # still describe (the stub doesn't encode the `sparse_output`-to-return-type
+    # relationship). `to_float_matrix`'s own `_ensure_array` check confirms that
+    # real invariant instead of assuming the union away.
+    binarized = to_float_matrix(label_binarize(y_true, classes=labels, sparse_output=False))
     if len(labels) == 2:
         # `label_binarize` collapses a 2-class problem to one column; rebuild the
         # second (negative-class) column so both classes get a curve, symmetric with
@@ -142,11 +260,13 @@ def compute_roc_pr_curves(
     for index, label in enumerate(labels):
         column_true = [row[index] for row in binarized]
         column_score = [row[index] for row in y_proba]
-        false_positive_rate, true_positive_rate, _ = roc_curve(column_true, column_score)
-        precision, recall, _ = precision_recall_curve(column_true, column_score)
+        raw_fpr, raw_tpr, _ = roc_curve(column_true, column_score)
+        raw_precision, raw_recall, _ = precision_recall_curve(column_true, column_score)
+        false_positive_rate = to_float_list(raw_fpr)
+        true_positive_rate = to_float_list(raw_tpr)
         curves[label] = {
-            "roc": {"fpr": false_positive_rate.tolist(), "tpr": true_positive_rate.tolist()},
-            "pr": {"precision": precision.tolist(), "recall": recall.tolist()},
+            "roc": {"fpr": false_positive_rate, "tpr": true_positive_rate},
+            "pr": {"precision": to_float_list(raw_precision), "recall": to_float_list(raw_recall)},
         }
         auc_scores[label] = float(auc(false_positive_rate, true_positive_rate))
         average_precision[label] = float(average_precision_score(column_true, column_score))

@@ -3,6 +3,7 @@
 import ScienceIcon from '@mui/icons-material/Science';
 import DatasetIcon from '@mui/icons-material/Dataset';
 import SmartToyIcon from '@mui/icons-material/SmartToy';
+import WarningAmberIcon from '@mui/icons-material/WarningAmber';
 import Alert from '@mui/material/Alert';
 import Autocomplete from '@mui/material/Autocomplete';
 import Button from '@mui/material/Button';
@@ -15,6 +16,7 @@ import FormControlLabel from '@mui/material/FormControlLabel';
 import Stack from '@mui/material/Stack';
 import TextField from '@mui/material/TextField';
 import Typography from '@mui/material/Typography';
+import type { Route } from 'next';
 import { useEffect, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { EmptyStateNotice } from '@/components/empty-state-notice';
@@ -68,7 +70,11 @@ export interface CreateTrainingJobDialogProps {
  * show the experiment's own Target/Feature Set/Split Configuration as a
  * read-only preview — never editable here, since those describe what the
  * experiment's dataset was actually built with, not something a training
- * job gets to redefine.
+ * job gets to redefine. If the selected experiment recorded neither (empty
+ * `feature_set`/`target_config` — routine before `ExperimentConfigDialog`
+ * existed), an inline warning links to that experiment's detail page and
+ * disables Create, catching the same failure the pipeline's `load_dataset`
+ * stage would otherwise only report several stages into `Run`.
  */
 export function CreateTrainingJobDialog({
   open,
@@ -179,6 +185,18 @@ export function CreateTrainingJobDialog({
 
   const hyperparametersValid = knownHyperparametersAreValid(knownValues);
   const requiresRealData = selectedAdapter?.requires_real_data ?? false;
+  // Checked at creation time rather than only surfacing at the pipeline's
+  // `load_dataset` stage after `Run` — an experiment with nothing recorded
+  // is guaranteed to fail training, so there is no reason to wait several
+  // stages deep to say so. Only evaluated once the experiment's full
+  // record has actually loaded (`experimentDetail.data`), so switching
+  // experiments never flashes a false warning while it's still fetching.
+  const experimentConfigIncomplete = Boolean(
+    experiment &&
+    experimentDetail.data &&
+    ((experimentDetail.data.feature_set?.length ?? 0) === 0 ||
+      (experimentDetail.data.target_config?.length ?? 0) === 0),
+  );
   const validationReasons: string[] = [];
   if (!experiment) validationReasons.push('Select an experiment.');
   if (!datasetVersion.trim()) validationReasons.push('Enter or select a dataset version.');
@@ -203,7 +221,8 @@ export function CreateTrainingJobDialog({
     onCreated(created.id);
   };
 
-  const canSubmit = validationReasons.length === 0 && !create.isPending;
+  const canSubmit =
+    validationReasons.length === 0 && !experimentConfigIncomplete && !create.isPending;
   const noExperiments = !experiments.isLoading && experimentOptions.length === 0;
   const noModelAdapters =
     !modelAdapters.isLoading && (modelAdapters.data?.adapters.length ?? 0) === 0;
@@ -252,6 +271,16 @@ export function CreateTrainingJobDialog({
             />
             <InfoTooltip label="Experiment" sections={EXPERIMENT_FIELD_HELP} />
           </Stack>
+
+          {experimentConfigIncomplete && experiment ? (
+            <EmptyStateNotice
+              icon={<WarningAmberIcon fontSize="small" color="warning" />}
+              title="This experiment has no feature_set/target_config recorded"
+              description="Set it on the experiment first — a training job trains against features and a target that were never selected otherwise, and is guaranteed to fail once run."
+              actionLabel="Open experiment"
+              actionHref={`/experiments/${experiment.id}` as Route}
+            />
+          ) : null}
 
           <Stack direction="row" spacing={0.5} alignItems="flex-start">
             <Autocomplete

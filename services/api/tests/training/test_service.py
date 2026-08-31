@@ -14,8 +14,9 @@ from app.repositories.training import TrainingJobRepository
 from app.schemas.experiments import ExperimentCreateRequest
 from app.schemas.training import TrainingJobCreateRequest
 from app.services.experiments import ExperimentService
-from app.services.training import TrainingJobService
+from app.services.training import TrainingJobService, _sanitize_for_json
 from app.training.adapters import load_builtin_model_adapters
+from app.training.base import TrainingResult
 from app.training.errors import (
     InvalidPredictionInputError,
     InvalidTrainingJobSortError,
@@ -383,6 +384,69 @@ class TestRun:
 
         with pytest.raises(InvalidTrainingJobTransitionError):
             await service.run(uuid.UUID(job.id))
+
+
+class TestSanitizeForJson:
+    """`_sanitize_for_json` — the guard against `training_jobs.result_summary`
+    (a Postgres `JSON` column) ever receiving a non-finite float. A one-vs-rest
+    ROC-AUC/average-precision for a class that never appears as a negative (or
+    positive) example in a split is a real, well-documented scikit-learn `NaN`,
+    not a bug in this platform's own math — and `NaN`/`Infinity`/`-Infinity` have
+    no JSON literal (RFC 8259), so persisting one outright fails the `UPDATE`."""
+
+    def test_replaces_nan_and_infinity_with_none(self) -> None:
+        assert _sanitize_for_json(float("nan")) is None
+        assert _sanitize_for_json(float("inf")) is None
+        assert _sanitize_for_json(float("-inf")) is None
+
+    def test_leaves_finite_values_untouched(self) -> None:
+        assert _sanitize_for_json(1.5) == 1.5
+        assert _sanitize_for_json("nan") == "nan"  # a string, not a float
+        assert _sanitize_for_json(None) is None
+        assert _sanitize_for_json(True) is True
+
+    def test_recurses_into_nested_dicts_and_lists(self) -> None:
+        value = {
+            "auc": {"up": float("nan"), "down": 0.9},
+            "curves": [{"fpr": [0.0, float("nan"), 1.0]}],
+            "macro_auc": float("nan"),
+        }
+        assert _sanitize_for_json(value) == {
+            "auc": {"up": None, "down": 0.9},
+            "curves": [{"fpr": [0.0, None, 1.0]}],
+            "macro_auc": None,
+        }
+
+
+class TestSaveResultsSanitizesNonFiniteFloats:
+    async def test_a_nan_metric_is_persisted_as_null_instead_of_failing_the_update(
+        self, session_factory: SessionFactory
+    ) -> None:
+        experiment_id = await seed_experiment(session_factory, dataset_version="ds-nan")
+        service = build_service(session_factory)
+        job = await service.create(
+            TrainingJobCreateRequest(experiment_id=experiment_id, model_type="placeholder")
+        )
+        save_results = service._make_save_results_hook(uuid.UUID(job.id))
+
+        # Exactly the shape that broke `POST /training-jobs/{id}/run` with a real
+        # Postgres backend (`invalid input syntax for type json ... Token "NaN" is
+        # invalid`) before this fix — a degenerate one-vs-rest AUC for a class with
+        # no negative examples in the split.
+        await save_results(
+            TrainingResult(
+                metrics={"accuracy": 1.0, "roc_auc": float("nan")},
+                artifact_uri="file:///tmp/model.joblib",
+                summary={"roc_pr_curves": {"auc": {"up": float("nan"), "down": 0.9}}},
+            )
+        )
+
+        updated = await service.get(uuid.UUID(job.id))
+        assert updated.result_summary is not None
+        assert updated.result_summary["metrics"]["roc_auc"] is None
+        assert updated.result_summary["metrics"]["accuracy"] == 1.0
+        assert updated.result_summary["roc_pr_curves"]["auc"]["up"] is None
+        assert updated.result_summary["roc_pr_curves"]["auc"]["down"] == 0.9
 
 
 class TestListModelAdapters:

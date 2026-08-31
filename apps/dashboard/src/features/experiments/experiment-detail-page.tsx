@@ -12,6 +12,7 @@ import { useState } from 'react';
 import { Section } from '@/components/section';
 import type { ExperimentStatus } from '@/types/api/experiments';
 import { DeleteExperimentDialog } from './components/delete-experiment-dialog';
+import { ExperimentConfigDialog } from './components/experiment-config-dialog';
 import { ExperimentArtifactsList } from './components/experiment-artifacts-list';
 import { ExperimentMetadataPanel } from './components/experiment-metadata-panel';
 import { ExperimentMetricsTable } from './components/experiment-metrics-table';
@@ -66,6 +67,7 @@ export function ExperimentDetailPage({ experimentId }: ExperimentDetailPageProps
   const createArtifact = useCreateArtifact();
   const deleteArtifact = useDeleteArtifact();
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [configOpen, setConfigOpen] = useState(false);
 
   if (experiment.isLoading) {
     return <PageSkeleton />;
@@ -122,6 +124,7 @@ export function ExperimentDetailPage({ experimentId }: ExperimentDetailPageProps
                 onStatusChange={(status: ExperimentStatus) =>
                   update.mutate({ id: data.id, body: { status } })
                 }
+                onEditConfig={() => setConfigOpen(true)}
               />
             </Section>
 
@@ -183,6 +186,12 @@ export function ExperimentDetailPage({ experimentId }: ExperimentDetailPageProps
             onSuccess: () => router.push('/experiments'),
           });
         }}
+      />
+
+      <ExperimentConfigDialog
+        open={configOpen}
+        experiment={data}
+        onClose={() => setConfigOpen(false)}
       />
     </Stack>
   );

@@ -1261,6 +1261,42 @@ that file the same way `history-page.test.tsx` already mocks it for its own
 to an empty `URLSearchParams` in `beforeEach` so every other existing test
 in that file is unaffected.
 
+### Testing the Live Prediction Service (frontend)
+
+`apps/dashboard/src/features/ml-predict/` follows the same layering as
+`ml-evaluation/`: pure types/API client (Zod-validated, covered indirectly
+through the page-level mocks below), components in isolation, then the
+page composition root.
+
+**Components.** `prediction-form.test.tsx` covers `fetchTrainingJobs`
+always being called with `status: 'completed'`, Run Prediction staying
+disabled until both a training job and a symbol have been chosen (and
+becoming enabled once both are), the submitted body having the exact
+expected shape with `asOf: null` when the As Of field is left blank, the
+empty-state notice appearing when there are no completed training jobs,
+and the button's label/disabled state while `submitting` is true.
+`prediction-result-panel.test.tsx` covers target and horizon rendering
+first, confidence rendering as an explicit "N.N% probability" string (never
+a bare fraction), every class's own probability chip rendering (including
+the predicted class's chip), a "Not available" chip plus its `InfoTooltip`
+reason replacing the confidence text entirely when `confidence` is `null`
+(asserted by the absence of any `/probability$/`-matching text, not just
+the presence of the chip), `actual_outcome` defaulting to "Not graded yet",
+both deep links' exact `href`s, and a regressor's numeric `predicted_value`
+rendering correctly alongside its own unavailable-confidence state.
+`prediction-history-table.test.tsx` covers one row per past prediction, a
+confidence chip vs. a dash when `confidence` is `null`, the reopen callback
+firing with the clicked row's own summary, an empty-history message, and
+loading-skeleton rows before the first page arrives.
+
+**Page-level.** `ml-predict-page.test.tsx` covers: selecting a training job
+and a symbol then running a prediction, asserting `runPrediction` was
+called with the exact expected body and the result panel then renders with
+the response's own `target_column`; a run failure surfacing the API
+error's own message in an `Alert`; and reopening a past prediction from
+Prediction History fetching it by id and rendering it through the same
+result panel a fresh run uses.
+
 ## End-to-End Tests
 
 Not implemented. `tests/` at the repo root is reserved for this; no browser

@@ -99,37 +99,46 @@ one review per task.
 
 ## Progress Tracking
 
-| ID           | Milestone       | Epic              | Task                 | Status  | Priority | Dependencies | Git Commit |
-| ------------ | --------------- | ----------------- | -------------------- | ------- | -------- | ------------ | ---------- |
-| M0-E1-T1-MT1 | M0: Foundation  | E1: Documentation | T1: Project Charter  | Ready   | Critical | None         | —          |
-| M0-E1-T1-MT2 | M0: Foundation  | E1: Documentation | T1: Project Charter  | Planned | Critical | M0-E1-T1-MT1 | —          |
-| M0-E1-T2-MT1 | M0: Foundation  | E1: Documentation | T2: Architecture     | Planned | Critical | M0-E1-T1-MT2 | —          |
-| M0-E2-T1-MT1 | M0: Foundation  | E2: Scaffold      | T1: Repository Setup | Planned | High     | M0-E1-T2-MT1 | —          |
-| M0-E2-T2-MT1 | M0: Foundation  | E2: Scaffold      | T2: Build Config     | Planned | High     | M0-E2-T1-MT1 | —          |
-| M1-E1-T1-MT1 | M1: Data Layer  | E1: Ingestion     | T1: Data Sources     | Planned | High     | M0-E2-T2-MT1 | —          |
-| M1-E1-T2-MT1 | M1: Data Layer  | E1: Ingestion     | T2: Pipeline         | Planned | High     | M1-E1-T1-MT1 | —          |
-| M2-E1-T1-MT1 | M2: Features    | E1: Engineering   | T1: Feature API      | Planned | Medium   | M1-E1-T2-MT1 | —          |
-| M3-E1-T1-MT1 | M3: AI Training | E1: Workflow      | T1: Research Env     | Planned | Medium   | M2-E1-T1-MT1 | —          |
-| M4-E1-T1-MT1 | M4: Prediction  | E1: Engine        | T1: Serving          | Planned | Medium   | M3-E1-T1-MT1 | —          |
+The milestone numbering below was replaced wholesale (see `ROADMAP.md`) once
+it became clear the old M0–M11 breakdown didn't map onto what had actually
+been built — see `CLAUDE.md`'s own note on this. The rows below are real,
+not illustrative: each one names an actually-completed capability, verified
+against the Definition of Done stated in `ROADMAP.md`'s own Purpose section
+(real code, a passing test, and it's actually wired in), with the commit
+that introduced it where the work has been committed.
+
+| ID       | Milestone                        | Epic                         | Task                                                       | Status      | Priority | Dependencies | Git Commit           |
+| -------- | -------------------------------- | ---------------------------- | ---------------------------------------------------------- | ----------- | -------- | ------------ | -------------------- |
+| M1-E1-T1 | M1: Research & Training Platform | E1: Data Layer               | Market data ingestion, validation, event bus               | Completed   | Critical | None         | `ee8c890`            |
+| M1-E2-T1 | M1: Research & Training Platform | E2: Feature Engineering      | Feature Engineering Engine                                 | Completed   | High     | M1-E1-T1     | `11d03a9`            |
+| M1-E3-T1 | M1: Research & Training Platform | E3: Dataset Validation       | Dataset Validation & Quality Engine                        | Completed   | High     | M1-E2-T1     | `d53cbde`            |
+| M1-E4-T1 | M1: Research & Training Platform | E4: ML Dataset Builder       | ML Dataset Builder                                         | Completed   | High     | M1-E2-T1     | `345341d`            |
+| M1-E5-T1 | M1: Research & Training Platform | E5: Experiment Management    | Experiment Management System                               | Completed   | High     | M1-E4-T1     | `00d6d52`            |
+| M1-E6-T1 | M1: Research & Training Platform | E6: Training Framework       | ML Training Framework + Baseline Model Framework           | Completed   | Critical | M1-E5-T1     | `c57a19d`, `3bd31a8` |
+| M1-E6-T2 | M1: Research & Training Platform | E6: Training Framework       | Per-column feature normalization                           | Completed   | High     | M1-E6-T1     | `4376586`            |
+| M1-E7-T1 | M1: Research & Training Platform | E7: Model Evaluation         | Model Evaluation & Benchmarking Engine                     | Completed   | High     | M1-E6-T1     | `3a411c1`            |
+| M1-E8-T1 | M1: Research & Training Platform | E8: Experiment Config Editor | In-app `feature_set`/`target_config`/`split_config` editor | Completed   | Medium   | M1-E5-T1     | `346f708`            |
+| M2-E1-T1 | M2: Prediction & Backtesting     | E1: Live Prediction          | Live Prediction Service (`app/prediction/`, `/ml/predict`) | Completed   | Critical | M1-E6-T1     | pending commit       |
+| M2-E2-T1 | M2: Prediction & Backtesting     | E2: Backtesting              | Backtesting engine                                         | Not Started | High     | M2-E1-T1     | —                    |
 
 ---
 
 ## Milestone Summary
 
-| Milestone | Name                       | Progress | Status  |
-| --------- | -------------------------- | -------- | ------- |
-| M0        | Foundation                 | 0%       | Planned |
-| M1        | Data Layer                 | 0%       | Planned |
-| M2        | Feature Engineering        | 0%       | Planned |
-| M3        | AI Research & Training     | 0%       | Planned |
-| M4        | Prediction Engine          | 0%       | Planned |
-| M5        | Backtesting                | 0%       | Planned |
-| M6        | Paper Trading              | 0%       | Planned |
-| M7        | Portfolio Analytics        | 0%       | Planned |
-| M8        | Risk Management            | 0%       | Planned |
-| M9        | Production Readiness       | 0%       | Planned |
-| M10       | Monitoring & Observability | 0%       | Planned |
-| M11       | Community & Expansion      | 0%       | Planned |
+| Milestone | Name                                         | Status      |
+| --------- | -------------------------------------------- | ----------- |
+| M1        | Research & Training Platform                 | COMPLETE    |
+| M2        | Prediction & Backtesting                     | IN PROGRESS |
+| M3        | Paper Trading & Risk                         | NOT STARTED |
+| M4        | Data Breadth                                 | NOT STARTED |
+| M5        | Production Hardening                         | NOT STARTED |
+| M6        | Live Trading (gated on extensive validation) | NOT STARTED |
+
+M2's "IN PROGRESS" covers exactly one completed item (Live Prediction
+Service) out of at least two known (backtesting is not started) — no
+percentage is given for M2 because its total scope isn't fully defined yet,
+unlike M1's, which is now closed. See `ROADMAP.md` for what each milestone
+actually covers.
 
 ---
 

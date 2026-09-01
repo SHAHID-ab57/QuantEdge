@@ -62,6 +62,12 @@ class Settings(BaseSettings):
     evaluation_history_default_limit: int = 20
     evaluation_history_max_limit: int = 100
 
+    #: Prediction History's list pagination — every successful
+    #: `POST /predictions/run` is recorded, and this bounds how many past
+    #: predictions `GET /predictions` returns per page.
+    predictions_default_limit: int = 20
+    predictions_max_limit: int = 100
+
     #: Where fitted baseline model artifacts are serialized to (joblib), relative
     #: to the service's working directory unless given as an absolute path.
     model_artifact_dir: str = "var/model_artifacts"

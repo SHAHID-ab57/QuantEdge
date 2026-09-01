@@ -1283,6 +1283,74 @@ persisted record; the underlying `TrainingJob` rows are untouched.
 `GET` and `DELETE`), `invalid_benchmark_run_sort` (400 — an unsupported
 `sort`/`dir` combination on the list endpoint).
 
+### Live Prediction Service
+
+| Method | Path                       | Purpose                                                      |
+| ------ | -------------------------- | ------------------------------------------------------------ |
+| POST   | `/api/v1/predictions/run`  | Reconstruct a live feature vector and predict, synchronously |
+| GET    | `/api/v1/predictions/{id}` | Reopen one past prediction                                   |
+| GET    | `/api/v1/predictions`      | List past predictions (Prediction History)                   |
+
+Full design in `ARCHITECTURE.md` § "Live Prediction Service". Given a
+**completed** training job with a saved model artifact, this recomputes the
+same features the experiment's `feature_set` produced at training time
+over fresh candles, applies the identical normalization transform training
+used (if any), runs the model, and persists the result.
+
+**Run a prediction** (`POST /predictions/run`):
+
+```jsonc
+// Request
+{ "training_job_id": "6f1e4a2c-3b8d-4c9a-9e2f-1a7c5d6b8e90", "symbol": "ETHUSD" }
+// "as_of": "2026-01-05T12:00:00Z" — optional; omit for the latest available candle
+
+// Response (201)
+{
+  "id": "b7e2c1a4-...",
+  "training_job_id": "6f1e4a2c-3b8d-4c9a-9e2f-1a7c5d6b8e90",
+  "experiment_id": "…",
+  "symbol": "ETHUSD",
+  "timeframe": "1h",
+  "model_type": "logistic_regression",
+  "model_kind": "classification",
+  "target_column": "next_direction_1",
+  "horizon": 1,
+  "as_of": "2026-01-05T12:00:00Z", // the real stored candle this was computed from — never interpolated
+  "predicted_value": "up",
+  "confidence": 0.81, // the predicted class's own probability; null for a regressor
+  "confidence_unavailable_reason": null, // set, in plain language, whenever confidence is null
+  "probabilities": { "down": 0.19, "up": 0.81 }, // null for a regressor
+  "classes": ["down", "up"], // null for a regressor
+  "feature_columns": ["open", "high", "low", "close", "volume"],
+  "actual_outcome": null, // reserved for a future grading task; always null today
+  "created_at": "2026-01-05T12:00:03Z",
+}
+```
+
+`target_column`, `horizon`, `as_of`, and `confidence` always accompany
+`predicted_value` — the response never presents a bare number as fact.
+`GET /predictions/{id}` returns the identical shape for a past run;
+`GET /predictions` returns the same fields minus `confidence_unavailable_reason`/
+`probabilities`/`classes`/`feature_columns`/`actual_outcome` (kept out of
+the list view the same way `TrainingJobSummaryDTO` keeps a job's full log
+list out of `GET /training-jobs`), plus `total`/`limit`/`offset`. It
+accepts `training_job_id`/`experiment_id`/`symbol` filters and
+`sort`/`dir`/`limit`/`offset` (one of `symbol`, `as_of`, `created_at`;
+default `created_at` descending) — the same list-endpoint shape every
+other history surface on this platform uses.
+
+**Error codes**: `training_job_not_found` (404), `market_not_found` (404),
+`prediction_not_available` (409 — the job hasn't completed yet, or has no
+saved artifact), `live_feature_reconstruction_not_supported` (409 — the job
+completed but wasn't trained on real data, so it recorded no
+`feature_columns`/`target_column`, e.g. `placeholder`),
+`training_feature_set_mismatch` (409 — the experiment's `feature_set` was
+edited after this job trained, so a column the model expects no longer
+exists), `empty_dataset` (400 — too little candle history for the
+requested features' warmup), `prediction_not_found` (404 — unknown
+prediction id), `invalid_prediction_sort` (400 — an unsupported `sort`/`dir`
+combination on the list endpoint).
+
 ### Platform health
 
 | Method | Path                     | Purpose                                            |

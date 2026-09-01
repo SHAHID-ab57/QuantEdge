@@ -46,6 +46,7 @@ All real pages live under the `(dashboard)` route group
 | `/validation`    | Implemented — Dataset Validation & Quality Engine workbench (see below)      |
 | `/ml/training`   | Implemented — Machine Learning Training Framework dashboard (see below)      |
 | `/ml/evaluation` | Implemented — Model Evaluation & Benchmarking comparison surface (see below) |
+| `/ml/predict`    | Implemented — Live Prediction Service (see below)                            |
 | `/dashboard`     | Placeholder                                                                  |
 | `/research`      | Placeholder                                                                  |
 | `/settings`      | Placeholder                                                                  |
@@ -3030,6 +3031,98 @@ opening the detail dialog on load, with `next/navigation`'s
 `useSearchParams` mocked the same way `history-page.test.tsx` already
 mocks it. See `docs/testing/TESTING.md` § "Testing the Model Evaluation &
 Benchmarking Engine (frontend)" for the full inventory.
+
+## Live Prediction Service
+
+`/ml/predict` (`src/features/ml-predict/`) is the frontend for the Live
+Prediction Service — the first usable output downstream of a saved model
+artifact in this codebase. Backend design lives in
+[`ARCHITECTURE.md`](ARCHITECTURE.md) § "Live Prediction Service"; the API
+surface is in [`docs/api/API.md`](docs/api/API.md) § "Live Prediction
+Service".
+
+```text
+src/features/ml-predict/
+├── hooks/use-prediction-data.ts       run mutation + Prediction History list/detail queries
+├── components/
+│   ├── prediction-form.tsx            training job (completed only) / symbol / optional as-of
+│   ├── prediction-result-panel.tsx    target + horizon, then predicted value, then confidence — deep links
+│   └── prediction-history-table.tsx   Prediction History's list view — reopen a past prediction
+└── ml-predict-page.tsx                 page composition root
+```
+
+**Running a prediction is a mutation, not a query; Prediction History is a
+real, listable resource.** `POST /predictions/run` is an explicit,
+potentially expensive, on-demand computation over freshly loaded candles —
+never something that should silently re-run on remount — so `useRunPrediction`
+(`hooks/use-prediction-data.ts`) is a TanStack Query `useMutation`, the same
+choice `useBuildDataset`/`useBenchmark` already made for their own real
+backend computations; its `onSuccess` invalidates the history list query,
+since a successful run is also a new history entry. `usePredictionHistory`/
+`usePrediction` are real `useQuery`s over `GET /predictions`/
+`GET /predictions/{id}`.
+
+**`PredictionForm` reuses the same searchable-combobox pattern
+`CreateTrainingJobDialog` already uses**, filtered to completed training
+jobs (`GET /training-jobs?status=completed`) — the only ones with a saved
+model artifact to predict with. `GET /training-jobs`'s own list shape
+doesn't record whether a job has a saved artifact (only its detail's
+`result_summary` does), so this is as far as the form can narrow it
+client-side; a job that completed without training on real data (e.g.
+`placeholder`) still appears and is rejected with a clear, explained error
+only once selected and actually run — the same "let the request explain
+it" posture this platform's other forms already take for a condition their
+own list endpoint can't pre-filter. Symbol reuses `useMarkets` (the same
+catalogue `/markets`/`/history` already fetch); As Of is an optional
+`datetime-local` input, defaulting to the latest available candle when
+left blank.
+
+**`PredictionResultPanel` never presents a bare number as fact.** Target
+and horizon lead (what is actually being predicted, and how far ahead),
+then the predicted value, then confidence — always rendered as an explicit
+probability (e.g. "81.2% probability"), or, when this model type has none
+(every regressor today), a "Not available" chip paired with an
+`InfoTooltip` stating why in the API's own words
+(`confidence_unavailable_reason`), never a hidden field. Every class's own
+probability renders as a row of chips, the predicted class's own chip
+highlighted. `actual_outcome` always reads "Not graded yet" today — no
+grading task exists yet, a separate, later milestone item; the field is
+shown, not hidden, so its eventual arrival needs no new layout. Deep links
+to the source Experiment (`/experiments/{id}`) and Training Job
+(`/ml/training?jobId={id}`) match the convention
+`BenchmarkComparisonTable` already established, including the same
+`as Route` cast a `next/link`-wrapping MUI `Link` needs.
+
+**`PredictionHistoryTable` mirrors `benchmark-history-table.tsx`'s exact
+shape** — a metadata-only list (symbol, target, as-of, predicted value,
+confidence), most recent first, server-paginated, with a Reopen action;
+there is no delete action (Prediction History has no destructive-action
+requirement the way Benchmark History or Dataset History do). Reopening a
+row fetches that prediction's full detail (`usePrediction`) and renders it
+through the _same_ `PredictionResultPanel` a fresh run uses — one
+rendering path, not two.
+
+**Errors are read from the API's own message, not re-derived.** A run
+failure (`prediction_not_available`, `live_feature_reconstruction_not_supported`,
+`market_not_found`, `training_feature_set_mismatch`, `empty_dataset`) shows
+its `detail` string directly in an `Alert`, with no client-side
+re-explanation that could drift from the backend's own wording.
+
+**Testing.** `prediction-form.test.tsx` (only completed jobs requested,
+Run Prediction stays disabled until both a job and a symbol are chosen,
+submits the exact expected body with `as_of` omitted when left blank, the
+empty-state notice with no completed jobs, the submitting label).
+`prediction-result-panel.test.tsx` (leads with target/horizon, confidence
+rendered as an explicit probability, every class's own probability chip,
+states plainly when confidence is unavailable rather than hiding the
+field, `actual_outcome` defaults to "Not graded yet", both deep links'
+`href`s, a regressor's numeric predicted value). `prediction-history-table.test.tsx`
+(one row per prediction, a dash instead of a confidence chip when null,
+the reopen callback, an empty-history message, loading rows). `ml-predict-page.test.tsx`
+covers the whole page end to end: running a prediction and seeing the
+result panel, a surfaced run error, and reopening a past prediction from
+Prediction History. See `docs/testing/TESTING.md` § "Testing the Live
+Prediction Service (frontend)" for the full inventory.
 
 ## State management
 

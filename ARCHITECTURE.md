@@ -2208,6 +2208,154 @@ case. 100% backend coverage maintained on `app/evaluation/`,
 and `app/models/evaluation_benchmark_run.py`. See `docs/testing/TESTING.md`/
 `services/api/TESTING.md` for the full inventory.
 
+### Live Prediction Service
+
+Every previous milestone (data, features, datasets, experiments, training,
+evaluation) ends at a saved model artifact and stops there — nothing
+downstream of it existed until this one. This is the first piece: given a
+**completed** training job with a saved model, compute a fresh feature
+vector for a requested market/timeframe, run the model, and return one
+prediction, framed honestly — never a bare number presented as fact.
+
+**Package layout** (`app/prediction/`) — framework-light and
+database-free, the same discipline `app/evaluation/` holds itself to:
+
+- `base.py` — `PredictionOutcome`, a plain dataclass (`target_column`,
+  `horizon`, `as_of`, `predicted_value`, `confidence`,
+  `confidence_unavailable_reason`, `probabilities`, `classes`). Nothing
+  here touches the database or a model adapter.
+- `engine.py` — `PredictionEngine.assemble(...)` turns an already-computed
+  `TrainingJobPredictResponse` (see below) plus the experiment's own
+  `target_config` into one `PredictionOutcome`: `resolve_horizon` matches
+  the resolved `target_column` (e.g. `next_direction_1`) back to its
+  configured target's own `horizon` param by name — never by parsing the
+  column's numeric suffix, which would silently drift the moment a target
+  generator's naming convention did. `confidence` is `max(probabilities)`
+  — the predicted class's own probability — set together with
+  `probabilities`/`classes` only when the adapter produced any;
+  `confidence_unavailable_reason` is set, in the same words the API and
+  frontend both show, whenever it did not (every regressor today).
+  `default_engine` is the one shared, stateless instance every request
+  uses.
+- `registry.py` — not a new Strategy+Registry pattern: reconstructing a
+  feature vector has exactly one way to do it (drive the Feature
+  Engineering Engine with the experiment's own recorded `feature_set`), so
+  this module's only export, `get_model_adapter_registry()`, is a named
+  seam onto the Training Framework's **existing** `ModelAdapterRegistry`
+  — resolving a job's `model_type` to its `model_kind`, the same way
+  `EvaluationService.benchmark` already does for a benchmark candidate.
+- `errors.py` — `LiveFeatureReconstructionNotSupportedError` (409 — a job
+  completed without training on real data, e.g. `placeholder`, so it
+  recorded no `feature_columns`/`target_column` to reconstruct from),
+  `TrainingFeatureSetMismatchError` (409 — the experiment's `feature_set`
+  was edited, via `ExperimentConfigDialog`, after this job trained, so a
+  column the model expects no longer exists), `PredictionRunNotFoundError`
+  (404), `InvalidPredictionSortError` (400). Every other failure reuses an
+  existing named error rather than duplicating it: a job that isn't
+  completed or has no artifact
+  (`app.training.errors.PredictionNotAvailableError`, raised by
+  `TrainingJobService.predict` itself), an unknown market
+  (`app.services.market_query.MarketNotFoundError`), or too little candle
+  history for the requested features' warmup
+  (`app.features.errors.EmptyDatasetError`, raised by
+  `FeatureDatasetBuilder.build` itself).
+
+**Feature reconstruction — the part most likely to silently produce
+garbage if done casually.** `app/services/prediction.py`'s
+`PredictionService.run` is the one place this actually happens, composing
+three already-existing services directly rather than a second copy of any
+of them:
+
+1. `TrainingJobService.get` resolves the job and reads its recorded
+   `result_summary["feature_columns"]`/`["target_column"]` — the
+   authoritative record of exactly what a completed run actually trained
+   on (`report["feature_columns"] = list(dataset.feature_columns)`,
+   already written by both baseline adapters) — never re-derived here.
+2. `ExperimentService.get` reads the linked experiment's own recorded
+   `feature_set` — the same field `ExperimentConfigDialog` makes editable
+   and `TrainingJobService`'s own `_make_load_dataset_hook` already reads
+   for training.
+3. `FeatureService.build_raw` — "the one dataset-building path every
+   consumer shares" (its own docstring names "a live inference path" as a
+   future consumer, written before this milestone existed) —
+   recomputes the _same_ features over fresh candles, bounded to a
+   `[start, end)` window that ends exactly at the requested `as_of` (or,
+   by default, the market's real latest candle, resolved via
+   `CandleRepository.get_latest_candle`) and starts far enough back to
+   cover the largest feature's own warmup plus a small buffer. The last
+   row of that freshly-built dataset — never assumed to be row `0` or
+   capped from the wrong end — is the live feature vector; its own
+   timestamp (a real, stored candle's `open_time`, never interpolated) is
+   the response's `as_of`.
+4. **Normalization was investigated, not assumed.** Fitted
+   `NormalizationStats` (`app/training/normalization.py`) are already
+   persisted onto a completed job's `result_summary["normalization"]`/
+   `["normalization_method"]` — closed as part of the normalization
+   milestone itself, not this one. `TrainingJobService.predict` already
+   reconstructs them and applies the identical transform training used
+   (`_normalize_prediction_rows`) before calling the model — this service
+   calls that method directly rather than touching a `NormalizationStats`
+   or the adapter's artifact itself, so it is structurally impossible for
+   this path to fit fresh statistics from the single inference-time row
+   (a degenerate, meaningless transform: a single row's own z-score
+   against itself is always exactly zero, regardless of its real values).
+5. The model runs through the existing, unchanged
+   `TrainingJobService.predict(job_id, [row])` — the same method
+   `POST /training-jobs/{id}/predict` already calls, so `predict_proba`
+   (today: `logistic_regression` only) is never reimplemented, only reused.
+
+**Persistence** — one new table, `predictions` (migration
+`20260901_35fe2827d1fb`): `training_job_id`/`experiment_id` (both real
+foreign keys, the latter denormalized for cheap filtering — the same
+choice `TrainingJob.dataset_version` already made relative to its own
+parent), `symbol`, `timeframe`, `target_column`, `horizon`, `as_of`,
+`predicted_value` (JSON — a class label or a number), `confidence`
+(nullable — not every model produces one), `probabilities`/`classes`
+(verbatim, small by construction), `feature_columns`, `model_type`/
+`model_kind`, and **`actual_outcome`, deliberately always `NULL`** — no
+grading task exists yet (a separate, later milestone item), reserved now
+so that task never needs a migration of its own.
+
+**API** — `POST /predictions/run` (runs synchronously — inference on a
+single reconstructed row is fast; the known need for a worker/queue
+applies to _training_, not this), `GET /predictions/{id}`,
+`GET /predictions` (filterable by `training_job_id`/`experiment_id`/
+`symbol`, the same pagination convention as `/experiments` and
+`/training-jobs`) — see `API.md` § "Live Prediction Service" for the full
+request/response shapes and error codes. The response never presents a
+prediction as certain: `target_column`, `horizon`, `as_of`, and
+`confidence` (explicitly `null` with `confidence_unavailable_reason` when
+absent) always accompany `predicted_value`.
+
+**Frontend** (`apps/dashboard/src/features/ml-predict/`, `/ml/predict` —
+full detail in `FRONTEND.md` § "Live Prediction Service"): a form (training
+job — filtered to completed jobs, symbol, optional as-of timestamp) reusing
+the same searchable-combobox pattern `CreateTrainingJobDialog` already
+uses; a result panel leading with target and horizon, then the predicted
+value, then confidence framed explicitly as a probability (or a plainly
+stated reason it isn't available); a Prediction History table mirroring
+`benchmark-history-table.tsx`'s exact shape (list, reopen, most-recent
+first); and deep links to the source Experiment/Training Job matching the
+convention `BenchmarkComparisonTable` already established.
+
+**Testing.** `tests/prediction/test_engine.py` covers `resolve_horizon`
+and `assemble` in isolation (classifier vs. regressor shape, an
+adversarial case proving `confidence` is the predicted class's own
+probability, not just the first or last entry in the row).
+`tests/prediction/test_service.py` reuses `tests/training/test_service.py`'s
+own real-candle/real-experiment fixtures end to end: feature-vector
+reconstruction checked against the real stored latest candle, classifier
+and regressor shape, persistence/reopen, Prediction History filtering, and
+a dedicated adversarial normalization test (predicting at two different
+`as_of` times on the same `normalize_features=True` job must **not**
+produce identical probabilities — the one observable symptom a degenerate
+single-row normalization bug would produce). `tests/api/test_prediction_api.py`
+adds the same at the HTTP layer, including a job that hasn't completed yet
+and a job with no real `feature_columns` (`placeholder`). On the frontend,
+`PredictionForm`/`PredictionResultPanel`/`PredictionHistoryTable` each have
+their own test file, plus a page-level test covering the run → result →
+history-reopen flow end to end.
+
 ### Feature Store
 
 > Not built. Features are computed on demand and exported; no persisted,

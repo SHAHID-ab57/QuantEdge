@@ -8,6 +8,58 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Live Prediction Service — the first usable output downstream of a
+  saved model artifact.** Every previous milestone (data, features,
+  datasets, experiments, training, evaluation) ended at a saved model and
+  stopped there; this turns one into a live output: given a completed
+  training job, compute a fresh feature vector for a requested
+  market/timeframe, run the model, and return one prediction, framed
+  honestly — never a bare number presented as fact.
+  - **New `app/prediction/` package** (`base.py`, `engine.py`, `registry.py`,
+    `errors.py`), mirroring `app/evaluation/`'s own layering.
+    `PredictionEngine.assemble` resolves a target's configured horizon by
+    name (never by parsing the column's numeric suffix) and sets
+    `confidence`/`probabilities`/`classes` only when the model adapter
+    actually produced them, with `confidence_unavailable_reason` explained
+    in plain language otherwise.
+  - **Feature reconstruction reuses the Feature Engineering Engine
+    directly** (`FeatureService.build_raw` — the exact seam its own
+    docstring already reserved for "a live inference path"), bounded to a
+    `[start, end)` window ending at the requested `as_of` (or the market's
+    real latest candle) with enough headroom for the largest feature's
+    warmup — never assumed to be row `0`, and never capped from the wrong
+    end.
+  - **Normalization was investigated, not assumed.** Fitted
+    `NormalizationStats` were already being persisted onto a completed
+    job's `result_summary` (closed by the normalization milestone above,
+    not this one); this service reuses the existing
+    `TrainingJobService.predict` wholesale for the model-running step, so
+    it is structurally impossible for it to fit fresh, meaningless
+    statistics from the single inference-time row.
+  - **New `predictions` table** (migration `35fe2827d1fb`): training job
+    and experiment (both real foreign keys), symbol, timeframe, target,
+    horizon, the as-of timestamp, predicted value, confidence (nullable),
+    and an `actual_outcome` column left deliberately `NULL` — reserved for
+    a future grading task so that task never needs a migration of its own.
+  - **Three new endpoints**: `POST /predictions/run` (synchronous — a
+    single reconstructed row is fast), `GET /predictions/{id}`, and
+    `GET /predictions` (filterable by training job/experiment/symbol, the
+    same pagination convention as `/experiments` and `/training-jobs`).
+  - **New `/ml/predict` page** (`apps/dashboard/src/features/ml-predict/`):
+    a form (completed training jobs only, symbol, optional as-of) reusing
+    `CreateTrainingJobDialog`'s own searchable-combobox pattern; a result
+    panel leading with target and horizon, then the predicted value, then
+    confidence framed explicitly as a probability (or a plainly stated
+    reason it isn't available); a Prediction History table mirroring
+    `benchmark-history-table.tsx`'s exact shape; and deep links to the
+    source Experiment/Training Job matching the convention
+    `BenchmarkComparisonTable` already established.
+  - Full design in `ARCHITECTURE.md` § "Live Prediction Service"; API
+    surface in `docs/api/API.md` § "Live Prediction Service"; frontend in
+    `FRONTEND.md` § "Live Prediction Service"; tests in
+    `services/api/TESTING.md`/`docs/testing/TESTING.md` § "Testing the
+    Live Prediction Service".
+
 - **Per-column feature normalization for the Machine Learning Training
   Framework — fixes a real scale bias, not just a missing capability.**
   Without it, a feature naturally measured in the thousands (`close`,

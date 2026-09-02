@@ -36,6 +36,7 @@ from app.marketdata import DeltaNormalizer, MarketDataPipeline
 from app.marketdata.gateway import MarketStreamGateway
 from app.marketdata.orderbook import OrderBookAggregator
 from app.services.candle_sync import CandleSyncScheduler
+from app.services.grading_scheduler import PredictionGradingScheduler
 from app.state import MarketStateManager
 from app.ws.models import WSEvent
 
@@ -90,6 +91,7 @@ class Runtime:
         self.pipeline: MarketDataPipeline | None = None
         self.delta_ws: DeltaWebSocketClient | None = None
         self.candle_sync: CandleSyncScheduler | None = None
+        self.prediction_grading: PredictionGradingScheduler | None = None
         self.last_ws_message_at: datetime | None = None
         self.last_rest_request_at: datetime | None = None
 
@@ -99,11 +101,11 @@ class Runtime:
         return self._market_data_live
 
     async def start(self) -> None:
-        """Start live components (pipeline + WebSocket) and the candle sync.
+        """Start live components (pipeline + WebSocket), the candle sync, and grading.
 
-        The WebSocket pipeline runs only in live mode; the candle sync
-        scheduler is independent and starts whenever the database is
-        configured (it no-ops otherwise).
+        The WebSocket pipeline runs only in live mode; the candle sync and
+        prediction grading schedulers are each independent and start
+        whenever the database is configured (they no-op otherwise).
         """
         if self._market_data_live:
             self.pipeline = MarketDataPipeline(
@@ -133,13 +135,22 @@ class Runtime:
                 backfill_days=settings.candle_sync_backfill_days,
             )
             await self.candle_sync.start()
+        if settings.prediction_grading_enabled:
+            self.prediction_grading = PredictionGradingScheduler(
+                interval_seconds=settings.prediction_grading_interval_seconds,
+            )
+            await self.prediction_grading.start()
 
     async def shutdown(self) -> None:
-        """Stop the WebSocket client, the candle sync loop, and drain handlers."""
+        """Stop the WebSocket client, the candle sync/grading loops, and drain handlers."""
         candle_sync = self.candle_sync
         if candle_sync is not None:
             await candle_sync.stop()
             self.candle_sync = None
+        prediction_grading = self.prediction_grading
+        if prediction_grading is not None:
+            await prediction_grading.stop()
+            self.prediction_grading = None
         ws = self.delta_ws
         if ws is not None:
             await ws.close()

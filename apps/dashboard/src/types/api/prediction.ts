@@ -33,8 +33,17 @@ export const PredictionResponseSchema = z.object({
   probabilities: z.record(z.string(), z.number()).nullable(),
   classes: z.array(PredictedValueSchema).nullable(),
   feature_columns: z.array(z.string()),
-  // Reserved for a future grading task; always null today.
-  actual_outcome: z.unknown().nullable(),
+  // `actual_outcome === null` is the one authoritative "still pending"
+  // signal (never inferred from `is_correct`/`error`/`graded_at`) — see
+  // `services/api/app/models/prediction.py`'s own docstring.
+  actual_outcome: PredictedValueSchema.nullable(),
+  // Classification only; null for a regressor (or while ungraded).
+  is_correct: z.boolean().nullable(),
+  // Regression only; null for a classifier (or while ungraded).
+  error: z.number().nullable(),
+  graded_at: z.string().datetime().nullable(),
+  // Set only while ungraded: when grading can next determine the outcome.
+  available_after: z.string().datetime().nullable(),
   created_at: z.string().datetime(),
 });
 
@@ -54,6 +63,11 @@ export const PredictionSummarySchema = z.object({
   as_of: z.string().datetime(),
   predicted_value: PredictedValueSchema,
   confidence: z.number().nullable(),
+  actual_outcome: PredictedValueSchema.nullable(),
+  is_correct: z.boolean().nullable(),
+  error: z.number().nullable(),
+  graded_at: z.string().datetime().nullable(),
+  available_after: z.string().datetime().nullable(),
   created_at: z.string().datetime(),
 });
 

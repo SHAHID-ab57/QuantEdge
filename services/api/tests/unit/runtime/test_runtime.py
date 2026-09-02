@@ -23,6 +23,8 @@ def _settings(**overrides: object) -> SimpleNamespace:
         "candle_sync_enabled": False,
         "candle_sync_interval_seconds": 300,
         "candle_sync_backfill_days": 3,
+        "prediction_grading_enabled": False,
+        "prediction_grading_interval_seconds": 300,
         "delta_base_url": "https://api.test.invalid",
         "delta_api_key": "",
         "delta_api_secret": "",
@@ -169,6 +171,35 @@ async def test_runtime_shutdown_stops_candle_sync(
     await runtime.shutdown()
     assert stopped == [True]
     assert runtime.candle_sync is None
+
+
+async def test_runtime_shutdown_stops_prediction_grading(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The prediction grading scheduler is stopped when configured — the
+    same start/shutdown wiring `CandleSyncScheduler` already gets."""
+    stopped = []
+
+    class FakeGrading:
+        async def start(self) -> None:
+            pass
+
+        async def stop(self) -> None:
+            stopped.append(True)
+
+    monkeypatch.setattr(
+        runtime_module,
+        "get_settings",
+        lambda: _settings(prediction_grading_enabled=True),
+    )
+    monkeypatch.setattr(runtime_module, "PredictionGradingScheduler", lambda **_: FakeGrading())
+
+    runtime = _runtime()
+    await runtime.start()
+    assert runtime.prediction_grading is not None
+    await runtime.shutdown()
+    assert stopped == [True]
+    assert runtime.prediction_grading is None
 
 
 async def test_delta_connection_none_when_not_running() -> None:

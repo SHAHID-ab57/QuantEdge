@@ -8,7 +8,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.db.session import get_db
 from app.dependencies.features import get_dataset_builder
+from app.dependencies.ml_datasets import get_target_pipeline
 from app.dependencies.training import get_training_job_service
+from app.evaluation.metrics import load_builtin_metrics
+from app.evaluation.registry import default_registry as default_metric_registry
 from app.prediction.engine import default_engine
 from app.repositories.candles import CandleRepository
 from app.repositories.experiments import ExperimentRepository
@@ -31,8 +34,18 @@ def get_prediction_service(
     `get_feature_service` (`app/dependencies/features.py`) builds it, so a
     live prediction's feature reconstruction shares the process-wide
     pipeline/cache every other feature consumer already warms.
+
+    `target_pipeline`/`metric_registry` back `grade_pending` (prediction
+    grading, not live inference): `get_target_pipeline()` is the *exact*
+    process-wide pipeline the ML Dataset Builder itself uses to generate
+    training labels (`app/dependencies/ml_datasets.py`), and
+    `default_metric_registry` (with `load_builtin_metrics()` called
+    explicitly, the same pattern `get_evaluation_service` already uses for
+    its own registry) is the same one `EvaluationEngine` reads `accuracy`/
+    `mae` from — neither is a second copy built for grading alone.
     """
     settings = get_settings()
+    load_builtin_metrics()
     return PredictionService(
         repository=PredictionRepository(session),
         training_job_service=get_training_job_service(session),
@@ -47,4 +60,6 @@ def get_prediction_service(
         market_repository=MarketRepository(session),
         candle_repository=CandleRepository(session),
         engine=default_engine,
+        target_pipeline=get_target_pipeline(),
+        metric_registry=default_metric_registry,
     )

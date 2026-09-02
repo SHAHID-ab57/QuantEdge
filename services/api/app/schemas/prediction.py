@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel, Field, field_serializer
 
 from app.prediction.engine import NO_CONFIDENCE_REASON
+from app.services.candle_ingest import resolution_duration
 
 if TYPE_CHECKING:
     from app.models.prediction import Prediction
@@ -20,6 +21,20 @@ if TYPE_CHECKING:
 def _iso(value: datetime) -> str:
     """ISO-8601 UTC with a literal `Z`, matching every timestamp on this API."""
     return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _available_after(prediction: "Prediction") -> datetime | None:
+    """When this prediction's outcome becomes knowable, if it isn't yet.
+
+    `None` once graded (`actual_outcome` is no longer `None`) — there is
+    nothing left to wait for. Otherwise `as_of + horizon` candle-intervals,
+    the exact instant `PredictionService.grade_pending` starts looking for
+    the target candle to have closed and been ingested — computed here so
+    the frontend never re-derives timeframe-to-duration math itself.
+    """
+    if prediction.actual_outcome is not None or prediction.horizon is None:
+        return None
+    return prediction.as_of + resolution_duration(prediction.timeframe) * prediction.horizon
 
 
 class PredictionRunRequest(BaseModel):
@@ -82,13 +97,31 @@ class PredictionResponse(BaseModel):
     )
     actual_outcome: Any | None = Field(
         default=None,
-        description="Reserved for a future grading task; always null today",
+        description="The real observed value once known; null means not yet gradeable",
+    )
+    is_correct: bool | None = Field(
+        default=None,
+        description="Classification only: whether predicted_value matched actual_outcome",
+    )
+    error: float | None = Field(
+        default=None,
+        description="Regression only: absolute error between predicted_value and actual_outcome",
+    )
+    graded_at: datetime | None = Field(
+        default=None, description="When grading actually ran for this prediction"
+    )
+    available_after: datetime | None = Field(
+        default=None,
+        description=(
+            "Set only while ungraded: the instant the target candle is expected to have "
+            "closed, i.e. when grading can next determine this prediction's outcome"
+        ),
     )
     created_at: datetime
 
-    @field_serializer("as_of", "created_at")
-    def _serialize_timestamps(self, value: datetime) -> str:
-        return _iso(value)
+    @field_serializer("as_of", "created_at", "graded_at", "available_after")
+    def _serialize_timestamps(self, value: datetime | None) -> str | None:
+        return _iso(value) if value is not None else None
 
     @classmethod
     def from_model(cls, prediction: "Prediction") -> "PredictionResponse":
@@ -112,6 +145,10 @@ class PredictionResponse(BaseModel):
             classes=prediction.classes,
             feature_columns=list(prediction.feature_columns),
             actual_outcome=prediction.actual_outcome,
+            is_correct=prediction.is_correct,
+            error=prediction.error,
+            graded_at=prediction.graded_at,
+            available_after=_available_after(prediction),
             created_at=prediction.created_at,
         )
 
@@ -131,11 +168,30 @@ class PredictionSummaryDTO(BaseModel):
     as_of: datetime
     predicted_value: Any
     confidence: float | None
+    actual_outcome: Any | None = Field(
+        default=None,
+        description="The real observed value once known; null means not yet gradeable",
+    )
+    is_correct: bool | None = Field(
+        default=None,
+        description="Classification only: whether predicted_value matched actual_outcome",
+    )
+    error: float | None = Field(
+        default=None,
+        description="Regression only: absolute error between predicted_value and actual_outcome",
+    )
+    graded_at: datetime | None = Field(
+        default=None, description="When grading actually ran for this prediction"
+    )
+    available_after: datetime | None = Field(
+        default=None,
+        description="Set only while ungraded: when grading can next determine the outcome",
+    )
     created_at: datetime
 
-    @field_serializer("as_of", "created_at")
-    def _serialize_timestamps(self, value: datetime) -> str:
-        return _iso(value)
+    @field_serializer("as_of", "created_at", "graded_at", "available_after")
+    def _serialize_timestamps(self, value: datetime | None) -> str | None:
+        return _iso(value) if value is not None else None
 
     @classmethod
     def from_model(cls, prediction: "Prediction") -> "PredictionSummaryDTO":
@@ -152,6 +208,11 @@ class PredictionSummaryDTO(BaseModel):
             as_of=prediction.as_of,
             predicted_value=prediction.predicted_value,
             confidence=prediction.confidence,
+            actual_outcome=prediction.actual_outcome,
+            is_correct=prediction.is_correct,
+            error=prediction.error,
+            graded_at=prediction.graded_at,
+            available_after=_available_after(prediction),
             created_at=prediction.created_at,
         )
 

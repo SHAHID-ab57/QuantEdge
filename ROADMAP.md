@@ -62,7 +62,15 @@ watchdog yet to reconcile it, a disclosed limitation, not a silent one.
 This is the seam a real backtesting engine's own (likely many, and
 possibly longer-running) prediction/training runs will need — built now
 rather than assumed later. See `ARCHITECTURE.md` § "Machine Learning
-Training Framework". A backtesting engine — replaying a trained model's
+Training Framework". Third: Prediction Grading — for every persisted
+prediction whose target horizon has actually arrived, determine what
+really happened (via the exact target-generation logic that produced its
+training label) and record whether it was right, reusing the existing
+evaluation metrics for correctness/error. Runs periodically
+(`PredictionGradingScheduler`, mirroring `CandleSyncScheduler`) and
+on-demand (`scripts/grade_predictions.py`); Prediction History now shows
+graded outcomes and pending ones distinctly. See `ARCHITECTURE.md` §
+"Prediction Grading". A backtesting engine — replaying a trained model's
 predictions against real historical candles to estimate how it would have
 performed — has not been started.
 

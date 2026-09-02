@@ -3099,9 +3099,13 @@ probability (e.g. "81.2% probability"), or, when this model type has none
 `InfoTooltip` stating why in the API's own words
 (`confidence_unavailable_reason`), never a hidden field. Every class's own
 probability renders as a row of chips, the predicted class's own chip
-highlighted. `actual_outcome` always reads "Not graded yet" today — no
-grading task exists yet, a separate, later milestone item; the field is
-shown, not hidden, so its eventual arrival needs no new layout. Deep links
+highlighted. `actual_outcome` reads "Not graded yet" here specifically
+because a prediction this panel renders was _just_ run — grading itself
+exists (see `ARCHITECTURE.md` § "Prediction Grading") and runs
+asynchronously later, once the target horizon actually arrives, so a
+freshly-created prediction is always ungraded at the instant this panel
+first shows it; `PredictionHistoryTable`'s own "Outcome" column (below) is
+where an eventually-graded result actually surfaces. Deep links
 to the source Experiment (`/experiments/{id}`) and Training Job
 (`/ml/training?jobId={id}`) match the convention
 `BenchmarkComparisonTable` already established, including the same
@@ -3115,6 +3119,20 @@ requirement the way Benchmark History or Dataset History do). Reopening a
 row fetches that prediction's full detail (`usePrediction`) and renders it
 through the _same_ `PredictionResultPanel` a fresh run uses — one
 rendering path, not two.
+
+**An "Outcome" column shows graded vs. pending, never blank.** Pending
+(`actual_outcome === null`): "Awaiting outcome — available after
+`<timestamp>`", using the API's own server-computed `available_after` —
+never re-derived timeframe math client-side. Graded, classification: the
+real outcome plus a Correct/Incorrect glyph — the _same_
+`CheckCircleIcon`/`CancelIcon` (green/red) `prediction-samples-table.tsx`
+already renders for a training job's own validation samples, reused rather
+than a second, differently-styled way of showing the same idea. Graded,
+regression: the real outcome plus its absolute error
+(`error.toFixed(4)`). Grading itself has no HTTP trigger — it runs
+periodically server-side (`ARCHITECTURE.md` § "Prediction Grading") — so
+this column simply reflects whatever the API's own `GET /predictions`
+already returned; there is nothing for the frontend to poll or trigger.
 
 **Errors are read from the API's own message, not re-derived.** A run
 failure (`prediction_not_available`, `live_feature_reconstruction_not_supported`,
@@ -3132,7 +3150,10 @@ states plainly when confidence is unavailable rather than hiding the
 field, `actual_outcome` defaults to "Not graded yet", both deep links'
 `href`s, a regressor's numeric predicted value). `prediction-history-table.test.tsx`
 (one row per prediction, a dash instead of a confidence chip when null,
-the reopen callback, an empty-history message, loading rows). `ml-predict-page.test.tsx`
+the reopen callback, an empty-history message, loading rows, a pending
+row's "Awaiting outcome — available after …" text, a graded classification
+row's Correct/Incorrect glyph in both directions, and a graded regression
+row's outcome-plus-error with no correctness glyph). `ml-predict-page.test.tsx`
 covers the whole page end to end: running a prediction and seeing the
 result panel, a surfaced run error, and reopening a past prediction from
 Prediction History. See `docs/testing/TESTING.md` § "Testing the Live

@@ -1294,7 +1294,15 @@ rendering correctly alongside its own unavailable-confidence state.
 `prediction-history-table.test.tsx` covers one row per past prediction, a
 confidence chip vs. a dash when `confidence` is `null`, the reopen callback
 firing with the clicked row's own summary, an empty-history message, and
-loading-skeleton rows before the first page arrives.
+loading-skeleton rows before the first page arrives — plus, for Prediction
+Grading (`ARCHITECTURE.md` § "Prediction Grading"): a pending row (`actual_outcome:
+null`) rendering "Awaiting outcome" with its server-computed
+`available_after` timestamp; a graded classification row rendering the
+real outcome plus the same Correct/Incorrect glyph
+`prediction-samples-table.tsx` already uses (asserted in both directions —
+`is_correct: true` and `is_correct: false` render distinct, correctly
+labeled glyphs); and a graded regression row rendering the real outcome
+plus its formatted absolute error, with neither correctness glyph present.
 
 **Page-level.** `ml-predict-page.test.tsx` covers: selecting a training job
 and a symbol then running a prediction, asserting `runPrediction` was

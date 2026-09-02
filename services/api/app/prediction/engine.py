@@ -29,27 +29,44 @@ NO_CONFIDENCE_REASON = (
 )
 
 
-def resolve_horizon(target_config: list[TargetRequestDTO] | None, target_column: str) -> int | None:
-    """The configured target's own `horizon` parameter, matched by name.
+def resolve_target_entry(
+    target_config: list[TargetRequestDTO] | None, target_column: str
+) -> TargetRequestDTO | None:
+    """The experiment's own recorded target entry that produced `target_column`.
 
     Every built-in target generator names its output `f"{target}_{horizon}"`
     (`app/ml_datasets/targets/{next_close,next_direction,next_return}.py`),
     so the entry whose `target` is that prefix is the one that produced
-    `target_column` — read from the experiment's own recorded
-    `target_config` (the authoritative, as-configured value), never
-    re-derived by parsing the column name's own numeric suffix, which would
-    silently drift the moment a target generator's naming convention did.
+    `target_column` — matched here once, so `resolve_horizon` (this
+    prediction's own displayed horizon) and `app.prediction.grading`
+    (which target *generator* — `entry.target` — to re-run for grading)
+    both read the identical authoritative entry rather than each
+    re-deriving it their own way.
     """
     for entry in target_config or []:
         if target_column == entry.target or target_column.startswith(f"{entry.target}_"):
-            horizon = entry.params.get("horizon")
-            if horizon is None:
-                return None
-            try:
-                return int(horizon)
-            except (TypeError, ValueError):
-                return None
+            return entry
     return None
+
+
+def resolve_horizon(target_config: list[TargetRequestDTO] | None, target_column: str) -> int | None:
+    """The configured target's own `horizon` parameter, matched by name.
+
+    Read from the experiment's own recorded `target_config` (the
+    authoritative, as-configured value), never re-derived by parsing the
+    column name's own numeric suffix, which would silently drift the moment
+    a target generator's naming convention did.
+    """
+    entry = resolve_target_entry(target_config, target_column)
+    if entry is None:
+        return None
+    horizon = entry.params.get("horizon")
+    if horizon is None:
+        return None
+    try:
+        return int(horizon)
+    except (TypeError, ValueError):
+        return None
 
 
 class PredictionEngine:

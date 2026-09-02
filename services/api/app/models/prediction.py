@@ -2,14 +2,19 @@
 
 One row per `POST /predictions/run` call: which training job and experiment
 produced it, the market/timeframe/target/horizon it predicted, the exact
-candle timestamp its feature vector was computed from, the predicted value
-itself, and — deliberately, from day one — an `actual_outcome` column left
-`NULL`. No grading task exists yet (a separate, later milestone item); this
-column exists now so that task never needs a schema migration of its own,
-the same "reserve the column before the feature that fills it" choice this
-platform has no prior precedent for but is the obviously correct one here:
-adding a nullable column to an existing table later is free, but every row
-recorded before that migration would otherwise be permanently ungradable.
+candle timestamp its feature vector was computed from, and the predicted
+value itself.
+
+`actual_outcome`/`is_correct`/`error`/`graded_at` are filled in later, once
+the target horizon has actually arrived — by `app.prediction.grading` (see
+its own module docstring), not at prediction time. All four are `NULL`
+until then; `actual_outcome IS NULL` is the one authoritative "still
+pending" signal every grading query and the API/frontend both use — never
+inferred from any other column. `actual_outcome` reserved this shape from
+the very first migration specifically so grading never needed a migration
+of its own for *that* column; `is_correct`/`error`/`graded_at` are new here
+because "was it right" is a genuinely separate concern from "what actually
+happened" the original design left open.
 
 Stores `probabilities`/`classes`/`feature_columns` verbatim (small by
 construction — a handful of classes, a few dozen feature names) rather than
@@ -24,6 +29,7 @@ from typing import Any
 
 from sqlalchemy import (
     JSON,
+    Boolean,
     DateTime,
     Float,
     ForeignKey,
@@ -96,13 +102,40 @@ class Prediction(BaseModel, TimestampMixin):
         nullable=False,
         comment="'classification' or 'regression', resolved from the model adapter registry.",
     )
-    #: Deliberately always NULL today — reserved for a future prediction-grading
-    #: task to fill in once the predicted candle's real outcome is known. No
-    #: code in this platform writes to this column yet.
+    #: NULL until the target horizon has arrived and `app.prediction.grading`
+    #: has computed a real outcome — the one authoritative "still pending"
+    #: signal (never inferred from `is_correct`/`error`/`graded_at`).
+    #:
+    #: `JSON(none_as_null=True)` is deliberate, not the default: SQLAlchemy's
+    #: `JSON` type otherwise stores a Python `None` as the *JSON literal*
+    #: `null` (a real, non-NULL value at the SQL level), not a SQL `NULL` —
+    #: a well-known SQLAlchemy gotcha that would make `WHERE actual_outcome
+    #: IS NULL` (every grading query's own "still pending" filter) match
+    #: nothing, ever. Caught by this feature's own tests before it shipped;
+    #: see migration `99d6a6e10268` for the one-time data fix this required
+    #: for rows already written under the old (default) behavior.
     actual_outcome: Mapped[Any] = mapped_column(
-        JSON,
+        JSON(none_as_null=True),
         nullable=True,
-        comment="Reserved for a future grading task; always NULL until that exists.",
+        comment="The real observed value once knowable; NULL means not yet gradeable.",
+    )
+    is_correct: Mapped[bool | None] = mapped_column(
+        Boolean,
+        nullable=True,
+        comment="Classification only: predicted_value == actual_outcome. NULL for a regressor.",
+    )
+    error: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+        comment=(
+            "Regression only: absolute error between predicted_value and actual_outcome "
+            "(the MAE metric applied to this single prediction). NULL for a classifier."
+        ),
+    )
+    graded_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="When grading actually ran for this row; NULL until it has.",
     )
 
     __table_args__ = (Index("ix_predictions_job_created_at", "training_job_id", "created_at"),)

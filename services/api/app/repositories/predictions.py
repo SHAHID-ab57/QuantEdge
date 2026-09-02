@@ -7,6 +7,7 @@ repository on this platform already follows.
 
 import uuid
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import func, select
@@ -77,3 +78,39 @@ class PredictionRepository:
 
         result = await self.session.execute(query)
         return list(result.scalars().all()), total
+
+    async def list_ungraded(self, *, limit: int = 500) -> list[Prediction]:
+        """Every prediction not yet graded (`actual_outcome IS NULL`).
+
+        Oldest `as_of` first, so a large backlog drains in the order
+        predictions actually became gradeable rather than leaving old ones
+        stuck behind an ever-growing pile of newer ones. `actual_outcome
+        IS NULL` is the single authoritative "still pending" signal this
+        whole table uses (see `app.models.prediction.Prediction`'s own
+        docstring) — never inferred from `is_correct`/`error`/`graded_at`.
+        """
+        result = await self.session.execute(
+            select(Prediction)
+            .where(Prediction.actual_outcome.is_(None))
+            .order_by(Prediction.as_of.asc())
+            .limit(limit)
+        )
+        return list(result.scalars().all())
+
+    async def record_grading(
+        self,
+        prediction: Prediction,
+        *,
+        actual_outcome: Any,
+        is_correct: bool | None,
+        error: float | None,
+        graded_at: datetime,
+    ) -> Prediction:
+        """Persist one prediction's grading outcome."""
+        prediction.actual_outcome = actual_outcome
+        prediction.is_correct = is_correct
+        prediction.error = error
+        prediction.graded_at = graded_at
+        await self.session.commit()
+        await self.session.refresh(prediction)
+        return prediction

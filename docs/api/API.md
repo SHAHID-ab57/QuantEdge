@@ -1334,7 +1334,11 @@ used (if any), runs the model, and persists the result.
   "probabilities": { "down": 0.19, "up": 0.81 }, // null for a regressor
   "classes": ["down", "up"], // null for a regressor
   "feature_columns": ["open", "high", "low", "close", "volume"],
-  "actual_outcome": null, // reserved for a future grading task; always null today
+  "actual_outcome": null, // null until the target horizon has arrived and grading has run
+  "is_correct": null, // classification only; null for a regressor or while ungraded
+  "error": null, // regression only; null for a classifier or while ungraded
+  "graded_at": null, // when grading actually ran for this row; null until it has
+  "available_after": "2026-01-05T13:00:00Z", // set only while ungraded — see below
   "created_at": "2026-01-05T12:00:03Z",
 }
 ```
@@ -1343,13 +1347,30 @@ used (if any), runs the model, and persists the result.
 `predicted_value` — the response never presents a bare number as fact.
 `GET /predictions/{id}` returns the identical shape for a past run;
 `GET /predictions` returns the same fields minus `confidence_unavailable_reason`/
-`probabilities`/`classes`/`feature_columns`/`actual_outcome` (kept out of
-the list view the same way `TrainingJobSummaryDTO` keeps a job's full log
-list out of `GET /training-jobs`), plus `total`/`limit`/`offset`. It
-accepts `training_job_id`/`experiment_id`/`symbol` filters and
+`probabilities`/`classes`/`feature_columns` (kept out of the list view the
+same way `TrainingJobSummaryDTO` keeps a job's full log list out of
+`GET /training-jobs`), plus `total`/`limit`/`offset`. It accepts
+`training_job_id`/`experiment_id`/`symbol` filters and
 `sort`/`dir`/`limit`/`offset` (one of `symbol`, `as_of`, `created_at`;
 default `created_at` descending) — the same list-endpoint shape every
 other history surface on this platform uses.
+
+**Grading** (both endpoints, no separate trigger — see `ARCHITECTURE.md` §
+"Prediction Grading"): `actual_outcome IS NULL` is the one authoritative
+"still pending" signal, never inferred from `is_correct`/`error`/
+`graded_at`. Once a prediction's target horizon has actually arrived (the
+target candle has closed and been ingested — checked periodically by
+`PredictionGradingScheduler`, or on demand via `scripts/grade_predictions.py`;
+neither is reachable over HTTP, there is no `POST` to trigger grading),
+`actual_outcome` holds the real observed value (the same shape as
+`predicted_value` — a class label or a number), computed with the exact
+target-generation logic that produced the training label. `is_correct` is
+set only for a classification job (`predicted_value == actual_outcome`);
+`error` only for a regression job (absolute error between the two) — never
+both. `available_after` is computed server-side (`as_of + horizon`
+candle-intervals) and set only while `actual_outcome` is still `null`, so
+a client never has to re-derive timeframe-to-duration math itself to show
+"available after `<timestamp>`".
 
 **Error codes**: `training_job_not_found` (404), `market_not_found` (404),
 `prediction_not_available` (409 — the job hasn't completed yet, or has no

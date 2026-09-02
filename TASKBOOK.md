@@ -119,8 +119,9 @@ that introduced it where the work has been committed.
 | M1-E7-T1 | M1: Research & Training Platform | E7: Model Evaluation         | Model Evaluation & Benchmarking Engine                                                                                             | Completed   | High     | M1-E6-T1     | `3a411c1`            |
 | M1-E8-T1 | M1: Research & Training Platform | E8: Experiment Config Editor | In-app `feature_set`/`target_config`/`split_config` editor                                                                         | Completed   | Medium   | M1-E5-T1     | `346f708`            |
 | M2-E1-T1 | M2: Prediction & Backtesting     | E1: Live Prediction          | Live Prediction Service (`app/prediction/`, `/ml/predict`)                                                                         | Completed   | Critical | M1-E6-T1     | `9871c1c`            |
-| M2-E1-T2 | M2: Prediction & Backtesting     | E1: Live Prediction          | Non-blocking `/training-jobs/{id}/run` (background `asyncio.Task`, own DB session, duplicate-run rejection, shutdown cancellation) | Completed   | High     | M1-E6-T1     | pending commit       |
-| M2-E2-T1 | M2: Prediction & Backtesting     | E2: Backtesting              | Backtesting engine                                                                                                                 | Not Started | High     | M2-E1-T1     | —                    |
+| M2-E1-T2 | M2: Prediction & Backtesting     | E1: Live Prediction          | Non-blocking `/training-jobs/{id}/run` (background `asyncio.Task`, own DB session, duplicate-run rejection, shutdown cancellation) | Completed   | High     | M1-E6-T1     | `8bb20f5`            |
+| M2-E1-T3 | M2: Prediction & Backtesting     | E1: Live Prediction          | Prediction Grading (`app/prediction/grading.py`, `PredictionGradingScheduler`, `scripts/grade_predictions.py`)                     | Completed   | High     | M2-E1-T1     | pending commit       |
+| M2-E2-T1 | M2: Prediction & Backtesting     | E2: Backtesting              | Backtesting engine                                                                                                                 | Not Started | High     | M2-E1-T3     | —                    |
 
 ---
 
@@ -135,11 +136,12 @@ that introduced it where the work has been committed.
 | M5        | Production Hardening                         | NOT STARTED |
 | M6        | Live Trading (gated on extensive validation) | NOT STARTED |
 
-M2's "IN PROGRESS" covers two completed items (the Live Prediction Service,
-and making training-job execution non-blocking) out of at least three
-known (backtesting is not started) — no percentage is given for M2 because
-its total scope isn't fully defined yet, unlike M1's, which is now closed.
-See `ROADMAP.md` for what each milestone actually covers.
+M2's "IN PROGRESS" covers three completed items (the Live Prediction
+Service, making training-job execution non-blocking, and Prediction
+Grading) out of at least four known (backtesting is not started) — no
+percentage is given for M2 because its total scope isn't fully defined
+yet, unlike M1's, which is now closed. See `ROADMAP.md` for what each
+milestone actually covers.
 
 ---
 

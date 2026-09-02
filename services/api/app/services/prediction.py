@@ -22,20 +22,30 @@ this platform's other read-mostly services layered over an existing one:
 The only genuinely new work here is bounding *which* candles to fetch (the
 one immediately at-or-before the requested `as_of`, plus enough history for
 the largest feature's warmup) and shaping/persisting the result.
+
+`grade_pending` (below) is a separate concern layered on top once a
+prediction's target horizon has actually arrived — see its own docstring
+and `app/prediction/grading.py`'s module docstring for what it reuses and
+why.
 """
 
 import logging
 import uuid
+from dataclasses import dataclass
+from datetime import UTC, datetime
 
+from app.evaluation.registry import MetricRegistry
 from app.features.dataset import FeatureRequest as DatasetFeatureRequest
+from app.ml_datasets.pipeline import TargetPipeline
 from app.models.prediction import Prediction
-from app.prediction.engine import PredictionEngine
+from app.prediction.engine import PredictionEngine, resolve_target_entry
 from app.prediction.errors import (
     InvalidPredictionSortError,
     LiveFeatureReconstructionNotSupportedError,
     PredictionRunNotFoundError,
     TrainingFeatureSetMismatchError,
 )
+from app.prediction.grading import GradingOutcome, grade_one
 from app.prediction.registry import get_model_adapter_registry
 from app.repositories.candles import CandleRepository
 from app.repositories.markets import MarketRepository
@@ -49,6 +59,7 @@ from app.schemas.prediction import (
     PredictionSummaryDTO,
 )
 from app.services.candle_ingest import resolution_duration
+from app.services.candle_points import to_point
 from app.services.experiments import ExperimentService
 from app.services.features import FeatureService
 from app.services.market_query import CandleNotFoundError, MarketNotFoundError
@@ -64,6 +75,16 @@ logger = logging.getLogger("app.services.prediction")
 _WARMUP_BUFFER_CANDLES = 5
 
 
+@dataclass(frozen=True, slots=True)
+class GradingSummary:
+    """The outcome of one `grade_pending` pass."""
+
+    attempted: int
+    graded: int
+    not_yet_knowable: int
+    failed: int
+
+
 class PredictionService:
     """The one entry point routers use for every live prediction operation."""
 
@@ -76,6 +97,8 @@ class PredictionService:
         market_repository: MarketRepository,
         candle_repository: CandleRepository,
         engine: PredictionEngine,
+        target_pipeline: TargetPipeline,
+        metric_registry: MetricRegistry,
     ) -> None:
         self.repository = repository
         self.training_job_service = training_job_service
@@ -84,6 +107,8 @@ class PredictionService:
         self.market_repository = market_repository
         self.candle_repository = candle_repository
         self.engine = engine
+        self.target_pipeline = target_pipeline
+        self.metric_registry = metric_registry
 
     async def run(self, request: PredictionRunRequest) -> PredictionResponse:
         """Reconstruct a live feature vector, predict, and persist the result.
@@ -245,4 +270,139 @@ class PredictionService:
             total=total,
             limit=limit,
             offset=offset,
+        )
+
+    async def grade_pending(self) -> GradingSummary:
+        """Grade every prediction whose target horizon has actually arrived.
+
+        For each prediction with `actual_outcome IS NULL`: fetch the
+        `horizon + 1` candles starting at its own `as_of`. If they aren't
+        all stored yet (the target candle hasn't closed and been ingested),
+        the prediction is left untouched — not an error, just not yet
+        knowable, exactly per this feature's own spec. When they are, the
+        real outcome is computed via `app.prediction.grading.grade_one` —
+        the *same* target-generation logic that produced the training
+        label, reused, never re-derived — and persisted.
+
+        Safe to call repeatedly and concurrently with itself in spirit
+        (the periodic scheduler and a manual script both call this): a
+        prediction already graded is never re-fetched, since
+        `list_ungraded` only returns rows with `actual_outcome IS NULL`.
+        """
+        candidates = await self.repository.list_ungraded()
+        graded = 0
+        not_yet_knowable = 0
+        failed = 0
+        for prediction in candidates:
+            try:
+                outcome = await self._grade_one(prediction)
+            except Exception:  # noqa: BLE001 - isolate one bad row from the whole pass
+                # Stated plainly, not just implied: `actual_outcome` stays
+                # NULL, so `list_ungraded` hands this same row back on
+                # every future pass — this log line is the only signal a
+                # row that fails on *every* attempt (as opposed to one
+                # that's merely not yet knowable) currently gets. There is
+                # no persistent "this row is stuck" marker on `Prediction`
+                # itself (no `error_message` column exists there, unlike
+                # `TrainingJob`) — discoverability today is log-only, by
+                # design (see this task's own follow-up question and
+                # answer in `ARCHITECTURE.md` § "Prediction Grading").
+                logger.exception(
+                    "Failed to grade prediction %s — it will remain ungraded and be "
+                    "retried on every future grading pass until this is fixed",
+                    prediction.id,
+                )
+                failed += 1
+                continue
+            if outcome is None:
+                not_yet_knowable += 1
+                continue
+            await self.repository.record_grading(
+                prediction,
+                actual_outcome=outcome.actual_outcome,
+                is_correct=outcome.is_correct,
+                error=outcome.error,
+                graded_at=datetime.now(UTC),
+            )
+            graded += 1
+            logger.info(
+                "Graded prediction %s: actual=%r correct=%r error=%r",
+                prediction.id,
+                outcome.actual_outcome,
+                outcome.is_correct,
+                outcome.error,
+            )
+        return GradingSummary(
+            attempted=len(candidates),
+            graded=graded,
+            not_yet_knowable=not_yet_knowable,
+            failed=failed,
+        )
+
+    async def _grade_one(self, prediction: Prediction) -> GradingOutcome | None:
+        """Grade one prediction, or return `None` if it isn't knowable yet.
+
+        Never raises for an ordinary "not yet knowable" case — only for a
+        genuine unexpected failure, which `grade_pending` isolates from the
+        rest of the pass.
+        """
+        if prediction.horizon is None:
+            # No configured horizon was ever resolved for this prediction —
+            # there is no way to know how many candles ahead to check.
+            return None
+
+        market = await self.market_repository.get_by_symbol(prediction.symbol)
+        if market is None:
+            return None
+
+        candles = await self.candle_repository.get_candles(
+            market.id,
+            prediction.timeframe,
+            start=prediction.as_of,
+            end=None,
+            limit=prediction.horizon + 1,
+            offset=0,
+            sort="open_time",
+            direction="asc",
+        )
+        if len(candles) < prediction.horizon + 1:
+            # The target candle hasn't closed and been ingested yet.
+            return None
+
+        points = [to_point(candle) for candle in candles]
+        as_of = (
+            prediction.as_of if prediction.as_of.tzinfo else prediction.as_of.replace(tzinfo=UTC)
+        )
+        if points[0].open_time != as_of:
+            # Defensive: the candle this prediction was actually computed
+            # from is no longer the oldest one in range (should not happen —
+            # candles are append-only and `as_of` is always a real stored
+            # open_time). Treat as not-yet-gradeable rather than grade
+            # against the wrong starting candle.
+            logger.warning(
+                "Prediction %s: expected as_of candle %s not found at the start of the "
+                "fetched window (got %s); skipping this grading pass",
+                prediction.id,
+                as_of,
+                points[0].open_time,
+            )
+            return None
+
+        experiment = await self.experiment_service.get(prediction.experiment_id)
+        entry = resolve_target_entry(experiment.target_config, prediction.target_column)
+        if entry is None:
+            # The experiment's target_config no longer has an entry that
+            # produced this column (e.g. edited since this job trained) —
+            # nothing to reliably re-run.
+            return None
+
+        return grade_one(
+            target_name=entry.target,
+            target_params=entry.params,
+            target_column=prediction.target_column,
+            predicted_value=prediction.predicted_value,
+            model_kind=prediction.model_kind,
+            candles=points,
+            target_pipeline=self.target_pipeline,
+            metric_registry=self.metric_registry,
         )

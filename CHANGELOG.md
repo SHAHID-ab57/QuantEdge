@@ -8,6 +8,93 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Prediction Grading — for every persisted prediction whose target
+  horizon has actually arrived, determine what really happened and record
+  whether the prediction was right.** The first thing this platform does
+  with a live prediction after making it.
+  - **Verified the open risk from the Live Prediction Service milestone
+    before writing any grading code**, per that task's own outstanding
+    question: pulled two real, previously-persisted predictions from the
+    dev database, reconstructed their feature vectors with the real
+    `FeatureService`, normalized with the training job's own recorded
+    `NormalizationStats`, and ran them through the real model artifact —
+    both reproduced their stored `predicted_value`/`confidence`
+    bit-for-bit, confirming live inference genuinely uses the job's own
+    training statistics. The same check surfaced a real, separate finding:
+    that job's live `volume` feature sat millions of standard deviations
+    outside its training window's own recorded range — a data/experiment
+    characteristic of that one job, not a code defect, and orthogonal to
+    grading itself. **Traced to its root cause on follow-up**: that job's
+    dataset build resolved to a real, `source='delta'`-ingested but
+    extremely low-liquidity 2024-02-07..02-10 window (flat OHLC, 0-or-1
+    volume for 70 straight hours) — reproduced bit-for-bit from the real
+    data, confirming no bug anywhere in the pipeline; flagging a
+    prediction as low-confidence/out-of-distribution is a genuinely
+    separate feature, not folded into grading. Full account in
+    `ARCHITECTURE.md` § "Prediction Grading".
+  - **Reuses the exact target-generation logic that produced training
+    labels — never a reimplementation.** `app/prediction/grading.py`
+    re-runs the same `TargetPipeline`/target generator
+    (`app.dependencies.ml_datasets.get_target_pipeline()`, the identical
+    instance `MLDatasetBuilder` itself drives) over a fresh `horizon + 1`
+    candle window starting at the prediction's own `as_of`. Which target
+    generator to re-run is resolved via a new `resolve_target_entry`
+    (refactored out of the existing `resolve_horizon`, so both read the
+    same authoritative `target_config` entry rather than each re-deriving
+    it independently).
+  - **Reuses the existing `accuracy`/`mae` metrics
+    (`app/evaluation/metrics/`) for correctness/error — never a new
+    formula.** `is_correct` (classification) and `error` (regression) are
+    each metric's own `compute` over a one-element pair, proven by tests
+    asserting the result is exactly what `AccuracyMetric`/`MaeMetric`
+    themselves return, not a hand-rolled equivalent.
+  - **A real bug this feature's own tests caught before it shipped**:
+    SQLAlchemy's `JSON` column type defaults to `none_as_null=False` — a
+    Python `None` written to `actual_outcome` was stored as the JSON
+    literal `null`, not a SQL `NULL`, so `WHERE actual_outcome IS NULL`
+    (every grading query's own "still pending" filter) matched nothing,
+    ever. Fixed by declaring the column `JSON(none_as_null=True)`; the new
+    migration also carries a one-time, hand-written data-fix `UPDATE` for
+    rows already written under the old behavior, verified against the real
+    dev database.
+  - **A prediction that fails on every grading pass (not just "not yet
+    knowable") is discoverable by design, not by accident.** `Prediction`
+    has no `error_message`/`status` column the way `TrainingJob` does (not
+    added — a schema change out of this task's scope), so the per-row
+    failure log line now states the real consequence plainly — "will
+    remain ungraded and be retried on every future grading pass until this
+    is fixed" — instead of a bare traceback, firing on every single pass a
+    row keeps failing, mirroring how the training-job background-crash log
+    already states its own consequence rather than leaving it implied.
+  - **New columns on `predictions`** (migration `99d6a6e10268`):
+    `is_correct` (classification), `error` (regression), `graded_at` — all
+    nullable, alongside the already-reserved `actual_outcome`, which
+    remains the one authoritative "still pending" signal.
+  - **Periodic execution mirrors `CandleSyncScheduler` exactly, no new
+    infrastructure**: `PredictionGradingScheduler`
+    (`app/services/grading_scheduler.py`) is a single `asyncio` loop task
+    with its own database session per tick, an enable flag
+    (`prediction_grading_enabled`) and interval
+    (`prediction_grading_interval_seconds`), wired into `Runtime.start`/
+    `shutdown` alongside candle sync. `scripts/grade_predictions.py` is the
+    manual one-off entry point, matching `scripts/sync_candles.py`'s exact
+    shape. No new queue or message broker.
+  - **`GET /predictions/{id}` and `GET /predictions`** now also return
+    `actual_outcome`, `is_correct`, `error`, `graded_at`, and a computed
+    `available_after` (when grading can next determine the outcome,
+    computed server-side so the frontend never re-derives
+    timeframe-to-duration math itself).
+  - **Prediction History's own table** gained an "Outcome" column — no new
+    page. Pending: "Awaiting outcome — available after `<timestamp>`",
+    never blank. Graded classification: the real outcome plus the same
+    Correct/Incorrect glyph `prediction-samples-table.tsx` already renders
+    for a training job's own validation samples. Graded regression: the
+    real outcome plus its absolute error.
+  - Full design in `ARCHITECTURE.md` § "Prediction Grading"; API surface in
+    `docs/api/API.md` § "Live Prediction Service"; tests in
+    `services/api/TESTING.md` § "Testing Prediction Grading" and
+    `docs/testing/TESTING.md`.
+
 - **Live Prediction Service — the first usable output downstream of a
   saved model artifact.** Every previous milestone (data, features,
   datasets, experiments, training, evaluation) ended at a saved model and

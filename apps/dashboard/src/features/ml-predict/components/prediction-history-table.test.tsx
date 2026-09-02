@@ -20,6 +20,11 @@ const DATA: PredictionListResponse = {
       as_of: '2026-01-05T12:00:00Z',
       predicted_value: 'up',
       confidence: 0.8,
+      actual_outcome: null,
+      is_correct: null,
+      error: null,
+      graded_at: null,
+      available_after: '2026-01-05T13:00:00Z',
       created_at: '2026-01-05T12:05:00Z',
     },
   ],
@@ -71,6 +76,73 @@ describe('PredictionHistoryTable', () => {
     const { onReopen } = renderTable();
     fireEvent.click(screen.getByRole('button', { name: 'Reopen prediction pred-1' }));
     expect(onReopen).toHaveBeenCalledWith(DATA.predictions[0]);
+  });
+
+  it('shows a pending prediction as "Awaiting outcome" with when it becomes available', () => {
+    renderTable();
+    expect(screen.getByText(/Awaiting outcome/)).toBeInTheDocument();
+    expect(
+      screen.getByText(new RegExp(new Date('2026-01-05T13:00:00Z').toLocaleString())),
+    ).toBeInTheDocument();
+  });
+
+  it('shows a graded classification prediction with its outcome and a Correct glyph', () => {
+    renderTable({
+      data: {
+        ...DATA,
+        predictions: [
+          {
+            ...DATA.predictions[0]!,
+            actual_outcome: 'up',
+            is_correct: true,
+            graded_at: '2026-01-05T13:05:00Z',
+          },
+        ],
+      },
+    });
+    expect(screen.queryByText(/Awaiting outcome/)).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Correct')).toBeInTheDocument();
+  });
+
+  it('shows a graded classification prediction with an Incorrect glyph when it missed', () => {
+    renderTable({
+      data: {
+        ...DATA,
+        predictions: [
+          {
+            ...DATA.predictions[0]!,
+            actual_outcome: 'down',
+            is_correct: false,
+            graded_at: '2026-01-05T13:05:00Z',
+          },
+        ],
+      },
+    });
+    expect(screen.getByLabelText('Incorrect')).toBeInTheDocument();
+  });
+
+  it('shows a graded regression prediction with its error, not a correctness glyph', () => {
+    renderTable({
+      data: {
+        ...DATA,
+        predictions: [
+          {
+            ...DATA.predictions[0]!,
+            model_kind: 'regression',
+            predicted_value: 101.2,
+            confidence: null,
+            actual_outcome: 103.7,
+            is_correct: null,
+            error: 2.5,
+            graded_at: '2026-01-05T13:05:00Z',
+          },
+        ],
+      },
+    });
+    expect(screen.getByText('103.7')).toBeInTheDocument();
+    expect(screen.getByText('(error: 2.5000)')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Correct')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Incorrect')).not.toBeInTheDocument();
   });
 
   it('reports an empty result', () => {

@@ -7,8 +7,11 @@ convention exactly — including reusing their `seed_real_candles`/
 second copy of any of them.
 """
 
+from datetime import UTC, datetime, timedelta
+
 import httpx
 
+from app.dependencies.prediction import get_prediction_service
 from tests.api.test_training_api import (
     create_experiment,
     create_experiment_with_real_config,
@@ -17,6 +20,11 @@ from tests.api.test_training_api import (
     seed_real_candles,
 )
 from tests.conftest import SessionFactory
+
+#: Well within `seed_real_candles`'s own 80-hour seeded series (starting
+#: 2026-01-01T00:00), leaving real candles already stored past a horizon
+#: of 1 — gradeable immediately, unlike a prediction at the very latest one.
+_EARLY_AS_OF = datetime(2026, 1, 1, tzinfo=UTC) + timedelta(hours=70)
 
 
 async def train_completed_job(
@@ -216,3 +224,71 @@ class TestListPredictions:
         response = await client.get("/api/v1/predictions", params={"sort": "not-a-column"})
         assert response.status_code == 400
         assert response.json()["code"] == "invalid_prediction_sort"
+
+
+class TestGradedResponseShape:
+    """`actual_outcome`/`is_correct`/`error`/`graded_at`/`available_after` —
+    grading itself has no HTTP trigger (it's scheduler/script-only, see
+    `ARCHITECTURE.md` § "Machine Learning Training Framework"'s own
+    background-task precedent applied here), so these tests advance state
+    the same way `test_training_api.py`'s own `wait_for_in_flight_training_jobs`
+    does: call the service directly, then verify the *HTTP response* reflects
+    it — proving the wiring, not re-testing grading logic itself (already
+    covered by `tests/prediction/test_grading.py`/`test_service.py`).
+    """
+
+    async def test_get_shows_pending_fields_before_grading(
+        self, client: httpx.AsyncClient, session_factory: SessionFactory
+    ) -> None:
+        job = await train_completed_job(client, session_factory, symbol="APIPENDINGUSD")
+        created = (
+            await client.post(
+                "/api/v1/predictions/run",
+                json={"training_job_id": job["id"], "symbol": "APIPENDINGUSD"},
+            )
+        ).json()
+
+        response = await client.get(f"/api/v1/predictions/{created['id']}")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["actual_outcome"] is None
+        assert body["is_correct"] is None
+        assert body["error"] is None
+        assert body["graded_at"] is None
+        assert body["available_after"] is not None
+
+    async def test_get_and_list_show_the_outcome_once_graded(
+        self, client: httpx.AsyncClient, session_factory: SessionFactory
+    ) -> None:
+        job = await train_completed_job(client, session_factory, symbol="APIGRADEDUSD")
+        created = (
+            await client.post(
+                "/api/v1/predictions/run",
+                json={
+                    "training_job_id": job["id"],
+                    "symbol": "APIGRADEDUSD",
+                    "as_of": _EARLY_AS_OF.isoformat(),
+                },
+            )
+        ).json()
+
+        service = get_prediction_service(session_factory())
+        summary = await service.grade_pending()
+        assert summary.graded == 1
+
+        get_response = await client.get(f"/api/v1/predictions/{created['id']}")
+        get_body = get_response.json()
+        assert get_body["actual_outcome"] in {"up", "down", "flat"}
+        assert get_body["is_correct"] in {True, False}
+        assert get_body["error"] is None
+        assert get_body["graded_at"] is not None
+        assert get_body["available_after"] is None
+
+        list_response = await client.get(
+            "/api/v1/predictions", params={"training_job_id": job["id"]}
+        )
+        listed = next(p for p in list_response.json()["predictions"] if p["id"] == created["id"])
+        assert listed["actual_outcome"] == get_body["actual_outcome"]
+        assert listed["is_correct"] == get_body["is_correct"]
+        assert listed["graded_at"] == get_body["graded_at"]

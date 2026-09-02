@@ -91,6 +91,12 @@ class Settings(BaseSettings):
     candle_sync_symbols: str = ""
     candle_sync_backfill_days: int = 7
 
+    #: Periodic prediction grading (`app.services.grading_scheduler.PredictionGradingScheduler`)
+    #: — mirrors `candle_sync_enabled`/`candle_sync_interval_seconds` exactly, for the
+    #: same reason: a lightweight in-process loop, its own enable flag, no queue/broker.
+    prediction_grading_enabled: bool = True
+    prediction_grading_interval_seconds: int = 300
+
 
 @lru_cache
 def get_settings() -> Settings:

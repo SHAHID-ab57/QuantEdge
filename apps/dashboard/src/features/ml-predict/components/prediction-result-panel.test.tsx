@@ -22,6 +22,10 @@ function prediction(overrides: Partial<PredictionResponse> = {}): PredictionResp
     classes: ['down', 'up'],
     feature_columns: ['open', 'high', 'low', 'close', 'volume'],
     actual_outcome: null,
+    is_correct: null,
+    error: null,
+    graded_at: null,
+    available_after: '2026-01-05T13:00:00Z',
     created_at: '2026-01-05T12:05:00Z',
     ...overrides,
   };

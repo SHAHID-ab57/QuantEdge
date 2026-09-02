@@ -10,13 +10,17 @@ proves the Training Framework works against real data proves the same
 thing here, one step further downstream.
 """
 
+import logging
 import uuid
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from app.core.config import get_settings
 from app.dependencies.features import get_dataset_builder
+from app.dependencies.ml_datasets import get_target_pipeline
+from app.evaluation.metrics import load_builtin_metrics
+from app.evaluation.registry import default_registry as default_metric_registry
 from app.models.exchange import Exchange
 from app.models.market import Market
 from app.prediction.engine import default_engine
@@ -51,6 +55,7 @@ from tests.training.test_service import (
 def build_prediction_service(session_factory: SessionFactory) -> PredictionService:
     session = session_factory()
     settings = get_settings()
+    load_builtin_metrics()
     return PredictionService(
         repository=PredictionRepository(session),
         training_job_service=build_training_service(session_factory),
@@ -65,6 +70,8 @@ def build_prediction_service(session_factory: SessionFactory) -> PredictionServi
         market_repository=MarketRepository(session),
         candle_repository=CandleRepository(session),
         engine=default_engine,
+        target_pipeline=get_target_pipeline(),
+        metric_registry=default_metric_registry,
     )
 
 
@@ -431,3 +438,233 @@ class TestErrors:
         service = build_prediction_service(session_factory)
         with pytest.raises(PredictionRunNotFoundError):
             await service.get(uuid.uuid4())
+
+
+#: Well within `seed_real_candles`'s own 80-hour seeded series (starting
+#: 2026-01-01T00:00), leaving real candles already stored past a horizon of
+#: 1 — gradeable immediately, unlike a prediction at the very latest one.
+#: Module-level (not just `TestGradePending`'s own) so
+#: `tests/services/test_grading_scheduler.py` can reuse the exact same
+#: fixture shape rather than a second copy of it.
+EARLY_AS_OF_FOR_GRADING = datetime(2026, 1, 1, tzinfo=UTC) + timedelta(hours=70)
+
+
+@pytest.mark.asyncio
+class TestGradePending:
+    """`PredictionService.grade_pending` — the seeded candle series
+    (`seed_real_candles`, 80 hourly candles from 2026-01-01T00:00) makes both
+    cases easy to construct on purpose: predicting at the very *latest*
+    candle leaves nothing after it to grade against yet; predicting at an
+    earlier `as_of` (hour 70 of 0..79) leaves real candles already stored
+    past its horizon — gradeable immediately, no waiting required.
+    """
+
+    _EARLY_AS_OF = EARLY_AS_OF_FOR_GRADING
+
+    async def test_grades_a_prediction_once_its_target_candle_has_closed(
+        self, session_factory: SessionFactory
+    ) -> None:
+        job_id, _ = await train_completed_job(
+            session_factory, symbol="GRADEUSD", model_type="logistic_regression"
+        )
+        service = build_prediction_service(session_factory)
+        prediction = await service.run(
+            PredictionRunRequest(
+                training_job_id=uuid.UUID(job_id), symbol="GRADEUSD", as_of=self._EARLY_AS_OF
+            )
+        )
+        assert prediction.actual_outcome is None
+
+        summary = await service.grade_pending()
+
+        assert summary.attempted == 1
+        assert summary.graded == 1
+        assert summary.not_yet_knowable == 0
+        assert summary.failed == 0
+
+        graded = await service.get(uuid.UUID(prediction.id))
+        assert graded.actual_outcome in {"up", "down", "flat"}
+        assert graded.is_correct in {True, False}
+        assert graded.error is None
+        assert graded.graded_at is not None
+        assert graded.available_after is None  # nothing left to wait for
+
+    async def test_leaves_an_ungradeable_prediction_untouched(
+        self, session_factory: SessionFactory
+    ) -> None:
+        """Predicting against the very latest stored candle: there is no
+        candle after it yet, so the outcome genuinely isn't knowable —
+        `grade_pending` must leave the row exactly as it found it."""
+        job_id, _ = await train_completed_job(
+            session_factory, symbol="UNGRADEUSD", model_type="logistic_regression"
+        )
+        service = build_prediction_service(session_factory)
+        prediction = await service.run(
+            PredictionRunRequest(training_job_id=uuid.UUID(job_id), symbol="UNGRADEUSD")
+        )
+
+        summary = await service.grade_pending()
+
+        assert summary.attempted == 1
+        assert summary.graded == 0
+        assert summary.not_yet_knowable == 1
+        assert summary.failed == 0
+
+        untouched = await service.get(uuid.UUID(prediction.id))
+        assert untouched.actual_outcome is None
+        assert untouched.is_correct is None
+        assert untouched.error is None
+        assert untouched.graded_at is None
+        assert untouched.available_after is not None
+
+    async def test_a_regressors_prediction_is_graded_with_an_error_not_correctness(
+        self, session_factory: SessionFactory
+    ) -> None:
+        job_id, _ = await train_completed_job(
+            session_factory,
+            symbol="GRADEREGUSD",
+            model_type="linear_regression",
+            target="next_close",
+        )
+        service = build_prediction_service(session_factory)
+        prediction = await service.run(
+            PredictionRunRequest(
+                training_job_id=uuid.UUID(job_id), symbol="GRADEREGUSD", as_of=self._EARLY_AS_OF
+            )
+        )
+
+        summary = await service.grade_pending()
+        assert summary.graded == 1
+
+        graded = await service.get(uuid.UUID(prediction.id))
+        # A whole-number float can round-trip through the JSON column as an
+        # int (the same JSON-numeric ambiguity `predicted_value`'s own tests
+        # already accommodate — see `test_a_regressor_produces_a_numeric_
+        # prediction_with_no_confidence` above).
+        assert isinstance(graded.actual_outcome, int | float)
+        assert graded.error is not None
+        assert graded.error >= 0.0
+        assert graded.is_correct is None
+
+    async def test_an_already_graded_prediction_is_never_reprocessed(
+        self, session_factory: SessionFactory
+    ) -> None:
+        job_id, _ = await train_completed_job(
+            session_factory, symbol="REGRADEUSD", model_type="logistic_regression"
+        )
+        service = build_prediction_service(session_factory)
+        await service.run(
+            PredictionRunRequest(
+                training_job_id=uuid.UUID(job_id), symbol="REGRADEUSD", as_of=self._EARLY_AS_OF
+            )
+        )
+
+        first_pass = await service.grade_pending()
+        assert first_pass.graded == 1
+
+        second_pass = await service.grade_pending()
+        assert second_pass.attempted == 0
+        assert second_pass.graded == 0
+
+    async def test_leaves_a_prediction_alone_when_target_config_no_longer_matches(
+        self, session_factory: SessionFactory
+    ) -> None:
+        """The experiment's `target_config` was edited (e.g. via
+        `ExperimentConfigDialog`) after this prediction was made, so there is
+        no longer a recorded entry that produced its `target_column` —
+        nothing to reliably re-run grading against, so it's left untouched
+        rather than guessed at."""
+        job_id, experiment_id = await train_completed_job(
+            session_factory, symbol="RETARGETUSD", model_type="logistic_regression"
+        )
+        service = build_prediction_service(session_factory)
+        prediction = await service.run(
+            PredictionRunRequest(
+                training_job_id=uuid.UUID(job_id), symbol="RETARGETUSD", as_of=self._EARLY_AS_OF
+            )
+        )
+
+        experiment_service = ExperimentService(repository=ExperimentRepository(session_factory()))
+        await experiment_service.update(
+            uuid.UUID(experiment_id), ExperimentUpdateRequest(target_config=[])
+        )
+
+        summary = await service.grade_pending()
+
+        assert summary.attempted == 1
+        assert summary.graded == 0
+        assert summary.failed == 0
+
+        untouched = await service.get(uuid.UUID(prediction.id))
+        assert untouched.actual_outcome is None
+
+    async def test_an_unexpected_failure_grading_one_prediction_does_not_stop_the_rest(
+        self, session_factory: SessionFactory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`grade_pending` isolates one bad row from the whole pass — the
+        same "one failure never blocks the rest" discipline
+        `CandleSyncScheduler.run_catch_up` already applies per symbol/timeframe."""
+        job_id, _ = await train_completed_job(
+            session_factory, symbol="CRASHGRADEUSD", model_type="logistic_regression"
+        )
+        service = build_prediction_service(session_factory)
+        await service.run(
+            PredictionRunRequest(
+                training_job_id=uuid.UUID(job_id), symbol="CRASHGRADEUSD", as_of=self._EARLY_AS_OF
+            )
+        )
+
+        async def boom(self, prediction):
+            raise RuntimeError("simulated unexpected grading failure")
+
+        monkeypatch.setattr(type(service), "_grade_one", boom)
+
+        summary = await service.grade_pending()
+
+        assert summary.attempted == 1
+        assert summary.graded == 0
+        assert summary.failed == 1
+
+    async def test_a_repeated_grading_failure_is_logged_every_pass_not_silent(
+        self,
+        session_factory: SessionFactory,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """There is no persistent 'this row is stuck' marker on `Prediction`
+        (no `error_message` column exists there, unlike `TrainingJob`) — a
+        prediction that fails on *every* attempt is discoverable only
+        through this log line, every single pass. Proves it actually fires,
+        names the failing prediction, and states the real consequence
+        (stays ungraded, retried forever) rather than a bare traceback."""
+        job_id, _ = await train_completed_job(
+            session_factory, symbol="STUCKGRADEUSD", model_type="logistic_regression"
+        )
+        service = build_prediction_service(session_factory)
+        prediction = await service.run(
+            PredictionRunRequest(
+                training_job_id=uuid.UUID(job_id), symbol="STUCKGRADEUSD", as_of=self._EARLY_AS_OF
+            )
+        )
+
+        async def boom(self, prediction):
+            raise RuntimeError("simulated permanent grading failure")
+
+        monkeypatch.setattr(type(service), "_grade_one", boom)
+
+        with caplog.at_level(logging.ERROR, logger="app.services.prediction"):
+            first_pass = await service.grade_pending()
+            second_pass = await service.grade_pending()
+
+        assert first_pass.failed == 1
+        assert second_pass.failed == 1  # still ungraded, still retried, still failing
+
+        failure_records = [r for r in caplog.records if prediction.id in r.getMessage()]
+        assert len(failure_records) == 2  # logged on every pass, not just the first
+        assert all(r.levelno == logging.ERROR for r in failure_records)
+        assert all(
+            "retried on every future grading pass" in r.getMessage() for r in failure_records
+        )
+        assert all(
+            r.exc_info is not None for r in failure_records
+        )  # full traceback, not just a message

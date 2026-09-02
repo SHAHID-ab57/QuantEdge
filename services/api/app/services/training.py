@@ -50,6 +50,7 @@ from app.training.error_reporting import describe_training_failure
 from app.training.errors import (
     InvalidPredictionInputError,
     InvalidTrainingJobSortError,
+    InvalidTrainingJobTransitionError,
     MissingFeatureOrTargetConfigError,
     MissingTrainingDataSourceError,
     PredictionExecutionError,
@@ -187,28 +188,68 @@ class TrainingJobService:
         )
         return TrainingJobResponse.from_model(updated)
 
-    async def run(self, job_id: uuid.UUID) -> TrainingJobResponse:
-        """Execute the training pipeline for a pending job.
+    async def start(self, job_id: uuid.UUID) -> TrainingJobResponse:
+        """Atomically transition a pending job to 'running', synchronously.
 
-        Runs synchronously within this call — no worker/queue service exists
-        in this platform yet (see `AI.md` § "Machine Learning Training
-        Framework"), so `POST /training-jobs/{id}/run` blocks for the
-        duration of the (placeholder, near-instant) pipeline run.
+        This is the part of a run `POST /training-jobs/{id}/run` now waits
+        for before responding (see `app/dependencies/training.py`'s
+        `schedule_training_job`/`run_training_job_in_background`, which take
+        over from here in a background `asyncio.Task`) — the response
+        already reflects 'running' because the transition and its commit
+        happen in this call, not after the pipeline finishes.
+
+        The transition itself is a single guarded `UPDATE` at the
+        repository layer (`TrainingJobRepository.try_transition_to_running`),
+        not a read-then-check-then-write here — a read-check-write would let
+        two genuinely concurrent calls on the same job (two overlapping
+        HTTP requests, each its own session) both read `'pending'` before
+        either commits, both pass the check, and both win, scheduling two
+        background pipeline runs against the one job. The database's own
+        `WHERE status = 'pending'` guard makes that impossible: only one
+        `UPDATE` can ever match the row, so only one caller ever gets a job
+        back from `try_transition_to_running`.
+
+        When it returns `None` (this call lost the race, or the job never
+        existed), the follow-up `get_by_id` read below carries no such risk
+        — it only decides *which* error to raise, never whether the
+        transition happens — so a `TrainingJobNotFoundError` (unknown job)
+        and an `InvalidTrainingJobTransitionError` (job exists but wasn't
+        `'pending'`: already `running`, or a terminal status) are still
+        told apart exactly as before, including for a genuine concurrent
+        duplicate call, which now gets the 409 for the same reason a
+        sequential one always did — it just can no longer slip through by
+        timing.
+        """
+        job = await self.repository.try_transition_to_running(job_id)
+        if job is None:
+            existing = await self.repository.get_by_id(job_id)
+            if existing is None:
+                raise TrainingJobNotFoundError(job_id)
+            raise InvalidTrainingJobTransitionError(existing.status, "running")
+        await self._append_log(job_id, "info", None, "Training job started")
+        # Fetched *after* the log line so the response reflects it, exactly like
+        # `cancel`'s own comment explains — `add_log` expires the job's `logs`
+        # collection in the session's identity map, so the `job` reference above
+        # would otherwise carry a now-expired attribute into `from_model` and
+        # trigger an implicit (and, on the async driver, unsupported) lazy load.
+        job = await self._get_or_404(job_id)
+        return TrainingJobResponse.from_model(job)
+
+    async def execute_run(self, job_id: uuid.UUID) -> TrainingJobResponse:
+        """Run the pipeline for a job `start` already moved to 'running', and finalize it.
+
+        Split out from `run` so `app/dependencies/training.py`'s background
+        task can call this on a *fresh* `TrainingJobService` instance (its
+        own DB session) after `start` has already returned the response to
+        the client — this method itself re-fetches `job` rather than
+        accepting the caller's, so it works correctly no matter which
+        session instance transitioned it to 'running'. Any exception raised
+        by the pipeline is caught here and turned into a 'failed' job with
+        the captured error — the same outcome whether this runs inline (via
+        `run`) or from the background task, so a failure is never silently
+        lost either way.
         """
         job = await self._get_or_404(job_id)
-        assert_transition_allowed(job.status, "running")
-        job = await self.repository.update(
-            job,
-            {
-                "status": "running",
-                "current_stage": None,
-                "error_message": None,
-                "started_at": datetime.now(UTC),
-                "completed_at": None,
-            },
-        )
-        await self._append_log(job_id, "info", None, "Training job started")
-
         try:
             await self.pipeline.run(
                 model_type=job.model_type,
@@ -238,6 +279,21 @@ class TrainingJobService:
             completed, {"status": "completed", "completed_at": datetime.now(UTC)}
         )
         return TrainingJobResponse.from_model(completed)
+
+    async def run(self, job_id: uuid.UUID) -> TrainingJobResponse:
+        """Execute the training pipeline for a pending job, start to finish.
+
+        Combines `start` (validate + transition to 'running') and
+        `execute_run` (run the pipeline + finalize) in one awaited call —
+        used directly by callers that want the full outcome without the
+        fire-and-forget background task `POST /training-jobs/{id}/run`
+        itself now uses (see that method's own docstring, and
+        `app/dependencies/training.py`). Kept as a single entry point
+        because most of this suite's own tests, and any other in-process
+        caller, want exactly this: one call, the job's final state.
+        """
+        await self.start(job_id)
+        return await self.execute_run(job_id)
 
     async def predict(
         self, job_id: uuid.UUID, rows: list[list[float]]

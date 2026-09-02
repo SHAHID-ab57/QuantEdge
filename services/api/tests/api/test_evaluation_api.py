@@ -6,7 +6,7 @@ database, mirroring `test_training_api.py`'s own convention exactly.
 
 import httpx
 
-from tests.api.test_training_api import seed_real_candles
+from tests.api.test_training_api import run_and_wait, seed_real_candles
 from tests.conftest import SessionFactory
 
 
@@ -81,8 +81,8 @@ class TestBenchmark:
                     },
                 )
             ).json()
-            run = await client.post(f"/api/v1/training-jobs/{created['id']}/run")
-            assert run.json()["status"] == "completed"
+            run = await run_and_wait(client, created["id"])
+            assert run["status"] == "completed"
 
         response = await client.post(
             "/api/v1/evaluation/benchmark", json={"dataset_version": "ds-bench-shared"}
@@ -130,7 +130,7 @@ class TestBenchmark:
                     },
                 )
             ).json()
-            await client.post(f"/api/v1/training-jobs/{created['id']}/run")
+            await run_and_wait(client, created["id"])
 
         response = await client.post(
             "/api/v1/evaluation/benchmark",
@@ -168,7 +168,7 @@ class TestBenchmark:
                     },
                 )
             ).json()
-            await client.post(f"/api/v1/training-jobs/{created['id']}/run")
+            await run_and_wait(client, created["id"])
 
         response = await client.post(
             "/api/v1/evaluation/benchmark",
@@ -202,7 +202,7 @@ class TestBenchmarkHistory:
                 },
             )
         ).json()
-        await client.post(f"/api/v1/training-jobs/{created['id']}/run")
+        await run_and_wait(client, created["id"])
 
         await client.post("/api/v1/evaluation/benchmark", json={"dataset_version": "ds-bench-hist"})
 
@@ -235,7 +235,8 @@ class TestBenchmarkHistory:
                 },
             )
         ).json()
-        await client.post(f"/api/v1/training-jobs/{created['id']}/run")
+        await run_and_wait(client, created["id"])
+
         await client.post(
             "/api/v1/evaluation/benchmark", json={"dataset_version": "ds-bench-reopen"}
         )
@@ -279,7 +280,8 @@ class TestBenchmarkHistory:
                 },
             )
         ).json()
-        await client.post(f"/api/v1/training-jobs/{created['id']}/run")
+        await run_and_wait(client, created["id"])
+
         await client.post(
             "/api/v1/evaluation/benchmark", json={"dataset_version": "ds-bench-delete"}
         )

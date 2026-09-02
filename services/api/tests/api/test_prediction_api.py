@@ -13,6 +13,7 @@ from tests.api.test_training_api import (
     create_experiment,
     create_experiment_with_real_config,
     job_body,
+    run_and_wait,
     seed_real_candles,
 )
 from tests.conftest import SessionFactory
@@ -34,9 +35,9 @@ async def train_completed_job(
             json=job_body(experiment["id"], model_type=model_type, symbol=symbol, timeframe="1h"),
         )
     ).json()
-    response = await client.post(f"/api/v1/training-jobs/{created['id']}/run")
-    assert response.status_code == 200
-    body = response.json()
+    # `run_and_wait` (not a bare POST) — `/run` no longer blocks for the pipeline's
+    # duration, see `test_training_api.py`'s own module docstring.
+    body = await run_and_wait(client, created["id"])
     assert body["status"] == "completed", body
     return body
 
@@ -134,8 +135,8 @@ class TestRunPrediction:
         created = (
             await client.post("/api/v1/training-jobs", json=job_body(experiment["id"]))
         ).json()
-        run = await client.post(f"/api/v1/training-jobs/{created['id']}/run")
-        assert run.json()["status"] == "completed"
+        run = await run_and_wait(client, created["id"])
+        assert run["status"] == "completed"
 
         response = await client.post(
             "/api/v1/predictions/run",

@@ -2,15 +2,50 @@
 
 Runs against the real FastAPI app over ASGI with the in-memory SQLite
 database, mirroring `test_experiments_api.py`'s own convention exactly.
+
+`POST /training-jobs/{id}/run` no longer blocks for the run's duration — it
+validates and transitions to 'running' synchronously, then executes the
+pipeline in a background `asyncio.Task` (see `app/dependencies/training.py`).
+That task opens its own DB session via `get_engine()`, never through
+`get_db`/FastAPI's dependency overrides, so `tests/api/conftest.py`'s
+autouse fixture points it at this suite's own in-memory engine — the same
+convention `tests/services/test_candle_sync.py` already uses for
+`CandleSyncScheduler`. `run_and_wait` is this suite's replacement for the
+old "the run response IS the final state" pattern: it asserts the response
+is already 'running', then deterministically awaits the background task
+(never a real sleep) before fetching the job's settled state.
 """
 
+import asyncio
+import time
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import httpx
+import pytest
 
+from app.dependencies.training import wait_for_in_flight_training_jobs
 from app.models import Candle, Exchange, Market
+from app.training.pipeline import TrainingPipeline
 from tests.conftest import SessionFactory
+
+# `_training_background_uses_the_test_engine` (autouse) lives in
+# `tests/api/conftest.py` — every suite under `tests/api/` needs it, not
+# just this file.
+
+
+async def run_and_wait(client: httpx.AsyncClient, job_id: str) -> dict:
+    """POST /run, assert it returned before the pipeline could have finished
+    (status is 'running', not a terminal state), deterministically await the
+    background task, then return the job's settled state.
+    """
+    response = await client.post(f"/api/v1/training-jobs/{job_id}/run")
+    assert response.status_code == 200
+    assert response.json()["status"] == "running"
+    await wait_for_in_flight_training_jobs()
+    final = await client.get(f"/api/v1/training-jobs/{job_id}")
+    assert final.status_code == 200
+    return final.json()
 
 
 async def create_experiment(client: httpx.AsyncClient, **overrides: object) -> dict:
@@ -201,6 +236,105 @@ class TestDeleteTrainingJob:
 
 
 class TestRunTrainingJob:
+    async def test_returns_before_a_slow_background_run_would_finish(
+        self, client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The non-blocking behavior itself: an artificially slow pipeline run
+        must not delay the response — the request returns 'running' almost
+        immediately, well under the delay, and the job only reaches its
+        final state once the background task is explicitly awaited."""
+        delay_seconds = 0.5
+        original_run = TrainingPipeline.run
+
+        async def slow_run(self: TrainingPipeline, **kwargs: object):
+            await asyncio.sleep(delay_seconds)
+            return await original_run(self, **kwargs)
+
+        monkeypatch.setattr(TrainingPipeline, "run", slow_run)
+
+        experiment = await create_experiment(client, dataset_version="ds-slow")
+        created = (
+            await client.post("/api/v1/training-jobs", json=job_body(experiment["id"]))
+        ).json()
+
+        started = time.perf_counter()
+        response = await client.post(f"/api/v1/training-jobs/{created['id']}/run")
+        elapsed = time.perf_counter() - started
+
+        assert response.status_code == 200
+        assert response.json()["status"] == "running"
+        assert elapsed < delay_seconds / 2, (
+            f"run endpoint took {elapsed:.3f}s — it should return long before "
+            f"the artificial {delay_seconds}s pipeline delay elapses"
+        )
+
+        await wait_for_in_flight_training_jobs()
+        final = (await client.get(f"/api/v1/training-jobs/{created['id']}")).json()
+        assert final["status"] == "completed"
+
+    async def test_polling_after_run_eventually_shows_completed(
+        self, client: httpx.AsyncClient
+    ) -> None:
+        """The replacement for a real sleep-based poll: the background task
+        is awaited deterministically (`wait_for_in_flight_training_jobs`),
+        not slept for — this is what `GET /training-jobs/{id}` would
+        observe on its own 3s poll interval once the job settles."""
+        experiment = await create_experiment(client, dataset_version="ds-poll")
+        created = (
+            await client.post("/api/v1/training-jobs", json=job_body(experiment["id"]))
+        ).json()
+
+        response = await client.post(f"/api/v1/training-jobs/{created['id']}/run")
+        assert response.json()["status"] == "running"
+
+        await wait_for_in_flight_training_jobs()
+
+        final = (await client.get(f"/api/v1/training-jobs/{created['id']}")).json()
+        assert final["status"] == "completed"
+
+    async def test_a_second_run_call_while_running_is_rejected_not_double_executed(
+        self, client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A duplicate run call while the job is still 'running' must be
+        rejected — never silently ignored, and never a second execution
+        racing the first.
+
+        `schedule_training_job` is stubbed out for this test so the first
+        call's job stays deterministically 'running' (no real background
+        task ever transitions it further) while the second call is made —
+        real concurrency safety (two callers genuinely racing the same
+        atomic transition) is proven separately and more precisely at the
+        service layer, without any HTTP/background-task involved, by
+        `tests/training/test_service.py::TestStartAndExecuteRun::
+        test_two_genuinely_concurrent_starts_reject_exactly_one` (two
+        independent `TrainingJobService` instances racing `start()` via
+        `asyncio.gather`). Letting a *real* background task run here too
+        was tried and is flaky in this suite's single-shared-connection
+        SQLite test harness specifically — the background task's own
+        commit can collide with this test's second request's commit on the
+        one physical connection `StaticPool` hands out to every session
+        (`sqlite3.OperationalError: cannot commit transaction - SQL
+        statements in progress`), a test-harness artifact of the
+        accepted-as-is engine/pool sharing (see `ARCHITECTURE.md` §
+        "Machine Learning Training Framework"), not a production one —
+        real Postgres gives each session its own connection.
+        """
+        monkeypatch.setattr(
+            "app.api.v1.endpoints.training.schedule_training_job", lambda job_id: None
+        )
+        experiment = await create_experiment(client, dataset_version="ds-dup")
+        created = (
+            await client.post("/api/v1/training-jobs", json=job_body(experiment["id"]))
+        ).json()
+
+        first = await client.post(f"/api/v1/training-jobs/{created['id']}/run")
+        assert first.status_code == 200
+        assert first.json()["status"] == "running"
+
+        second = await client.post(f"/api/v1/training-jobs/{created['id']}/run")
+        assert second.status_code == 409
+        assert second.json()["code"] == "invalid_training_job_transition"
+
     async def test_runs_to_completion_and_reflects_on_the_experiment(
         self, client: httpx.AsyncClient
     ) -> None:
@@ -212,9 +346,7 @@ class TestRunTrainingJob:
             )
         ).json()
 
-        response = await client.post(f"/api/v1/training-jobs/{created['id']}/run")
-        assert response.status_code == 200
-        body = response.json()
+        body = await run_and_wait(client, created["id"])
         assert body["status"] == "completed"
         assert body["result_summary"]["metrics"]["placeholder_loss"] is not None
         assert len(body["logs"]) > 0
@@ -230,16 +362,15 @@ class TestRunTrainingJob:
             await client.post("/api/v1/training-jobs", json=job_body(experiment["id"]))
         ).json()
 
-        response = await client.post(f"/api/v1/training-jobs/{created['id']}/run")
-        assert response.status_code == 200
-        assert response.json()["status"] == "failed"
+        body = await run_and_wait(client, created["id"])
+        assert body["status"] == "failed"
 
     async def test_cannot_run_a_completed_job_again(self, client: httpx.AsyncClient) -> None:
         experiment = await create_experiment(client, dataset_version="ds-1")
         created = (
             await client.post("/api/v1/training-jobs", json=job_body(experiment["id"]))
         ).json()
-        await client.post(f"/api/v1/training-jobs/{created['id']}/run")
+        await run_and_wait(client, created["id"])
 
         response = await client.post(f"/api/v1/training-jobs/{created['id']}/run")
         assert response.status_code == 409
@@ -262,7 +393,7 @@ class TestCancelTrainingJob:
         created = (
             await client.post("/api/v1/training-jobs", json=job_body(experiment["id"]))
         ).json()
-        await client.post(f"/api/v1/training-jobs/{created['id']}/run")
+        await run_and_wait(client, created["id"])
 
         response = await client.post(f"/api/v1/training-jobs/{created['id']}/cancel")
         assert response.status_code == 409
@@ -286,10 +417,8 @@ class TestRealBaselineModels:
             )
         ).json()
 
-        response = await client.post(f"/api/v1/training-jobs/{created['id']}/run")
+        body = await run_and_wait(client, created["id"])
 
-        assert response.status_code == 200
-        body = response.json()
         assert body["status"] == "completed"
         metrics = body["result_summary"]["metrics"]
         assert {"accuracy", "precision", "recall", "f1"} <= metrics.keys()
@@ -327,10 +456,8 @@ class TestRealBaselineModels:
             )
         ).json()
 
-        response = await client.post(f"/api/v1/training-jobs/{created['id']}/run")
+        body = await run_and_wait(client, created["id"])
 
-        assert response.status_code == 200
-        body = response.json()
         assert body["status"] == "completed"
         metrics = body["result_summary"]["metrics"]
         assert {"mae", "mse", "rmse", "r2"} <= metrics.keys()
@@ -344,10 +471,8 @@ class TestRealBaselineModels:
             )
         ).json()
 
-        response = await client.post(f"/api/v1/training-jobs/{created['id']}/run")
+        body = await run_and_wait(client, created["id"])
 
-        assert response.status_code == 200
-        body = response.json()
         assert body["status"] == "failed"
         assert body["error_detail"] is not None
         assert body["error_detail"]["suggested_fix"]
@@ -370,7 +495,7 @@ class TestPredictTrainingJob:
                 ),
             )
         ).json()
-        completed = (await client.post(f"/api/v1/training-jobs/{created['id']}/run")).json()
+        completed = await run_and_wait(client, created["id"])
         feature_columns = completed["result_summary"]["feature_columns"]
 
         response = await client.post(
@@ -417,7 +542,7 @@ class TestPredictTrainingJob:
                 ),
             )
         ).json()
-        await client.post(f"/api/v1/training-jobs/{created['id']}/run")
+        await run_and_wait(client, created["id"])
 
         response = await client.post(
             f"/api/v1/training-jobs/{created['id']}/predict",
@@ -445,7 +570,7 @@ class TestTrainingJobArtifacts:
                 ),
             )
         ).json()
-        await client.post(f"/api/v1/training-jobs/{created['id']}/run")
+        await run_and_wait(client, created["id"])
 
         listing = await client.get(f"/api/v1/training-jobs/{created['id']}/artifacts")
 
@@ -484,7 +609,7 @@ class TestTrainingJobArtifacts:
                 ),
             )
         ).json()
-        await client.post(f"/api/v1/training-jobs/{created['id']}/run")
+        await run_and_wait(client, created["id"])
 
         response = await client.get(
             f"/api/v1/training-jobs/{created['id']}/artifacts/roc_curve_png"

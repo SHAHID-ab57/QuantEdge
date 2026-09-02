@@ -27,9 +27,11 @@ export function useTrainingJobs(params: TrainingJobListParams) {
 
 /**
  * Polls every 3s while the job is running so the status monitor and logs
- * reflect pipeline progress without the user manually refreshing — the run
- * itself executes synchronously server-side (no worker/queue service
- * exists yet), so a short poll is how a client observes it "live."
+ * reflect pipeline progress without the user manually refreshing. The run
+ * itself now executes in a background task server-side (see
+ * `useRunTrainingJob` below) — the mutation resolves as soon as the job is
+ * validated and transitioned to 'running', well before the pipeline
+ * finishes, so this poll is what actually shows progress from there.
  */
 export function useTrainingJob(id: string | null) {
   return useQuery({
@@ -69,6 +71,14 @@ export function useDeleteTrainingJob() {
   });
 }
 
+/**
+ * Starts the run — the mutation resolves once the job is validated and
+ * transitioned to 'running' (the server responds before the pipeline
+ * itself finishes), not once training completes. `invalidate` refetches
+ * the job detail immediately after, so the dialog shows 'running' right
+ * away; `useTrainingJob`'s own 3s poll takes over from there until the job
+ * settles into 'completed' or 'failed'.
+ */
 export function useRunTrainingJob() {
   const invalidate = useInvalidateTrainingJobs();
   return useMutation({

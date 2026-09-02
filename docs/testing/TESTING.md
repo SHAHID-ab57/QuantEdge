@@ -1127,7 +1127,14 @@ model adapters; and successful creation opening the detail dialog), and
 the detail dialog (the stage timeline, the log trail, the result summary
 once completed, the error message on a failed job, and the Run action plus
 the confirm-then-mutate flow for both Cancel and Delete — including
-backing out of a confirmation without triggering the mutation). The
+backing out of a confirmation without triggering the mutation). The Run
+action's own test mocks `runTrainingJob` the same way regardless of
+whether the backend resolves it immediately or after the full pipeline —
+`useTrainingJob`'s 3s poll while `status === "running"` (not the run
+mutation's response) is what the dialog actually renders progress from, so
+the backend becoming non-blocking (see `ARCHITECTURE.md`/`services/api/
+TESTING.md` § "Machine Learning Training Framework") needed no test
+changes here. The
 Experiment selector appearing in both the page's filter bar and the create
 dialog at the same time (once the dialog is open) means tests querying
 "Experiment" scope with `within(screen.getByRole('dialog'))` rather than

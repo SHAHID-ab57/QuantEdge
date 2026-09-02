@@ -8,9 +8,11 @@ write-heavy, CRUD-backed domain.
 
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import InstrumentedAttribute, selectinload
 
@@ -60,6 +62,51 @@ class TrainingJobRepository:
             select(TrainingJob).where(TrainingJob.id == job_id).options(*_WITH_LOGS)
         )
         return result.scalar_one_or_none()
+
+    async def try_transition_to_running(self, job_id: uuid.UUID) -> TrainingJob | None:
+        """Atomically move `job_id` from 'pending' to 'running', or fail closed.
+
+        A single `UPDATE ... WHERE id = :job_id AND status = 'pending'`
+        guards the transition at the database level, not in Python: two
+        concurrent callers racing the same job (two overlapping
+        `POST /training-jobs/{id}/run` requests, each its own session) can
+        never both win, because the database serializes the two `UPDATE`
+        statements and only the first to commit still sees a `'pending'`
+        row to match — the second's `WHERE` clause matches zero rows.
+        `'pending'` is hardcoded here (not looked up from
+        `app.training.state_machine.ALLOWED_TRANSITIONS`) because it is
+        already the *only* source state that state machine ever allows into
+        `'running'` — this method's whole reason to exist is standing in
+        for a read-then-check-then-write of that exact rule, done instead
+        as one atomic write.
+
+        Returns the freshly updated job when this call won the race,
+        `None` when it lost — indistinguishable here from "the job does not
+        exist at all"; the caller (`TrainingJobService.start`) tells those
+        two apart with its own follow-up read, which carries no race risk
+        since it only decides *which error* to raise, not whether the
+        transition happens.
+        """
+        result = await self.session.execute(
+            update(TrainingJob)
+            .where(TrainingJob.id == job_id, TrainingJob.status == "pending")
+            .values(
+                status="running",
+                current_stage=None,
+                error_message=None,
+                started_at=datetime.now(UTC),
+                completed_at=None,
+            )
+        )
+        await self.session.commit()
+        # `AsyncSession.execute` is typed to return the generic `Result[Any]`,
+        # but a Core DML statement (this `update()`) always yields a
+        # `CursorResult` at runtime — the subclass `.rowcount` actually lives
+        # on. Narrowed with `assert isinstance`, not `cast`/`# type: ignore`.
+        assert isinstance(result, CursorResult)
+        if result.rowcount == 0:
+            return None
+        return await self.get_by_id(job_id)
 
     async def search(
         self,

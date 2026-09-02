@@ -1,5 +1,6 @@
 """Tests for `TrainingJobService` — lifecycle, pipeline execution, and experiment integration."""
 
+import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -384,6 +385,141 @@ class TestRun:
 
         with pytest.raises(InvalidTrainingJobTransitionError):
             await service.run(uuid.UUID(job.id))
+
+
+class TestStartAndExecuteRun:
+    """`start`/`execute_run` — the split `run` is built from, and what the
+    non-blocking `/run` endpoint actually calls (`start` inline, `execute_run`
+    from a background task on a separate service instance — see
+    `app/dependencies/training.py`)."""
+
+    async def test_start_transitions_to_running_without_executing_the_pipeline(
+        self, session_factory: SessionFactory
+    ) -> None:
+        experiment_id = await seed_experiment(session_factory, dataset_version="ds-start")
+        service = build_service(session_factory)
+        job = await service.create(
+            TrainingJobCreateRequest(experiment_id=experiment_id, model_type="placeholder")
+        )
+
+        started = await service.start(uuid.UUID(job.id))
+
+        assert started.status == "running"
+        assert started.started_at is not None
+        assert started.completed_at is None
+        # Never touched: `start` only transitions and logs, it does not run
+        # the pipeline (that's `execute_run`'s job).
+        assert started.result_summary is None
+        assert any(log.message == "Training job started" for log in started.logs)
+
+    async def test_start_twice_is_rejected_not_double_executed(
+        self, session_factory: SessionFactory
+    ) -> None:
+        experiment_id = await seed_experiment(session_factory, dataset_version="ds-dup")
+        service = build_service(session_factory)
+        job = await service.create(
+            TrainingJobCreateRequest(experiment_id=experiment_id, model_type="placeholder")
+        )
+        await service.start(uuid.UUID(job.id))
+
+        from app.training.errors import InvalidTrainingJobTransitionError
+
+        with pytest.raises(InvalidTrainingJobTransitionError):
+            await service.start(uuid.UUID(job.id))
+
+    async def test_two_genuinely_concurrent_starts_reject_exactly_one(
+        self, session_factory: SessionFactory
+    ) -> None:
+        """Reproduces the race demonstrated manually: two independent
+        `TrainingJobService` instances (each its own session, modeling two
+        overlapping HTTP requests) calling `start` on the *same* job via
+        `asyncio.gather` — not sequentially. Before the atomic
+        `try_transition_to_running` guard, both calls read `'pending'`
+        before either committed and both won. With the guard, exactly one
+        `UPDATE ... WHERE status = 'pending'` can ever match the row, so
+        exactly one call succeeds and the other gets the same 409
+        (`InvalidTrainingJobTransitionError`) a sequential duplicate call
+        gets — proving concurrency safety, not just the state machine's
+        sequential logic (which `test_start_twice_is_rejected_not_double_executed`
+        above already covers).
+        """
+        experiment_id = await seed_experiment(session_factory, dataset_version="ds-race")
+        creator = build_service(session_factory)
+        job = await creator.create(
+            TrainingJobCreateRequest(experiment_id=experiment_id, model_type="placeholder")
+        )
+        job_id = uuid.UUID(job.id)
+
+        # Two independent service instances — each its own session — racing
+        # `start` on the same job concurrently, not one after the other.
+        service_a = build_service(session_factory)
+        service_b = build_service(session_factory)
+
+        from app.training.errors import InvalidTrainingJobTransitionError
+
+        results = await asyncio.gather(
+            service_a.start(job_id), service_b.start(job_id), return_exceptions=True
+        )
+
+        successes = [r for r in results if not isinstance(r, BaseException)]
+        failures = [r for r in results if isinstance(r, BaseException)]
+
+        assert len(successes) == 1, f"expected exactly one winner, got: {results}"
+        assert successes[0].status == "running"
+        assert len(failures) == 1
+        assert isinstance(failures[0], InvalidTrainingJobTransitionError)
+
+    async def test_execute_run_completes_a_job_start_already_moved_to_running(
+        self, session_factory: SessionFactory
+    ) -> None:
+        experiment_id = await seed_experiment(session_factory, dataset_version="ds-exec")
+        service = build_service(session_factory)
+        job = await service.create(
+            TrainingJobCreateRequest(
+                experiment_id=experiment_id, model_type="placeholder", hyperparameters={"epochs": 2}
+            )
+        )
+        await service.start(uuid.UUID(job.id))
+
+        completed = await service.execute_run(uuid.UUID(job.id))
+
+        assert completed.status == "completed"
+        assert completed.result_summary is not None
+        assert "placeholder_loss" in completed.result_summary["metrics"]
+
+    async def test_execute_run_on_a_fresh_service_instance_still_completes_it(
+        self, session_factory: SessionFactory
+    ) -> None:
+        """The exact shape `run_training_job_in_background` relies on: `start`
+        happens on one `TrainingJobService` instance, `execute_run` on a
+        second, independent one built from its own session — proving
+        `execute_run` never depends on any in-memory state `start` held."""
+        experiment_id = await seed_experiment(session_factory, dataset_version="ds-fresh")
+        starter = build_service(session_factory)
+        job = await starter.create(
+            TrainingJobCreateRequest(experiment_id=experiment_id, model_type="placeholder")
+        )
+        await starter.start(uuid.UUID(job.id))
+
+        executor = build_service(session_factory)
+        completed = await executor.execute_run(uuid.UUID(job.id))
+
+        assert completed.status == "completed"
+
+    async def test_execute_run_marks_failed_on_a_pipeline_error(
+        self, session_factory: SessionFactory
+    ) -> None:
+        experiment_id = await seed_experiment(session_factory)  # no dataset_version -> fails
+        service = build_service(session_factory)
+        job = await service.create(
+            TrainingJobCreateRequest(experiment_id=experiment_id, model_type="placeholder")
+        )
+        await service.start(uuid.UUID(job.id))
+
+        failed = await service.execute_run(uuid.UUID(job.id))
+
+        assert failed.status == "failed"
+        assert failed.error_message is not None
 
 
 class TestSanitizeForJson:

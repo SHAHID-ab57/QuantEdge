@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, Path, Query, status
 from fastapi.responses import FileResponse
 
 from app.core.config import get_settings
-from app.dependencies.training import get_training_job_service
+from app.dependencies.training import get_training_job_service, schedule_training_job
 from app.schemas.training import (
     ModelAdapterCatalogResponse,
     TrainingArtifactListResponse,
@@ -177,19 +177,26 @@ async def delete_training_job(job_id: TrainingJobIdPath, service: TrainingJobSer
 @router.post(
     "/training-jobs/{job_id}/run",
     response_model=TrainingJobResponse,
-    summary="Execute the training pipeline for a pending job",
+    summary="Start the training pipeline for a pending job",
     description=(
-        "Runs the six-stage placeholder training pipeline synchronously and returns the "
-        "job's final state (completed or failed). No worker/queue service exists yet, so "
-        "this call blocks for the duration of the run."
+        "Validates the job and synchronously transitions it to 'running', then returns "
+        "immediately — the six-stage pipeline itself executes in a background task, not "
+        "before this response is sent. Poll GET /training-jobs/{id} (or its logs) while "
+        "status is 'running' to observe progress; it settles into 'completed' or 'failed'. "
+        "Calling this again while the job is already 'running' is rejected with 409, not "
+        "double-executed. No worker/queue service exists yet, so the background task runs "
+        "in-process and does not survive an app restart — see ARCHITECTURE.md § "
+        "'Machine Learning Training Framework' for that limitation."
     ),
     responses=_ERROR_RESPONSES,
 )
 async def run_training_job(
     job_id: TrainingJobIdPath, service: TrainingJobServiceDep
 ) -> TrainingJobResponse:
-    """Execute a pending training job's pipeline."""
-    return await service.run(job_id)
+    """Transition a pending job to 'running' and schedule its pipeline in the background."""
+    response = await service.start(job_id)
+    schedule_training_job(job_id)
+    return response
 
 
 @router.post(

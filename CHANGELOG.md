@@ -1586,6 +1586,44 @@ MA"]`).
 
 ### Changed
 
+- **`POST /training-jobs/{id}/run` no longer blocks for the training run's
+  duration.** It validates the job and transitions it to `running`
+  synchronously (the response already reflects reality, committed before
+  it's sent), then executes the six-stage pipeline in a background
+  `asyncio.Task` — the same "in-process task, no message broker" pattern
+  `CandleSyncScheduler` already established for periodic candle sync, now
+  applied to a one-shot task per run. `TrainingJobService.run` is split
+  into `start` (validate and transition) and `execute_run` (run the
+  pipeline and finalize); the background task builds a fresh
+  `TrainingJobService` on
+  its own database session (`app.db.engine.get_engine()`), never the
+  request-scoped one, which is closed by the time the task actually gets a
+  turn on the event loop. A second, concurrent `/run` call on an
+  already-`running` job is rejected with `409` (`invalid_training_job_transition`)
+  — the existing state machine already enforces this, no new check was
+  needed. A pipeline failure still marks the job `failed` with the
+  captured error, whether it happens inline or in the background; an
+  outer `except` around the whole background task additionally catches
+  anything that goes wrong _outside_ `execute_run` itself (opening the
+  session, building the service), so a background task's exception is
+  never silently lost. On app shutdown, `cancel_in_flight_training_jobs`
+  cancels and awaits every still-running background task before the
+  database engine is disposed, mirroring `CandleSyncScheduler.stop()`'s
+  own cancel-then-await pattern — with one disclosed, real limitation:
+  because cancellation can land mid-pipeline (not at a safe boundary, and
+  `asyncio.CancelledError` is never caught as a training failure), a job
+  whose task was still running at shutdown time is left `status="running"`
+  in the database, with no restart-recovery/watchdog yet to reconcile it.
+  No new infrastructure (no Redis, broker, or queue library) was added —
+  see `ARCHITECTURE.md` § "Machine Learning Training Framework" for the
+  full design and `services/api/TESTING.md` § "Testing the Machine
+  Learning Training Framework" for how the non-blocking response, the
+  background task's own DB session, both failure paths, and shutdown
+  cancellation are each tested. The dashboard's Run action required no
+  frontend logic change — its existing 3s poll while `status === "running"`
+  was already how it observed pipeline progress; only the "Running" status
+  legend's copy was updated (see `FRONTEND.md` § "Machine Learning
+  Training Framework").
 - Live Market Dashboard hardened for research use: it now resolves which
   market to show (URL → remembered → `ETHUSD` → live-tracked → any active)
   and validates each candidate for stored candles and live-feed support

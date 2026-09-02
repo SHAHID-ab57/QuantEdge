@@ -1667,10 +1667,70 @@ callback; the DB-touching stages (`load_dataset`, `save_results`,
 something it does itself — `app/services/training.py`'s `TrainingJobService`
 supplies the concrete implementations, the same separation `app/services/
 ml_datasets.py` already draws between "the pure computation" and "the
-database session that surrounds it." Runs **synchronously** within the
-request — no worker/queue service exists anywhere on this platform yet, so
-`/run` blocks for the (near-instant, since nothing real trains) duration
-of the pipeline.
+database session that surrounds it."
+
+**`POST /training-jobs/{id}/run` does not block for the pipeline's
+duration.** `TrainingJobService.run` is split into `start` (validate the
+job exists and isn't already running, transition it to `running`, log
+"Training job started" — all synchronous, committed before the response is
+sent) and `execute_run` (run the six-stage pipeline and finalize into
+`completed`/`failed`). The endpoint calls `start` inline, then hands
+`execute_run` off to `asyncio.create_task()` via
+`app/dependencies/training.py`'s `schedule_training_job` — the same
+"in-process `asyncio` task, no message broker" pattern
+`CandleSyncScheduler` already established for periodic candle sync (see
+`app/services/candle_sync.py`), applied here to a one-shot task per run
+instead of a persistent loop. `run` itself (`start` + `execute_run` in one
+awaited call) is kept as the single entry point every in-process caller
+that wants the full outcome synchronously — this suite's own service-level
+tests included — still uses.
+
+Calling `/run` again while the job is already `running` is rejected with
+409 (`invalid_training_job_transition`, `running -> running` is not a
+legal edge in the state machine above), not double-executed — no separate
+"is it already running" check exists beyond the state machine itself
+already enforcing it.
+
+**The background task opens its own database session.** The request's
+session (`get_db`) is closed by the time the scheduled task actually gets a
+turn on the event loop, so `run_training_job_in_background` builds a fresh
+one from `app.db.engine.get_engine()` — exactly how `CandleSyncScheduler`
+opens its own session for each periodic tick, never the request-scoped
+instance. `execute_run`'s own `except Exception` still converts a pipeline
+failure into a `failed` job with the captured error, same as before; a
+second, outer `except Exception` around the whole background task is a
+last-resort net for anything that goes wrong _outside_ that call (opening
+the session, building the service), so a background task's exception is
+never just silently lost the way an unretrieved `asyncio.Task` exception
+usually is.
+
+**Shutdown behavior is deliberate, not accidental, and has a disclosed
+limitation.** `app/application.py`'s `shutdown()` calls
+`cancel_in_flight_training_jobs()` before disposing the database engine —
+the same relative ordering `Runtime.shutdown` already uses for
+`CandleSyncScheduler.stop()` (stop what uses the engine, then dispose the
+engine), generalized from one persistent loop task to a dynamic set of
+per-request background tasks tracked in
+`app/dependencies/training.py`. Unlike the scheduler's loop, which waits on
+an `asyncio.Event` at a safe boundary between ticks, a training run's
+background task is cancelled wherever it happens to be — mid-stage,
+mid-write. `asyncio.CancelledError` is not an `Exception` subclass, so
+neither `execute_run`'s nor the background task's own `except Exception`
+catches it: a cancelled task never gets the chance to mark its job
+`failed` the normal way. **The real, disclosed consequence**: a training
+job whose background task was still running when the app shut down is
+left with `status="running"` in the database, and there is no
+restart-recovery/watchdog in this platform yet to reconcile it — the same
+"no worker/queue service exists yet" limitation this framework has always
+carried, not a new one this change introduces. If real distributed or
+restart-safe execution becomes necessary later, this is the seam it plugs
+into, not something built out now. The same "no alerting" gap applies one
+level deeper, too: the outer catch-all's own recovery write
+(`_mark_job_failed_after_crash`) is itself only best-effort, and can fail
+the same way the crash it's recovering from did (e.g. the database is
+genuinely unreachable) — when it does, the job is silently left exactly as
+the crash found it (most likely `running`), with a log line and nothing
+else, not a second, escalated alert.
 
 **`update_experiment` reuses `ExperimentService` directly — the one
 integration point this whole framework exists to wire up.** A completed
@@ -1705,7 +1765,7 @@ unversioned):
 | GET    | `/api/v1/training-jobs`             | Search/filter/sort/paginate               |
 | GET    | `/api/v1/training-jobs/{id}`        | One job, with its full log trail          |
 | DELETE | `/api/v1/training-jobs/{id}`        | Delete a job (409 if currently `running`) |
-| POST   | `/api/v1/training-jobs/{id}/run`    | Execute the pipeline synchronously        |
+| POST   | `/api/v1/training-jobs/{id}/run`    | Start the pipeline in the background      |
 | POST   | `/api/v1/training-jobs/{id}/cancel` | Cancel a `pending` (or `running`) job     |
 
 **Frontend** (`apps/dashboard/src/features/ml-training/`, route
@@ -1722,16 +1782,27 @@ space; the framework has no fixed schema to build a typed form against). A
 detail dialog is the status monitor: current status/stage/timestamps, the
 full log trail, the result summary once completed, and Run/Cancel/Delete
 actions — it polls every 3s while `status === "running"`, since the run
-itself has no independent push channel.
+itself has no independent push channel. The Run action's mutation resolves
+as soon as the job is transitioned to `running` (not once training
+finishes), which this polling was already built to observe — no dialog
+logic assumed otherwise, so this became non-blocking with no frontend
+behavior change beyond the "Running" status legend's own copy.
 
 **Testing.** `tests/training/` covers the state machine (every legal/
 illegal transition), the model adapter registry and the placeholder
 adapter's determinism, the pipeline (every stage in order, and every
 failure mode, with plain async stub hooks — no database), the repository
-(CRUD/search/filter/sort/logs), and the service (lifecycle, pipeline
-execution, and the experiment-integration path, including the
-best-effort failure path); `tests/api/test_training_api.py` covers the
-same surface end to end over ASGI; `tests/repository/test_training_postgres.py`
+(CRUD/search/filter/sort/logs), and the service (lifecycle, `start`/
+`execute_run`, and the experiment-integration path, including the
+best-effort failure path); `tests/training/test_background.py` covers the
+background-execution seam specifically (its own DB session opened after
+the original would have closed, a pipeline failure and a crash outside the
+pipeline both marking the job failed, the deterministic test-wait helper,
+and shutdown cancellation); `tests/api/test_training_api.py` covers the
+same surface end to end over ASGI, plus the non-blocking response itself
+(an artificially slow pipeline proves the request returns well before it
+finishes) and a duplicate concurrent run being rejected, not
+double-executed; `tests/repository/test_training_postgres.py`
 (opt-in, `postgres` marker) exercises the real `ON DELETE CASCADE` the
 in-memory SQLite test engine cannot. 100% test coverage on every new
 backend module. See `docs/testing/TESTING.md` for the full inventory.

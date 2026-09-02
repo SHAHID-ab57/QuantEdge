@@ -52,9 +52,19 @@ inventory.
 Prediction Service (`app/prediction/`, `/ml/predict`) is the first item and
 is complete: given a completed training job, reconstruct a live feature
 vector, run the model, and return one prediction, persisted to Prediction
-History. A backtesting engine — replaying a trained model's predictions
-against real historical candles to estimate how it would have performed —
-has not been started.
+History. Second: `POST /training-jobs/{id}/run` no longer blocks for a
+training run's duration — it validates and transitions to `running`
+synchronously, then executes the pipeline in a background `asyncio.Task`
+with its own database session, rejecting a concurrent duplicate call
+rather than double-executing it; a job whose background task was still
+running at an app restart is left `status="running"` with no
+watchdog yet to reconcile it, a disclosed limitation, not a silent one.
+This is the seam a real backtesting engine's own (likely many, and
+possibly longer-running) prediction/training runs will need — built now
+rather than assumed later. See `ARCHITECTURE.md` § "Machine Learning
+Training Framework". A backtesting engine — replaying a trained model's
+predictions against real historical candles to estimate how it would have
+performed — has not been started.
 
 **Milestone 3 — Paper Trading & Risk.** Simulated order execution against
 live prices, a risk engine (position sizing, exposure limits, drawdown

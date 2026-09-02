@@ -2709,6 +2709,20 @@ src/features/ml-training/
 └── ml-training-page.tsx                    list page composition root
 ```
 
+**The Run action's mutation resolves almost immediately, not once training
+finishes.** `POST /training-jobs/{id}/run` used to block for the whole
+pipeline; it now validates and transitions the job to `running`
+synchronously, then executes in the background (see `ARCHITECTURE.md` §
+"Machine Learning Training Framework"). This required **no frontend logic
+change**: `useTrainingJob`'s existing 3s poll while `status === "running"`
+was already what showed pipeline progress (the run response itself was
+never treated as the final state), and `useRunTrainingJob`'s `onSuccess`
+already just invalidates the job query rather than reading the mutation's
+own response body. Only the "Running" status legend's copy
+(`training-job-help.ts`) changed, from describing a blocking call to
+describing the background task and its one real limitation (it does not
+survive a server restart).
+
 `EmptyStateNotice` and `ConfirmActionDialog` are both shared components
 (`src/components/empty-state-notice.tsx`, `src/components/
 confirm-action-dialog.tsx`), promoted out of this feature once Dataset

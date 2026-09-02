@@ -154,7 +154,7 @@ export const TRAINING_STATUS_HELP: Record<TrainingJobStatus, InfoTooltipSection>
   },
   running: {
     heading: 'Running',
-    body: 'The pipeline is currently executing. This call blocks until it finishes — no worker/queue service exists yet, so a run is normally near-instant.',
+    body: 'The pipeline is executing in the background. This page refreshes automatically every few seconds until it settles into Completed or Failed — no worker/queue service exists yet, so the run happens in-process and does not survive a server restart.',
   },
   completed: {
     heading: 'Completed',

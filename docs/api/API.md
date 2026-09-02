@@ -956,7 +956,7 @@ omit it to leave tags untouched.
 | GET    | `/api/v1/training-jobs`              | Search, filter, sort, and paginate training jobs          |
 | GET    | `/api/v1/training-jobs/{id}`         | Get one training job (with its full log trail)            |
 | DELETE | `/api/v1/training-jobs/{id}`         | Delete a training job (refuses a running job)             |
-| POST   | `/api/v1/training-jobs/{id}/run`     | Execute the six-stage pipeline synchronously              |
+| POST   | `/api/v1/training-jobs/{id}/run`     | Start the six-stage pipeline in the background            |
 | POST   | `/api/v1/training-jobs/{id}/cancel`  | Cancel a pending job                                      |
 | POST   | `/api/v1/training-jobs/{id}/predict` | Predict using a completed job's trained model             |
 
@@ -1080,11 +1080,23 @@ unchanged from before (`placeholder_loss`/`placeholder_accuracy`,
 
 **Lifecycle** (`app/training/state_machine.py`): `pending -> running ->
 completed | failed`, and `pending | running -> cancelled`. `completed`/
-`failed`/`cancelled` are terminal. `POST .../run` executes the pipeline
-**synchronously** — no worker/queue service exists on this platform yet
-(`AI.md` § "Current status"), so the call blocks for the run's duration
-(near-instant for the placeholder; a real but small `fit`/evaluate for a
-baseline model).
+`failed`/`cancelled` are terminal.
+
+**`POST .../run` does not block for the pipeline's duration.** It
+validates the job and transitions it to `running` synchronously — the
+response already reflects `running`, committed before it's sent — then
+executes the six-stage pipeline in a background `asyncio.Task`. No
+worker/queue service exists on this platform yet (`AI.md` § "Current
+status"): the task runs in-process, opens its own database session, and
+does not survive an app restart — a job whose task was still running when
+the process stopped is left `status="running"` with no watchdog to
+reconcile it (see `ARCHITECTURE.md` § "Machine Learning Training
+Framework" for the full reasoning). Poll `GET /training-jobs/{id}` (every
+few seconds, e.g. the dashboard's own 3s interval) while `status` is
+`running` to observe progress via `current_stage` and `logs`; it settles
+into `completed` or `failed`. Calling `/run` again while the job is
+already `running` returns **409** (`invalid_training_job_transition`) —
+rejected, never double-executed.
 
 **The pipeline's six stages**, each logged as it starts and completes:
 `validate_dataset` (dataset citation present, model adapter registered) →

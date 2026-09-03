@@ -33,7 +33,6 @@ async def engine() -> AsyncGenerator[AsyncEngine]:
     await engine.dispose()
 
 
-
 @pytest_asyncio.fixture
 async def exchange_id(session_factory: SessionFactory) -> uuid.UUID:
     async with session_factory() as session:

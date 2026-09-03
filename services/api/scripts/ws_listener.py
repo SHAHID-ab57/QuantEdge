@@ -93,11 +93,7 @@ def resolve_settings(args: argparse.Namespace) -> WebSocketSettings:
     return WebSocketSettings(
         url=(
             args.url
-            or (
-                app_settings.delta_ws_private_url
-                if args.private
-                else app_settings.delta_ws_url
-            )
+            or (app_settings.delta_ws_private_url if args.private else app_settings.delta_ws_url)
         ),
         reconnect_delay=(
             args.reconnect_delay
@@ -105,9 +101,7 @@ def resolve_settings(args: argparse.Namespace) -> WebSocketSettings:
             else app_settings.delta_ws_reconnect_delay
         ),
         max_retries=(
-            args.max_retries
-            if args.max_retries is not None
-            else app_settings.delta_ws_max_retries
+            args.max_retries if args.max_retries is not None else app_settings.delta_ws_max_retries
         ),
     )
 
@@ -147,9 +141,7 @@ async def run(args: argparse.Namespace) -> int:
     client.start()
     run_task = asyncio.create_task(client.run(), name="ws-listener-run")
     stop_waiter = asyncio.create_task(stop.wait())
-    done, _ = await asyncio.wait(
-        {stop_waiter, run_task}, return_when=asyncio.FIRST_COMPLETED
-    )
+    done, _ = await asyncio.wait({stop_waiter, run_task}, return_when=asyncio.FIRST_COMPLETED)
     await client.close()
     stop_waiter.cancel()
     with suppress(CancelledError):

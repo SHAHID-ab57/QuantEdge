@@ -420,9 +420,7 @@ class TestCache:
         run = cached_pipeline.run("doubler", candles(3), {"factor": "3"})
         assert run.cache_status == "miss"
 
-    def test_different_candle_ranges_do_not_collide(
-        self, cached_pipeline: FeaturePipeline
-    ) -> None:
+    def test_different_candle_ranges_do_not_collide(self, cached_pipeline: FeaturePipeline) -> None:
         cached_pipeline.run("counting", candles(3))
         run = cached_pipeline.run("counting", candles(4))
         assert run.cache_status == "miss"

@@ -133,8 +133,7 @@ async def test_sync_inserts_markets_and_creates_exchange(
         assert exchange.name == "Delta Exchange"
 
         markets = {
-            market.symbol: market
-            for market in (await session.execute(select(Market))).scalars()
+            market.symbol: market for market in (await session.execute(select(Market))).scalars()
         }
     assert markets["BTCUSD"].market_type == "perpetual"
     assert markets["ETHUSD"].market_type == "spot"

@@ -94,9 +94,7 @@ class CandleSyncScheduler:
         if self.running:
             return
         if get_engine() is None:
-            logger.warning(
-                "Candle sync scheduler not started: database is not configured"
-            )
+            logger.warning("Candle sync scheduler not started: database is not configured")
             return
         if not self._timeframes:
             logger.warning("Candle sync scheduler not started: no supported timeframes")
@@ -135,9 +133,7 @@ class CandleSyncScheduler:
                     perf_counter() - started,
                 )
             with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(
-                    self._stopped.wait(), timeout=self._interval_seconds
-                )
+                await asyncio.wait_for(self._stopped.wait(), timeout=self._interval_seconds)
 
     async def run_catch_up(self) -> SyncTickSummary:
         """Sync every configured symbol/timeframe up to the last closed bucket.
@@ -159,9 +155,7 @@ class CandleSyncScheduler:
                 window = await self._catch_up_window(symbol, timeframe)
             except Exception as exc:
                 failed += 1
-                logger.error(
-                    "Candle sync failed to plan %s %s: %s", symbol, timeframe, exc
-                )
+                logger.error("Candle sync failed to plan %s %s: %s", symbol, timeframe, exc)
                 continue
             if window is None:
                 skipped += 1
@@ -175,9 +169,7 @@ class CandleSyncScheduler:
                 synced += 1
             except (CandleIngestError, RuntimeError) as exc:
                 failed += 1
-                logger.error(
-                    "Candle sync failed for %s %s: %s", symbol, timeframe, exc
-                )
+                logger.error("Candle sync failed for %s %s: %s", symbol, timeframe, exc)
             except Exception as exc:
                 failed += 1
                 logger.exception("Candle sync crashed for %s %s: %s", symbol, timeframe, exc)
@@ -203,9 +195,9 @@ class CandleSyncScheduler:
         if not configured:
             configured = [
                 part.strip()
-                for part in (
-                    settings.candle_sync_symbols or settings.delta_market_symbols
-                ).split(",")
+                for part in (settings.candle_sync_symbols or settings.delta_market_symbols).split(
+                    ","
+                )
                 if part.strip()
             ]
 
@@ -222,14 +214,8 @@ class CandleSyncScheduler:
 
         missing = [symbol for symbol in configured if symbol not in known]
         if missing:
-            logger.warning(
-                "Candle sync skipping unknown markets: %s", ", ".join(missing)
-            )
-        return [
-            (symbol, timeframe)
-            for symbol in sorted(known)
-            for timeframe in self._timeframes
-        ]
+            logger.warning("Candle sync skipping unknown markets: %s", ", ".join(missing))
+        return [(symbol, timeframe) for symbol in sorted(known) for timeframe in self._timeframes]
 
     async def _catch_up_window(
         self, symbol: str, timeframe: str

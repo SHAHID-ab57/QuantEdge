@@ -3159,6 +3159,89 @@ result panel, a surfaced run error, and reopening a past prediction from
 Prediction History. See `docs/testing/TESTING.md` § "Testing the Live
 Prediction Service (frontend)" for the full inventory.
 
+## Backtesting Engine
+
+`/ml/backtest` (`src/features/ml-backtest/`) is the frontend for the
+Backtesting Engine — given a trained model and a historical date range,
+walk it one step at a time, reusing the Live Prediction Service and its
+grading logic completely unmodified. Backend design lives in
+[`ARCHITECTURE.md`](ARCHITECTURE.md) § "Backtesting Engine"; the API
+surface is in [`docs/api/API.md`](docs/api/API.md) § "Backtesting Engine".
+
+```text
+src/features/ml-backtest/
+├── hooks/use-backtest-data.ts                   run mutation + Backtest History list/detail queries
+├── components/
+│   ├── backtest-form.tsx                        training job (completed only) / symbol / date range / optional step
+│   ├── backtest-result-panel.tsx                 status, honest truncation, step/grading counts, aggregate metrics
+│   ├── backtest-history-table.tsx                Backtest History's list view — reopen a past run
+│   └── backtest-prediction-detail-dialog.tsx     reopens one drill-down prediction, reusing ml-predict verbatim
+└── ml-backtest-page.tsx                          page composition root
+```
+
+**Starting a backtest is a mutation, not a query; Backtest History is a
+real, listable resource** — the same "explicit action, invalidate on
+success" shape `useRunPrediction`/`useRunTrainingJob` already established.
+`useBacktest` (a single run's own detail) polls every 3s while `status` is
+`'running'`, the identical pattern `useTrainingJob` already established for
+a training job's own background execution — `POST /backtests/run` itself
+returns once the run is planned and started, well before the walk
+finishes, so this poll is what actually shows progress from there.
+
+**`BacktestForm` reuses `PredictionForm`'s own job/symbol selection
+pattern** (completed training jobs only, the searchable `useMarkets`
+symbol combobox), adding a required date range (`start`/`end`, both
+`datetime-local`) and an optional `step` text field, defaulting to the
+training job's own timeframe when left blank — a job that can't actually
+predict (e.g. `placeholder`) still appears and is rejected with a clear,
+explained error only once submitted, the same "let the request explain it"
+posture `PredictionForm` already takes for the identical condition.
+
+**`BacktestResultPanel` reuses `EvaluationSummary` verbatim for aggregate
+metrics — never a second metrics display.** A status chip, symbol/timeframe/
+step, and a `completed/total steps · N graded` line always lead; a
+truncated run shows its own honest warning (capped step count and the
+actual `effective_end`, never silently presented as the full requested
+range); a failed run shows its `error_message` directly. Once `completed`,
+`EvaluationSummary` renders the run's own `aggregate_metrics` with
+`summary={}` — a backtest's own metrics are a flat `{name: value}` dict
+with none of a full training job's confusion-matrix/feature-importance/
+prediction-sample detail, and every one of that component's own
+sub-sections already renders nothing when its part of `summary` is absent,
+so this is real reuse, not a coincidentally-compatible call.
+
+**The drill-down into a run's own predictions is the _same_ Prediction
+History table, filtered — never a second table.** `usePredictionHistory`
+(from `ml-predict/hooks/`) gained an optional `enabled` option so this
+`backtest_run_id`-filtered query can be skipped entirely until a run
+actually exists, rather than firing the default (live-only) request every
+time; `PredictionHistoryTable` itself needed no changes at all. Reopening
+one of those rows renders `PredictionResultPanel` inside
+`BacktestPredictionDetailDialog`, reusing `usePrediction`/
+`PredictionResultPanel` verbatim — the exact hook and component the Live
+Prediction page itself uses to reopen a row — rather than a second "show
+one prediction" view built for backtest rows specifically.
+
+**`BacktestHistoryTable` mirrors `benchmark-history-table.tsx`'s exact
+shape** — a metadata-only list (symbol, step, status, step progress,
+created), most recent first, server-paginated, with a Reopen action; there
+is no delete action (no `DELETE /backtests/{id}` exists). Reopening a row
+fetches that run's full detail (`useBacktest`) and renders it through the
+_same_ `BacktestResultPanel` a fresh run uses.
+
+**Errors are read from the API's own message, not re-derived.** A run
+failure (`training_job_not_found`, `live_feature_reconstruction_not_supported`,
+`invalid_backtest_range`, `invalid_backtest_step`) shows its `detail`
+string directly in an `Alert`, with no client-side re-explanation that
+could drift from the backend's own wording. A failure that happens
+_mid-walk_ (after the run was already planned and started) instead shows
+up as this run's own `status: 'failed'`/`error_message` inside
+`BacktestResultPanel` — not a request-level error at all, since the
+`POST /backtests/run` call itself already succeeded.
+
+**Testing.** See `docs/testing/TESTING.md` § "Testing the Backtesting
+Engine (frontend)" for the full inventory.
+
 ## State management
 
 - Server state: TanStack Query (`src/lib/query/queryClient.ts`).

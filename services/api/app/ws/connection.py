@@ -200,9 +200,7 @@ class ConnectionManager:
         """Reconnect loop: connect, supervise, and retry with backoff."""
         while not self._stop_event.is_set():
             if self._settings.max_retries and self._attempt >= self._settings.max_retries:
-                logger.error(
-                    "WebSocket giving up after %d attempts", self._attempt
-                )
+                logger.error("WebSocket giving up after %d attempts", self._attempt)
                 break
             self._attempt += 1
             self._state = "connecting"
@@ -211,9 +209,7 @@ class ConnectionManager:
             except CancelledError:
                 raise
             except Exception:
-                logger.exception(
-                    "WebSocket unexpected failure on attempt %d", self._attempt
-                )
+                logger.exception("WebSocket unexpected failure on attempt %d", self._attempt)
             if self._stop_event.is_set():
                 break
             delay = backoff_delay(
@@ -222,9 +218,7 @@ class ConnectionManager:
                 self._settings.max_backoff,
             )
             jittered = delay * (1.0 + random.random() * 0.1)
-            logger.warning(
-                "WebSocket reconnecting in %.2fs (attempt %d)", jittered, self._attempt
-            )
+            logger.warning("WebSocket reconnecting in %.2fs (attempt %d)", jittered, self._attempt)
             try:
                 await asyncio.sleep(jittered)
             except CancelledError:
@@ -244,24 +238,18 @@ class ConnectionManager:
                 ping_timeout=None,
             )
         except (OSError, WebSocketException) as exc:
-            logger.warning(
-                "WebSocket connect failed on attempt %d: %s", self._attempt, exc
-            )
+            logger.warning("WebSocket connect failed on attempt %d: %s", self._attempt, exc)
             return
 
         ws = self._ws
         self._connected_event.set()
         self._state = "connected"
         self._connected_at = datetime.now(UTC)
-        logger.info(
-            "WebSocket connected to %s (attempt %d)", self._settings.url, self._attempt
-        )
+        logger.info("WebSocket connected to %s (attempt %d)", self._settings.url, self._attempt)
         setup_task: asyncio.Task[None] | None = None
         try:
             if self._on_connected is not None:
-                setup_task = asyncio.create_task(
-                    self._on_connected(), name="ws-on-connected"
-                )
+                setup_task = asyncio.create_task(self._on_connected(), name="ws-on-connected")
                 # Frames buffered before the receive loop starts are processed
                 # synchronously; yield once so the setup hook runs first.
                 await asyncio.sleep(0)
@@ -277,9 +265,7 @@ class ConnectionManager:
                 if self._on_message is not None:
                     await self._on_message(raw)
         except ConnectionClosed as exc:
-            logger.warning(
-                "WebSocket connection closed: %s", self._close_description(exc)
-            )
+            logger.warning("WebSocket connection closed: %s", self._close_description(exc))
         except CancelledError:
             raise
         except Exception:
@@ -304,13 +290,9 @@ class ConnectionManager:
         """Start heartbeat and (when configured) ping supervision tasks."""
         self._heartbeat_event.clear()
         self._pong_event.clear()
-        self._monitor_tasks.add(
-            asyncio.create_task(self._heartbeat_monitor(), name="ws-heartbeat")
-        )
+        self._monitor_tasks.add(asyncio.create_task(self._heartbeat_monitor(), name="ws-heartbeat"))
         if self._on_ping is not None:
-            self._monitor_tasks.add(
-                asyncio.create_task(self._ping_loop(), name="ws-ping")
-            )
+            self._monitor_tasks.add(asyncio.create_task(self._ping_loop(), name="ws-ping"))
 
     async def _stop_monitors(self) -> None:
         """Cancel and drain all supervision tasks."""
@@ -353,13 +335,9 @@ class ConnectionManager:
                 await self._on_ping()
             self._pong_event.clear()
             try:
-                await asyncio.wait_for(
-                    self._pong_event.wait(), timeout=self._settings.pong_timeout
-                )
+                await asyncio.wait_for(self._pong_event.wait(), timeout=self._settings.pong_timeout)
             except TimeoutError:
-                logger.warning(
-                    "WebSocket pong timeout after %.1fs", self._settings.pong_timeout
-                )
+                logger.warning("WebSocket pong timeout after %.1fs", self._settings.pong_timeout)
                 await self.abort("pong timeout")
                 return
             except CancelledError:

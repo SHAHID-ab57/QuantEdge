@@ -28,9 +28,7 @@ async def test_real_market_data_api() -> None:
     app = create_app()
     async with LifespanManager(app):
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(
-            transport=transport, base_url="http://test"
-        ) as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             markets = await client.get("/api/v1/markets")
             assert markets.status_code == 200
             symbols = [market["symbol"] for market in markets.json()["markets"]]
@@ -46,9 +44,7 @@ async def test_real_market_data_api() -> None:
             )
             assert page.status_code == 200
             body = page.json()
-            assert body["pagination"]["returned"] == min(
-                10, body["pagination"]["total"]
-            )
+            assert body["pagination"]["returned"] == min(10, body["pagination"]["total"])
             assert body["pagination"]["total"] > 0
             items = body["items"]
             assert items == sorted(items, key=lambda candle: candle["open_time"])

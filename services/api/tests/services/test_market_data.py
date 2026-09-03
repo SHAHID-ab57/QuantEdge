@@ -55,7 +55,6 @@ async def engine() -> AsyncGenerator[AsyncEngine]:
     await engine.dispose()
 
 
-
 @pytest_asyncio.fixture
 async def market_id(session_factory: SessionFactory) -> uuid.UUID:
     async with session_factory() as session:
@@ -150,9 +149,7 @@ async def test_get_candles_pagination_metadata(
 ) -> None:
     await seed(session_factory, market_id, [utc(0), utc(1), utc(2), utc(3), utc(4)])
 
-    response = await service(session_factory).get_candles(
-        "ETHUSD", "1h", limit=2, offset=2
-    )
+    response = await service(session_factory).get_candles("ETHUSD", "1h", limit=2, offset=2)
 
     assert [item.open_time for item in response.items] == [utc(2), utc(3)]
     assert response.pagination.total == 5
@@ -167,9 +164,7 @@ async def test_get_candles_last_page_has_no_more(
 ) -> None:
     await seed(session_factory, market_id, [utc(0), utc(1), utc(2)])
 
-    response = await service(session_factory).get_candles(
-        "ETHUSD", "1h", limit=2, offset=2
-    )
+    response = await service(session_factory).get_candles("ETHUSD", "1h", limit=2, offset=2)
 
     assert response.pagination.returned == 1
     assert response.pagination.has_more is False
@@ -215,15 +210,11 @@ async def test_one_sided_range_raises(
     session_factory: SessionFactory, market_id: uuid.UUID
 ) -> None:
     with pytest.raises(InvalidRangeError, match="together"):
-        await service(session_factory).get_candles(
-            "ETHUSD", "1h", start=utc(0), limit=10, offset=0
-        )
+        await service(session_factory).get_candles("ETHUSD", "1h", start=utc(0), limit=10, offset=0)
 
 
 @pytest.mark.asyncio
-async def test_reversed_range_raises(
-    session_factory: SessionFactory, market_id: uuid.UUID
-) -> None:
+async def test_reversed_range_raises(session_factory: SessionFactory, market_id: uuid.UUID) -> None:
     with pytest.raises(InvalidRangeError, match="after start"):
         await service(session_factory).get_candles(
             "ETHUSD", "1h", start=utc(2), end=utc(1), limit=10, offset=0
@@ -231,18 +222,14 @@ async def test_reversed_range_raises(
 
 
 @pytest.mark.asyncio
-async def test_limit_over_max_raises(
-    session_factory: SessionFactory, market_id: uuid.UUID
-) -> None:
+async def test_limit_over_max_raises(session_factory: SessionFactory, market_id: uuid.UUID) -> None:
     with pytest.raises(LimitExceededError) as exc_info:
         await service(session_factory).get_candles("ETHUSD", "1h", limit=1001, offset=0)
     assert exc_info.value.code == "limit_exceeded"
 
 
 @pytest.mark.asyncio
-async def test_latest_candle(
-    session_factory: SessionFactory, market_id: uuid.UUID
-) -> None:
+async def test_latest_candle(session_factory: SessionFactory, market_id: uuid.UUID) -> None:
     await seed(session_factory, market_id, [utc(0), utc(1)])
 
     response = await service(session_factory).get_latest_candle("ETHUSD", "1h")

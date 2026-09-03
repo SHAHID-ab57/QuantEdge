@@ -91,10 +91,9 @@ async def test_real_delta_ingest_is_idempotent() -> None:
             "(use DELTA_INTEGRATION_SYMBOL to override)"
         )
         assert second.inserted == 0, "second run must be fully idempotent"
-        assert (
-            second.duplicates_skipped
-            == first.duplicates_skipped + first.inserted
-        ), "second run must skip everything the first run accepted"
+        assert second.duplicates_skipped == first.duplicates_skipped + first.inserted, (
+            "second run must skip everything the first run accepted"
+        )
 
         stored_after = await _count_stored(engine, SYMBOL)
         assert stored_after == stored_before + first.inserted + second.inserted
@@ -115,9 +114,7 @@ async def _ensure_market(session: AsyncSession, symbol: str) -> None:
             await session.flush()
         market = (
             await session.execute(
-                select(Market).where(
-                    Market.exchange_id == exchange.id, Market.symbol == symbol
-                )
+                select(Market).where(Market.exchange_id == exchange.id, Market.symbol == symbol)
             )
         ).scalar_one_or_none()
         if market is None:

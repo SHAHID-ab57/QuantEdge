@@ -668,3 +668,60 @@ class TestGradePending:
         assert all(
             r.exc_info is not None for r in failure_records
         )  # full traceback, not just a message
+
+
+@pytest.mark.asyncio
+class TestGradeNow:
+    """`PredictionService.grade_now` — the Backtesting Engine's own way to
+    grade a prediction immediately rather than waiting for `grade_pending`'s
+    periodic pass. Calls the exact same `_grade_one` `grade_pending` itself
+    calls; these tests prove the two behave identically for the same
+    prediction, never a second grading code path."""
+
+    _EARLY_AS_OF = EARLY_AS_OF_FOR_GRADING
+
+    async def test_grades_a_knowable_prediction_immediately(
+        self, session_factory: SessionFactory
+    ) -> None:
+        job_id, _ = await train_completed_job(
+            session_factory, symbol="GRADENOWUSD", model_type="logistic_regression"
+        )
+        service = build_prediction_service(session_factory)
+        prediction = await service.run(
+            PredictionRunRequest(
+                training_job_id=uuid.UUID(job_id), symbol="GRADENOWUSD", as_of=self._EARLY_AS_OF
+            )
+        )
+        assert prediction.actual_outcome is None
+
+        outcome = await service.grade_now(uuid.UUID(prediction.id))
+
+        assert outcome is not None
+        assert outcome.actual_outcome in {"up", "down", "flat"}
+        graded = await service.get(uuid.UUID(prediction.id))
+        assert graded.actual_outcome == outcome.actual_outcome
+        assert graded.graded_at is not None
+
+    async def test_returns_none_for_a_prediction_not_yet_knowable(
+        self, session_factory: SessionFactory
+    ) -> None:
+        job_id, _ = await train_completed_job(
+            session_factory, symbol="GRADENOWLATEUSD", model_type="logistic_regression"
+        )
+        service = build_prediction_service(session_factory)
+        prediction = await service.run(
+            PredictionRunRequest(training_job_id=uuid.UUID(job_id), symbol="GRADENOWLATEUSD")
+        )
+
+        outcome = await service.grade_now(uuid.UUID(prediction.id))
+
+        assert outcome is None
+        untouched = await service.get(uuid.UUID(prediction.id))
+        assert untouched.actual_outcome is None
+
+    async def test_raises_for_an_unknown_prediction_id(
+        self, session_factory: SessionFactory
+    ) -> None:
+        service = build_prediction_service(session_factory)
+        with pytest.raises(PredictionRunNotFoundError):
+            await service.grade_now(uuid.uuid4())

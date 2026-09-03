@@ -81,9 +81,7 @@ def _datetime_metric(snapshot: _MetricSnapshot | None, key: str) -> datetime | N
 def _delta_ws_detail(snapshot: DeltaConnectionSnapshot) -> str:
     """Human-readable summary of the WebSocket connection state."""
     parts = [snapshot.state]
-    parts.append(
-        "authenticated" if snapshot.authenticated else "unauthenticated"
-    )
+    parts.append("authenticated" if snapshot.authenticated else "unauthenticated")
     parts.append(
         f"{len(snapshot.subscriptions)} subscription(s)"
         if snapshot.subscriptions
@@ -141,9 +139,7 @@ async def system_health(runtime: RuntimeDep) -> SystemHealthResponse:
     else:
         staleness_ms = None
         if snapshot.last_message_at is not None:
-            staleness_ms = max(
-                (now - snapshot.last_message_at).total_seconds() * 1000, 0.0
-            )
+            staleness_ms = max((now - snapshot.last_message_at).total_seconds() * 1000, 0.0)
         status: ComponentStatusValue = "ok" if snapshot.connected else "degraded"
         delta_ws = ComponentStatus(
             name="delta_ws",
@@ -169,10 +165,7 @@ async def system_health(runtime: RuntimeDep) -> SystemHealthResponse:
     state_manager = ComponentStatus(
         name="state_manager",
         status="ok",
-        detail=(
-            f"{len(state.symbols())} symbols tracked, "
-            f"{state.metrics.state_updates} updates"
-        ),
+        detail=(f"{len(state.symbols())} symbols tracked, {state.metrics.state_updates} updates"),
     )
 
     return SystemHealthResponse(
@@ -227,17 +220,11 @@ async def system_status(
         market_data_live=runtime.market_data_live,
         delta_ws_connected=connected,
         delta_ws=(
-            DeltaConnectionState.model_validate(snapshot.__dict__)
-            if snapshot is not None
-            else None
+            DeltaConnectionState.model_validate(snapshot.__dict__) if snapshot is not None else None
         ),
         last_ws_message_at=runtime.last_ws_message_at,
-        last_heartbeat_at=(
-            snapshot.last_heartbeat_at if snapshot is not None else None
-        ),
-        last_ws_reconnect_at=(
-            snapshot.connected_at if snapshot is not None else None
-        ),
+        last_heartbeat_at=(snapshot.last_heartbeat_at if snapshot is not None else None),
+        last_ws_reconnect_at=(snapshot.connected_at if snapshot is not None else None),
         last_rest_request_at=runtime.last_rest_request_at,
         last_ingestion_at=last_ingestion_at,
         symbols_tracked=len(runtime.state_manager.symbols()),
@@ -261,9 +248,7 @@ async def system_metrics(
     session: OptionalSessionDep,
 ) -> SystemMetricsResponse:
     """Report counters and aggregates for the platform stack."""
-    pipeline = (
-        runtime.pipeline.metrics.snapshot() if runtime.pipeline is not None else None
-    )
+    pipeline = runtime.pipeline.metrics.snapshot() if runtime.pipeline is not None else None
     state = runtime.state_manager.metrics.snapshot()
     state_snapshot = runtime.state_manager.snapshot()
     bus_snapshot = runtime.bus.snapshot()

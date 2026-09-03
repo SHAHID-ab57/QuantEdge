@@ -25,9 +25,7 @@ async def test_health_versioned_unconfigured_database(
 
 async def test_health_response_shape() -> None:
     """The healthy response shape matches the documented contract."""
-    response = HealthResponse(
-        status="ok", service="api", version="0.1.0", database="connected"
-    )
+    response = HealthResponse(status="ok", service="api", version="0.1.0", database="connected")
     assert response.model_dump() == {
         "status": "ok",
         "service": "api",

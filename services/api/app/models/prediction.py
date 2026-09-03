@@ -21,6 +21,17 @@ construction — a handful of classes, a few dozen feature names) rather than
 re-deriving them from the linked training job on every read, the same
 "store the whole answer, never re-compute for history" precedent
 `EvaluationBenchmarkRun` already set for Benchmark History.
+
+`backtest_run_id` is `NULL` for every ordinary `POST /predictions/run` call
+— the Live Prediction Service itself never sets it, and `PredictionService.run`
+is not modified to accept one (see `app/services/backtest.py`'s own module
+docstring for why). It is filled in, via a separate, additive
+`PredictionRepository.tag_backtest_run` write, only by the Backtesting
+Engine, immediately after each of its own steps calls `PredictionService.run`
+unmodified — the one thing that distinguishes a backtest-generated
+prediction from a live one, so Prediction History's default view
+(`PredictionRepository.search`) can exclude backtest predictions and keep
+showing only what a live trader/researcher actually asked for right now.
 """
 
 import uuid
@@ -136,6 +147,15 @@ class Prediction(BaseModel, TimestampMixin):
         DateTime(timezone=True),
         nullable=True,
         comment="When grading actually ran for this row; NULL until it has.",
+    )
+    backtest_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("backtest_runs.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+        comment=(
+            "Set only for a prediction the Backtesting Engine generated; NULL for every "
+            "ordinary live POST /predictions/run call. See this model's own docstring."
+        ),
     )
 
     __table_args__ = (Index("ix_predictions_job_created_at", "training_job_id", "created_at"),)

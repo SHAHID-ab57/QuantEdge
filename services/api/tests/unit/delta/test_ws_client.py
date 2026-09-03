@@ -22,18 +22,12 @@ from tests.websocket.server import MockWSServer, wait_until
 API_KEY = "test-key"
 API_SECRET = "test-secret"
 
-AUTH_OK = (
-    '{"type":"key-auth","success":true,"status_code":200,'
-    '"status":"authenticated"}'
-)
+AUTH_OK = '{"type":"key-auth","success":true,"status_code":200,"status":"authenticated"}'
 AUTH_FAIL = (
     '{"type":"key-auth","success":false,"status_code":401,'
     '"status":"invalid_signature","message":"Invalid Signature"}'
 )
-ACK = (
-    '{"type":"subscriptions","channels":'
-    '[{"name":"ticker","symbols":["ETHUSD"]}]}'
-)
+ACK = '{"type":"subscriptions","channels":[{"name":"ticker","symbols":["ETHUSD"]}]}'
 HEARTBEAT = '{"type":"heartbeat"}'
 TICKER = '{"type":"ticker","sy":"ETHUSD","sp":"3050.5","ts":1775801092453559}'
 MALFORMED = "{not json"
@@ -104,9 +98,7 @@ async def test_full_stream_flow() -> None:
         received_events: list[WSEvent] = []
         client.add_listener("*", lambda event: _record(received_events, event))
         client.start()
-        await wait_until(
-            lambda: any(isinstance(e, events.TickerEvent) for e in received_events)
-        )
+        await wait_until(lambda: any(isinstance(e, events.TickerEvent) for e in received_events))
 
         await client.subscribe("ticker", ["ETHUSD"])
         await wait_until(lambda: bool(find_received(server.received, "subscribe")))
@@ -123,9 +115,7 @@ async def test_full_stream_flow() -> None:
         subscribe = find_received(server.received, "subscribe")[0]
         assert subscribe == {
             "type": "subscribe",
-            "payload": {
-                "channels": [{"name": "ticker", "symbols": ["ETHUSD"]}]
-            },
+            "payload": {"channels": [{"name": "ticker", "symbols": ["ETHUSD"]}]},
         }
 
         types = [event.type for event in received_events]
@@ -142,9 +132,7 @@ async def test_full_stream_flow() -> None:
 
 @pytest.mark.asyncio
 async def test_heartbeat_keeps_connection_alive() -> None:
-    server = MockWSServer(
-        script=[("send", AUTH_OK)], heartbeat_interval=0.1
-    )
+    server = MockWSServer(script=[("send", AUTH_OK)], heartbeat_interval=0.1)
     async with server:
         client = await make_client(server, heartbeat_timeout=0.15)
         client.start()
@@ -237,9 +225,7 @@ async def test_public_client_skips_auth_and_subscribes() -> None:
         client.add_listener("ticker", lambda event: _record(received_events, event))
         await client.subscribe("ticker", ["ETHUSD"])
         client.start()
-        await wait_until(
-            lambda: any(isinstance(e, events.TickerEvent) for e in received_events)
-        )
+        await wait_until(lambda: any(isinstance(e, events.TickerEvent) for e in received_events))
 
         assert find_received(server.received, "key-auth") == []
         assert find_received(server.received, "enable_heartbeat")

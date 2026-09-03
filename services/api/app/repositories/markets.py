@@ -18,11 +18,7 @@ class MarketRepository:
 
     async def get_all(self) -> list[Market]:
         """Return all markets (with their exchange) ordered by symbol."""
-        query = (
-            select(Market)
-            .options(selectinload(Market.exchange))
-            .order_by(Market.symbol.asc())
-        )
+        query = select(Market).options(selectinload(Market.exchange)).order_by(Market.symbol.asc())
         return list((await self._session.execute(query)).scalars())
 
     async def count_all(self) -> int:

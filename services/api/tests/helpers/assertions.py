@@ -3,9 +3,7 @@
 import httpx
 
 
-def assert_domain_error(
-    response: httpx.Response, code: str, status_code: int = 400
-) -> None:
+def assert_domain_error(response: httpx.Response, code: str, status_code: int = 400) -> None:
     """Assert a domain error response with a stable error code."""
     assert response.status_code == status_code
     body = response.json()

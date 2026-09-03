@@ -48,9 +48,7 @@ async def test_public_ticker_stream_receives_live_messages() -> None:
                 ticker = tickers[0]
                 assert ticker.sy == "BTCUSD"
                 assert ticker.ts is not None
-                assert any(
-                    product.s == "BTCUSD" for product in (ticker.d or [])
-                )
+                assert any(product.s == "BTCUSD" for product in (ticker.d or []))
                 return
             await asyncio.sleep(0.1)
         pytest.fail("no live ticker message received within 20s")

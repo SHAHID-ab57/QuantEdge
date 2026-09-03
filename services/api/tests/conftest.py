@@ -78,13 +78,9 @@ def pytest_collection_modifyitems(
     run_performance = config.getoption("--run-performance")
     for item in items:
         if "integration" in item.keywords and not run_integration:
-            item.add_marker(
-                pytest.mark.skip(reason="integration tests require --run-integration")
-            )
+            item.add_marker(pytest.mark.skip(reason="integration tests require --run-integration"))
         if "performance" in item.keywords and not run_performance:
-            item.add_marker(
-                pytest.mark.skip(reason="performance tests require --run-performance")
-            )
+            item.add_marker(pytest.mark.skip(reason="performance tests require --run-performance"))
 
 
 @pytest_asyncio.fixture
@@ -133,9 +129,7 @@ async def client(app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
     """Async HTTP client exercising the app through the ASGI interface."""
     async with LifespanManager(app):
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(
-            transport=transport, base_url="http://test"
-        ) as test_client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as test_client:
             yield test_client
 
 

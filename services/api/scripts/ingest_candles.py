@@ -56,9 +56,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--start", required=True, type=parse_datetime, help="Range start (inclusive)"
     )
-    parser.add_argument(
-        "--end", required=True, type=parse_datetime, help="Range end (exclusive)"
-    )
+    parser.add_argument("--end", required=True, type=parse_datetime, help="Range end (exclusive)")
     parser.add_argument(
         "--max-candles-per-request",
         type=int,

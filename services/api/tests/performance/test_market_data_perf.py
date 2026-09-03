@@ -141,9 +141,7 @@ async def test_seeding_five_thousand_candles_is_fast(
         seed=7,
     )
     began = time.perf_counter()
-    market_id = await seed_market_with_candles(
-        session_factory, rows, symbol="SEEDUSD"
-    )
+    market_id = await seed_market_with_candles(session_factory, rows, symbol="SEEDUSD")
     elapsed = time.perf_counter() - began
 
     assert market_id is not None

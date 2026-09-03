@@ -40,12 +40,8 @@ def random_candle_row(
     ]
     open_price = random_price(rng, base, Decimal("200"))
     close_price = random_price(rng, base, Decimal("200"))
-    high = max(open_price, close_price) + Decimal(str(rng.uniform(0, 10))).quantize(
-        Decimal("0.01")
-    )
-    low = min(open_price, close_price) - Decimal(str(rng.uniform(0, 10))).quantize(
-        Decimal("0.01")
-    )
+    high = max(open_price, close_price) + Decimal(str(rng.uniform(0, 10))).quantize(Decimal("0.01"))
+    low = min(open_price, close_price) - Decimal(str(rng.uniform(0, 10))).quantize(Decimal("0.01"))
     return {
         "timeframe": timeframe,
         "open_time": open_time,

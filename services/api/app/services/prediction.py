@@ -250,17 +250,29 @@ class PredictionService:
         training_job_id: uuid.UUID | None,
         experiment_id: uuid.UUID | None,
         symbol: str | None,
+        backtest_run_id: uuid.UUID | None = None,
         sort: str,
         direction: str,
         limit: int,
         offset: int,
     ) -> PredictionListResponse:
-        """Prediction History's list view — every past run, paginated."""
+        """Prediction History's list view — every past run, paginated.
+
+        `backtest_run_id` left `None` (every existing caller) excludes every
+        backtest-tagged prediction, exactly as before that column existed —
+        the live Prediction History view is never flooded by a backtest's
+        many rows. Given explicitly, it's the Backtest Result view's own
+        drill-down: the *same* table/endpoint, filtered to one run's rows,
+        never a second "backtest predictions" view built to duplicate it.
+        """
         if sort not in PREDICTION_SORT_COLUMNS or direction not in {"asc", "desc"}:
             raise InvalidPredictionSortError(sort, direction, tuple(PREDICTION_SORT_COLUMNS))
 
         filters = PredictionFilters(
-            training_job_id=training_job_id, experiment_id=experiment_id, symbol=symbol
+            training_job_id=training_job_id,
+            experiment_id=experiment_id,
+            symbol=symbol,
+            backtest_run_id=backtest_run_id,
         )
         predictions, total = await self.repository.search(
             filters, sort=sort, direction=direction, limit=limit, offset=offset
@@ -338,6 +350,36 @@ class PredictionService:
             not_yet_knowable=not_yet_knowable,
             failed=failed,
         )
+
+    async def grade_now(self, prediction_id: uuid.UUID) -> GradingOutcome | None:
+        """Grade one specific, already-persisted prediction immediately.
+
+        Used by the Backtesting Engine (`app/services/backtest.py`): a
+        backtest walks historical data, so a step's target horizon has
+        already arrived by construction — there's no reason to wait for
+        `grade_pending`'s periodic pass. Calls the *exact* same `_grade_one`
+        `grade_pending` itself calls per row below; never a second grading
+        code path for backtest predictions. Returns `None` for the same
+        "not yet knowable" reason `_grade_one` ever returns `None` for a
+        live prediction (e.g. the requested range's last few steps land
+        close enough to "now" that their target candle hasn't closed and
+        been ingested yet) — not an error, and left for `grade_pending`'s
+        own periodic pass to pick up later, exactly like any live prediction.
+        """
+        prediction = await self.repository.get_by_id(prediction_id)
+        if prediction is None:
+            raise PredictionRunNotFoundError(prediction_id)
+        outcome = await self._grade_one(prediction)
+        if outcome is None:
+            return None
+        await self.repository.record_grading(
+            prediction,
+            actual_outcome=outcome.actual_outcome,
+            is_correct=outcome.is_correct,
+            error=outcome.error,
+            graded_at=datetime.now(UTC),
+        )
+        return outcome
 
     async def _grade_one(self, prediction: Prediction) -> GradingOutcome | None:
         """Grade one prediction, or return `None` if it isn't knowable yet.

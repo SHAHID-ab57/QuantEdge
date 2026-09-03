@@ -2,6 +2,7 @@
 
 from fastapi import APIRouter
 
+from app.api.v1.endpoints.backtest import router as backtest_router
 from app.api.v1.endpoints.dataset_validation import router as dataset_validation_router
 from app.api.v1.endpoints.evaluation import router as evaluation_router
 from app.api.v1.endpoints.experiments import router as experiments_router
@@ -24,6 +25,7 @@ router.include_router(experiments_router)
 router.include_router(training_router)
 router.include_router(evaluation_router)
 router.include_router(prediction_router)
+router.include_router(backtest_router)
 router.include_router(indicators_router)
 router.include_router(market_data_router)
 router.include_router(market_stream_router)

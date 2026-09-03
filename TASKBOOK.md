@@ -107,21 +107,21 @@ against the Definition of Done stated in `ROADMAP.md`'s own Purpose section
 (real code, a passing test, and it's actually wired in), with the commit
 that introduced it where the work has been committed.
 
-| ID       | Milestone                        | Epic                         | Task                                                                                                                               | Status      | Priority | Dependencies | Git Commit           |
-| -------- | -------------------------------- | ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ----------- | -------- | ------------ | -------------------- |
-| M1-E1-T1 | M1: Research & Training Platform | E1: Data Layer               | Market data ingestion, validation, event bus                                                                                       | Completed   | Critical | None         | `ee8c890`            |
-| M1-E2-T1 | M1: Research & Training Platform | E2: Feature Engineering      | Feature Engineering Engine                                                                                                         | Completed   | High     | M1-E1-T1     | `11d03a9`            |
-| M1-E3-T1 | M1: Research & Training Platform | E3: Dataset Validation       | Dataset Validation & Quality Engine                                                                                                | Completed   | High     | M1-E2-T1     | `d53cbde`            |
-| M1-E4-T1 | M1: Research & Training Platform | E4: ML Dataset Builder       | ML Dataset Builder                                                                                                                 | Completed   | High     | M1-E2-T1     | `345341d`            |
-| M1-E5-T1 | M1: Research & Training Platform | E5: Experiment Management    | Experiment Management System                                                                                                       | Completed   | High     | M1-E4-T1     | `00d6d52`            |
-| M1-E6-T1 | M1: Research & Training Platform | E6: Training Framework       | ML Training Framework + Baseline Model Framework                                                                                   | Completed   | Critical | M1-E5-T1     | `c57a19d`, `3bd31a8` |
-| M1-E6-T2 | M1: Research & Training Platform | E6: Training Framework       | Per-column feature normalization                                                                                                   | Completed   | High     | M1-E6-T1     | `4376586`            |
-| M1-E7-T1 | M1: Research & Training Platform | E7: Model Evaluation         | Model Evaluation & Benchmarking Engine                                                                                             | Completed   | High     | M1-E6-T1     | `3a411c1`            |
-| M1-E8-T1 | M1: Research & Training Platform | E8: Experiment Config Editor | In-app `feature_set`/`target_config`/`split_config` editor                                                                         | Completed   | Medium   | M1-E5-T1     | `346f708`            |
-| M2-E1-T1 | M2: Prediction & Backtesting     | E1: Live Prediction          | Live Prediction Service (`app/prediction/`, `/ml/predict`)                                                                         | Completed   | Critical | M1-E6-T1     | `9871c1c`            |
-| M2-E1-T2 | M2: Prediction & Backtesting     | E1: Live Prediction          | Non-blocking `/training-jobs/{id}/run` (background `asyncio.Task`, own DB session, duplicate-run rejection, shutdown cancellation) | Completed   | High     | M1-E6-T1     | `8bb20f5`            |
-| M2-E1-T3 | M2: Prediction & Backtesting     | E1: Live Prediction          | Prediction Grading (`app/prediction/grading.py`, `PredictionGradingScheduler`, `scripts/grade_predictions.py`)                     | Completed   | High     | M2-E1-T1     | pending commit       |
-| M2-E2-T1 | M2: Prediction & Backtesting     | E2: Backtesting              | Backtesting engine                                                                                                                 | Not Started | High     | M2-E1-T3     | —                    |
+| ID       | Milestone                        | Epic                         | Task                                                                                                                               | Status    | Priority | Dependencies | Git Commit           |
+| -------- | -------------------------------- | ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | --------- | -------- | ------------ | -------------------- |
+| M1-E1-T1 | M1: Research & Training Platform | E1: Data Layer               | Market data ingestion, validation, event bus                                                                                       | Completed | Critical | None         | `ee8c890`            |
+| M1-E2-T1 | M1: Research & Training Platform | E2: Feature Engineering      | Feature Engineering Engine                                                                                                         | Completed | High     | M1-E1-T1     | `11d03a9`            |
+| M1-E3-T1 | M1: Research & Training Platform | E3: Dataset Validation       | Dataset Validation & Quality Engine                                                                                                | Completed | High     | M1-E2-T1     | `d53cbde`            |
+| M1-E4-T1 | M1: Research & Training Platform | E4: ML Dataset Builder       | ML Dataset Builder                                                                                                                 | Completed | High     | M1-E2-T1     | `345341d`            |
+| M1-E5-T1 | M1: Research & Training Platform | E5: Experiment Management    | Experiment Management System                                                                                                       | Completed | High     | M1-E4-T1     | `00d6d52`            |
+| M1-E6-T1 | M1: Research & Training Platform | E6: Training Framework       | ML Training Framework + Baseline Model Framework                                                                                   | Completed | Critical | M1-E5-T1     | `c57a19d`, `3bd31a8` |
+| M1-E6-T2 | M1: Research & Training Platform | E6: Training Framework       | Per-column feature normalization                                                                                                   | Completed | High     | M1-E6-T1     | `4376586`            |
+| M1-E7-T1 | M1: Research & Training Platform | E7: Model Evaluation         | Model Evaluation & Benchmarking Engine                                                                                             | Completed | High     | M1-E6-T1     | `3a411c1`            |
+| M1-E8-T1 | M1: Research & Training Platform | E8: Experiment Config Editor | In-app `feature_set`/`target_config`/`split_config` editor                                                                         | Completed | Medium   | M1-E5-T1     | `346f708`            |
+| M2-E1-T1 | M2: Prediction & Backtesting     | E1: Live Prediction          | Live Prediction Service (`app/prediction/`, `/ml/predict`)                                                                         | Completed | Critical | M1-E6-T1     | `9871c1c`            |
+| M2-E1-T2 | M2: Prediction & Backtesting     | E1: Live Prediction          | Non-blocking `/training-jobs/{id}/run` (background `asyncio.Task`, own DB session, duplicate-run rejection, shutdown cancellation) | Completed | High     | M1-E6-T1     | `8bb20f5`            |
+| M2-E1-T3 | M2: Prediction & Backtesting     | E1: Live Prediction          | Prediction Grading (`app/prediction/grading.py`, `PredictionGradingScheduler`, `scripts/grade_predictions.py`)                     | Completed | High     | M2-E1-T1     | `92c4425`            |
+| M2-E2-T1 | M2: Prediction & Backtesting     | E2: Backtesting              | Backtesting Engine (`app/backtest/`, `/ml/backtest`) — reuses live prediction + grading unmodified, verified no-look-ahead         | Completed | High     | M2-E1-T3     | pending commit       |
 
 ---
 
@@ -130,18 +130,19 @@ that introduced it where the work has been committed.
 | Milestone | Name                                         | Status      |
 | --------- | -------------------------------------------- | ----------- |
 | M1        | Research & Training Platform                 | COMPLETE    |
-| M2        | Prediction & Backtesting                     | IN PROGRESS |
+| M2        | Prediction & Backtesting                     | COMPLETE    |
 | M3        | Paper Trading & Risk                         | NOT STARTED |
 | M4        | Data Breadth                                 | NOT STARTED |
 | M5        | Production Hardening                         | NOT STARTED |
 | M6        | Live Trading (gated on extensive validation) | NOT STARTED |
 
-M2's "IN PROGRESS" covers three completed items (the Live Prediction
-Service, making training-job execution non-blocking, and Prediction
-Grading) out of at least four known (backtesting is not started) — no
-percentage is given for M2 because its total scope isn't fully defined
-yet, unlike M1's, which is now closed. See `ROADMAP.md` for what each
-milestone actually covers.
+M2 is now closed: the Live Prediction Service, making training-job
+execution non-blocking (the async seam the Backtesting Engine's own runs
+now share, rather than a second mechanism), Prediction Grading, and the
+Backtesting Engine itself (reuses the live prediction and grading code
+completely unmodified, verified adversarially to have no look-ahead bias)
+are all real, tested, and wired into the running API and dashboard. See
+`ROADMAP.md` for what each milestone actually covers.
 
 ---
 

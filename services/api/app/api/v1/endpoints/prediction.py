@@ -125,7 +125,9 @@ async def get_prediction(
     summary="List past predictions (Prediction History)",
     description=(
         "Every successful POST /predictions/run is recorded here, most recent first by "
-        "default — filterable by training job, experiment, or symbol."
+        "default — filterable by training job, experiment, or symbol. Excludes backtest-"
+        "generated predictions by default; pass backtest_run_id to see only one backtest "
+        "run's own predictions (the Backtest Result view's drill-down)."
     ),
 )
 async def list_predictions(
@@ -137,6 +139,15 @@ async def list_predictions(
         uuid.UUID | None, Query(description="Only predictions from this experiment")
     ] = None,
     symbol: Annotated[str | None, Query(description="Only predictions for this market")] = None,
+    backtest_run_id: Annotated[
+        uuid.UUID | None,
+        Query(
+            description=(
+                "Only this backtest run's own predictions, instead of the default "
+                "(live predictions only, backtest ones excluded)"
+            )
+        ),
+    ] = None,
     sort: Annotated[
         str, Query(description="Sort column; one of symbol, as_of, created_at")
     ] = "created_at",
@@ -152,6 +163,7 @@ async def list_predictions(
         training_job_id=training_job_id,
         experiment_id=experiment_id,
         symbol=symbol,
+        backtest_run_id=backtest_run_id,
         sort=sort,
         direction=dir,
         limit=limit,

@@ -59,9 +59,7 @@ def make_book_event(symbol: str = "BTCUSD") -> OrderBookUpdated:
     )
 
 
-def make_candle_event(
-    symbol: str = "BTCUSD", resolution: str = "1h"
-) -> CandleClosed:
+def make_candle_event(symbol: str = "BTCUSD", resolution: str = "1h") -> CandleClosed:
     return CandleClosed(
         source="delta.ws",
         symbol=symbol,
@@ -80,9 +78,7 @@ async def publish_all(bus: EventBus, events: list[Event]) -> None:
     await bus.drain()
 
 
-def latest_trade(
-    manager: MarketStateManager, symbol: str
-) -> TradeEvent:
+def latest_trade(manager: MarketStateManager, symbol: str) -> TradeEvent:
     trade = manager.get_latest_trade(symbol)
     assert trade is not None
     return trade

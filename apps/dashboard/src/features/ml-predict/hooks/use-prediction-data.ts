@@ -26,10 +26,21 @@ export function useRunPrediction() {
   });
 }
 
-export function usePredictionHistory(params: PredictionListParams) {
+/**
+ * `options.enabled` (default `true`) lets a caller that filters by
+ * `backtest_run_id` — the Backtesting Engine's own drill-down, reusing this
+ * hook verbatim rather than a second one — skip the request entirely until
+ * a run actually exists to filter by, instead of firing a request for the
+ * default (live-only) view every time.
+ */
+export function usePredictionHistory(
+  params: PredictionListParams,
+  options: { enabled?: boolean } = {},
+) {
   return useQuery({
     queryKey: [...PREDICTION_HISTORY_KEY, 'list', params],
     queryFn: () => fetchPredictions(params),
+    enabled: options.enabled ?? true,
   });
 }
 

@@ -32,9 +32,7 @@ def test_subscriptions_ack() -> None:
 
 
 def test_key_auth_success() -> None:
-    event = parse(
-        '{"type":"key-auth","success":true,"status_code":200,"status":"authenticated"}'
-    )
+    event = parse('{"type":"key-auth","success":true,"status_code":200,"status":"authenticated"}')
     assert isinstance(event, events.KeyAuthEvent)
     assert event.success
     assert event.status == "authenticated"
@@ -149,9 +147,7 @@ def test_candlestick_event_without_volume() -> None:
 
 
 def test_spot_price_event() -> None:
-    event = parse(
-        '{"p":"1","sy":".DEUSDTUSD","ts":1775818505952018,"type":"spot_price"}'
-    )
+    event = parse('{"p":"1","sy":".DEUSDTUSD","ts":1775818505952018,"type":"spot_price"}')
     assert isinstance(event, events.SpotPriceEvent)
     assert event.p == events.Decimal("1")
 
@@ -279,6 +275,7 @@ def test_sign_key_auth_matches_independent_hmac() -> None:
 def test_sign_key_auth_uses_live_path() -> None:
     secret = "s"
     ts = "1"
-    assert sign_key_auth(secret, ts) != hmac.new(
-        secret.encode(), f"GET{ts}/".encode(), hashlib.sha256
-    ).hexdigest()
+    assert (
+        sign_key_auth(secret, ts)
+        != hmac.new(secret.encode(), f"GET{ts}/".encode(), hashlib.sha256).hexdigest()
+    )

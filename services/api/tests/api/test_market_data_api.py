@@ -42,9 +42,7 @@ async def test_list_timeframes(client: httpx.AsyncClient, seeded: None) -> None:
     assert response.json() == {"symbol": "ETHUSD", "timeframes": ["1h"]}
 
 
-async def test_list_timeframes_unknown_symbol(
-    client: httpx.AsyncClient, seeded: None
-) -> None:
+async def test_list_timeframes_unknown_symbol(client: httpx.AsyncClient, seeded: None) -> None:
     response = await client.get("/api/v1/markets/NOPE/timeframes")
 
     assert response.status_code == 404
@@ -76,9 +74,7 @@ async def test_get_candles_ascending_with_pagination(
     assert body["items"][0]["quote_volume"] is None
 
 
-async def test_get_candles_range_filter(
-    client: httpx.AsyncClient, seeded: None
-) -> None:
+async def test_get_candles_range_filter(client: httpx.AsyncClient, seeded: None) -> None:
     response = await client.get(
         "/api/v1/markets/ETHUSD/candles",
         params={
@@ -94,31 +90,21 @@ async def test_get_candles_range_filter(
     assert body["pagination"]["has_more"] is False
 
 
-async def test_get_candles_unknown_symbol(
-    client: httpx.AsyncClient, seeded: None
-) -> None:
-    response = await client.get(
-        "/api/v1/markets/NOPE/candles", params={"timeframe": "1h"}
-    )
+async def test_get_candles_unknown_symbol(client: httpx.AsyncClient, seeded: None) -> None:
+    response = await client.get("/api/v1/markets/NOPE/candles", params={"timeframe": "1h"})
 
     assert response.status_code == 404
     assert response.json()["code"] == "market_not_found"
 
 
-async def test_get_candles_invalid_timeframe(
-    client: httpx.AsyncClient, seeded: None
-) -> None:
-    response = await client.get(
-        "/api/v1/markets/ETHUSD/candles", params={"timeframe": "7d"}
-    )
+async def test_get_candles_invalid_timeframe(client: httpx.AsyncClient, seeded: None) -> None:
+    response = await client.get("/api/v1/markets/ETHUSD/candles", params={"timeframe": "7d"})
 
     assert response.status_code == 400
     assert response.json()["code"] == "invalid_timeframe"
 
 
-async def test_get_candles_reversed_range(
-    client: httpx.AsyncClient, seeded: None
-) -> None:
+async def test_get_candles_reversed_range(client: httpx.AsyncClient, seeded: None) -> None:
     response = await client.get(
         "/api/v1/markets/ETHUSD/candles",
         params={
@@ -132,9 +118,7 @@ async def test_get_candles_reversed_range(
     assert response.json()["code"] == "invalid_range"
 
 
-async def test_get_candles_one_sided_range(
-    client: httpx.AsyncClient, seeded: None
-) -> None:
+async def test_get_candles_one_sided_range(client: httpx.AsyncClient, seeded: None) -> None:
     response = await client.get(
         "/api/v1/markets/ETHUSD/candles",
         params={"timeframe": "1h", "start": "2026-01-01T01:00:00Z"},
@@ -144,9 +128,7 @@ async def test_get_candles_one_sided_range(
     assert response.json()["code"] == "invalid_range"
 
 
-async def test_get_candles_negative_limit_rejected(
-    client: httpx.AsyncClient, seeded: None
-) -> None:
+async def test_get_candles_negative_limit_rejected(client: httpx.AsyncClient, seeded: None) -> None:
     response = await client.get(
         "/api/v1/markets/ETHUSD/candles", params={"timeframe": "1h", "limit": -1}
     )
@@ -154,9 +136,7 @@ async def test_get_candles_negative_limit_rejected(
     assert response.status_code == 422
 
 
-async def test_get_candles_limit_over_max_rejected(
-    client: httpx.AsyncClient, seeded: None
-) -> None:
+async def test_get_candles_limit_over_max_rejected(client: httpx.AsyncClient, seeded: None) -> None:
     response = await client.get(
         "/api/v1/markets/ETHUSD/candles", params={"timeframe": "1h", "limit": 1001}
     )
@@ -174,9 +154,7 @@ async def test_get_candles_negative_offset_rejected(
     assert response.status_code == 422
 
 
-async def test_get_candles_invalid_sort(
-    client: httpx.AsyncClient, seeded: None
-) -> None:
+async def test_get_candles_invalid_sort(client: httpx.AsyncClient, seeded: None) -> None:
     response = await client.get(
         "/api/v1/markets/ETHUSD/candles", params={"timeframe": "1h", "sort": "pepe"}
     )
@@ -185,9 +163,7 @@ async def test_get_candles_invalid_sort(
     assert response.json()["code"] == "invalid_sort"
 
 
-async def test_get_candles_invalid_direction(
-    client: httpx.AsyncClient, seeded: None
-) -> None:
+async def test_get_candles_invalid_direction(client: httpx.AsyncClient, seeded: None) -> None:
     response = await client.get(
         "/api/v1/markets/ETHUSD/candles", params={"timeframe": "1h", "dir": "sideways"}
     )
@@ -196,9 +172,7 @@ async def test_get_candles_invalid_direction(
     assert response.json()["code"] == "invalid_sort"
 
 
-async def test_get_candles_sorted_by_column(
-    client: httpx.AsyncClient, seeded_varied: None
-) -> None:
+async def test_get_candles_sorted_by_column(client: httpx.AsyncClient, seeded_varied: None) -> None:
     response = await client.get(
         "/api/v1/markets/ETCUSD/candles",
         params={"timeframe": "1h", "sort": "volume", "dir": "desc"},
@@ -231,12 +205,8 @@ async def test_get_candles_sorted_open_time_desc(
     ]
 
 
-async def test_get_candles_includes_statistics(
-    client: httpx.AsyncClient, seeded: None
-) -> None:
-    response = await client.get(
-        "/api/v1/markets/ETHUSD/candles", params={"timeframe": "1h"}
-    )
+async def test_get_candles_includes_statistics(client: httpx.AsyncClient, seeded: None) -> None:
+    response = await client.get("/api/v1/markets/ETHUSD/candles", params={"timeframe": "1h"})
 
     assert response.status_code == 200
     assert response.json()["statistics"] == {
@@ -280,12 +250,8 @@ async def test_get_candles_statistics_respect_range(
     assert statistics["completeness"] == 100.0
 
 
-async def test_get_candles_quality_clean(
-    client: httpx.AsyncClient, seeded: None
-) -> None:
-    response = await client.get(
-        "/api/v1/markets/ETHUSD/candles", params={"timeframe": "1h"}
-    )
+async def test_get_candles_quality_clean(client: httpx.AsyncClient, seeded: None) -> None:
+    response = await client.get("/api/v1/markets/ETHUSD/candles", params={"timeframe": "1h"})
 
     assert response.status_code == 200
     quality = response.json()["quality"]
@@ -303,9 +269,7 @@ async def test_get_candles_quality_clean(
 async def test_get_candles_quality_reports_gaps(
     client: httpx.AsyncClient, seeded_with_gap: None
 ) -> None:
-    response = await client.get(
-        "/api/v1/markets/BTCUSD/candles", params={"timeframe": "1h"}
-    )
+    response = await client.get("/api/v1/markets/BTCUSD/candles", params={"timeframe": "1h"})
 
     assert response.status_code == 200
     quality = response.json()["quality"]
@@ -319,9 +283,7 @@ async def test_get_candles_quality_reports_gaps(
 async def test_get_candles_quality_detects_issues(
     client: httpx.AsyncClient, seeded_with_issues: None
 ) -> None:
-    response = await client.get(
-        "/api/v1/markets/SOLUSD/candles", params={"timeframe": "1h"}
-    )
+    response = await client.get("/api/v1/markets/SOLUSD/candles", params={"timeframe": "1h"})
 
     assert response.status_code == 200
     quality = response.json()["quality"]
@@ -362,9 +324,7 @@ async def test_get_candles_empty_range_zeroed_analytics(
     assert body["meta"]["rows_returned"] == 0
 
 
-async def test_get_candles_meta_reports_execution(
-    client: httpx.AsyncClient, seeded: None
-) -> None:
+async def test_get_candles_meta_reports_execution(client: httpx.AsyncClient, seeded: None) -> None:
     response = await client.get(
         "/api/v1/markets/ETHUSD/candles",
         params={"timeframe": "1h", "limit": 2, "offset": 1},
@@ -381,9 +341,7 @@ async def test_get_candles_meta_reports_execution(
 
 
 async def test_get_latest(client: httpx.AsyncClient, seeded: None) -> None:
-    response = await client.get(
-        "/api/v1/markets/ETHUSD/latest", params={"timeframe": "1h"}
-    )
+    response = await client.get("/api/v1/markets/ETHUSD/latest", params={"timeframe": "1h"})
 
     assert response.status_code == 200
     body = response.json()
@@ -391,23 +349,15 @@ async def test_get_latest(client: httpx.AsyncClient, seeded: None) -> None:
     assert body["candle"]["open_time"] == "2026-01-01T04:00:00Z"
 
 
-async def test_get_latest_no_candles(
-    client: httpx.AsyncClient, seeded: None
-) -> None:
-    response = await client.get(
-        "/api/v1/markets/ETHUSD/latest", params={"timeframe": "1d"}
-    )
+async def test_get_latest_no_candles(client: httpx.AsyncClient, seeded: None) -> None:
+    response = await client.get("/api/v1/markets/ETHUSD/latest", params={"timeframe": "1d"})
 
     assert response.status_code == 404
     assert response.json()["code"] == "candle_not_found"
 
 
-async def test_get_latest_unknown_symbol(
-    client: httpx.AsyncClient, seeded: None
-) -> None:
-    response = await client.get(
-        "/api/v1/markets/NOPE/latest", params={"timeframe": "1h"}
-    )
+async def test_get_latest_unknown_symbol(client: httpx.AsyncClient, seeded: None) -> None:
+    response = await client.get("/api/v1/markets/NOPE/latest", params={"timeframe": "1h"})
 
     assert response.status_code == 404
     assert response.json()["code"] == "market_not_found"
@@ -434,9 +384,7 @@ async def test_get_candle_stats(client: httpx.AsyncClient, seeded: None) -> None
     assert body["first_candle"]["close"] == "3055.25"
 
 
-async def test_get_candle_stats_range(
-    client: httpx.AsyncClient, seeded: None
-) -> None:
+async def test_get_candle_stats_range(client: httpx.AsyncClient, seeded: None) -> None:
     response = await client.get(
         "/api/v1/markets/ETHUSD/candles/stats",
         params={
@@ -455,9 +403,7 @@ async def test_get_candle_stats_range(
     assert body["last_candle"]["open_time"] == "2026-01-01T02:00:00Z"
 
 
-async def test_get_candle_stats_no_candles(
-    client: httpx.AsyncClient, seeded: None
-) -> None:
+async def test_get_candle_stats_no_candles(client: httpx.AsyncClient, seeded: None) -> None:
     response = await client.get(
         "/api/v1/markets/ETHUSD/candles/stats",
         params={
@@ -471,9 +417,7 @@ async def test_get_candle_stats_no_candles(
     assert response.json()["code"] == "candle_not_found"
 
 
-async def test_get_candle_stats_empty_range(
-    client: httpx.AsyncClient, seeded: None
-) -> None:
+async def test_get_candle_stats_empty_range(client: httpx.AsyncClient, seeded: None) -> None:
     response = await client.get(
         "/api/v1/markets/ETHUSD/candles/stats",
         params={
@@ -487,9 +431,7 @@ async def test_get_candle_stats_empty_range(
     assert response.json()["code"] == "candle_not_found"
 
 
-async def test_get_candle_stats_invalid_timeframe(
-    client: httpx.AsyncClient, seeded: None
-) -> None:
+async def test_get_candle_stats_invalid_timeframe(client: httpx.AsyncClient, seeded: None) -> None:
     response = await client.get(
         "/api/v1/markets/ETHUSD/candles/stats",
         params={"timeframe": "7d"},
@@ -499,9 +441,7 @@ async def test_get_candle_stats_invalid_timeframe(
     assert response.json()["code"] == "invalid_timeframe"
 
 
-async def test_get_candle_stats_invalid_range(
-    client: httpx.AsyncClient, seeded: None
-) -> None:
+async def test_get_candle_stats_invalid_range(client: httpx.AsyncClient, seeded: None) -> None:
     response = await client.get(
         "/api/v1/markets/ETHUSD/candles/stats",
         params={
@@ -515,9 +455,7 @@ async def test_get_candle_stats_invalid_range(
     assert response.json()["code"] == "invalid_range"
 
 
-async def test_get_research_reports_coverage(
-    client: httpx.AsyncClient, seeded: None
-) -> None:
+async def test_get_research_reports_coverage(client: httpx.AsyncClient, seeded: None) -> None:
     """Research metrics match the stored 1h range with no gaps."""
     response = await client.get("/api/v1/markets/ETHUSD/research")
 
@@ -540,9 +478,7 @@ async def test_get_research_reports_coverage(
     assert entry["average_daily_candles"] == 25.0
 
 
-async def test_get_research_counts_gaps(
-    client: httpx.AsyncClient, seeded_with_gap: None
-) -> None:
+async def test_get_research_counts_gaps(client: httpx.AsyncClient, seeded_with_gap: None) -> None:
     """Missing buckets inside the stored range are reported per timeframe."""
     response = await client.get("/api/v1/markets/BTCUSD/research")
 
@@ -555,9 +491,7 @@ async def test_get_research_counts_gaps(
     assert entry["coverage_days"] == 0.2
 
 
-async def test_get_research_unknown_symbol(
-    client: httpx.AsyncClient, seeded: None
-) -> None:
+async def test_get_research_unknown_symbol(client: httpx.AsyncClient, seeded: None) -> None:
     response = await client.get("/api/v1/markets/NOPE/research")
 
     assert response.status_code == 404

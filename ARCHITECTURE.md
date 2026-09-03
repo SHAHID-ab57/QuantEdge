@@ -2618,6 +2618,263 @@ test_prediction_api.py`'s `TestGradedResponseShape` proves the HTTP
 response reflects both states. `PredictionHistoryTable`'s own test file
 covers pending, correct, incorrect, and regression-error rendering.
 
+### Backtesting Engine
+
+Given a trained model and a historical date range, generate a prediction at
+each step using only data available as of that point, grade each one
+immediately against what's actually stored afterward, and report aggregate
+performance. This is the milestone that makes the Live Prediction Service
+and Prediction Grading trustworthy as a _system_, not just as two features
+that happen to work individually — a backtest that used different logic
+than live prediction would test a hypothetical twin of the platform, not
+the platform itself.
+
+**Two things mattered more than anything else, both proven by a test, not
+asserted in prose:**
+
+- **The live prediction and grading code are reused exactly, unmodified,
+  called in a loop.** `app/services/backtest.py`'s `BacktestService
+.execute_run` calls `PredictionService.run` — the identical
+  `PredictionRunRequest` shape every live `POST /predictions/run` call
+  uses — once per planned step, and `PredictionService.grade_now` (new,
+  additive; internally calls the _same_ private `_grade_one`
+  `grade_pending` already uses) immediately after. Neither method gained a
+  `backtest_run_id` parameter or any backtest-specific branch; tagging a
+  resulting prediction as backtest-generated is a separate, additive
+  `PredictionRepository.tag_backtest_run` write performed _after_ `run` has
+  already returned, never threaded through it. `tests/backtest/test_service
+.py`'s `TestReusesLivePredictionExactly` proves this directly: a live
+  call and a backtest step for the identical job/symbol/`as_of` are run
+  independently and their full responses compared field-by-field
+  (`predicted_value`, `confidence`, `probabilities`, `classes`,
+  `target_column`, `horizon`, `model_kind`) — not merely "close", identical.
+- **No look-ahead bias, no data leakage — verified adversarially, not just
+  read and trusted.** `PredictionService.run`'s own candle fetch already
+  uses a half-open `end=reference_time + interval` (the same convention
+  `app.services.market_query.normalize_range`/`FeatureService.build_raw`
+  established platform-wide), which structurally excludes any candle
+  strictly after the requested `as_of` — walking a `for as_of in
+plan.as_of_values` loop and calling `run` unmodified at each one
+  _inherits_ that guarantee automatically, rather than needing a second
+  mechanism to enforce it. `tests/backtest/test_service.py`'s
+  `TestNoLookAhead` proves it adversarially: a live prediction is made at a
+  fixed `as_of`, then _every_ candle strictly after that `as_of` is deleted
+  from the database, and the identical call is repeated — the response
+  (`as_of`, `predicted_value`, `confidence`, `probabilities`) is bit-for-bit
+  unchanged, directly demonstrating that later candles were never
+  reachable at that step, not merely asserting it from reading the code.
+
+**Package layout** (`app/backtest/`) — framework-light and database-free,
+mirroring `app/evaluation/`'s own posture:
+
+- `base.py` — `BacktestStepPlan` (the capped `as_of` list to walk, its
+  `effective_end`, whether it was `truncated`, and the honest uncapped
+  `requested_steps`) and `GradedPredictionRow` (one step's outcome, shaped
+  for aggregation) — pure dataclasses, no ORM, no service.
+- `engine.py` — `plan_steps(...)` (the only genuinely new computation: which
+  `as_of` values to walk, half-open, capped from the _end_ — the same
+  "keep the earliest, cut the tail, report it honestly" direction
+  `apps/dashboard/src/features/replay/hooks/use-replay-candles.ts`'s own
+  `MAX_REPLAY_CANDLES` already established for this platform's other
+  range-capping feature, generalized rather than reinvented differently
+  here) and `aggregate(...)` (shapes graded rows into `y_true`/`y_pred`/
+  `y_proba` and calls `app.evaluation.engine.default_engine.evaluate` — the
+  _exact_ `EvaluationEngine` instance every other metric consumer on this
+  platform already reads from, never a second copy of `accuracy`/`mae`/
+  etc.). `y_proba` is reconstructed only when _every_ row carries both
+  `classes` and `probabilities`; otherwise `None`, letting
+  `EvaluationEngine`'s own graceful-skip contract (a skipped `roc_auc`, not
+  an error) handle it rather than fabricating a probability row.
+- `errors.py` — only what's genuinely new to walking a _range_
+  (`InvalidBacktestRangeError`, `InvalidBacktestStepError`,
+  `InvalidBacktestSortError`, `BacktestRunNotFoundError`). Every failure
+  that can also happen to a single live prediction (unknown/incomplete
+  training job, unknown market, too little candle history) already has a
+  named error raised by `PredictionService.run`/`grade_now` themselves,
+  reused verbatim by the walker — never duplicated here.
+
+**`app/services/backtest.py`'s `BacktestService`** is the one place a
+`BacktestRun`/`Prediction` ORM row exists in this feature's own code — it
+composes `PredictionService`/`TrainingJobService` directly (never a second
+copy of either), the same reuse `PredictionService` itself already
+established relative to `TrainingJobService`/`FeatureService`. `start()`
+resolves the job, its timeframe, and the requested (or defaulted) step,
+calls `plan_steps`, persists a `pending` `BacktestRun` row, and atomically
+transitions it to `running` — all before returning, so
+`POST /backtests/run` reflects `running` immediately. It deliberately does
+**not** pre-validate that the job is completed with a saved artifact the
+way `PredictionService.run` itself does; duplicating that check would be a
+second copy of it. If the job can't actually predict, the very first step
+inside `execute_run` raises exactly the error `PredictionService.run`
+already raises, and the whole run is finalized `failed` with that message —
+one try/except around the entire walk, mirroring
+`TrainingJobService.execute_run`'s own shape exactly (not a per-step
+isolate-and-continue, which belongs to `PredictionService.grade_pending`
+isolating many independent predictions from one bad row — a backtest is
+one run, and a step that can't predict at all means the whole run failed,
+not that it silently ran shorter than requested).
+
+**Runs asynchronously, reusing the exact same mechanism the training-job
+fix already built — not a second one.** The generic fire-and-forget
+tracking primitives (`track`/`schedule`/`cancel_all`/`wait_for_all`, one
+shared `set[asyncio.Task]`) were extracted out of
+`app/dependencies/training.py` into `app/services/background_tasks.py`
+once this feature needed the identical mechanism for
+`POST /backtests/run`; `app/dependencies/training.py` now delegates to it
+under its original public names (zero test breakage), and
+`app/application.py`'s `shutdown()` calls the now-generic `cancel_all()`
+directly — cancelling an in-flight training run _and_ an in-flight
+backtest alike, one shared registry, one shutdown path.
+`app/dependencies/backtest.py`'s `run_backtest_in_background`/
+`schedule_backtest_run`/`_mark_run_failed_after_crash` mirror
+`app/dependencies/training.py`'s own identically-named functions exactly,
+including the same disclosed limitation: a backtest whose background task
+was still running at shutdown time is left however the crash found it
+(most likely `'running'`), with only a log line — no restart-recovery/
+watchdog exists yet, the same limitation training jobs already carry.
+
+**Persistence** — a new `backtest_runs` table (migration `2f9216bd92c0`):
+training job id, (denormalized) experiment id, symbol/timeframe/step,
+`requested_start`/`requested_end`/`effective_end`/`truncated`, lifecycle
+`status` (`pending`/`running`/`completed`/`failed`, a `CheckConstraint`
+mirroring `TrainingJob`'s own), `error_message`/`started_at`/
+`completed_at`, `total_steps`/`completed_steps`/`graded_count`,
+`model_kind` (resolved from the model adapter registry, the same way a
+live prediction's own is), and `aggregate_metrics` (the exact
+`EvaluationReport.metrics` shape, stored verbatim once the run reaches a
+terminal status). `BacktestRunRepository.try_transition_to_running` mirrors
+`TrainingJobRepository`'s own atomic `UPDATE ... WHERE status = 'pending'`
+guard exactly — kept for consistency even though a backtest run's own row
+can never actually be raced the way a training job's can (each
+`POST /backtests/run` call creates a brand-new row; nothing else can ever
+call this on it concurrently).
+
+**This is deliberately _not_ the same fix as the training-job duplicate-run
+race, because there is no analogous race to close.** The training-job race
+existed because `POST /training-jobs/{id}/run` acts on one _existing,
+shared_ job id that two overlapping requests can both name — the fix was
+closing a check-then-act gap on that one shared row.
+`POST /backtests/run` never takes an existing id at all: every call
+creates its own brand-new row, so two concurrent calls (even with
+byte-identical parameters) are exactly as independent as two concurrent
+`POST /predictions/run` calls for the same job/symbol — both legitimate,
+neither contends with the other. `tests/backtest/test_service.py`'s
+`TestConcurrentStart` proves this two ways: two genuinely concurrent
+(`asyncio.gather`) `start()` calls with identical parameters both succeed,
+each getting its own id and its own `running` row (not one winner/one
+409); and, separately, `try_transition_to_running` itself is proven
+race-safe in isolation — two concurrent transition attempts against one
+pre-existing `pending` row (constructed directly, bypassing `start()`) still
+leave exactly one winner, the same kind of test training's own fix used,
+confirming the mirrored guard genuinely holds even though nothing in this
+feature's real call graph ever exercises it that way.
+
+**Grading in backtest mode reads only the exact `horizon + 1` candles for
+its own step — a separate property from, and a separate query than, the
+no-look-ahead guarantee above.** `PredictionService.grade_now` (reused by
+`BacktestService.execute_run`) calls the same private `_grade_one`
+`grade_pending` already uses, whose own candle fetch
+(`CandleRepository.get_candles(..., start=prediction.as_of, end=None,
+limit=prediction.horizon + 1, ...)`) is bounded by the SQL `LIMIT` clause
+itself, not a client-side truncation of a wider read — structurally
+incapable of returning a row past position `horizon`, regardless of how
+much real data exists further in the future. `tests/backtest/test_service
+.py`'s `TestGradingBoundary` proves this directly (not merely read and
+trusted) with a `CandleRepository.get_candles` spy: against a real
+80-candle seeded series, grading a prediction at hour 40 with horizon 1
+reads exactly 2 rows (hours 40 and 41), captured via the spy's own
+recorded `limit`/`end` arguments and the exact candles returned — the
+~38 real candles stored beyond hour 41 are never reached.
+
+**Backtest-generated predictions are tagged distinctly from live ones, so
+they never flood the live Prediction History view.** `predictions` gained
+a nullable, indexed `backtest_run_id` FK column — `NULL` for every ordinary
+`POST /predictions/run` call, set only by
+`PredictionRepository.tag_backtest_run` immediately after a backtest step's
+`PredictionService.run` call already persisted the row. `PredictionRepository
+.search`'s default behavior (no `backtest_run_id` filter given) now
+explicitly excludes any tagged row — Prediction History looks exactly as it
+did before this column existed; passing a specific `backtest_run_id` shows
+_only_ that run's own predictions instead, the Backtest Result view's own
+drill-down, reusing the _same_ list endpoint/table, never a second
+"backtest predictions" view. `tests/backtest/test_service.py`'s
+`TestTaggingAndAggregation` proves both halves of this directly.
+
+**Large ranges are capped, and truncation is reported honestly rather than
+silently running a shorter backtest than requested.** `MAX_BACKTEST_STEPS`
+(`app/core/config.py`, default `2000`) bounds `plan_steps`; a request
+needing more steps is capped from the _end_, keeping the earliest portion
+of the range — `BacktestRun.truncated`/`effective_end` (and the API's own
+`total_steps` vs. the client's originally-requested range) let a caller see
+exactly what actually ran, never a silently-shortened result presented as
+if it were the full request.
+
+**A range that reaches past the symbol's latest actually-stored candle is
+rejected outright at request time (`BacktestRangeExceedsAvailableDataError`,
+400), not silently truncated or run** — unlike the step cap above,
+letting it through would mean `PredictionService.run` (never
+interpolating) resolves every step past that point to the same last real
+candle, collapsing them into repeated, identical predictions that a
+completed run's own `aggregate_metrics` would otherwise present as an
+ordinary result.
+
+**API**, mirroring the existing Benchmark pattern but asynchronous like
+training jobs: `POST /backtests/run` (plans, persists, starts, and returns
+immediately — the walk executes in a background task, not before the
+response), `GET /backtests/{id}`, `GET /backtests` (list, most recent
+first, filterable by training job/experiment/symbol/status). `GET
+/predictions` gained an optional `backtest_run_id` query parameter (see
+tagging, above) — no new prediction endpoint.
+
+**Frontend** — a new page, `/ml/backtest`
+(`apps/dashboard/src/features/ml-backtest/`), continuing the `/ml/training`,
+`/ml/evaluation`, `/ml/predict` route family: a form (job, symbol, date
+range, optional step, mirroring `PredictionForm`'s own job/symbol
+selection), a result panel showing lifecycle status, honest truncation
+reporting, and — once complete — aggregate metrics via `EvaluationSummary`
+reused verbatim (`summary={}`, since a backtest's own `aggregate_metrics`
+is a flat metrics dict with none of a training job's confusion-matrix/
+feature-importance detail, and every one of that component's own
+sub-sections already renders nothing when its part of `summary` is absent),
+a drill-down into the run's own predictions via the _existing_ Prediction
+History table (`usePredictionHistory` gained an optional `enabled` option
+so this filtered-by-`backtest_run_id` query can be skipped until a run
+actually exists), and a Backtest History list mirroring Benchmark History's
+own list/reopen shape (no delete action — no `DELETE /backtests/{id}`
+exists). Reopening a backtest step's own prediction from the drill-down
+reuses `usePrediction`/`PredictionResultPanel` verbatim — the exact hook and
+component the Live Prediction page itself uses — rather than a second
+"show one prediction" view.
+
+**Testing.** `tests/backtest/test_engine.py` covers `plan_steps` (even
+division, end-truncation and its honest `requested_steps`, a partial final
+step still counted whole, an empty/backwards range rejected) and
+`aggregate` (a hand-computed classification accuracy and regression MAE
+against a small fixture set — not re-derived from the engine itself —
+`roc_auc` skipped gracefully when any row lacks probabilities, computed
+when every row has them, and an empty row set producing an empty report
+rather than an error). `tests/backtest/test_service.py` covers both of this
+feature's own defining properties (above), tagging/exclusion, aggregate
+metrics for both a classifier and a regressor, honest capping/truncation, a
+mid-walk failure finalizing the _whole_ run as failed with its own partial
+progress recorded, and every named domain error.
+`tests/backtest/test_background.py` mirrors
+`tests/training/test_background.py` exactly for the shared background-task
+seam (own DB session, a crash outside `execute_run` still marked failed, a
+failure in the crash-recovery write itself leaving the run `running`, and
+deterministic scheduling/cancellation via the shared registry).
+`tests/api/test_backtest_api.py` proves the run endpoint returns before the
+background walk completes (an artificially slow `PredictionService.run`
+must not delay the response), honest truncation reporting over HTTP, and
+the Prediction History drill-down end-to-end. Frontend:
+`ml-backtest-page.test.tsx` (run/error/truncation/reopen-and-drill-down) and
+`backtest-history-table.test.tsx`.
+
+This is the last piece of Milestone 2 (Prediction & Backtesting, per
+`TASKBOOK.md`/`ROADMAP.md`) — with the Live Prediction Service, Prediction
+Grading, and now the Backtesting Engine all real, tested, and wired in,
+Milestone 2 is complete.
+
 ### Feature Store
 
 > Not built. Features are computed on demand and exported; no persisted,

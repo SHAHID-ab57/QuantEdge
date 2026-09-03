@@ -169,9 +169,7 @@ class DeltaWebSocketClient:
         """Gracefully close the connection and stop reconnection."""
         await self._manager.close()
 
-    async def subscribe(
-        self, channel: str, symbols: list[str] | None = None
-    ) -> None:
+    async def subscribe(self, channel: str, symbols: list[str] | None = None) -> None:
         """Subscribe to a channel, optionally for specific symbols.
 
         When not yet connected, the subscription is queued and sent after
@@ -187,16 +185,13 @@ class DeltaWebSocketClient:
                 return
             except WebSocketError:
                 logger.warning(
-                    "WebSocket dropped while subscribing to %s; "
-                    "will resubscribe on reconnect",
+                    "WebSocket dropped while subscribing to %s; will resubscribe on reconnect",
                     channel,
                 )
         else:
             logger.info("WebSocket not connected; queued subscription to %s", channel)
 
-    async def unsubscribe(
-        self, channel: str, symbols: list[str] | None = None
-    ) -> None:
+    async def unsubscribe(self, channel: str, symbols: list[str] | None = None) -> None:
         """Unsubscribe from a channel, optionally only for specific symbols."""
         payload = self._subscriptions.unsubscribe(channel, symbols)
         if payload is None:
@@ -206,8 +201,7 @@ class DeltaWebSocketClient:
                 await self._manager.send_text(payload)
             except WebSocketError:
                 logger.warning(
-                    "WebSocket dropped while unsubscribing from %s; "
-                    "will not be re-requested",
+                    "WebSocket dropped while unsubscribing from %s; will not be re-requested",
                     channel,
                 )
 
@@ -271,8 +265,7 @@ class DeltaWebSocketClient:
             raise AuthenticationError("WebSocket key-auth timed out") from None
         if not response.success:
             raise AuthenticationError(
-                f"WebSocket key-auth failed: {response.status} "
-                f"({response.status_code})"
+                f"WebSocket key-auth failed: {response.status} ({response.status_code})"
             )
         self._authenticated = True
         logger.info("WebSocket authenticated")
@@ -303,9 +296,7 @@ class DeltaWebSocketClient:
             errors = self._subscriptions.handle_ack(
                 [channel.model_dump() for channel in event.channels]
             )
-            self._active_subscriptions = tuple(
-                channel.name for channel in event.channels
-            )
+            self._active_subscriptions = tuple(channel.name for channel in event.channels)
             logger.info(
                 "WebSocket subscriptions active: %s",
                 list(self._active_subscriptions),

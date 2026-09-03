@@ -67,8 +67,6 @@ def make_candle(
     }
 
 
-
-
 async def seed_market(session_factory: SessionFactory, symbol: str = "ETHUSDT") -> uuid.UUID:
     """Create the Delta exchange and one market; return the market id."""
     async with session_factory() as session:
@@ -121,14 +119,11 @@ async def test_ingest_normalizes_and_inserts_with_chunked_requests(
     async def handler(request: httpx.Request) -> httpx.Response:
         captured["urls"].append(str(request.url))
         query = {
-            key: values[0]
-            for key, values in parse_qs(urlparse(str(request.url)).query).items()
+            key: values[0] for key, values in parse_qs(urlparse(str(request.url)).query).items()
         }
         start = int(query["start"])
         end = int(query["end"])
-        window = [
-            candle for candle in all_candles if start <= int(candle["time"]) < end
-        ]
+        window = [candle for candle in all_candles if start <= int(candle["time"]) < end]
         window.reverse()
         return httpx.Response(200, json={"success": True, "result": window})
 
@@ -286,9 +281,7 @@ async def test_invalid_timestamps_are_rejected(session_factory: SessionFactory) 
     async with session_factory() as session:
         candles = await load_candles(session)
         assert len(candles) == 1
-        assert as_utc(candles[0].open_time) == datetime.fromtimestamp(
-            current_bucket - HOUR, UTC
-        )
+        assert as_utc(candles[0].open_time) == datetime.fromtimestamp(current_bucket - HOUR, UTC)
 
 
 @pytest.mark.asyncio
@@ -486,6 +479,7 @@ async def test_database_conflict_is_isolated_and_rejected(
 @pytest.mark.asyncio
 async def test_unknown_symbol_raises_with_guidance(session_factory: SessionFactory) -> None:
     """A missing market fails fast and points at the market sync command."""
+
     async def handler(request: httpx.Request) -> httpx.Response:
         raise AssertionError("no API call expected")
 

@@ -100,9 +100,7 @@ def format_state(state: MarketState | None) -> str:
     ]
     if state.trade is not None:
         trade = state.trade
-        lines.append(
-            f"  trade      : price={trade.price} size={trade.size} side={trade.side}"
-        )
+        lines.append(f"  trade      : price={trade.price} size={trade.size} side={trade.side}")
     else:
         lines.append("  trade      : (none)")
     if state.ticker is not None:
@@ -121,8 +119,7 @@ def format_state(state: MarketState | None) -> str:
     if state.candle is not None:
         candle = state.candle
         lines.append(
-            f"  candle     : {candle.resolution} close={candle.close} "
-            f"volume={candle.volume}"
+            f"  candle     : {candle.resolution} close={candle.close} volume={candle.volume}"
         )
     else:
         lines.append("  candle     : (none)")
@@ -152,23 +149,38 @@ async def run(args: argparse.Namespace) -> int:
     print("MarketStateManager registered on EventBus", flush=True)
 
     await publish(
-        bus, manager, make_trade("BTCUSD", "72141.5"), "BTCUSD",
+        bus,
+        manager,
+        make_trade("BTCUSD", "72141.5"),
+        "BTCUSD",
         "Publish trade BTCUSD 72141.5",
     )
     await publish(
-        bus, manager, make_ticker("BTCUSD", "72141.0", "72142.0"), "BTCUSD",
+        bus,
+        manager,
+        make_ticker("BTCUSD", "72141.0", "72142.0"),
+        "BTCUSD",
         "Publish ticker BTCUSD bid=72141.0 ask=72142.0",
     )
     await publish(
-        bus, manager, make_book("BTCUSD", "72141.5", "72142.0"), "BTCUSD",
+        bus,
+        manager,
+        make_book("BTCUSD", "72141.5", "72142.0"),
+        "BTCUSD",
         "Publish order book BTCUSD (l1)",
     )
     await publish(
-        bus, manager, make_candle("BTCUSD", "1h", "71500"), "BTCUSD",
+        bus,
+        manager,
+        make_candle("BTCUSD", "1h", "71500"),
+        "BTCUSD",
         "Publish candle BTCUSD 1h close=71500",
     )
     await publish(
-        bus, manager, make_trade("BTCUSD", "72200.0"), "BTCUSD",
+        bus,
+        manager,
+        make_trade("BTCUSD", "72200.0"),
+        "BTCUSD",
         "Publish NEWER trade BTCUSD 72200.0 (state replacement)",
     )
 

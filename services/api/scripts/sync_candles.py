@@ -35,9 +35,9 @@ def build_parser() -> argparse.ArgumentParser:
 async def _main(symbols: str | None, timeframes: str | None) -> int:
     setup_logging()
     symbol_list = [part.strip() for part in (symbols or "").split(",") if part.strip()] or None
-    timeframe_list = (
-        [part.strip() for part in (timeframes or "").split(",") if part.strip()] or None
-    )
+    timeframe_list = [
+        part.strip() for part in (timeframes or "").split(",") if part.strip()
+    ] or None
     summary = await run_sync_once(symbols=symbol_list, timeframes=timeframe_list)
     print(
         f"attempted={summary.attempted} synced={summary.synced} "

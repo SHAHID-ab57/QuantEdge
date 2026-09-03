@@ -141,9 +141,7 @@ def _validate_request(
     """Fail fast on unsupported or unusable ingestion parameters."""
     if timeframe not in DELTA_RESOLUTIONS:
         supported = ", ".join(sorted(DELTA_RESOLUTIONS))
-        raise CandleIngestError(
-            f"Unsupported timeframe {timeframe!r}; Delta supports: {supported}"
-        )
+        raise CandleIngestError(f"Unsupported timeframe {timeframe!r}; Delta supports: {supported}")
     if start.tzinfo is None or end.tzinfo is None:
         raise CandleIngestError("start and end must be timezone-aware datetimes")
     if end <= start:
@@ -316,9 +314,7 @@ def _build_candles(
     candles: list[Candle] = []
     rejected = 0
     for record in records:
-        if _validate_candle(
-            symbol, record, start_ts, end_ts, duration_seconds, now_ts, timeframe
-        ):
+        if _validate_candle(symbol, record, start_ts, end_ts, duration_seconds, now_ts, timeframe):
             open_time = datetime.fromtimestamp(record.time, UTC)
             candles.append(
                 Candle(
@@ -361,8 +357,7 @@ def _validate_candle(
         return False
     if record.time % duration_seconds != 0:
         logger.warning(
-            "Rejecting candle (symbol=%s timeframe=%s time=%d): open time not "
-            "aligned to buckets",
+            "Rejecting candle (symbol=%s timeframe=%s time=%d): open time not aligned to buckets",
             symbol,
             timeframe,
             record.time,

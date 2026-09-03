@@ -31,7 +31,7 @@ a versioned dataset citation, a recorded experiment) — it is now complete.
 | Milestone | Name                                         | Status      |
 | --------- | -------------------------------------------- | ----------- |
 | 1         | Research & Training Platform                 | COMPLETE    |
-| 2         | Prediction & Backtesting                     | IN PROGRESS |
+| 2         | Prediction & Backtesting                     | COMPLETE    |
 | 3         | Paper Trading & Risk                         | NOT STARTED |
 | 4         | Data Breadth                                 | NOT STARTED |
 | 5         | Production Hardening                         | NOT STARTED |
@@ -48,31 +48,39 @@ real code, passing tests, and is wired into the running API and dashboard
 `docs/testing/TESTING.md`/`services/api/TESTING.md` for the full test
 inventory.
 
-**Milestone 2 — Prediction & Backtesting (IN PROGRESS).** The Live
-Prediction Service (`app/prediction/`, `/ml/predict`) is the first item and
-is complete: given a completed training job, reconstruct a live feature
-vector, run the model, and return one prediction, persisted to Prediction
-History. Second: `POST /training-jobs/{id}/run` no longer blocks for a
-training run's duration — it validates and transitions to `running`
-synchronously, then executes the pipeline in a background `asyncio.Task`
-with its own database session, rejecting a concurrent duplicate call
-rather than double-executing it; a job whose background task was still
-running at an app restart is left `status="running"` with no
-watchdog yet to reconcile it, a disclosed limitation, not a silent one.
-This is the seam a real backtesting engine's own (likely many, and
-possibly longer-running) prediction/training runs will need — built now
-rather than assumed later. See `ARCHITECTURE.md` § "Machine Learning
-Training Framework". Third: Prediction Grading — for every persisted
-prediction whose target horizon has actually arrived, determine what
-really happened (via the exact target-generation logic that produced its
-training label) and record whether it was right, reusing the existing
-evaluation metrics for correctness/error. Runs periodically
+**Milestone 2 — Prediction & Backtesting (COMPLETE).** The Live
+Prediction Service (`app/prediction/`, `/ml/predict`) is the first item:
+given a completed training job, reconstruct a live feature vector, run the
+model, and return one prediction, persisted to Prediction History. Second:
+`POST /training-jobs/{id}/run` no longer blocks for a training run's
+duration — it validates and transitions to `running` synchronously, then
+executes the pipeline in a background `asyncio.Task` with its own database
+session, rejecting a concurrent duplicate call rather than
+double-executing it; a job whose background task was still running at an
+app restart is left `status="running"` with no watchdog yet to reconcile
+it, a disclosed limitation, not a silent one. This seam
+(`app/services/background_tasks.py`, generalized once the Backtesting
+Engine needed it too) is what every longer-running prediction/training run
+on this platform now schedules through. See `ARCHITECTURE.md` §
+"Machine Learning Training Framework". Third: Prediction Grading — for
+every persisted prediction whose target horizon has actually arrived,
+determine what really happened (via the exact target-generation logic that
+produced its training label) and record whether it was right, reusing the
+existing evaluation metrics for correctness/error. Runs periodically
 (`PredictionGradingScheduler`, mirroring `CandleSyncScheduler`) and
 on-demand (`scripts/grade_predictions.py`); Prediction History now shows
 graded outcomes and pending ones distinctly. See `ARCHITECTURE.md` §
-"Prediction Grading". A backtesting engine — replaying a trained model's
-predictions against real historical candles to estimate how it would have
-performed — has not been started.
+"Prediction Grading". Fourth and last: the Backtesting Engine
+(`app/backtest/`, `/ml/backtest`) — given a trained model and a historical
+date range, walk it one step at a time, calling the Live Prediction
+Service and its grading logic completely unmodified in a loop (proven
+identical to a live call by test, not asserted), verified adversarially to
+have no look-ahead bias, and reporting aggregate performance via the exact
+same evaluation metrics every other milestone already reads from. Runs
+asynchronously through the same shared background-task registry training
+jobs use — no second mechanism. See `ARCHITECTURE.md` § "Backtesting
+Engine". Every capability in this milestone has real code, passing tests,
+and is wired into the running API and dashboard.
 
 **Milestone 3 — Paper Trading & Risk.** Simulated order execution against
 live prices, a risk engine (position sizing, exposure limits, drawdown

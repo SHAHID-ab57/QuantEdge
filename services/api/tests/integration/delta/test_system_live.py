@@ -23,9 +23,7 @@ def _offline_runtime() -> Runtime:
 
 
 @pytest.mark.integration
-async def test_system_health_delta_rest_reachable(
-    client: httpx.AsyncClient, app: FastAPI
-) -> None:
+async def test_system_health_delta_rest_reachable(client: httpx.AsyncClient, app: FastAPI) -> None:
     """The live Delta REST probe reports reachable with a latency."""
     app.dependency_overrides[get_runtime] = lambda: _offline_runtime()
     try:
@@ -50,9 +48,7 @@ async def test_system_probe_direct() -> None:
 
 
 @pytest.mark.integration
-async def test_system_status_tracks_rest_timeline(
-    client: httpx.AsyncClient, app: FastAPI
-) -> None:
+async def test_system_status_tracks_rest_timeline(client: httpx.AsyncClient, app: FastAPI) -> None:
     """The status timeline records the last REST probe time."""
     runtime = _offline_runtime()
     app.dependency_overrides[get_runtime] = lambda: runtime

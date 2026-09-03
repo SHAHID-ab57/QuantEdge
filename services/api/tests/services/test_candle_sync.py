@@ -67,8 +67,6 @@ def fake_ingest(
     return ingest, calls
 
 
-
-
 async def seed_market(
     session_factory: async_sessionmaker[AsyncSession],
     symbol: str = "ETHUSD",
@@ -128,18 +126,12 @@ async def seed_candle(
 def test_truncate_to_bucket() -> None:
     """Bucket flooring respects the resolution grid."""
     now = FIXED_NOW
-    assert _truncate_to_bucket(now, timedelta(hours=1)) == datetime(
-        2026, 8, 20, 16, 0, tzinfo=UTC
-    )
+    assert _truncate_to_bucket(now, timedelta(hours=1)) == datetime(2026, 8, 20, 16, 0, tzinfo=UTC)
     assert _truncate_to_bucket(now, timedelta(minutes=1)) == datetime(
         2026, 8, 20, 16, 33, tzinfo=UTC
     )
-    assert _truncate_to_bucket(now, timedelta(hours=4)) == datetime(
-        2026, 8, 20, 16, 0, tzinfo=UTC
-    )
-    assert _truncate_to_bucket(now, timedelta(days=1)) == datetime(
-        2026, 8, 20, 0, 0, tzinfo=UTC
-    )
+    assert _truncate_to_bucket(now, timedelta(hours=4)) == datetime(2026, 8, 20, 16, 0, tzinfo=UTC)
+    assert _truncate_to_bucket(now, timedelta(days=1)) == datetime(2026, 8, 20, 0, 0, tzinfo=UTC)
 
 
 @pytest.mark.asyncio
@@ -258,9 +250,7 @@ async def test_run_catch_up_skips_inactive_and_unknown_markets(
     ingest, calls = fake_ingest()
     monkeypatch.setattr(candle_sync, "ingest_candles", ingest)
 
-    scheduler = CandleSyncScheduler(
-        symbols=["ETHUSD", "BTCUSD", "NOPEUSD"], timeframes=["1h"]
-    )
+    scheduler = CandleSyncScheduler(symbols=["ETHUSD", "BTCUSD", "NOPEUSD"], timeframes=["1h"])
     summary = await scheduler.run_catch_up()
 
     assert summary.attempted == 1
@@ -328,9 +318,7 @@ async def test_loop_runs_ticks_until_stopped(
     ingest, calls = fake_ingest()
     monkeypatch.setattr(candle_sync, "ingest_candles", ingest)
 
-    scheduler = CandleSyncScheduler(
-        symbols=["ETHUSD"], timeframes=["1h"], interval_seconds=60
-    )
+    scheduler = CandleSyncScheduler(symbols=["ETHUSD"], timeframes=["1h"], interval_seconds=60)
     await scheduler.start()
     assert scheduler.running
 

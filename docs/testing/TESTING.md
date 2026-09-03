@@ -1312,6 +1312,31 @@ error's own message in an `Alert`; and reopening a past prediction from
 Prediction History fetching it by id and rendering it through the same
 result panel a fresh run uses.
 
+### Testing the Backtesting Engine (frontend)
+
+`apps/dashboard/src/features/ml-backtest/` follows the same layering as
+`ml-predict/`: pure types/API client (Zod-validated, covered indirectly
+through the page-level mocks below), components in isolation, then the
+page composition root.
+
+**Components.** `backtest-history-table.test.tsx` covers one row per past
+run (symbol, step, a status chip, `completed_steps/total_steps`), a
+truncated run rendering a distinct `N/M *` marker, an empty-history
+message, and the reopen callback firing with the clicked row's own
+summary.
+
+**Page-level.** `ml-backtest-page.test.tsx` covers: selecting a training
+job, symbol, and date range then running a backtest, asserting
+`runBacktest` was called with the exact expected body (ISO-8601 `start`/`end`)
+and the result panel then renders showing its status, step/grading counts,
+and (once complete) its aggregate metrics; a run failure surfacing the
+API error's own message in an `Alert`; a truncated run's own honest warning
+text rendering; and reopening a past run from Backtest History fetching it
+by id, rendering it through the same result panel a fresh run uses, and
+the Prediction History drill-down firing `fetchPredictions` with the
+reopened run's own `backtest_run_id` and rendering that run's own
+predictions.
+
 ## End-to-End Tests
 
 Not implemented. `tests/` at the repo root is reserved for this; no browser

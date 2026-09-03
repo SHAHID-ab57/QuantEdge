@@ -47,9 +47,7 @@ def test_backoff_delay_growth_and_cap() -> None:
 
 @pytest.mark.asyncio
 async def test_connect_receive_and_shutdown() -> None:
-    server = MockWSServer(
-        script=[("send", HEARTBEAT), ("send", '{"type":"ticker","sy":"BTCUSD"}')]
-    )
+    server = MockWSServer(script=[("send", HEARTBEAT), ("send", '{"type":"ticker","sy":"BTCUSD"}')])
     async with server:
         messages: list[str] = []
 
@@ -107,9 +105,7 @@ async def test_reconnect_after_server_close() -> None:
 async def test_heartbeat_timeout_triggers_reconnect() -> None:
     server = MockWSServer(script=[("send", HEARTBEAT), ("send", HEARTBEAT)])
     async with server:
-        manager = ConnectionManager(
-            settings(server.url, heartbeat_timeout=0.1), on_message=None
-        )
+        manager = ConnectionManager(settings(server.url, heartbeat_timeout=0.1), on_message=None)
         manager.start()
         await wait_until(lambda: server.connections >= 2)
         await manager.close()
@@ -147,6 +143,7 @@ async def test_ping_loop_and_pong_prevents_disconnect() -> None:
 async def test_pong_timeout_triggers_reconnect() -> None:
     server = MockWSServer(script=[("wait", 0.1), ("wait", 0.1)])
     async with server:
+
         async def on_ping() -> None:
             await manager.send_json({"type": "ping"})
 

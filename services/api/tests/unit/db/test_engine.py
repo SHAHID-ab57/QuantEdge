@@ -49,8 +49,8 @@ async def test_get_engine_caches_the_engine(monkeypatch: pytest.MonkeyPatch) -> 
         engine_module,
         "get_settings",
         lambda: _settings(
-        database_url="postgresql+asyncpg://u:p@localhost:5432/db",
-    ),
+            database_url="postgresql+asyncpg://u:p@localhost:5432/db",
+        ),
     )
     engine = get_engine()
     assert isinstance(engine, AsyncEngine)

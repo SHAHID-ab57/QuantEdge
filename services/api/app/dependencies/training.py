@@ -9,9 +9,17 @@ for itself — see `run_training_job_in_background`'s own docstring for why
 that matters, and `app/services/candle_sync.py`'s `CandleSyncScheduler` for
 the existing precedent this mirrors (a `get_engine()`-backed session, never
 the request's own).
+
+The actual task-tracking (cancel-on-shutdown, await-in-tests) now lives in
+`app.services.background_tasks` — extracted once `app/backtest/` needed the
+identical mechanism for `POST /backtests/run`. The names below
+(`schedule_training_job`, `cancel_in_flight_training_jobs`,
+`wait_for_in_flight_training_jobs`, `_track`, `_background_tasks`) are kept
+for backward compatibility with every existing caller/test; they delegate
+to (and, for `_track`/`_background_tasks`, are the exact same objects as)
+that shared module rather than owning a second registry.
 """
 
-import asyncio
 import functools
 import logging
 import uuid
@@ -26,6 +34,7 @@ from app.db.session import get_db
 from app.dependencies.ml_datasets import get_ml_dataset_service
 from app.repositories.experiments import ExperimentRepository
 from app.repositories.training import TrainingJobRepository
+from app.services import background_tasks
 from app.services.experiments import ExperimentService
 from app.services.training import TrainingJobService
 from app.training.adapters import load_builtin_model_adapters
@@ -34,13 +43,13 @@ from app.training.registry import default_registry as default_model_adapter_regi
 
 logger = logging.getLogger("app.dependencies.training")
 
-#: Every `asyncio.Task` currently executing a training job's pipeline in the
-#: background, keyed by nothing (a plain set) since nothing here needs to
-#: look one up by job id — only to cancel/await "all of them" on shutdown,
-#: or await "all of them" deterministically in a test. A task discards
-#: itself once done (`_track`'s own done-callback), so this never grows
-#: unbounded across the process's lifetime.
-_background_tasks: set[asyncio.Task[None]] = set()
+#: Backward-compatible alias — the exact same set object
+#: `app.services.background_tasks` tracks every task in, shared with every
+#: other caller of that module (e.g. `app/backtest/`), not a second
+#: registry. Kept so existing white-box tests
+#: (`tests/training/test_background.py`) that inspect this module's own
+#: `_background_tasks` keep working unchanged.
+_background_tasks = background_tasks._tasks  # noqa: SLF001 - deliberate shared-object alias
 
 
 @functools.lru_cache(maxsize=1)
@@ -176,34 +185,38 @@ async def _mark_job_failed_after_crash(job_id: uuid.UUID, error_message: str) ->
         )
 
 
-def _track(task: asyncio.Task[None]) -> None:
-    _background_tasks.add(task)
-    task.add_done_callback(_background_tasks.discard)
+#: Backward-compatible alias for the shared module's own `track` — kept so
+#: `tests/training/test_background.py`'s existing white-box call
+#: (`training_dependencies._track(task)`) keeps working unchanged.
+_track = background_tasks.track
 
 
 def schedule_training_job(job_id: uuid.UUID) -> None:
     """Fire-and-forget `run_training_job_in_background(job_id)`, tracked.
 
-    Tracking (rather than a bare `asyncio.create_task` the caller discards)
-    serves two purposes: `cancel_in_flight_training_jobs` can cancel/await
-    every in-flight run on app shutdown (mirroring
-    `CandleSyncScheduler.stop`'s own cancel-then-await pattern, generalized
-    to a dynamic set of per-request tasks instead of one persistent loop
-    task), and `wait_for_in_flight_training_jobs` gives tests a
-    deterministic way to await background execution instead of a real
-    sleep-based poll.
+    Delegates to `app.services.background_tasks.schedule` — tracking
+    (rather than a bare `asyncio.create_task` the caller discards) serves
+    two purposes: `cancel_in_flight_training_jobs` can cancel/await every
+    in-flight run on app shutdown (mirroring `CandleSyncScheduler.stop`'s
+    own cancel-then-await pattern, generalized to a dynamic set of
+    per-request tasks instead of one persistent loop task), and
+    `wait_for_in_flight_training_jobs` gives tests a deterministic way to
+    await background execution instead of a real sleep-based poll.
     """
-    task = asyncio.create_task(run_training_job_in_background(job_id), name=f"train-run-{job_id}")
-    _track(task)
+    background_tasks.schedule(run_training_job_in_background(job_id), name=f"train-run-{job_id}")
 
 
 async def cancel_in_flight_training_jobs() -> None:
     """Cancel and await every training job still executing in the background.
 
-    Called from `app/application.py`'s `shutdown()`, before the database
-    engine is disposed — the same relative ordering `Runtime.shutdown`
-    already uses for `CandleSyncScheduler.stop()` (stop the thing that uses
-    the engine, then dispose the engine).
+    Delegates to `app.services.background_tasks.cancel_all` — which now
+    cancels *every* tracked background task, not just training ones (a
+    backtest's own background task, once `app/backtest/` exists, is
+    tracked in the same shared registry and cancelled here too). Called
+    from `app/application.py`'s `shutdown()`, before the database engine is
+    disposed — the same relative ordering `Runtime.shutdown` already uses
+    for `CandleSyncScheduler.stop()` (stop the thing that uses the engine,
+    then dispose the engine).
 
     Unlike `CandleSyncScheduler`, whose single loop task waits on an
     `asyncio.Event` at a safe boundary between ticks, a training run's
@@ -220,25 +233,19 @@ async def cancel_in_flight_training_jobs() -> None:
     already lives with (see `ARCHITECTURE.md` § "Machine Learning Training
     Framework"), not a new one this change introduces.
     """
-    tasks = list(_background_tasks)
-    for task in tasks:
-        task.cancel()
-    if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)
+    await background_tasks.cancel_all()
 
 
 async def wait_for_in_flight_training_jobs() -> None:
-    """Await every currently-tracked background training task to completion.
+    """Await every currently-tracked background task to completion.
 
-    Test-only helper: the deterministic alternative to a real sleep-based
-    poll for "has the background run finished yet" — see
-    `services/api/TESTING.md` § "Testing the non-blocking training run"
-    for how the test suite uses this alongside monkeypatching `get_engine`
-    to the test's own in-memory engine (mirroring
-    `tests/services/test_candle_sync.py`'s existing convention for the
-    same reason: this module's background task never goes through
-    `get_db`/FastAPI's dependency overrides).
+    Delegates to `app.services.background_tasks.wait_for_all` — test-only
+    helper: the deterministic alternative to a real sleep-based poll for
+    "has the background run finished yet" — see `services/api/TESTING.md`
+    § "Testing the non-blocking training run" for how the test suite uses
+    this alongside monkeypatching `get_engine` to the test's own in-memory
+    engine (mirroring `tests/services/test_candle_sync.py`'s existing
+    convention for the same reason: this module's background task never
+    goes through `get_db`/FastAPI's dependency overrides).
     """
-    tasks = list(_background_tasks)
-    if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)
+    await background_tasks.wait_for_all()

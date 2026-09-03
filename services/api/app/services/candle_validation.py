@@ -157,7 +157,9 @@ async def validate_candles(
                     )
                     .order_by(Candle.open_time)
                 )
-            ).scalars().all()
+            )
+            .scalars()
+            .all()
         )
 
         range_start, range_end = _validation_range(start, end, rows, duration_seconds)
@@ -171,9 +173,7 @@ async def validate_candles(
             )
         else:
             exact_duplicates = await _count_exact_duplicates(session, market.id, timeframe)
-            issues, invalid_count, overlaps = _assess_candles(
-                rows, duration_seconds, issue_limit
-            )
+            issues, invalid_count, overlaps = _assess_candles(rows, duration_seconds, issue_limit)
             expected, missing, missing_samples = _find_gaps(
                 rows, range_start, range_end, duration_seconds, issue_limit
             )

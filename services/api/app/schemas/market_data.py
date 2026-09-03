@@ -299,9 +299,7 @@ class CandleStatsResponse(BaseModel):
     start: datetime | None = Field(
         None, description="Applied range start (inclusive), ISO-8601 UTC"
     )
-    end: datetime | None = Field(
-        None, description="Applied range end (exclusive), ISO-8601 UTC"
-    )
+    end: datetime | None = Field(None, description="Applied range end (exclusive), ISO-8601 UTC")
     total_candles: int
     highest_price: Decimal | None
     lowest_price: Decimal | None

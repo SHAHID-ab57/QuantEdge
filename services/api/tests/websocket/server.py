@@ -89,9 +89,7 @@ class MockWSServer:
     async def _handle(self, ws: Any) -> None:
         """Serve one connection: play the script while draining the client."""
         self.connections += 1
-        script = (
-            list(self.script) if callable(self.script) else list(self.script or [])
-        )
+        script = list(self.script) if callable(self.script) else list(self.script or [])
         drain = asyncio.create_task(self._drain(ws))
         heartbeat = None
         if self.heartbeat_interval is not None:

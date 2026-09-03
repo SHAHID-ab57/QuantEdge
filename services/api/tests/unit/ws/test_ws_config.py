@@ -34,9 +34,7 @@ def test_defaults_are_sane() -> None:
         ("max_backoff", 0.0, "max_backoff must be positive"),
     ],
 )
-def test_invalid_values_are_rejected(
-    field: str, bad_value: float | int, message: str
-) -> None:
+def test_invalid_values_are_rejected(field: str, bad_value: float | int, message: str) -> None:
     """Non-positive timeouts and negative retries fail fast."""
     with pytest.raises(ValueError, match=message):
         kwargs = {field: bad_value}

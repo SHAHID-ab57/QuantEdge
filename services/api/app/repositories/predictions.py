@@ -25,11 +25,21 @@ SORT_COLUMNS: dict[str, InstrumentedAttribute[Any]] = {
 
 @dataclass
 class PredictionFilters:
-    """Search/filter criteria for listing past predictions."""
+    """Search/filter criteria for listing past predictions.
+
+    `backtest_run_id` has two distinct meanings, matching this feature's own
+    spec ("tag backtest-generated predictions distinctly... so they don't
+    flood the live Prediction History view"): left `None` (the default,
+    every existing caller), `search` excludes every backtest-tagged
+    prediction — Prediction History shows only live ones, exactly as before
+    this column existed. Set to a specific id, `search` shows *only* that
+    backtest run's own predictions — the Backtest drill-down view.
+    """
 
     training_job_id: uuid.UUID | None = None
     experiment_id: uuid.UUID | None = None
     symbol: str | None = None
+    backtest_run_id: uuid.UUID | None = None
 
 
 class PredictionRepository:
@@ -69,6 +79,12 @@ class PredictionRepository:
         if filters.symbol:
             query = query.where(Prediction.symbol == filters.symbol)
             count_query = count_query.where(Prediction.symbol == filters.symbol)
+        if filters.backtest_run_id is not None:
+            query = query.where(Prediction.backtest_run_id == filters.backtest_run_id)
+            count_query = count_query.where(Prediction.backtest_run_id == filters.backtest_run_id)
+        else:
+            query = query.where(Prediction.backtest_run_id.is_(None))
+            count_query = count_query.where(Prediction.backtest_run_id.is_(None))
 
         total = (await self.session.execute(count_query)).scalar_one()
 
@@ -96,6 +112,25 @@ class PredictionRepository:
             .limit(limit)
         )
         return list(result.scalars().all())
+
+    async def tag_backtest_run(
+        self, prediction_id: uuid.UUID, backtest_run_id: uuid.UUID
+    ) -> Prediction | None:
+        """Mark one already-persisted prediction as belonging to a backtest run.
+
+        Called by `app/services/backtest.py` immediately after `PredictionService.run`
+        (called completely unmodified) has already created and persisted the row —
+        a separate, additive write, never a new parameter threaded through `run`
+        itself. Returns `None` if the id is somehow unknown (defensive only;
+        the caller always just created this exact row).
+        """
+        prediction = await self.get_by_id(prediction_id)
+        if prediction is None:
+            return None
+        prediction.backtest_run_id = backtest_run_id
+        await self.session.commit()
+        await self.session.refresh(prediction)
+        return prediction
 
     async def record_grading(
         self,

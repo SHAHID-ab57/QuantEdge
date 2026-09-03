@@ -144,9 +144,7 @@ def test_order_book_levels_validation() -> None:
 
 def test_order_book_event_defaults() -> None:
     event_time = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
-    book = OrderBookEvent(
-        exchange="delta", symbol="BTCUSD", event_time=event_time, kind="l2"
-    )
+    book = OrderBookEvent(exchange="delta", symbol="BTCUSD", event_time=event_time, kind="l2")
     assert book.bids == []
     assert book.asks == []
     assert book.is_snapshot is True

@@ -88,9 +88,7 @@ async def run(args: argparse.Namespace) -> int:
     client.start()
     run_task = asyncio.create_task(client.run(), name="marketdata-demo-run")
     stop_waiter = asyncio.create_task(stop.wait())
-    done, _ = await asyncio.wait(
-        {stop_waiter, run_task}, return_when=asyncio.FIRST_COMPLETED
-    )
+    done, _ = await asyncio.wait({stop_waiter, run_task}, return_when=asyncio.FIRST_COMPLETED)
     await client.close()
     stop_waiter.cancel()
     with suppress(CancelledError):

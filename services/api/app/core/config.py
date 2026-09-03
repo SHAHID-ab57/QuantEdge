@@ -68,6 +68,19 @@ class Settings(BaseSettings):
     predictions_default_limit: int = 20
     predictions_max_limit: int = 100
 
+    #: Backtest History's list pagination — every `POST /backtests/run` call
+    #: is recorded, and this bounds how many past runs `GET /backtests`
+    #: returns per page.
+    backtests_default_limit: int = 20
+    backtests_max_limit: int = 100
+
+    #: The largest number of steps a single backtest will ever walk in one
+    #: run — mirrors `apps/dashboard/src/features/replay/hooks/use-replay-candles.ts`'s
+    #: own `MAX_REPLAY_CANDLES` convention (cap from the end, keep the
+    #: earliest portion, report the cap honestly) applied to this platform's
+    #: other range-capping feature.
+    max_backtest_steps: int = 2000
+
     #: Where fitted baseline model artifacts are serialized to (joblib), relative
     #: to the service's working directory unless given as an absolute path.
     model_artifact_dir: str = "var/model_artifacts"

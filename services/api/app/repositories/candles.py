@@ -96,9 +96,13 @@ class CandleRepository:
         end: datetime | None = None,
     ) -> int:
         """Count candles for a market/timeframe, honoring the range filter."""
-        query = select(func.count()).select_from(Candle).where(
-            Candle.market_id == market_id,
-            Candle.timeframe == timeframe,
+        query = (
+            select(func.count())
+            .select_from(Candle)
+            .where(
+                Candle.market_id == market_id,
+                Candle.timeframe == timeframe,
+            )
         )
         if start is not None:
             query = query.where(Candle.open_time >= start)
@@ -283,8 +287,10 @@ class CandleRepository:
             .where(*conditions)
             .subquery()
         )
-        query = select(func.count()).select_from(subquery).where(
-            subquery.c.open_time < subquery.c.prev_close
+        query = (
+            select(func.count())
+            .select_from(subquery)
+            .where(subquery.c.open_time < subquery.c.prev_close)
         )
         return int((await self._session.execute(query)).scalar_one())
 
@@ -399,7 +405,4 @@ class CandleRepository:
             .order_by(Candle.timeframe.asc())
         )
         rows = await self._session.execute(query)
-        return [
-            (row.timeframe, int(row.total), row.oldest, row.newest)
-            for row in rows
-        ]
+        return [(row.timeframe, int(row.total), row.oldest, row.newest) for row in rows]

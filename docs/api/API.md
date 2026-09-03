@@ -1353,7 +1353,11 @@ same way `TrainingJobSummaryDTO` keeps a job's full log list out of
 `training_job_id`/`experiment_id`/`symbol` filters and
 `sort`/`dir`/`limit`/`offset` (one of `symbol`, `as_of`, `created_at`;
 default `created_at` descending) — the same list-endpoint shape every
-other history surface on this platform uses.
+other history surface on this platform uses. An optional `backtest_run_id`
+filter (see "Backtesting Engine", below) shows only that run's own
+predictions; omitted (the default, every existing caller), the list
+excludes every backtest-generated prediction — Prediction History shows
+only live ones, exactly as before that column existed.
 
 **Grading** (both endpoints, no separate trigger — see `ARCHITECTURE.md` §
 "Prediction Grading"): `actual_outcome IS NULL` is the one authoritative
@@ -1383,6 +1387,111 @@ exists), `empty_dataset` (400 — too little candle history for the
 requested features' warmup), `prediction_not_found` (404 — unknown
 prediction id), `invalid_prediction_sort` (400 — an unsupported `sort`/`dir`
 combination on the list endpoint).
+
+### Backtesting Engine
+
+| Method | Path                     | Purpose                                                         |
+| ------ | ------------------------ | --------------------------------------------------------------- |
+| POST   | `/api/v1/backtests/run`  | Plan, persist, and start a backtest; returns before it finishes |
+| GET    | `/api/v1/backtests/{id}` | Reopen one past backtest run                                    |
+| GET    | `/api/v1/backtests`      | List past backtest runs (Backtest History)                      |
+
+Full design in `ARCHITECTURE.md` § "Backtesting Engine". Given a completed
+training job and a historical date range, walks it one step at a time —
+calling `POST /predictions/run`'s own service method and grading logic
+completely unmodified, in a loop — and reports aggregate metrics. Runs
+asynchronously, the same non-blocking shape `POST /training-jobs/{id}/run`
+already established: this call returns once the run is planned and moved
+to `running`, well before the walk itself finishes.
+
+**Run a backtest** (`POST /backtests/run`):
+
+```jsonc
+// Request
+{
+  "training_job_id": "6f1e4a2c-3b8d-4c9a-9e2f-1a7c5d6b8e90",
+  "symbol": "ETHUSD",
+  "start": "2026-01-01T00:00:00Z",
+  "end": "2026-01-05T00:00:00Z",
+  // "step": "1h" — optional; defaults to the training job's own timeframe.
+  // Must be the same as, or coarser than, it.
+}
+
+// Response (200) — status is 'running', not a terminal state
+{
+  "id": "c3f1a2b4-...",
+  "training_job_id": "6f1e4a2c-3b8d-4c9a-9e2f-1a7c5d6b8e90",
+  "experiment_id": "…",
+  "symbol": "ETHUSD",
+  "timeframe": "1h",
+  "step": "1h",
+  "requested_start": "2026-01-01T00:00:00Z",
+  "requested_end": "2026-01-05T00:00:00Z",
+  "effective_end": "2026-01-05T00:00:00Z", // < requested_end only if truncated
+  "truncated": false, // honest: true if MAX_BACKTEST_STEPS capped the range short
+  "status": "running",
+  "error_message": null,
+  "started_at": "2026-01-06T09:00:00Z",
+  "completed_at": null,
+  "total_steps": 96, // the planned step count, after capping
+  "completed_steps": 0,
+  "graded_count": 0,
+  "model_kind": "classification",
+  "aggregate_metrics": null, // filled in once status reaches a terminal value
+  "created_at": "2026-01-06T09:00:00Z",
+}
+```
+
+Poll `GET /backtests/{id}` while `status` is `running`; it settles into
+`completed` or `failed`. Once `completed`, `aggregate_metrics` holds the
+exact `EvaluationEngine.evaluate` output over every one of this run's own
+graded predictions (`{"accuracy": 0.62, ...}` for a classifier,
+`{"mae": 12.4, ...}` for a regressor) — the same metric names/values
+`GET /training-jobs/{id}` and Benchmark History already use, never a
+second metric vocabulary. Each of this run's own predictions is a real row
+in `predictions`, reachable via `GET /predictions?backtest_run_id={id}`
+(see "Live Prediction Service", above) — never duplicated into this
+response.
+
+**Large ranges are capped, honestly.** A request needing more steps than
+`MAX_BACKTEST_STEPS` (default 2000) allows is capped from the _end_ (the
+earliest steps are kept, the same direction the Replay engine's own
+`MAX_REPLAY_CANDLES` already truncates from) — `truncated: true` and
+`effective_end` report exactly what actually ran, never a silently
+shorter backtest presented as the full request.
+
+**A mid-walk failure finalizes the whole run as `failed`**, with
+`completed_steps` recording however many steps succeeded before it —
+mirroring `POST /training-jobs/{id}/run`'s own "one failure, the whole job
+fails" shape, not a per-step "skip and continue" (that convention belongs
+to grading's own periodic pass over many independent predictions).
+
+**Error codes**: `training_job_not_found` (404) and
+`live_feature_reconstruction_not_supported` (409, when the training job
+itself has no recorded timeframe at all) are checked upfront, since there
+is nothing to plan a walk over without either. `market_not_found` (404)
+and `candle_not_found` (404, no candles stored yet for this symbol/
+timeframe) are also checked upfront now — resolving the requested range
+against available data needs the market's own latest candle anyway (see
+`backtest_range_exceeds_available_data`, below), so surfacing these at
+request time is strictly better than creating a run that would only fail
+once its first step ran. `invalid_backtest_range` (400 — `end` not after
+`start`), `invalid_backtest_step` (400 — `step` finer than the job's own
+timeframe), and **`backtest_range_exceeds_available_data` (400 — the
+requested `end` reaches past the latest candle actually stored for this
+symbol/timeframe; rejected rather than silently truncated, since letting
+it through would collapse every step past that point into a repeated,
+identical prediction against the same last real candle, corrupting
+`aggregate_metrics` without looking like a failure)** are all checked
+before the run is even created. Once a run has actually started, the same
+`prediction_not_available`/`training_feature_set_mismatch`/`empty_dataset`
+errors `POST /predictions/run` itself can raise still surface as this
+run's own `failed` status/`error_message`, not as this endpoint's own HTTP
+error — these depend on the job's own completeness/feature-set validity,
+never pre-validated a second time (see `ARCHITECTURE.md` § "Backtesting
+Engine"). `backtest_run_not_found` (404 — unknown run id) and
+`invalid_backtest_sort` (400 — an unsupported `sort`/`dir` combination on
+the list endpoint) round out the rest.
 
 ### Platform health
 

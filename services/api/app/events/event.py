@@ -13,9 +13,7 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
 
-_METADATA_FIELDS = frozenset(
-    {"event_id", "event_type", "timestamp", "source", "payload"}
-)
+_METADATA_FIELDS = frozenset({"event_id", "event_type", "timestamp", "source", "payload"})
 
 
 class Event(BaseModel):

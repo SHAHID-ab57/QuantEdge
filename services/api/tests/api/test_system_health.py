@@ -75,9 +75,7 @@ class FakeRuntime(Runtime):
 @pytest.fixture(autouse=True)
 def override_runtime(app: FastAPI) -> Iterator[None]:
     """Override the runtime dependency for every test in this module."""
-    runtime = FakeRuntime(
-        probe=DeltaRestProbeResult(ok=True, latency_ms=12.5, error=None)
-    )
+    runtime = FakeRuntime(probe=DeltaRestProbeResult(ok=True, latency_ms=12.5, error=None))
     app.dependency_overrides[get_runtime] = lambda: runtime
     yield
     app.dependency_overrides.clear()
@@ -104,9 +102,7 @@ async def test_health_all_ok_shape(client: httpx.AsyncClient) -> None:
     assert "subscribers" in body["event_bus"]["detail"]
 
 
-async def test_health_delta_rest_failure(
-    client: httpx.AsyncClient, app: FastAPI
-) -> None:
+async def test_health_delta_rest_failure(client: httpx.AsyncClient, app: FastAPI) -> None:
     """A failing Delta probe marks the component and overall status."""
     runtime = FakeRuntime(
         probe=DeltaRestProbeResult(ok=False, latency_ms=250.0, error="Connection refused")
@@ -118,13 +114,9 @@ async def test_health_delta_rest_failure(
     assert body["delta_rest"]["detail"] == "Connection refused"
 
 
-async def test_health_ws_connected(
-    client: httpx.AsyncClient, app: FastAPI
-) -> None:
+async def test_health_ws_connected(client: httpx.AsyncClient, app: FastAPI) -> None:
     """A running, connected WebSocket client reports ok with live state."""
-    runtime = FakeRuntime(
-        probe=DeltaRestProbeResult(ok=True, latency_ms=10.0, error=None)
-    )
+    runtime = FakeRuntime(probe=DeltaRestProbeResult(ok=True, latency_ms=10.0, error=None))
     runtime.delta_ws = cast(
         DeltaWebSocketClient,
         FakeWs(
@@ -144,13 +136,9 @@ async def test_health_ws_connected(
     assert "2 subscription(s)" in body["delta_ws"]["detail"]
 
 
-async def test_health_ws_connected_staleness(
-    client: httpx.AsyncClient, app: FastAPI
-) -> None:
+async def test_health_ws_connected_staleness(client: httpx.AsyncClient, app: FastAPI) -> None:
     """A connected socket with a recent message reports message staleness."""
-    runtime = FakeRuntime(
-        probe=DeltaRestProbeResult(ok=True, latency_ms=10.0, error=None)
-    )
+    runtime = FakeRuntime(probe=DeltaRestProbeResult(ok=True, latency_ms=10.0, error=None))
     runtime.delta_ws = cast(
         DeltaWebSocketClient,
         FakeWs(
@@ -168,13 +156,9 @@ async def test_health_ws_connected_staleness(
     assert "last message" in body["delta_ws"]["detail"]
 
 
-async def test_health_ws_disconnected_degrades(
-    client: httpx.AsyncClient, app: FastAPI
-) -> None:
+async def test_health_ws_disconnected_degrades(client: httpx.AsyncClient, app: FastAPI) -> None:
     """A running but disconnected WebSocket reports degraded."""
-    runtime = FakeRuntime(
-        probe=DeltaRestProbeResult(ok=True, latency_ms=10.0, error=None)
-    )
+    runtime = FakeRuntime(probe=DeltaRestProbeResult(ok=True, latency_ms=10.0, error=None))
     runtime.delta_ws = cast(DeltaWebSocketClient, FakeWs(connected=False))
     app.dependency_overrides[get_runtime] = lambda: runtime
     body = (await client.get("/api/v1/system/health")).json()
@@ -217,9 +201,7 @@ async def test_status_reports_delta_connection_state(
     client: httpx.AsyncClient, app: FastAPI
 ) -> None:
     """Status embeds the live WebSocket connection snapshot when running."""
-    runtime = FakeRuntime(
-        probe=DeltaRestProbeResult(ok=True, latency_ms=10.0, error=None)
-    )
+    runtime = FakeRuntime(probe=DeltaRestProbeResult(ok=True, latency_ms=10.0, error=None))
     runtime.delta_ws = cast(
         DeltaWebSocketClient,
         FakeWs(
@@ -281,9 +263,7 @@ async def test_metrics_reports_bus_and_state_activity(
     client: httpx.AsyncClient, app: FastAPI
 ) -> None:
     """Published events and state snapshots flow into the metrics response."""
-    runtime = FakeRuntime(
-        probe=DeltaRestProbeResult(ok=True, latency_ms=10.0, error=None)
-    )
+    runtime = FakeRuntime(probe=DeltaRestProbeResult(ok=True, latency_ms=10.0, error=None))
     app.dependency_overrides[get_runtime] = lambda: runtime
 
     from app.marketdata.bus_events import TickerUpdated

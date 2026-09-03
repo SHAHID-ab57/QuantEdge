@@ -3,6 +3,7 @@
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+import app.dependencies.backtest as backtest_dependencies
 import app.dependencies.training as training_dependencies
 
 
@@ -25,3 +26,16 @@ def _training_background_uses_the_test_engine(
     `test_training_api.py` itself.
     """
     monkeypatch.setattr(training_dependencies, "get_engine", lambda: engine)
+
+
+@pytest.fixture(autouse=True)
+def _backtest_background_uses_the_test_engine(
+    monkeypatch: pytest.MonkeyPatch, engine: AsyncEngine
+) -> None:
+    """The same seam as `_training_background_uses_the_test_engine` above,
+    for `POST /backtests/run`'s own background task
+    (`app.dependencies.backtest.get_engine()`) — a separate imported name in
+    a separate module, so it needs its own monkeypatch target even though
+    both ultimately point at the identical in-memory test engine.
+    """
+    monkeypatch.setattr(backtest_dependencies, "get_engine", lambda: engine)

@@ -99,9 +99,7 @@ class MarketStateManager:
         """Latest normalized ticker for ``symbol``, or ``None``."""
         return self._count(self._tickers.get(symbol))
 
-    def get_latest_candle(
-        self, symbol: str, resolution: str | None = None
-    ) -> CandleClosed | None:
+    def get_latest_candle(self, symbol: str, resolution: str | None = None) -> CandleClosed | None:
         """Latest closed candle for ``symbol``.
 
         With ``resolution``, the latest candle of that timeframe;

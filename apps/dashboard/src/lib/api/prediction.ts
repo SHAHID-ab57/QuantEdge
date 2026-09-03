@@ -29,6 +29,9 @@ export interface PredictionListParams {
   training_job_id?: string;
   experiment_id?: string;
   symbol?: string;
+  /** Omit for the default (live predictions only); a specific backtest run's
+   * own predictions when given — the Backtest Result view's drill-down. */
+  backtest_run_id?: string;
   sort?: 'symbol' | 'as_of' | 'created_at';
   dir?: 'asc' | 'desc';
   limit?: number;

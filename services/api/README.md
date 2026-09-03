@@ -830,7 +830,7 @@ async def on_ticker(event: events.TickerEvent) -> None:
 
 
 async def main() -> None:
-    client = get_delta_ws_client()          # public socket, no credentials
+    client = get_delta_ws_client()  # public socket, no credentials
     client.add_listener("ticker", on_ticker)
     await client.subscribe("ticker", ["BTCUSD"])
     client.start()

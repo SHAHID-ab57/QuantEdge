@@ -22,6 +22,7 @@ import FactCheckIcon from '@mui/icons-material/FactCheck';
 import BiotechIcon from '@mui/icons-material/Biotech';
 import LeaderboardIcon from '@mui/icons-material/Leaderboard';
 import OnlinePredictionIcon from '@mui/icons-material/OnlinePrediction';
+import HistoryEduIcon from '@mui/icons-material/HistoryEdu';
 import ModelTrainingIcon from '@mui/icons-material/ModelTraining';
 import ScienceIcon from '@mui/icons-material/Science';
 import SmartToyIcon from '@mui/icons-material/SmartToy';
@@ -50,6 +51,7 @@ const NAV_ITEMS: NavItem[] = [
   { label: 'Training', href: '/ml/training', icon: SmartToyIcon },
   { label: 'Evaluation', href: '/ml/evaluation', icon: LeaderboardIcon },
   { label: 'Predict', href: '/ml/predict', icon: OnlinePredictionIcon },
+  { label: 'Backtest', href: '/ml/backtest', icon: HistoryEduIcon },
   { label: 'Research', href: '/research', icon: ScienceIcon },
   { label: 'Settings', href: '/settings', icon: SettingsIcon },
   { label: 'Health', href: '/health', icon: HealthAndSafetyIcon },

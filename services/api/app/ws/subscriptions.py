@@ -37,9 +37,7 @@ class SubscriptionManager:
         if not new_symbols:
             return None
         self._requested[channel] = current | new_symbols
-        return self._payload(
-            "subscribe", [{"name": channel, "symbols": sorted(new_symbols)}]
-        )
+        return self._payload("subscribe", [{"name": channel, "symbols": sorted(new_symbols)}])
 
     def unsubscribe(self, channel: str, symbols: list[str] | None = None) -> str | None:
         """Request a subscription removal; return the payload, or None."""
@@ -59,9 +57,7 @@ class SubscriptionManager:
             self._requested[channel] = remaining
         else:
             del self._requested[channel]
-        return self._payload(
-            "unsubscribe", [{"name": channel, "symbols": sorted(removed)}]
-        )
+        return self._payload("unsubscribe", [{"name": channel, "symbols": sorted(removed)}])
 
     def resubscribe_payload(self) -> str | None:
         """Payload re-requesting every tracked subscription, or None."""

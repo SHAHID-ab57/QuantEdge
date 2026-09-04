@@ -121,7 +121,8 @@ that introduced it where the work has been committed.
 | M2-E1-T1 | M2: Prediction & Backtesting     | E1: Live Prediction          | Live Prediction Service (`app/prediction/`, `/ml/predict`)                                                                         | Completed | Critical | M1-E6-T1     | `9871c1c`            |
 | M2-E1-T2 | M2: Prediction & Backtesting     | E1: Live Prediction          | Non-blocking `/training-jobs/{id}/run` (background `asyncio.Task`, own DB session, duplicate-run rejection, shutdown cancellation) | Completed | High     | M1-E6-T1     | `8bb20f5`            |
 | M2-E1-T3 | M2: Prediction & Backtesting     | E1: Live Prediction          | Prediction Grading (`app/prediction/grading.py`, `PredictionGradingScheduler`, `scripts/grade_predictions.py`)                     | Completed | High     | M2-E1-T1     | `92c4425`            |
-| M2-E2-T1 | M2: Prediction & Backtesting     | E2: Backtesting              | Backtesting Engine (`app/backtest/`, `/ml/backtest`) — reuses live prediction + grading unmodified, verified no-look-ahead         | Completed | High     | M2-E1-T3     | pending commit       |
+| M2-E2-T1 | M2: Prediction & Backtesting     | E2: Backtesting              | Backtesting Engine (`app/backtest/`, `/ml/backtest`) — reuses live prediction + grading unmodified, verified no-look-ahead         | Completed | High     | M2-E1-T3     | `fed6259`            |
+| M3-E1-T1 | M3: Paper Trading & Risk         | E1: Paper Trading            | Paper Trading (`app/paper_trading/`, `/paper-trading`) — realistic slippage/fee always applied, long-only, no margin/automation    | Completed | High     | M2-E2-T1     | pending commit       |
 
 ---
 
@@ -131,7 +132,7 @@ that introduced it where the work has been committed.
 | --------- | -------------------------------------------- | ----------- |
 | M1        | Research & Training Platform                 | COMPLETE    |
 | M2        | Prediction & Backtesting                     | COMPLETE    |
-| M3        | Paper Trading & Risk                         | NOT STARTED |
+| M3        | Paper Trading & Risk                         | IN PROGRESS |
 | M4        | Data Breadth                                 | NOT STARTED |
 | M5        | Production Hardening                         | NOT STARTED |
 | M6        | Live Trading (gated on extensive validation) | NOT STARTED |
@@ -141,8 +142,19 @@ execution non-blocking (the async seam the Backtesting Engine's own runs
 now share, rather than a second mechanism), Prediction Grading, and the
 Backtesting Engine itself (reuses the live prediction and grading code
 completely unmodified, verified adversarially to have no look-ahead bias)
-are all real, tested, and wired into the running API and dashboard. See
-`ROADMAP.md` for what each milestone actually covers.
+are all real, tested, and wired into the running API and dashboard. Before
+M3 began, two items left outstanding from M2 were re-verified: the
+backtesting no-look-ahead adversarial test was re-run fresh and still
+passes, and a real training job was created and run against the real dev
+database, timed at 0.028s to return `status: "running"` — not
+`"completed"` — with the background pipeline finishing independently
+moments later (`ARCHITECTURE.md` § "Paper Trading" has the full account).
+
+M3's first item, Paper Trading, is real, tested, and wired in — a
+virtual trading account with realistic (slippage/fee-applied) market
+order fills, long-only, no margin/shorting/leverage/automation. A risk
+engine has not been started. See `ROADMAP.md` for what each milestone
+actually covers.
 
 ---
 

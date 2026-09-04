@@ -1337,6 +1337,36 @@ the Prediction History drill-down firing `fetchPredictions` with the
 reopened run's own `backtest_run_id` and rendering that run's own
 predictions.
 
+### Testing Paper Trading (frontend)
+
+`apps/dashboard/src/features/paper-trading/` follows the same layering as
+every other feature: a pure lib helper, components in isolation, then the
+page composition root.
+
+**Lib.** `format-pnl.test.ts` covers the one shared PnL formatter every
+surface on this page uses: a leading `+` before the dollar sign for a
+positive value, a leading `-` before the dollar sign for a negative one
+(not `$-50.00` — an inconsistency an early draft of this feature actually
+had, caught by this exact test), no sign at all for exactly zero, and
+rounding to two decimal places.
+
+**Components.** `order-history-table.test.tsx` covers fill price, price
+source, and slippage/fee all rendering as their own visible columns; a
+dash (not a blank cell) for a buy order's null `realized_pnl`; a real
+signed value for a sell's; a stale fallback fill's warning chip; and an
+empty-history message. `positions-table.test.tsx` covers a position's own
+quantity/average entry/current price/unrealized PnL rendering, both
+positive and negative signed formatting, and an empty-positions message.
+
+**Page-level.** `paper-trading-page.test.tsx` covers: the empty-account
+prompt when no account is selected; opening an account through
+`CreateAccountDialog` and seeing its summary render; placing a buy order
+end to end (selecting a market via the reused `MarketSelector`, entering
+a quantity, confirming through `ConfirmActionDialog`) and asserting
+`placePaperOrder` was called with the exact expected body; and a
+surfaced order-placement error rendering the API error's own message in
+an `Alert`.
+
 ## End-to-End Tests
 
 Not implemented. `tests/` at the repo root is reserved for this; no browser

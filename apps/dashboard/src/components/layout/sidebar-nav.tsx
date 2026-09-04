@@ -28,6 +28,7 @@ import ScienceIcon from '@mui/icons-material/Science';
 import SmartToyIcon from '@mui/icons-material/SmartToy';
 import SettingsIcon from '@mui/icons-material/Settings';
 import HealthAndSafetyIcon from '@mui/icons-material/HealthAndSafety';
+import AccountBalanceWalletIcon from '@mui/icons-material/AccountBalanceWallet';
 
 interface NavItem {
   label: string;
@@ -43,6 +44,7 @@ const NAV_ITEMS: NavItem[] = [
   { label: 'Order Book', href: '/orderbook', icon: TableChartIcon },
   { label: 'Trade Analytics', href: '/trades', icon: ReceiptLongIcon },
   { label: 'Replay', href: '/replay', icon: ReplayIcon },
+  { label: 'Paper Trading', href: '/paper-trading', icon: AccountBalanceWalletIcon },
   { label: 'Indicators', href: '/indicators', icon: FunctionsIcon },
   { label: 'Features', href: '/features', icon: DatasetIcon },
   { label: 'Validation', href: '/validation', icon: FactCheckIcon },

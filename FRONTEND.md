@@ -3242,6 +3242,91 @@ up as this run's own `status: 'failed'`/`error_message` inside
 **Testing.** See `docs/testing/TESTING.md` § "Testing the Backtesting
 Engine (frontend)" for the full inventory.
 
+## Paper Trading
+
+`/paper-trading` (`src/features/paper-trading/`) is a new **top-level**
+page — alongside `/trades` and `/replay`, not under `/ml/`, since this
+feature trades against real prices directly and has nothing to do with a
+trained model or a prediction. Backend design lives in
+[`ARCHITECTURE.md`](ARCHITECTURE.md) § "Paper Trading"; the API surface is
+in [`docs/api/API.md`](docs/api/API.md) § "Paper Trading".
+
+```text
+src/features/paper-trading/
+├── store/use-paper-trading-account-store.ts   "my account" id, persisted to localStorage
+├── hooks/use-paper-trading-data.ts             account/order/position/summary queries + mutations
+├── lib/format-pnl.ts                           the one place a signed PnL figure is formatted
+├── components/
+│   ├── account-summary-card.tsx                balance, realized PnL, unrealized PnL, total equity
+│   ├── create-account-dialog.tsx               open a new account (name, starting balance)
+│   ├── order-form.tsx                          symbol / side / quantity — market orders only
+│   ├── positions-table.tsx                     open positions, marked to a live price
+│   ├── order-history-table.tsx                 fill price, source, slippage/fee — always visible
+│   └── live-data-chip.tsx                       page-level "live data or fallback" hint
+└── paper-trading-page.tsx                       page composition root
+```
+
+**"My account" is a `localStorage`-remembered id, not a server-side
+identity.** Nothing on this platform authenticates a user, so
+`usePaperTradingAccountStore` (the same deliberately-durable-not-session-
+scoped `persist`+`localStorage` exception `use-favorite-features-store.ts`
+already established, rather than the platform's usual `sessionStorage`
+convention) is what lets a trader open the page tomorrow and see the same
+account. `GET /paper-trading/accounts` backs a small account switcher
+(an `Autocomplete` in the Account section) as the recovery path if that's
+ever cleared, or a different account is wanted — there is no dedicated
+"Account History" table beyond this, since an account has no reopenable
+"run" the way a training job or backtest does.
+
+**Placing an order is a mutation behind a confirmation, not a bare
+submit.** `OrderForm` reuses `MarketSelector` (the chart module's own
+generic, data-driven market picker) for the symbol field — no order type
+selector at all, since this feature is market-orders-only by spec — and
+opens `ConfirmActionDialog` (the same "are you sure" pattern used
+elsewhere for a consequential action) before `usePlacePaperOrder` actually
+fires, since a fill spends real (simulated) cash or reduces a real
+position and cannot be undone.
+
+**Three of the task's four named reuses are literal; the fourth was
+deliberately substituted.** `MarketSelector`, `EmptyStateNotice`, and
+`ConfirmActionDialog` are used verbatim. `ConnectionStatus` — the Live
+Market Dashboard's own connection panel — was not: its props
+(`connectionState`, `lastMessageAt`, `reconnectAttempt`, `latencyMs`) are
+tied to `useMarketStream`, a live WebSocket hook this page has no other
+reason to run, and wiring up a full WS connection just to drive a status
+chip would be disproportionate machinery for what this page actually
+needs. In its place, `LiveDataChip` reads the _same_ `/system/status` poll
+`live-status.tsx`/the Health page already use (`useSystemStatus`, no new
+data path) for a lightweight, page-level "live data or stored-candle
+fallback" hint. The accurate signal this feature actually promises —
+`price_source`/`is_stale_price` — lives on every row of the order history
+table instead, not in a page-level chip.
+
+**`OrderHistoryTable` never hides a fill's own cost.** Fill price, price
+source (with a warning chip when `is_stale_price` is true, plus a tooltip
+naming the quote's own age), slippage applied, fee applied, and — for a
+sell — realized PnL are all their own visible columns, never a
+drill-down. `PositionsTable` marks every open position to a live price
+(`current_price`, the _same_ price-lookup path a fill would use, no
+slippage/fee applied — a mark-to-market valuation, not a hypothetical
+exit fill) and its own `unrealized_pnl`. Both tables, plus
+`AccountSummaryCard`, format every signed PnL figure through the one
+shared `formatSignedCurrency` (`lib/format-pnl.ts`) — sign _before_ the
+dollar sign (`-$50.00`, not `$-50.00`), colored green/red/neutral by sign,
+computed in exactly one place so the three surfaces never drift into
+inconsistent formatting.
+
+**Testing.** `format-pnl.test.ts` (sign placement and rounding, in
+isolation). `order-history-table.test.tsx` (fill price/source/slippage/fee
+all rendered, a dash for a buy's null realized PnL, a real value for a
+sell's, a stale fallback marked with its warning chip, an empty-history
+message). `positions-table.test.tsx` (a row's own quantity/prices/PnL,
+positive and negative signed formatting, an empty-positions message).
+`paper-trading-page.test.tsx` covers the whole page end to end: the
+empty-account prompt, opening an account and seeing its summary, placing
+a buy order and the mutation firing with the exact expected body, and a
+surfaced order error.
+
 ## State management
 
 - Server state: TanStack Query (`src/lib/query/queryClient.ts`).

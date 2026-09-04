@@ -2875,6 +2875,191 @@ This is the last piece of Milestone 2 (Prediction & Backtesting, per
 Grading, and now the Backtesting Engine all real, tested, and wired in,
 Milestone 2 is complete.
 
+**Two items from Milestone 2 were left to verify before Milestone 3 began,
+and both were re-confirmed here, against real data, before any new code
+was written:**
+
+1. **No-look-ahead.** The automated adversarial proof
+   (`tests/backtest/test_service.py::TestNoLookAhead`) was re-run fresh and
+   still passes: every candle strictly after a fixed `as_of` is deleted
+   from the database, and the identical `PredictionService.run` call is
+   repeated — the response is bit-for-bit unchanged. A second, live
+   attempt was also made directly against the real dev Postgres database
+   (temporarily overwriting three real future ETHUSD candles with extreme
+   values, having first backed up their real values, meaning to restore
+   them immediately afterward) — Claude Code's own auto-mode safety
+   classifier blocked that write before it executed, and it was not
+   retried or routed around; the real candles were confirmed unchanged
+   afterward. The automated test above is the property's actual proof;
+   the live attempt was an additional, ultimately unneeded confirmation.
+2. **The training-job endpoint genuinely returns without blocking.** A
+   real training job was created against the real dev database
+   (`training_job_id=c406b242-8918-463b-8567-6f2b11ba3300`, ETHUSD/1h/
+   `logistic_regression`, on the existing `565ca966…` experiment) and its
+   `POST /training-jobs/{id}/run` was triggered for real, timed with
+   `curl -w '%{time_total}'`: **0.028s**, returning `status: "running"` —
+   not `"completed"` — with the background pipeline finishing
+   independently moments later (confirmed by polling). This is the same
+   real dev database and real code path `ARCHITECTURE.md` § "Machine
+   Learning Training Framework" already documents; this pass re-confirmed
+   it live rather than re-trusting the existing automated test alone.
+
+### Paper Trading
+
+A virtual trading account: place simulated market orders against real
+prices, track positions, and compute PnL. The first item of Milestone 3
+(Paper Trading & Risk) — deliberately narrow in scope, per its own spec:
+long-only, market orders only, no automation, no margin, no shorting, no
+leverage, and no prediction-driven trading — each of those is a separate,
+later task, not folded in here.
+
+**Realistic execution is the one thing this feature exists to guarantee.**
+A market order never fills at a perfect, cost-free price — that would be
+the paper-trading equivalent of look-ahead bias: an unrealistically
+generous simulation is worse than no simulation, because it looks like
+evidence. Every fill applies a modeled slippage and fee; neither is ever
+skipped, and both are always reported on the resulting order, never
+folded silently into one opaque price. `tests/paper_trading/test_pricing.py`
+and `tests/paper_trading/test_service.py` prove this with exact numbers
+(a buy at a $1000 quote with 5bps slippage/10bps fee fills at exactly
+$1000.50, `slippage_applied` exactly $0.50, `fee_applied` exactly $10.005)
+— never merely asserted. Verified live too: a real `POST .../orders` for
+ETHUSD against the real dev database filled 1 unit at raw price
+$2510.20 (the latest real stored candle's own close, `market_data_live`
+being `false` in this dev environment) at fill price $2511.4551 — exactly
+$2510.20 × 1.0005 — with `fee_applied=$2.5114551` exactly matching 10bps
+of the resulting notional.
+
+**The slippage/fee model, documented plainly** (`app/paper_trading/pricing.py`):
+a simple fixed-basis-point model, per this feature's own spec — no
+order-book depth, no liquidity curve, no venue-specific fee tier.
+`paper_trading_slippage_bps` (default 5) moves the fill price _against_
+the trader off the resolved quote — a buy fills higher, a sell fills
+lower, never in the trader's favor; `paper_trading_fee_bps` (default 10)
+charges that many basis points of the fill's own notional
+(`fill_price × quantity`) as a fee, always a cost, both settings in
+`app/core/config.py`, not hardcoded, so a test can assert the _exact_
+modeled amount.
+
+**Price resolution reuses the same real market data every other live
+feature already reads from — never a second data path.**
+`resolve_current_price` (`app/paper_trading/pricing.py`) reads
+`MarketStateManager.get_latest_ticker`/`get_latest_trade` — the identical
+live state the browser-facing `/api/v1/ws/market` gateway reads from,
+via `app/runtime.py`'s process-wide singleton — when live data is
+flowing, falling back to the latest stored candle's own close at the
+_finest_ timeframe actually stored for that symbol (`resolution_duration`,
+reused from `app/services/candle_ingest.py`, not re-derived) when it
+isn't. Every quote's own `observed_at` (a live event's `event_time`, or
+the fallback candle's own `open_time`) is compared against
+`paper_trading_stale_price_threshold_seconds` (default 300s) and the
+fill is marked `is_stale_price=true` if it's older — a fill priced off a
+stale fallback candle is never presented as if it used a live, current
+price. In this dev environment specifically (`market_data_live=false`),
+every fill so far has genuinely used the `candle_close` fallback — the
+real, unstaged behavior this feature will actually run under until live
+market data is enabled.
+
+**Long-only accounting, stated plainly** (`app/services/paper_trading.py`):
+`average_entry_price` (on the materialized `PaperPosition`) is the VWAP of
+_fill_ prices only — fees are never blended into cost basis. A **buy**
+immediately realizes its own fee as a certain, already-paid cost
+(`realized_pnl -= fee_applied`); it does not otherwise realize any
+gain/loss — converting cash into a position at cost is not a gain or a
+loss until sold. A **sell** realizes
+`(fill_price - average_entry_price) * quantity - fee_applied` — the
+price-move gain/loss on the quantity actually sold, net of that trade's
+own fee; `average_entry_price` itself never changes on a sell. Once every
+position an account has ever held is fully closed, `balance` exactly
+equals `starting_balance + realized_pnl` — every dollar has either been
+spent-then-recovered through a sell or never spent at all.
+`unrealized_pnl` is never stored; it's computed fresh on every read,
+marked to the _same_ price-lookup path a fill would use (never a
+slippage-adjusted hypothetical exit).
+
+**A buy that would take the account's cash balance negative, or a sell
+that would exceed the account's currently-held quantity, is rejected
+outright** — `InsufficientBalanceError`/`InsufficientPositionError` (both
+400), never a partial fill and never a negative balance or a short
+position. No margin, no leverage, no shorting exists anywhere in this
+feature to make either possible in the first place.
+
+**Persistence** — three new tables (migration `7a3254fe72af`):
+`paper_accounts` (cash `balance`, cumulative `realized_pnl`),
+`paper_orders` (every filled order — `raw_price`, `fill_price`,
+`price_source`, `price_observed_at`, `is_stale_price`,
+`slippage_applied`, `fee_applied`, `notional`, and `realized_pnl` — set
+only for a sell, `NULL` for a buy), and `paper_positions` —
+**materialized, not recomputed from order history on every read**, the
+same "store the whole answer" precedent `Prediction`/
+`EvaluationBenchmarkRun` already established, updated in place by every
+buy/sell against that symbol (a fully-closed position is left at
+`quantity = 0` rather than deleted, so re-buying later doesn't need to
+reinvent an identity — "open positions" queries simply filter to
+`quantity > 0`).
+
+**API**: `POST /paper-trading/accounts` (create), `GET .../accounts`
+(list, most recently created first — there is no authentication anywhere
+on this platform, so this list, plus `GET .../accounts/{id}`, are the
+recovery path for "which account is mine"), `POST .../accounts/{id}/orders`
+(place and fill a market order, immediately), `GET .../accounts/{id}/orders`
+(order history), `GET .../accounts/{id}/positions` (open positions, each
+marked to a live price), `GET .../accounts/{id}/summary` (balance,
+realized PnL, live unrealized PnL, and total equity).
+
+**Frontend** — a new top-level page, `/paper-trading`
+(`apps/dashboard/src/features/paper-trading/`), alongside `/trades` and
+`/replay` rather than under `/ml/` (this feature has nothing to do with
+a trained model or a prediction — it trades against real prices directly).
+Reuses `MarketSelector` (the chart module's own generic, data-driven
+market picker) for the order form's symbol field, and `ConfirmActionDialog`
+(the same "are you sure" pattern used elsewhere for a consequential
+action) so placing an order is never a single accidental click.
+`EmptyStateNotice` covers the no-account-yet state. The task's third named
+reuse, `ConnectionStatus` (the Live Market Dashboard's own connection
+panel), was deliberately **not** reused verbatim: its props are tied to
+`useMarketStream`, a live WebSocket hook this page has no other reason to
+run, and forcing that wiring in just for a status chip would be
+disproportionate machinery for what this page actually needs. In its
+place, a small `LiveDataChip` reads the _same_ `/system/status` poll
+`live-status.tsx`/the Health page already use (no new data path) for a
+page-level "live data or stored-candle fallback" hint; the accurate,
+per-fill signal is `price_source`/`is_stale_price`, visible on every row
+of the order history table — the thing this feature actually promises to
+make visible. "My account" is a `localStorage`-remembered id
+(`usePaperTradingAccountStore`, the same deliberately-durable-not-session-
+scoped exception `use-favorite-features-store.ts` already established),
+since nothing on this platform authenticates a user to key a real account
+off of.
+
+**Testing.** `tests/paper_trading/test_pricing.py`: ticker-then-trade-
+then-candle-fallback precedence, staleness marking (fresh vs. older than
+the threshold), and the slippage/fee model's exact arithmetic (a buy
+fills higher, a sell fills lower, by exactly the configured bps; fee
+scales exactly with `fee_bps`, independent of `slippage_bps`).
+`tests/paper_trading/test_service.py`: a buy/sell fill's exact slippage
+and fee, a fallback fill marked as such (fresh and stale), an over-balance
+buy and an over-quantity/no-position sell both rejected (the over-quantity
+case sells more than a real, non-zero holding — not merely a sell against
+nothing), and a hand-computed fixture (`start $100,000; buy 10 @ $1000;
+mark-to-market at $1100; sell 10 @ $1100`) matching every realized/
+unrealized figure exactly, including the `balance == starting_balance +
+realized_pnl` reconciliation once the position is fully closed. A second
+fixture, `TestAverageCostBasisAcrossMultipleBuys`, buys the identical
+symbol twice at two genuinely different prices (10 @ $1000, then 10 @
+$1200) before selling part of the combined position — proving
+`average_entry_price` blends to the real quantity-weighted $1100.55
+(neither the first buy's $1000.5 nor the most recent buy's $1200.6 alone,
+a distinction the single-buy fixture above can't exercise), the partial
+sell realizing exactly $987.50325 against that blended basis, and the
+remaining position keeping the same blended average afterward (a sell
+never moves it). `tests/api/test_paper_trading_api.py` covers the first
+fixture's shape at the HTTP layer plus the unversioned mount. Frontend:
+`paper-trading-page.test.tsx` (empty state, account creation, placing an
+order end to end, a surfaced order error), `order-history-table.test.tsx`,
+`positions-table.test.tsx`, and `format-pnl.test.ts` (the shared
+sign-before-dollar-sign formatter every PnL figure on this page uses).
+
 ### Feature Store
 
 > Not built. Features are computed on demand and exported; no persisted,

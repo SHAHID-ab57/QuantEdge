@@ -1493,6 +1493,88 @@ Engine"). `backtest_run_not_found` (404 — unknown run id) and
 `invalid_backtest_sort` (400 — an unsupported `sort`/`dir` combination on
 the list endpoint) round out the rest.
 
+### Paper Trading
+
+| Method | Path                                            | Purpose                                         |
+| ------ | ----------------------------------------------- | ----------------------------------------------- |
+| POST   | `/api/v1/paper-trading/accounts`                | Open a new virtual trading account              |
+| GET    | `/api/v1/paper-trading/accounts`                | List every account, most recently created first |
+| GET    | `/api/v1/paper-trading/accounts/{id}`           | Get one account                                 |
+| POST   | `/api/v1/paper-trading/accounts/{id}/orders`    | Place and fill a market order                   |
+| GET    | `/api/v1/paper-trading/accounts/{id}/orders`    | List an account's own order history             |
+| GET    | `/api/v1/paper-trading/accounts/{id}/positions` | List an account's currently-open positions      |
+| GET    | `/api/v1/paper-trading/accounts/{id}/summary`   | Balance, realized PnL, and live unrealized PnL  |
+
+Full design in `ARCHITECTURE.md` § "Paper Trading". A virtual trading
+account: place simulated market orders against real prices, track
+positions, and compute PnL. Long-only, market orders only, no automation
+— no margin, no shorting, no leverage, and no prediction-driven trading
+exist anywhere in this surface.
+
+**Place an order** (`POST /paper-trading/accounts/{id}/orders`):
+
+```jsonc
+// Request
+{ "symbol": "ETHUSD", "side": "buy", "quantity": "10" }
+
+// Response (201) — fills immediately and completely; there is no
+// pending/partial-fill state
+{
+  "id": "7cf445c8-...",
+  "account_id": "2cff34d9-...",
+  "symbol": "ETHUSD",
+  "side": "buy",
+  "quantity": "10.000000000000000000",
+  "raw_price": "1000.000000000000000000", // the resolved quote, before slippage
+  "fill_price": "1000.500000000000000000", // what the account was actually charged — never a perfect fill
+  "fill_time": "2026-01-05T12:00:03Z",
+  "price_source": "ticker", // "ticker" | "trade" | "candle_close" — which real data this used
+  "price_observed_at": "2026-01-05T12:00:00Z",
+  "is_stale_price": false, // true if price_observed_at was already old at fill time
+  "slippage_applied": "0.500000000000000000", // always visible, never folded into fill_price
+  "fee_applied": "10.005000000000000000",
+  "notional": "10005.000000000000000000", // fill_price * quantity
+  "realized_pnl": null, // set only for a sell; null for a buy
+  "created_at": "2026-01-05T12:00:03Z",
+}
+```
+
+**Realistic execution, always** — a market order never fills at a
+perfect, cost-free price. `raw_price` (the quote resolved just before
+this fill) and `fill_price` (what the account was actually charged/
+credited) are both always present, so `slippage_applied` is never a
+hidden adjustment; `fee_applied` is charged on the fill's own notional.
+Both are a simple fixed-basis-point model (`paper_trading_slippage_bps`/
+`paper_trading_fee_bps`, `app/core/config.py`), documented in full in
+`ARCHITECTURE.md` § "Paper Trading".
+
+**Price resolution**: the current live ticker/trade if market data is
+flowing, otherwise the latest stored candle's own close — never
+interpolated, never a second, hypothetical price. `price_source`/
+`price_observed_at`/`is_stale_price` record exactly which data a fill
+used and how fresh it was; a fallback price older than
+`paper_trading_stale_price_threshold_seconds` (default 300s) is marked
+`is_stale_price: true` rather than presented as current.
+
+**Long-only, no margin**: a buy that would take the account's cash
+balance negative, or a sell that would exceed the account's currently-held
+quantity, is rejected outright — never a partial fill.
+
+**PnL**: `GET .../positions` marks every open position to a live price
+(`unrealized_pnl`, mark-to-market — no slippage/fee applied, since
+nothing has actually been sold); `GET .../summary` reports the account's
+own cash `balance`, cumulative `realized_pnl` (updated the instant a
+trade closes or reduces a position), the summed `unrealized_pnl` across
+every open position, and `total_equity` (`balance` plus every open
+position's own live mark-to-market value).
+
+**Error codes**: `paper_account_not_found` (404), `market_not_found`
+(404), `no_price_available` (404 — no live ticker/trade and no candle has
+ever been stored for this symbol), `insufficient_balance` (400 — a buy
+would take the balance negative), `insufficient_position` (400 — a sell
+would exceed the held quantity), `invalid_paper_order_sort` (400 — an
+unsupported `sort`/`dir` combination on the order history endpoint).
+
 ### Platform health
 
 | Method | Path                     | Purpose                                            |

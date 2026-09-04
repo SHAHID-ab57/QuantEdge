@@ -110,6 +110,26 @@ class Settings(BaseSettings):
     prediction_grading_enabled: bool = True
     prediction_grading_interval_seconds: int = 300
 
+    #: Paper Trading's fixed-basis-point execution model
+    #: (`app/paper_trading/pricing.py` documents it in full) — a market
+    #: order's fill price always moves this many basis points *against* the
+    #: trader off the resolved quote, and this many basis points of the
+    #: fill's own notional are charged as a fee. Never zero by default: an
+    #: unrealistically generous simulation is worse than none.
+    paper_trading_slippage_bps: int = 5
+    paper_trading_fee_bps: int = 10
+
+    #: How old a resolved price quote (a live ticker/trade's own event_time,
+    #: or a fallback candle's own open_time) can be before a fill is marked
+    #: `is_stale_price=True` rather than presented as current.
+    paper_trading_stale_price_threshold_seconds: int = 300
+
+    #: Paper Trading History pagination.
+    paper_trading_accounts_default_limit: int = 20
+    paper_trading_accounts_max_limit: int = 100
+    paper_trading_orders_default_limit: int = 20
+    paper_trading_orders_max_limit: int = 100
+
 
 @lru_cache
 def get_settings() -> Settings:

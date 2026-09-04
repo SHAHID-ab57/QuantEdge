@@ -32,7 +32,7 @@ a versioned dataset citation, a recorded experiment) — it is now complete.
 | --------- | -------------------------------------------- | ----------- |
 | 1         | Research & Training Platform                 | COMPLETE    |
 | 2         | Prediction & Backtesting                     | COMPLETE    |
-| 3         | Paper Trading & Risk                         | NOT STARTED |
+| 3         | Paper Trading & Risk                         | IN PROGRESS |
 | 4         | Data Breadth                                 | NOT STARTED |
 | 5         | Production Hardening                         | NOT STARTED |
 | 6         | Live Trading (gated on extensive validation) | NOT STARTED |
@@ -82,9 +82,23 @@ jobs use — no second mechanism. See `ARCHITECTURE.md` § "Backtesting
 Engine". Every capability in this milestone has real code, passing tests,
 and is wired into the running API and dashboard.
 
-**Milestone 3 — Paper Trading & Risk.** Simulated order execution against
-live prices, a risk engine (position sizing, exposure limits, drawdown
-guards). Not started; see `docs/architecture/DomainModel.md`/
+Before Milestone 3 began, two items left outstanding from Milestone 2 were
+re-verified: the backtesting no-look-ahead adversarial test was re-run
+fresh and still passes, and a real training job was created and run
+against the real dev database, timed at 0.028s to return `status:
+"running"` (not `"completed"`), with the background pipeline finishing
+independently moments later. See `ARCHITECTURE.md` § "Paper Trading" for
+the full account.
+
+**Milestone 3 — Paper Trading & Risk (IN PROGRESS).** Paper Trading
+(`app/paper_trading/`, `/paper-trading`) is the first item and is
+complete: a virtual trading account places simulated market orders
+against real prices — a modeled slippage and fee always applied, never a
+perfect, cost-free fill — tracks materialized positions, and computes
+realized/unrealized PnL, long-only with no margin, no shorting, no
+leverage, and no automation. See `ARCHITECTURE.md` § "Paper Trading". A
+risk engine (position sizing, exposure limits, drawdown guards) has not
+been started; see `docs/architecture/DomainModel.md`/
 `ContainerArchitecture.md` for the intended bounded contexts.
 
 **Milestone 4 — Data Breadth.** The additional external data connectors

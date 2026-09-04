@@ -8,6 +8,68 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Paper Trading — a virtual trading account: place simulated market
+  orders against real prices, track positions, and compute PnL.** The
+  first item of Milestone 3 (Paper Trading & Risk). Long-only, market
+  orders only, no automation — no margin, no shorting, no leverage, and
+  no prediction-driven trading, each a separate, later task.
+  - **Realistic execution, always — proven by exact numbers, not
+    asserted.** A market order never fills at a perfect, cost-free price:
+    a modeled slippage always moves the fill _against_ the trader, and a
+    modeled fee is always charged on the fill's own notional. Both are a
+    simple fixed-basis-point model (`paper_trading_slippage_bps`/
+    `paper_trading_fee_bps`, `app/core/config.py`), documented plainly in
+    `app/paper_trading/pricing.py`. Verified live against the real dev
+    database too: a real ETHUSD buy filled at exactly `$2510.20 × 1.0005`
+    with a fee exactly 10bps of notional.
+  - **Price resolution reuses the same real market data every other live
+    feature already reads from.** `MarketStateManager.get_latest_ticker`/
+    `get_latest_trade` (the identical live state the browser-facing
+    WebSocket gateway reads) when live data is flowing; the latest stored
+    candle's own close at the finest timeframe actually stored, when it
+    isn't — never interpolated. A fallback price older than
+    `paper_trading_stale_price_threshold_seconds` (default 300s) is
+    marked `is_stale_price: true` on the fill, never presented as current.
+  - **Long-only accounting, stated plainly**: `average_entry_price` is
+    the VWAP of fill prices only (fees never blended into cost basis); a
+    buy immediately realizes its own fee as a certain cost; a sell
+    realizes `(fill_price - average_entry_price) * quantity - fee`.
+    Once every position is fully closed, `balance` exactly equals
+    `starting_balance + realized_pnl` — verified against a hand-computed
+    fixture sequence, not just asserted.
+  - **A buy that would take the balance negative, or a sell that would
+    exceed the held quantity, is rejected outright** —
+    `insufficient_balance`/`insufficient_position` (400), never a partial
+    fill, never a negative balance, never a short position.
+  - **New tables** (migration `7a3254fe72af`): `paper_accounts`,
+    `paper_orders` (`raw_price`, `fill_price`, `price_source`,
+    `price_observed_at`, `is_stale_price`, `slippage_applied`,
+    `fee_applied`, `notional`, `realized_pnl`), and `paper_positions` —
+    materialized, never recomputed from order history on read.
+  - **New endpoints**: `POST /paper-trading/accounts` (create),
+    `GET .../accounts` (list), `GET .../accounts/{id}`,
+    `POST .../accounts/{id}/orders` (place and fill), `GET .../orders`,
+    `GET .../positions`, `GET .../summary`.
+  - **New top-level page, `/paper-trading`**
+    (`apps/dashboard/src/features/paper-trading/`), alongside `/trades`
+    and `/replay` rather than under `/ml/`: an account summary card, an
+    order form (symbol/side/quantity, confirmed before it fires), a
+    positions table, and an order history table where fill price,
+    source, and the slippage/fee actually applied are always visible
+    columns, never hidden behind a drill-down.
+  - Full design in `ARCHITECTURE.md` § "Paper Trading"; API surface in
+    `docs/api/API.md` § "Paper Trading"; tests in
+    `services/api/TESTING.md` § "Testing Paper Trading" and
+    `docs/testing/TESTING.md`.
+
+- **Two outstanding Milestone 2 verification items closed out before this
+  work began** (`ARCHITECTURE.md` § "Paper Trading" has the full account):
+  the backtesting no-look-ahead adversarial test was re-run fresh and
+  still passes; a real training job was created and run against the real
+  dev database, timed at 0.028s to return `status: "running"` — not
+  `"completed"` — with the background pipeline finishing independently
+  moments later.
+
 - **Backtesting Engine — given a trained model and a historical date
   range, generate a prediction at each step using only data available as
   of that point, grade each one immediately, and report aggregate

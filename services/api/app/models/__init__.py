@@ -17,6 +17,7 @@ from app.models.experiment import (
 )
 from app.models.market import Market
 from app.models.ml_dataset_build import MLDatasetBuild
+from app.models.paper_trading import PaperAccount, PaperOrder, PaperPosition
 from app.models.prediction import Prediction
 from app.models.training import TrainingJob, TrainingJobLog
 
@@ -33,6 +34,9 @@ __all__ = [
     "ExperimentTag",
     "Market",
     "MLDatasetBuild",
+    "PaperAccount",
+    "PaperOrder",
+    "PaperPosition",
     "Prediction",
     "TrainingJob",
     "TrainingJobLog",

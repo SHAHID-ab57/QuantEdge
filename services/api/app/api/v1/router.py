@@ -12,6 +12,7 @@ from app.api.v1.endpoints.indicators import router as indicators_router
 from app.api.v1.endpoints.market_data import router as market_data_router
 from app.api.v1.endpoints.market_stream import router as market_stream_router
 from app.api.v1.endpoints.ml_datasets import router as ml_datasets_router
+from app.api.v1.endpoints.paper_trading import router as paper_trading_router
 from app.api.v1.endpoints.prediction import router as prediction_router
 from app.api.v1.endpoints.system import router as system_router
 from app.api.v1.endpoints.training import router as training_router
@@ -26,6 +27,7 @@ router.include_router(training_router)
 router.include_router(evaluation_router)
 router.include_router(prediction_router)
 router.include_router(backtest_router)
+router.include_router(paper_trading_router)
 router.include_router(indicators_router)
 router.include_router(market_data_router)
 router.include_router(market_stream_router)

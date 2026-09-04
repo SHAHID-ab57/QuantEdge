@@ -228,15 +228,17 @@ hypothetical exit fill.
 
 All mounted under both `/api/v1/*` and unversioned `/*`, tag `paper-trading`.
 
-| Method | Path                                             | Purpose                                                  | Success status |
-| ------ | ------------------------------------------------ | -------------------------------------------------------- | -------------- |
-| POST   | `/paper-trading/accounts`                        | Open a new virtual trading account                       | 201            |
-| GET    | `/paper-trading/accounts`                        | List every account, most recently created first          | 200            |
-| GET    | `/paper-trading/accounts/{account_id}`           | Get one account                                          | 200            |
-| POST   | `/paper-trading/accounts/{account_id}/orders`    | Place and fill one market order                          | 201            |
-| GET    | `/paper-trading/accounts/{account_id}/orders`    | This account's own order history, paginated + sortable   | 200            |
-| GET    | `/paper-trading/accounts/{account_id}/positions` | This account's currently-open positions                  | 200            |
-| GET    | `/paper-trading/accounts/{account_id}/summary`   | Balance, realized PnL, live unrealized PnL, total equity | 200            |
+| Method | Path                                                  | Purpose                                                                | Success status |
+| ------ | ----------------------------------------------------- | ---------------------------------------------------------------------- | -------------- |
+| POST   | `/paper-trading/accounts`                             | Open a new virtual trading account                                     | 201            |
+| GET    | `/paper-trading/accounts`                             | List every account, most recently created first                        | 200            |
+| GET    | `/paper-trading/accounts/{account_id}`                | Get one account                                                        | 200            |
+| POST   | `/paper-trading/accounts/{account_id}/orders`         | Place and fill one market order                                        | 201            |
+| GET    | `/paper-trading/accounts/{account_id}/orders`         | This account's own order history, paginated + sortable                 | 200            |
+| GET    | `/paper-trading/accounts/{account_id}/positions`      | This account's currently-open positions                                | 200            |
+| GET    | `/paper-trading/accounts/{account_id}/summary`        | Balance, realized PnL, live unrealized PnL, total equity               | 200            |
+| GET    | `/paper-trading/accounts/{account_id}/risk`           | Current exposure %/drawdown %, distance to each limit, halted status   | 200            |
+| POST   | `/paper-trading/accounts/{account_id}/resume-trading` | Clear a drawdown halt, resetting `peak_balance` to the current balance | 200            |
 
 #### `POST /paper-trading/accounts` — request
 
@@ -244,22 +246,47 @@ All mounted under both `/api/v1/*` and unversioned `/*`, tag `paper-trading`.
 {
   "name": "My Account", // optional, max 200 chars, null if omitted
   "starting_balance": "100000", // required, > 0, decimal string
+  "max_position_size_pct": "10", // optional, > 0, <= 100 — falls back to the platform default (10)
+  "max_exposure_pct": "50", // optional, > 0, <= 100 — falls back to the platform default (50)
+  "max_drawdown_pct": "20", // optional, > 0, <= 100 — falls back to the platform default (20)
 }
 ```
 
 #### Account response shape (`PaperAccountResponse`) — every field
 
-| Field              | Type           | Notes                        |
-| ------------------ | -------------- | ---------------------------- |
-| `id`               | string (UUID)  | —                            |
-| `name`             | string \| null | —                            |
-| `starting_balance` | decimal string | Fixed at creation.           |
-| `balance`          | decimal string | Current cash.                |
-| `realized_pnl`     | decimal string | Cumulative.                  |
-| `created_at`       | ISO-8601 UTC   | e.g. `2026-09-04T10:00:00Z`. |
+| Field                   | Type           | Notes                                                             |
+| ----------------------- | -------------- | ----------------------------------------------------------------- |
+| `id`                    | string (UUID)  | —                                                                 |
+| `name`                  | string \| null | —                                                                 |
+| `starting_balance`      | decimal string | Fixed at creation.                                                |
+| `balance`               | decimal string | Current cash.                                                     |
+| `realized_pnl`          | decimal string | Cumulative.                                                       |
+| `max_position_size_pct` | decimal string | Default `10`.                                                     |
+| `max_exposure_pct`      | decimal string | Default `50`.                                                     |
+| `max_drawdown_pct`      | decimal string | Default `20`.                                                     |
+| `peak_balance`          | decimal string | Highest balance ever reached; reset to current balance on resume. |
+| `trading_halted`        | boolean        | `true` once a drawdown breach halts the account.                  |
+| `created_at`            | ISO-8601 UTC   | e.g. `2026-09-04T10:00:00Z`.                                      |
 
 `GET .../accounts` wraps a page of these in
-`{ accounts: [...], total, limit, offset }`.
+`{ accounts: [...], total, limit, offset }`. `POST .../resume-trading`
+(no request body) also returns this same shape.
+
+#### Risk summary response shape (`RiskSummaryResponse`, `GET .../risk`) — every field
+
+| Field                   | Type           | Notes                                                                           |
+| ----------------------- | -------------- | ------------------------------------------------------------------------------- |
+| `account_id`            | string (UUID)  | —                                                                               |
+| `balance`               | decimal string | Current cash.                                                                   |
+| `peak_balance`          | decimal string | —                                                                               |
+| `current_exposure_pct`  | decimal string | Total open-position value (current prices) as a % of current balance.           |
+| `max_exposure_pct`      | decimal string | —                                                                               |
+| `exposure_headroom_pct` | decimal string | `max_exposure_pct - current_exposure_pct`.                                      |
+| `current_drawdown_pct`  | decimal string | How far current balance has fallen below `peak_balance`, as a %.                |
+| `max_drawdown_pct`      | decimal string | —                                                                               |
+| `drawdown_headroom_pct` | decimal string | `max_drawdown_pct - current_drawdown_pct`.                                      |
+| `max_position_size_pct` | decimal string | Threshold only — checked per order, per symbol, not as one account-wide figure. |
+| `trading_halted`        | boolean        | —                                                                               |
 
 #### `POST /paper-trading/accounts/{account_id}/orders` — request (`PaperOrderRequest`)
 
@@ -332,17 +359,88 @@ account's open-position count is always small).
 
 ### 1.8 Error codes
 
-| HTTP | `code`                     | Raised when                                                          |
-| ---- | -------------------------- | -------------------------------------------------------------------- |
-| 400  | `insufficient_balance`     | A buy's `notional + fee` exceeds the account's current cash balance. |
-| 400  | `insufficient_position`    | A sell's quantity exceeds what the account currently holds.          |
-| 400  | `invalid_paper_order_sort` | An unsupported `sort`/`dir` on `GET .../orders`.                     |
-| 404  | `paper_account_not_found`  | Unknown `account_id`.                                                |
-| 404  | `market_not_found`         | Unknown market `symbol` (reused from `MarketNotFoundError`).         |
-| 404  | `no_price_available`       | No live ticker/trade and no candle ever stored for the symbol.       |
+| HTTP | `code`                       | Raised when                                                                                                         |
+| ---- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| 400  | `insufficient_balance`       | A buy's `notional + fee` exceeds the account's current cash balance.                                                |
+| 400  | `insufficient_position`      | A sell's quantity exceeds what the account currently holds.                                                         |
+| 400  | `trading_halted`             | Any order attempted while `trading_halted` is `true`.                                                               |
+| 400  | `max_position_size_exceeded` | This order's resulting position value exceeds `max_position_size_pct`.                                              |
+| 400  | `max_exposure_exceeded`      | Total exposure after this order exceeds `max_exposure_pct`.                                                         |
+| 400  | `invalid_paper_order_sort`   | An unsupported `sort`/`dir` on `GET .../orders`.                                                                    |
+| 404  | `paper_account_not_found`    | Unknown `account_id`.                                                                                               |
+| 404  | `market_not_found`           | Unknown market `symbol` (reused from `MarketNotFoundError`).                                                        |
+| 404  | `no_price_available`         | No live ticker/trade and no candle ever stored for the symbol.                                                      |
+| 409  | `account_update_conflict`    | The concurrency guard's bounded retries were all lost (see § 1.9) — practically unreachable by a real two-way race. |
 
 Every error is a structured `{code, detail}` JSON body via `AppError`
-subclasses, matching every other domain error on this platform.
+subclasses, matching every other domain error on this platform. Every
+risk-limit rejection's `detail` names the specific limit and the actual
+numbers involved (e.g. _"This order would bring the 'ETHUSD' position to
+a value of 15000.00 — 15% of the current balance of 100000.00 —
+exceeding the 10% max position size limit for this account"_) — never a
+generic message.
+
+### 1.9 Pre-trade risk limits
+
+Three account-level percentage limits, extended onto `paper_accounts`
+(migration `c1e00878df40`), plus the running state that enforces them:
+
+| Column                  | Default | Meaning                                                                                                                    |
+| ----------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `max_position_size_pct` | `10`    | A single order's resulting position value may never exceed this % of current balance.                                      |
+| `max_exposure_pct`      | `50`    | Total open-position value (every symbol, current prices) may never exceed this % of current balance.                       |
+| `max_drawdown_pct`      | `20`    | If balance falls below `peak_balance * (1 - this/100)`, `trading_halted` is set.                                           |
+| `peak_balance`          | —       | The highest balance this account has ever reached — never decreases (except being reset by an explicit resume, see below). |
+| `trading_halted`        | `false` | Set once balance breaches the drawdown limit; cleared only by an explicit resume.                                          |
+
+Settable per account at creation (`PaperAccountCreateRequest`'s optional
+`max_position_size_pct`/`max_exposure_pct`/`max_drawdown_pct` fields);
+falls back to this platform's configured defaults
+(`paper_trading_default_max_position_size_pct`/`_max_exposure_pct`/
+`_max_drawdown_pct`, `app/core/config.py`) when omitted.
+
+**Check order in `PaperTradingService.place_order`, every order:**
+
+1. **Halted?** Reject (`trading_halted`) before anything else.
+2. **Position sizing** — this order's _resulting_ quantity in its own
+   symbol, valued at the _current_ resolved quote (never the price a
+   position was originally opened at), against `max_position_size_pct`
+   of _current_ balance.
+3. **Exposure** — every _other_ open position's current value (the same
+   live-price-with-fallback lookup `GET .../positions` already uses) plus
+   this order's own resulting value, against `max_exposure_pct` of
+   current balance.
+
+**After the trade completes** (never before, never blocking the trade
+that causes it): `peak_balance = max(peak_balance, new_balance)`; if
+`new_balance < peak_balance * (1 - max_drawdown_pct/100)`,
+`trading_halted = true`. This can only flip `false → true` here — a
+halted account is rejected at step 1 before ever reaching this point
+again.
+
+**No self-healing.** Balance moving back above the threshold on its own
+never clears the flag — only `POST .../resume-trading` does, and that
+call _also_ resets `peak_balance` to the account's current balance
+(without the reset, an account resumed while still deep in drawdown
+against its old peak would re-halt after its very next order, regardless
+of that order's own direction).
+
+**Concurrency guard** — the same core primitive
+`TrainingJobRepository.try_transition_to_running` uses for the
+training-job duplicate-run race (a single conditional `UPDATE`, its
+matched-row-count telling the caller whether its precondition still
+held), adapted into a bounded retry-and-recompute loop because this
+feature's precondition (current balance, current prices, every other
+open position) can't be pinned to one fixed column the way a training
+job's `'pending'` status can:
+`PaperAccountRepository.try_apply_trade_effects` runs
+`UPDATE ... WHERE balance = :expected AND trading_halted = :expected`.
+Two concurrent orders against the same account can never both still
+match an unmodified row — the loser's `UPDATE` matches zero rows, and
+`place_order` re-reads the account and every open position and retries
+(bounded at `paper_trading_max_order_attempts`, default 5) rather than
+proceeding on stale numbers. Verified empirically with two real
+concurrent requests via `asyncio.gather` — see § 3/§ 4 below.
 
 ---
 
@@ -517,7 +615,23 @@ the task's originally-named `ConnectionStatus` component, which is tied to
 `useMarketStream` (a live WebSocket hook this page has no other reason to
 run) — see `ARCHITECTURE.md` § "Paper Trading" for the full rationale.
 
-### 2.9 State management
+### 2.9 Every field — Risk Summary Panel
+
+Component: `RiskSummaryPanel` — `components/risk-summary-panel.tsx`. Data
+source: `GET .../risk` (`usePaperTradingRisk`, polled every 10s).
+
+| Element                                     | Component type                                                                        | Behavior                                                                                                                                            |
+| ------------------------------------------- | ------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| "Trading active" chip                       | MUI `Chip` (green), shown only when `trading_halted` is `false`                       | —                                                                                                                                                   |
+| Halted `Alert`                              | MUI `Alert severity="error" role="alert"`, shown only when `trading_halted` is `true` | Names the drawdown % and peak balance; carries the "Resume Trading" action inline.                                                                  |
+| Exposure row                                | Label + `{current}% / {max}% limit` text + `LinearProgress`                           | Bar colored `error` once `current_exposure_pct > max_exposure_pct`, `warning` past 80% of the limit, `primary` otherwise.                           |
+| Drawdown row                                | Same shape as Exposure                                                                | Same coloring rule, against `current_drawdown_pct`/`max_drawdown_pct`.                                                                              |
+| "Max position size" caption                 | MUI `Typography variant="caption"`                                                    | States `max_position_size_pct` as text only — no "current" figure, since this limit is checked per order/per symbol, not as one account-wide value. |
+| "Resume Trading" button (only while halted) | MUI `Button` inside the `Alert`'s action slot                                         | Opens a `ConfirmActionDialog` (title "Resume trading?"); confirming calls `useResumeTrading`'s mutation.                                            |
+| Resume error `Alert`                        | MUI `Alert severity="error" role="alert"`, shown only if the resume mutation failed   | The backend's own error message.                                                                                                                    |
+| Loading state                               | 2 `Skeleton` placeholders (a text line + a bar, twice)                                | Shown while `isLoading` and no data yet.                                                                                                            |
+
+### 2.10 State management
 
 - **Current account id** — `usePaperTradingAccountStore` (Zustand +
   `localStorage` persist, key `paper-trading-current-account`). Durable
@@ -535,8 +649,10 @@ run) — see `ARCHITECTURE.md` § "Paper Trading" for the full rationale.
 | `usePaperPortfolioSummary(id)` | `[...accountKey,'summary']`                                         | Every 10s while an account is selected |
 | `usePaperPositions(id)`        | `[...accountKey,'positions']`                                       | Every 10s while an account is selected |
 | `usePaperOrders(id, params)`   | `[...accountKey,'orders',params]`                                   | None                                   |
+| `usePaperTradingRisk(id)`      | `[...accountKey,'risk']`                                            | Every 10s while an account is selected |
 | `useCreatePaperAccount()`      | mutation; invalidates the accounts list on success                  | —                                      |
 | `usePlacePaperOrder(id)`       | mutation; invalidates every query under `accountKey(id)` on success | —                                      |
+| `useResumeTrading(id)`         | mutation; invalidates every query under `accountKey(id)` on success | —                                      |
 
 Positions and the summary poll because their unrealized PnL depends on a live
 price that moves on its own, unprompted by any user action — the same
@@ -544,18 +660,20 @@ justification `useTrainingJob` uses to poll a still-running job. Placing an
 order invalidates (rather than polls) everything, since it's a
 user-triggered, one-shot event.
 
-### 2.10 Loading, empty, and error states — summary
+### 2.11 Loading, empty, and error states — summary
 
-| State                                  | What renders                                                                                                        |
-| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| No account selected                    | `EmptyStateNotice` — "No paper trading account yet"                                                                 |
-| Remembered account id no longer exists | Same empty state (the page treats a fetch error on the remembered id as "no account", not a permanent error banner) |
-| Summary/positions loading (first load) | Skeletons (§ 2.5 / § 2.6)                                                                                           |
-| Orders loading (first load)            | 3 skeleton rows (§ 2.7)                                                                                             |
-| Account creation fails                 | Red `Alert role="alert"` under the Account section, with the server's own error message                             |
-| Placing an order fails                 | Red `Alert role="alert"` under the Place an Order section (e.g. "insufficient balance")                             |
-| No open positions                      | Centered text row in the Positions table                                                                            |
-| No orders yet                          | Centered text row in the Order History table                                                                        |
+| State                                                       | What renders                                                                                                                                                                                                              |
+| ----------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| No account selected                                         | `EmptyStateNotice` — "No paper trading account yet"                                                                                                                                                                       |
+| Remembered account id no longer exists                      | Same empty state (the page treats a fetch error on the remembered id as "no account", not a permanent error banner)                                                                                                       |
+| Summary/positions loading (first load)                      | Skeletons (§ 2.5 / § 2.6)                                                                                                                                                                                                 |
+| Risk panel loading (first load)                             | Skeletons (§ 2.9)                                                                                                                                                                                                         |
+| Orders loading (first load)                                 | 3 skeleton rows (§ 2.7)                                                                                                                                                                                                   |
+| Account creation fails                                      | Red `Alert role="alert"` under the Account section, with the server's own error message                                                                                                                                   |
+| Placing an order fails (including any risk-limit rejection) | Red `Alert role="alert"` under the Place an Order section, with the server's own specific `detail` message (e.g. "insufficient balance", or a named-limit message like "...exceeding the 10% max position size limit...") |
+| Resuming trading fails                                      | Red `Alert role="alert"` inside the Risk panel, with the server's own error message                                                                                                                                       |
+| No open positions                                           | Centered text row in the Positions table                                                                                                                                                                                  |
+| No orders yet                                               | Centered text row in the Order History table                                                                                                                                                                              |
 
 ---
 
@@ -584,9 +702,28 @@ Key files:
   fixture), `TestAverageCostBasisAcrossMultipleBuys` (two buys at different
   prices blend to a real VWAP, a partial sell realizes correctly against
   that blend, the remaining position keeps the same blended average).
+- `tests/paper_trading/test_service.py` (risk limits) —
+  `TestPositionSizeLimit` (an order over the limit rejected, one just
+  under it succeeds), `TestExposureLimit` (a position bought cheap whose
+  market value has since grown far past its entry cost makes an
+  unrelated, otherwise-trivial order rejected — proof the check uses
+  _current_, not entry, prices), `TestDrawdownHalt` (a trade that drops
+  balance past the drawdown limit halts the account _after_ completing;
+  a further order is then rejected until resumed), `TestResumeTrading`
+  (resume clears the halt _and_ resets `peak_balance`; a valid order then
+  succeeds and the account stays un-halted), and
+  `TestConcurrentExposureRace` (two real concurrent orders via
+  `asyncio.gather` that would jointly breach exposure — exactly one
+  succeeds, the other rejected with `MaxExposureExceededError`, stable
+  across repeated runs — mirrors
+  `tests/training/test_service.py::test_two_genuinely_concurrent_starts_reject_exactly_one`'s
+  exact shape).
 - `tests/api/test_paper_trading_api.py` — create/list/reopen account,
-  a realistic buy fill over HTTP, all three 400/404 error codes, order/
-  position/summary population, invalid sort.
+  a realistic buy fill over HTTP, all error codes (400/404/409), order/
+  position/summary population, invalid sort, an account's real default
+  risk limits on creation, a position-size rejection over HTTP, and a
+  full risk-summary → drawdown-halt → rejected → resume → succeeds
+  walkthrough via `GET .../risk` and `POST .../resume-trading`.
 
 ```bash
 # Frontend
@@ -595,9 +732,12 @@ pnpm test -- --run src/features/paper-trading
 ```
 
 Key files: `paper-trading-page.test.tsx` (empty state, account creation,
-placing an order end-to-end, a surfaced order error), `order-history-table.test.tsx`,
-`positions-table.test.tsx`, `format-pnl.test.ts` (the shared
-sign-before-dollar-sign formatter every PnL figure on this page uses).
+placing an order end-to-end, a surfaced order error, a halted risk panel's
+Resume Trading action), `order-history-table.test.tsx`,
+`positions-table.test.tsx`, `risk-summary-panel.test.tsx` (active/halted
+rendering, the confirm-before-resume flow, a surfaced resume error, the
+loading skeleton), `format-pnl.test.ts` (the shared sign-before-dollar-sign
+formatter every PnL figure on this page uses).
 
 ---
 
@@ -776,6 +916,69 @@ curl -s -w '\nHTTP %{http_code}\n' \
 # Expect HTTP 404, code "paper_account_not_found"
 ```
 
+### Scenario H — Pre-trade risk limits: position size, exposure, and a drawdown halt
+
+**Goal:** see all three risk limits fire for real, and confirm a halt
+requires an explicit resume.
+
+1. Open a fresh account with the real platform defaults (10% position
+   size, 50% exposure, 20% drawdown) and `starting_balance = 100000`.
+2. In **Place an Order**, buy `11` units of a market whose current price
+   is around `$1000` (e.g. `ETHUSD`, if its candle close is near that
+   level — otherwise pick a quantity that puts the resulting position
+   value just over 10% of your balance).
+3. **What you should see:** a red `Alert` naming the specific breach,
+   e.g. _"This order would bring the 'ETHUSD' position to a value of
+   ... exceeding the 10% max position size limit for this account."_ No
+   row appears in Order History.
+4. Open the **Risk** section. **What you should see:** an exposure bar
+   and a drawdown bar, each reading `0.00% / 50.00% limit` and
+   `0.00% / 20.00% limit` respectively (nothing has filled yet), and a
+   green "Trading active" chip.
+5. Buy a smaller, valid quantity (comfortably under 10%) of a real
+   market — this succeeds and now shows up in Risk's exposure bar as a
+   nonzero percentage.
+6. To see a drawdown halt: open a fresh account with a small
+   `starting_balance` (e.g. `10000`) and buy enough of a symbol that the
+   total cost (notional + fee) exceeds 20% of that balance — e.g. `2`
+   units at a ~$1000 quote. The order itself succeeds (the halt is
+   evaluated _after_ it, never blocking it), but the Risk section now
+   shows a red halted `Alert` and the drawdown bar in the `error` color,
+   over its limit.
+7. Try placing any further order. **What you should see:** a red `Alert`
+   reading _"Trading is halted for this account: balance ... has fallen
+   more than 20% below its peak of ... Resume trading explicitly before
+   placing another order."_
+8. Click **Resume Trading** on the halted `Alert`, confirm in the
+   dialog. **What you should see:** the halted `Alert` disappears, replaced
+   by the green "Trading active" chip. Place a small, valid order — it
+   now succeeds.
+
+### Scenario I — The exposure limit via curl, proving current-price valuation
+
+```bash
+ACCOUNT_ID=$(curl -s -X POST http://localhost:8000/api/v1/paper-trading/accounts \
+  -H 'Content-Type: application/json' \
+  -d '{"starting_balance": "100000", "max_position_size_pct": "100", "max_exposure_pct": "50"}' \
+  | jq -r '.id')
+
+# Buy 1 unit cheap (a market trading near, say, $100)
+curl -s -X POST "http://localhost:8000/api/v1/paper-trading/accounts/$ACCOUNT_ID/orders" \
+  -H 'Content-Type: application/json' \
+  -d '{"symbol": "<CHEAP_SYMBOL>", "side": "buy", "quantity": "1"}' | jq '.fill_price'
+
+# Check the risk summary — exposure should be small (~0.1% of balance)
+curl -s "http://localhost:8000/api/v1/paper-trading/accounts/$ACCOUNT_ID/risk" | jq '.current_exposure_pct'
+
+# Wait for (or pick a market already at) a much higher price, then try a
+# tiny order in a *different* symbol — expect HTTP 400, max_exposure_exceeded,
+# because the held position is now revalued at its *current*, much higher price.
+curl -s -w '\nHTTP %{http_code}\n' -X POST \
+  "http://localhost:8000/api/v1/paper-trading/accounts/$ACCOUNT_ID/orders" \
+  -H 'Content-Type: application/json' \
+  -d '{"symbol": "<OTHER_SYMBOL>", "side": "buy", "quantity": "0.001"}'
+```
+
 ---
 
 ## 5. Known gaps / out of scope
@@ -786,6 +989,8 @@ Deliberately **not** built (each is a separate, later task, not a defect):
   existing long position.
 - No limit/stop orders — market orders only, filled immediately and
   completely; there is no pending/partial-fill state anywhere in the schema.
+- No stop-loss/take-profit — a separate, later task; the drawdown halt is
+  an account-wide circuit breaker, not a per-position exit order.
 - No automation and no prediction-driven trading — every order is placed by
   a human clicking the form; nothing on this platform ever calls
   `POST .../orders` on its own.

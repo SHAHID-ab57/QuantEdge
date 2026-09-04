@@ -15,6 +15,7 @@ import { LiveDataChip } from './components/live-data-chip';
 import { OrderForm, type OrderFormValues } from './components/order-form';
 import { OrderHistoryTable } from './components/order-history-table';
 import { PositionsTable } from './components/positions-table';
+import { RiskSummaryPanel } from './components/risk-summary-panel';
 import {
   useCreatePaperAccount,
   usePaperAccount,
@@ -22,7 +23,9 @@ import {
   usePaperOrders,
   usePaperPortfolioSummary,
   usePaperPositions,
+  usePaperTradingRisk,
   usePlacePaperOrder,
+  useResumeTrading,
 } from './hooks/use-paper-trading-data';
 import { usePaperTradingAccountStore } from './store/use-paper-trading-account-store';
 
@@ -48,6 +51,7 @@ export function PaperTradingPage() {
   const account = usePaperAccount(accountId);
   const summary = usePaperPortfolioSummary(accountId);
   const positions = usePaperPositions(accountId);
+  const risk = usePaperTradingRisk(accountId);
   const orders = usePaperOrders(accountId, {
     limit: ORDERS_PAGE_SIZE,
     offset: (ordersPage - 1) * ORDERS_PAGE_SIZE,
@@ -56,6 +60,7 @@ export function PaperTradingPage() {
 
   const createAccount = useCreatePaperAccount();
   const placeOrder = usePlacePaperOrder(accountId);
+  const resumeTrading = useResumeTrading(accountId);
 
   // The remembered id might no longer exist (e.g. a fresh database) —
   // fall back to "no account" rather than a permanent error banner.
@@ -80,6 +85,14 @@ export function PaperTradingPage() {
   };
 
   const selectedAccountOption = accounts.data?.accounts.find((a) => a.id === accountId) ?? null;
+
+  let resumeErrorMessage: string | null = null;
+  if (resumeTrading.isError) {
+    resumeErrorMessage =
+      resumeTrading.error instanceof Error
+        ? resumeTrading.error.message
+        : 'Could not resume trading.';
+  }
 
   return (
     <Stack spacing={2}>
@@ -137,6 +150,21 @@ export function PaperTradingPage() {
           ) : null}
         </Stack>
       </Section>
+
+      {hasAccount ? (
+        <Section
+          title="Risk"
+          subtitle="Current exposure and drawdown against this account's own configured limits"
+        >
+          <RiskSummaryPanel
+            data={risk.data}
+            isLoading={risk.isLoading}
+            onResume={() => resumeTrading.mutate()}
+            resuming={resumeTrading.isPending}
+            resumeError={resumeErrorMessage}
+          />
+        </Section>
+      ) : null}
 
       <Section
         title="Place an Order"

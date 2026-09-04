@@ -53,6 +53,90 @@ class InsufficientPositionError(AppError):
         )
 
 
+class TradingHaltedError(AppError):
+    """Raised when an order is attempted against an account whose trading
+    has been halted by the drawdown limit.
+
+    Does not self-heal on balance recovery (this feature's own spec) — an
+    explicit `POST .../resume-trading` is required before any new order
+    can be placed, no matter how the balance moves afterward.
+    """
+
+    def __init__(self, balance: object, peak_balance: object, max_drawdown_pct: object) -> None:
+        super().__init__(
+            f"Trading is halted for this account: balance {balance} has fallen more than "
+            f"{max_drawdown_pct}% below its peak of {peak_balance}. Resume trading explicitly "
+            "before placing another order — a halt never clears itself on balance recovery.",
+            code="trading_halted",
+        )
+
+
+class MaxPositionSizeExceededError(AppError):
+    """Raised when a single order's resulting position value would exceed
+    the account's `max_position_size_pct` of its current balance.
+
+    Computed against the *current* price and *current* balance, never the
+    price a position was originally opened at (this feature's own spec) —
+    a stale-priced check would be exactly the kind of dishonest simulation
+    this platform's realistic-execution guarantee exists to avoid.
+    """
+
+    def __init__(
+        self,
+        symbol: str,
+        resulting_value: object,
+        balance: object,
+        resulting_pct: object,
+        max_pct: object,
+    ) -> None:
+        super().__init__(
+            f"This order would bring the {symbol!r} position to a value of {resulting_value} — "
+            f"{resulting_pct}% of the current balance of {balance} — exceeding the "
+            f"{max_pct}% max position size limit for this account",
+            code="max_position_size_exceeded",
+        )
+
+
+class MaxExposureExceededError(AppError):
+    """Raised when total open-position value (every symbol, at current
+    prices) after this order would exceed the account's `max_exposure_pct`
+    of its current balance.
+
+    Computed against every open position's *current* price, not each
+    position's own entry price — the same live-price-with-fallback lookup
+    (`app/paper_trading/pricing.py`) every other read of this account's
+    positions already uses.
+    """
+
+    def __init__(
+        self, resulting_exposure: object, balance: object, resulting_pct: object, max_pct: object
+    ) -> None:
+        super().__init__(
+            f"This order would bring total exposure to {resulting_exposure} — {resulting_pct}% "
+            f"of the current balance of {balance} — exceeding the {max_pct}% max exposure limit "
+            "for this account",
+            code="max_exposure_exceeded",
+        )
+
+
+class AccountUpdateConflictError(AppError):
+    """Raised only if the optimistic-concurrency guard around placing an
+    order (`PaperAccountRepository.try_apply_trade_effects`) loses every
+    one of its bounded retries — i.e. this account had another order (or a
+    resume-trading call) commit against it on *every single* attempt this
+    request made. Practically never hit by two concurrent requests (one
+    retry is enough), but a request is never left to loop forever.
+    """
+
+    def __init__(self, attempts: int) -> None:
+        super().__init__(
+            f"Could not place this order after {attempts} attempts — this account changed "
+            "concurrently on every attempt. Please retry.",
+            code="account_update_conflict",
+            status_code=status.HTTP_409_CONFLICT,
+        )
+
+
 class InvalidPaperOrderSortError(AppError):
     """Raised when an order-history list request names an unsupported sort column."""
 

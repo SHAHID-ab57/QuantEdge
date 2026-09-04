@@ -11,7 +11,8 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import InstrumentedAttribute
 
@@ -61,6 +62,65 @@ class PaperAccountRepository:
         await self.session.commit()
         await self.session.refresh(account)
         return account
+
+    async def try_apply_trade_effects(
+        self,
+        account_id: uuid.UUID,
+        *,
+        expected_balance: Decimal,
+        expected_trading_halted: bool,
+        new_balance: Decimal,
+        new_realized_pnl: Decimal,
+        new_peak_balance: Decimal,
+        new_trading_halted: bool,
+    ) -> PaperAccount | None:
+        """Atomically apply one order's balance/realized-PnL/peak-balance/
+        halt effects, or fail closed if the account changed since the
+        caller last read it.
+
+        The same core primitive `TrainingJobRepository
+        .try_transition_to_running` uses — a single `UPDATE ... WHERE`
+        whose matched-row-count tells the caller whether its precondition
+        still held — adapted here because the precondition this feature
+        needs to guard (the account's current balance and halt state,
+        which `PaperTradingService.place_order` used to compute this
+        order's fill, position-sizing check, and exposure check) can't be
+        pinned to one fixed status value the way a training job's
+        `'pending'` can: it's whatever the caller most recently read, and
+        those checks themselves depend on live prices and every other open
+        position, not just this row.
+
+        Two concurrent orders against the same account can never both
+        still match an unmodified row: Postgres serializes the two
+        `UPDATE`s (same primary key), so whichever commits first changes
+        `balance`, and the second's `WHERE` clause matches zero rows.
+        Returns `None` in that case — the caller
+        (`PaperTradingService.place_order`) treats that as "re-read the
+        account and its positions, recompute every check against the
+        fresh live numbers, and retry," never as "proceed anyway," so a
+        losing order is re-evaluated against the *other* order's
+        now-committed effect rather than silently allowed to stack past a
+        limit it would have breached alone.
+        """
+        result = await self.session.execute(
+            update(PaperAccount)
+            .where(
+                PaperAccount.id == account_id,
+                PaperAccount.balance == expected_balance,
+                PaperAccount.trading_halted == expected_trading_halted,
+            )
+            .values(
+                balance=new_balance,
+                realized_pnl=new_realized_pnl,
+                peak_balance=new_peak_balance,
+                trading_halted=new_trading_halted,
+            )
+        )
+        await self.session.commit()
+        assert isinstance(result, CursorResult)
+        if result.rowcount == 0:
+            return None
+        return await self.get_by_id(account_id)
 
 
 class PaperOrderRepository:

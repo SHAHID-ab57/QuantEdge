@@ -1495,15 +1495,17 @@ the list endpoint) round out the rest.
 
 ### Paper Trading
 
-| Method | Path                                            | Purpose                                         |
-| ------ | ----------------------------------------------- | ----------------------------------------------- |
-| POST   | `/api/v1/paper-trading/accounts`                | Open a new virtual trading account              |
-| GET    | `/api/v1/paper-trading/accounts`                | List every account, most recently created first |
-| GET    | `/api/v1/paper-trading/accounts/{id}`           | Get one account                                 |
-| POST   | `/api/v1/paper-trading/accounts/{id}/orders`    | Place and fill a market order                   |
-| GET    | `/api/v1/paper-trading/accounts/{id}/orders`    | List an account's own order history             |
-| GET    | `/api/v1/paper-trading/accounts/{id}/positions` | List an account's currently-open positions      |
-| GET    | `/api/v1/paper-trading/accounts/{id}/summary`   | Balance, realized PnL, and live unrealized PnL  |
+| Method | Path                                                 | Purpose                                                              |
+| ------ | ---------------------------------------------------- | -------------------------------------------------------------------- |
+| POST   | `/api/v1/paper-trading/accounts`                     | Open a new virtual trading account                                   |
+| GET    | `/api/v1/paper-trading/accounts`                     | List every account, most recently created first                      |
+| GET    | `/api/v1/paper-trading/accounts/{id}`                | Get one account                                                      |
+| POST   | `/api/v1/paper-trading/accounts/{id}/orders`         | Place and fill a market order                                        |
+| GET    | `/api/v1/paper-trading/accounts/{id}/orders`         | List an account's own order history                                  |
+| GET    | `/api/v1/paper-trading/accounts/{id}/positions`      | List an account's currently-open positions                           |
+| GET    | `/api/v1/paper-trading/accounts/{id}/summary`        | Balance, realized PnL, and live unrealized PnL                       |
+| GET    | `/api/v1/paper-trading/accounts/{id}/risk`           | Current exposure %/drawdown %, distance to each limit, halted status |
+| POST   | `/api/v1/paper-trading/accounts/{id}/resume-trading` | Clear a drawdown halt, resetting peak_balance to the current balance |
 
 Full design in `ARCHITECTURE.md` § "Paper Trading". A virtual trading
 account: place simulated market orders against real prices, track
@@ -1567,6 +1569,45 @@ own cash `balance`, cumulative `realized_pnl` (updated the instant a
 trade closes or reduces a position), the summed `unrealized_pnl` across
 every open position, and `total_equity` (`balance` plus every open
 position's own live mark-to-market value).
+
+**Pre-trade risk limits** — every account carries `max_position_size_pct`
+(default 10%), `max_exposure_pct` (default 50%), and `max_drawdown_pct`
+(default 20%), settable per account at creation (`PaperAccountCreateRequest`)
+or left to fall back to this platform's configured defaults. Every order
+is checked, in order: halted (`trading_halted`, 400 `trading_halted`) →
+position sizing (this order's own resulting position value vs. current
+balance, 400 `max_position_size_exceeded`) → exposure (every open
+position's _current_ value, live-priced, plus this order's own resulting
+value, vs. current balance, 400 `max_exposure_exceeded`). After the trade
+completes, `peak_balance` and `trading_halted` are re-evaluated — a
+balance drop of more than `max_drawdown_pct` below the (possibly
+just-raised) peak halts the account. A halt never self-clears; only
+`POST .../resume-trading` clears it (and resets `peak_balance` to the
+current balance). Every rejection's `detail` names the specific limit and
+the actual numbers involved — never a generic message.
+
+**Risk summary** (`GET /paper-trading/accounts/{id}/risk`):
+
+```jsonc
+{
+  "account_id": "2cff34d9-...",
+  "balance": "89984.995000000000000000",
+  "peak_balance": "100000.000000000000000000",
+  "current_exposure_pct": "11.116944...", // total open-position value, current prices, as a % of balance
+  "max_exposure_pct": "50.000000000000000000",
+  "exposure_headroom_pct": "38.883055...", // max_exposure_pct - current_exposure_pct
+  "current_drawdown_pct": "10.015000000000000000", // how far below peak_balance, as a %
+  "max_drawdown_pct": "20.000000000000000000",
+  "drawdown_headroom_pct": "9.985000000000000000",
+  "max_position_size_pct": "10.000000000000000000", // threshold only — checked per order, per symbol, not as one account-wide "current" figure
+  "trading_halted": false,
+}
+```
+
+**Resume trading** (`POST /paper-trading/accounts/{id}/resume-trading`,
+no request body) returns the updated `PaperAccountResponse` with
+`trading_halted: false` and `peak_balance` reset to the account's current
+balance.
 
 **Error codes**: `paper_account_not_found` (404), `market_not_found`
 (404), `no_price_available` (404 — no live ticker/trade and no candle has

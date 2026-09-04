@@ -96,10 +96,16 @@ complete: a virtual trading account places simulated market orders
 against real prices — a modeled slippage and fee always applied, never a
 perfect, cost-free fill — tracks materialized positions, and computes
 realized/unrealized PnL, long-only with no margin, no shorting, no
-leverage, and no automation. See `ARCHITECTURE.md` § "Paper Trading". A
-risk engine (position sizing, exposure limits, drawdown guards) has not
-been started; see `docs/architecture/DomainModel.md`/
-`ContainerArchitecture.md` for the intended bounded contexts.
+leverage, and no automation. Pre-trade risk limits are also complete:
+position sizing, total exposure, and a maximum drawdown that halts an
+account until an explicit resume — all three checked against current
+prices and current balance, never entry prices or a stale balance, and
+guarded against concurrent orders by the same atomic-`UPDATE` pattern the
+training-job duplicate-run race established. See `ARCHITECTURE.md` §
+"Paper Trading". Stop-loss/take-profit orders and a standalone risk
+engine beyond these three account-level limits have not been started;
+see `docs/architecture/DomainModel.md`/`ContainerArchitecture.md` for the
+intended bounded contexts.
 
 **Milestone 4 — Data Breadth.** The additional external data connectors
 this platform has designed for but never implemented — Marketaux (news/

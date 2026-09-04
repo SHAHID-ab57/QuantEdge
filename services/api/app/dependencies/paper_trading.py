@@ -39,4 +39,8 @@ def get_paper_trading_service(
         slippage_bps=settings.paper_trading_slippage_bps,
         fee_bps=settings.paper_trading_fee_bps,
         staleness_threshold=timedelta(seconds=settings.paper_trading_stale_price_threshold_seconds),
+        default_max_position_size_pct=settings.paper_trading_default_max_position_size_pct,
+        default_max_exposure_pct=settings.paper_trading_default_max_exposure_pct,
+        default_max_drawdown_pct=settings.paper_trading_default_max_drawdown_pct,
+        max_order_attempts=settings.paper_trading_max_order_attempts,
     )

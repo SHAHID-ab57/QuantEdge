@@ -11,6 +11,7 @@ import type {
   PaperOrderListResponse,
   PaperPositionListResponse,
   PortfolioSummary,
+  RiskSummary,
 } from '@/types/api/paper-trading';
 import { PaperTradingPage } from './paper-trading-page';
 import { usePaperTradingAccountStore } from './store/use-paper-trading-account-store';
@@ -22,7 +23,9 @@ vi.mock('@/lib/api/paper-trading', () => ({
   fetchPaperOrders: vi.fn(),
   fetchPaperPortfolioSummary: vi.fn(),
   fetchPaperPositions: vi.fn(),
+  fetchPaperTradingRisk: vi.fn(),
   placePaperOrder: vi.fn(),
+  resumePaperTrading: vi.fn(),
 }));
 
 vi.mock('@/lib/api/market', () => ({
@@ -44,6 +47,11 @@ function account(overrides: Partial<PaperAccount> = {}): PaperAccount {
     starting_balance: '100000',
     balance: '89984.995',
     realized_pnl: '-10.005',
+    max_position_size_pct: '10',
+    max_exposure_pct: '50',
+    max_drawdown_pct: '20',
+    peak_balance: '100000',
+    trading_halted: false,
     created_at: '2026-01-01T00:00:00Z',
     ...overrides,
   };
@@ -84,6 +92,23 @@ function positionsResponse(): PaperPositionListResponse {
 
 function ordersResponse(overrides: Partial<PaperOrderListResponse> = {}): PaperOrderListResponse {
   return { orders: [], total: 0, limit: 10, offset: 0, ...overrides };
+}
+
+function riskSummary(overrides: Partial<RiskSummary> = {}): RiskSummary {
+  return {
+    account_id: 'account-1',
+    balance: '89984.995',
+    peak_balance: '100000',
+    current_exposure_pct: '11.11',
+    max_exposure_pct: '50',
+    exposure_headroom_pct: '38.89',
+    current_drawdown_pct: '10.015',
+    max_drawdown_pct: '20',
+    drawdown_headroom_pct: '9.985',
+    max_position_size_pct: '10',
+    trading_halted: false,
+    ...overrides,
+  };
 }
 
 function order(overrides: Partial<PaperOrder> = {}): PaperOrder {
@@ -177,6 +202,7 @@ describe('PaperTradingPage', () => {
     mockedPaperTradingApi.fetchPaperPortfolioSummary.mockResolvedValue(summary());
     mockedPaperTradingApi.fetchPaperPositions.mockResolvedValue(positionsResponse());
     mockedPaperTradingApi.fetchPaperOrders.mockResolvedValue(ordersResponse());
+    mockedPaperTradingApi.fetchPaperTradingRisk.mockResolvedValue(riskSummary());
 
     renderPage();
     fireEvent.click(await screen.findByRole('button', { name: 'Open Account' }));
@@ -199,6 +225,7 @@ describe('PaperTradingPage', () => {
     mockedPaperTradingApi.fetchPaperPortfolioSummary.mockResolvedValue(summary());
     mockedPaperTradingApi.fetchPaperPositions.mockResolvedValue(positionsResponse());
     mockedPaperTradingApi.fetchPaperOrders.mockResolvedValue(ordersResponse());
+    mockedPaperTradingApi.fetchPaperTradingRisk.mockResolvedValue(riskSummary());
     mockedPaperTradingApi.placePaperOrder.mockResolvedValue(order());
 
     renderPage();
@@ -225,6 +252,7 @@ describe('PaperTradingPage', () => {
     mockedPaperTradingApi.fetchPaperPortfolioSummary.mockResolvedValue(summary());
     mockedPaperTradingApi.fetchPaperPositions.mockResolvedValue(positionsResponse());
     mockedPaperTradingApi.fetchPaperOrders.mockResolvedValue(ordersResponse());
+    mockedPaperTradingApi.fetchPaperTradingRisk.mockResolvedValue(riskSummary());
     mockedPaperTradingApi.placePaperOrder.mockRejectedValue(new Error('insufficient balance'));
 
     renderPage();
@@ -238,5 +266,33 @@ describe('PaperTradingPage', () => {
 
     const alert = await screen.findByRole('alert');
     expect(alert).toHaveTextContent('insufficient balance');
+  });
+
+  it('shows a halted risk panel and resumes trading', async () => {
+    act(() => usePaperTradingAccountStore.getState().setAccountId('account-1'));
+    mockedPaperTradingApi.fetchPaperAccount.mockResolvedValue(account());
+    mockedPaperTradingApi.fetchPaperPortfolioSummary.mockResolvedValue(summary());
+    mockedPaperTradingApi.fetchPaperPositions.mockResolvedValue(positionsResponse());
+    mockedPaperTradingApi.fetchPaperOrders.mockResolvedValue(ordersResponse());
+    mockedPaperTradingApi.fetchPaperTradingRisk.mockResolvedValue(
+      riskSummary({ trading_halted: true, current_drawdown_pct: '25' }),
+    );
+    mockedPaperTradingApi.resumePaperTrading.mockResolvedValue(account());
+
+    renderPage();
+    await screen.findByText('My Account');
+
+    expect(await screen.findByText(/Trading halted/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Resume Trading' }));
+
+    // Both the alert's action button and the confirmation dialog's own
+    // confirm button share the label "Resume Trading" once the dialog is
+    // open — the dialog's is the last one rendered (portalled after it).
+    const confirmButtons = await screen.findAllByRole('button', { name: 'Resume Trading' });
+    fireEvent.click(confirmButtons[confirmButtons.length - 1]!);
+
+    await waitFor(() =>
+      expect(mockedPaperTradingApi.resumePaperTrading).toHaveBeenCalledWith('account-1'),
+    );
   });
 });

@@ -1357,15 +1357,26 @@ signed value for a sell's; a stale fallback fill's warning chip; and an
 empty-history message. `positions-table.test.tsx` covers a position's own
 quantity/average entry/current price/unrealized PnL rendering, both
 positive and negative signed formatting, and an empty-positions message.
+`risk-summary-panel.test.tsx` covers: the active state (a "Trading
+active" chip, both limit rows rendering their exact current/max
+percentages); the halted state (an `Alert` naming the drawdown, a "Resume
+Trading" action); that clicking it opens a confirmation before
+`onResume` fires at all (proven by asserting `onResume` has _not_ been
+called immediately after the first click); a surfaced resume-error
+message; and the loading skeleton.
 
 **Page-level.** `paper-trading-page.test.tsx` covers: the empty-account
 prompt when no account is selected; opening an account through
 `CreateAccountDialog` and seeing its summary render; placing a buy order
 end to end (selecting a market via the reused `MarketSelector`, entering
 a quantity, confirming through `ConfirmActionDialog`) and asserting
-`placePaperOrder` was called with the exact expected body; and a
-surfaced order-placement error rendering the API error's own message in
-an `Alert`.
+`placePaperOrder` was called with the exact expected body; a surfaced
+order-placement error rendering the API error's own message in an
+`Alert` (the same path a risk-limit rejection's specific `detail` — which
+limit, by how much — takes, since nothing frontend-specific distinguishes
+it from any other order error); and a halted risk panel whose confirmed
+"Resume Trading" action calls `resumePaperTrading` with the selected
+account's id.
 
 ## End-to-End Tests
 

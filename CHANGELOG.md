@@ -62,6 +62,45 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
     `services/api/TESTING.md` § "Testing Paper Trading" and
     `docs/testing/TESTING.md`.
 
+- **Paper Trading — pre-trade risk limits: maximum position size, maximum
+  total exposure, and a maximum drawdown that halts trading until
+  explicitly resumed.** Extends Paper Trading (above), still Milestone 3.
+  - **Every risk check runs against current prices and current balance,
+    never entry prices or a stale balance** — proven with a fixture that
+    buys a position cheap, lets the market carry its value far past what
+    entry cost would ever suggest, then shows a separate, otherwise-
+    trivial order rejected purely because of that revaluation.
+  - **Three account-level percentage limits** (`max_position_size_pct`
+    default 10%, `max_exposure_pct` default 50%, `max_drawdown_pct`
+    default 20%), plus `peak_balance`/`trading_halted` running state — new
+    columns on `paper_accounts` (migration `c1e00878df40`), settable per
+    account at creation or left to this platform's configured defaults.
+  - **A drawdown breach halts the account after the trade completes, and
+    never self-heals** — only `POST .../resume-trading` clears it, which
+    also resets `peak_balance` to the current balance (without that, the
+    account would re-halt on its very next order regardless of direction).
+  - **The same atomic-`UPDATE` concurrency guard the training-job
+    duplicate-run race established, adapted to a bounded retry-and-
+    recompute loop** (`PaperAccountRepository.try_apply_trade_effects`) —
+    verified empirically, not just asserted sequentially: two real
+    concurrent orders that would each individually pass the exposure
+    check but jointly breach it, raced via genuine `asyncio.gather`,
+    result in exactly one success and one `max_exposure_exceeded`
+    rejection, stable across repeated runs.
+  - **New endpoints**: `GET .../accounts/{id}/risk` (current exposure %/
+    drawdown %, distance to each limit, halted status),
+    `POST .../accounts/{id}/resume-trading`.
+  - **New frontend panel**: `RiskSummaryPanel` — exposure and drawdown
+    each against their own limit (a progress bar, colored by proximity to
+    it), halted status, and a confirmed "Resume Trading" action while
+    halted. Every risk-limit rejection surfaces through the page's
+    existing order-error `Alert` with no new frontend logic, since the
+    backend's own specific `detail` message already carries through.
+  - Full design in `ARCHITECTURE.md` § "Paper Trading"; API surface in
+    `docs/api/API.md` § "Paper Trading"; tests in
+    `services/api/TESTING.md` § "Testing Paper Trading" and
+    `docs/testing/TESTING.md`.
+
 - **Two outstanding Milestone 2 verification items closed out before this
   work began** (`ARCHITECTURE.md` § "Paper Trading" has the full account):
   the backtesting no-look-ahead adversarial test was re-run fresh and

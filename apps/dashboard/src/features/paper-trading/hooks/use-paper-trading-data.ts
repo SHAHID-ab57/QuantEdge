@@ -8,7 +8,9 @@ import {
   fetchPaperOrders,
   fetchPaperPortfolioSummary,
   fetchPaperPositions,
+  fetchPaperTradingRisk,
   placePaperOrder,
+  resumePaperTrading,
   type PaperAccountCreateBody,
   type PaperAccountListParams,
   type PaperOrderBody,
@@ -84,6 +86,25 @@ export function usePlacePaperOrder(accountId: string | null) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (body: PaperOrderBody) => placePaperOrder(accountId as string, body),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: accountKey(accountId) }),
+  });
+}
+
+export function usePaperTradingRisk(accountId: string | null) {
+  return useQuery({
+    queryKey: [...accountKey(accountId), 'risk'],
+    queryFn: () => fetchPaperTradingRisk(accountId as string),
+    enabled: Boolean(accountId),
+    // Exposure/drawdown depend on live prices and the account's own
+    // running balance — poll it the same way the summary/positions do.
+    refetchInterval: Boolean(accountId) && 10_000,
+  });
+}
+
+export function useResumeTrading(accountId: string | null) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => resumePaperTrading(accountId as string),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: accountKey(accountId) }),
   });
 }

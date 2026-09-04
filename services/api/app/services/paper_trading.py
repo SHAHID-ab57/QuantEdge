@@ -28,6 +28,37 @@ for the schema side of this):
   the cost-basis value of what's still held, which is neither a gain nor
   a loss yet — that's what `unrealized_pnl` is for, computed fresh on
   every read against a live price, never stored.
+
+**Pre-trade risk limits, stated plainly:**
+
+- **Halted check** (first, before anything else): a halted account rejects
+  every order outright until an explicit `resume_trading` call — see that
+  method's own docstring for why it also resets `peak_balance` to the
+  account's current balance.
+- **Position sizing**: this order's *resulting* quantity in its own symbol,
+  valued at the *current* resolved quote (never the price a position was
+  originally opened at), must not exceed `max_position_size_pct` of the
+  account's *current* balance.
+- **Exposure**: every other open position's *current* value (the same
+  live-price-with-fallback lookup `list_positions` already uses) plus this
+  order's own resulting value must not exceed `max_exposure_pct` of the
+  account's *current* balance.
+- **Drawdown/halt**, evaluated *after* the trade completes, never before:
+  `peak_balance` only ever rises (`max(peak_balance, new_balance)`); if the
+  new balance has fallen more than `max_drawdown_pct` below the (possibly
+  just-raised) peak, `trading_halted` is set. This can only ever flip
+  `False -> True` here — a halted account never reaches this check again
+  until it's resumed (the halted check above rejects it first).
+
+**Concurrency**: the whole read-check-write sequence above is guarded by
+`PaperAccountRepository.try_apply_trade_effects`, an atomic
+`UPDATE ... WHERE balance = :expected AND trading_halted = :expected` —
+the same core primitive `TrainingJobRepository.try_transition_to_running`
+uses for its own check-then-act race, adapted into a bounded
+retry-and-recompute loop because what this feature needs to guard
+(current balance, current prices, every other open position) can't be
+pinned to one fixed status value the way a training job's `'pending'`
+can. See `place_order`'s own docstring for the full mechanics.
 """
 
 import uuid
@@ -35,11 +66,16 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from app.models.paper_trading import PaperAccount, PaperOrder
+from app.paper_trading.base import FillQuote
 from app.paper_trading.errors import (
+    AccountUpdateConflictError,
     InsufficientBalanceError,
     InsufficientPositionError,
     InvalidPaperOrderSortError,
+    MaxExposureExceededError,
+    MaxPositionSizeExceededError,
     PaperAccountNotFoundError,
+    TradingHaltedError,
 )
 from app.paper_trading.pricing import apply_fill_model, resolve_current_price
 from app.repositories.candles import CandleRepository
@@ -60,9 +96,17 @@ from app.schemas.paper_trading import (
     PaperPositionDTO,
     PaperPositionListResponse,
     PortfolioSummaryResponse,
+    RiskSummaryResponse,
 )
 from app.services.market_query import MarketNotFoundError
 from app.state.manager import MarketStateManager
+
+#: A nonzero exposure/position value against an exactly-zero balance (a
+#: fully cash-out account, legitimately reachable without ever going
+#: negative) has no finite "% of balance" — reported as this large, fixed
+#: sentinel rather than raising `ZeroDivisionError`, since it's always
+#: unambiguously over any limit that could ever be configured (<= 100%).
+_ZERO_BALANCE_SENTINEL_PCT = Decimal("999999")
 
 
 class PaperTradingService:
@@ -79,6 +123,10 @@ class PaperTradingService:
         slippage_bps: int,
         fee_bps: int,
         staleness_threshold: timedelta,
+        default_max_position_size_pct: Decimal,
+        default_max_exposure_pct: Decimal,
+        default_max_drawdown_pct: Decimal,
+        max_order_attempts: int,
     ) -> None:
         self.account_repository = account_repository
         self.order_repository = order_repository
@@ -89,6 +137,10 @@ class PaperTradingService:
         self.slippage_bps = slippage_bps
         self.fee_bps = fee_bps
         self.staleness_threshold = staleness_threshold
+        self.default_max_position_size_pct = default_max_position_size_pct
+        self.default_max_exposure_pct = default_max_exposure_pct
+        self.default_max_drawdown_pct = default_max_drawdown_pct
+        self.max_order_attempts = max_order_attempts
 
     async def create_account(self, request: PaperAccountCreateRequest) -> PaperAccountResponse:
         account = PaperAccount(
@@ -96,6 +148,23 @@ class PaperTradingService:
             starting_balance=request.starting_balance,
             balance=request.starting_balance,
             realized_pnl=Decimal(0),
+            max_position_size_pct=(
+                request.max_position_size_pct
+                if request.max_position_size_pct is not None
+                else self.default_max_position_size_pct
+            ),
+            max_exposure_pct=(
+                request.max_exposure_pct
+                if request.max_exposure_pct is not None
+                else self.default_max_exposure_pct
+            ),
+            max_drawdown_pct=(
+                request.max_drawdown_pct
+                if request.max_drawdown_pct is not None
+                else self.default_max_drawdown_pct
+            ),
+            peak_balance=request.starting_balance,
+            trading_halted=False,
         )
         created = await self.account_repository.create(account)
         return PaperAccountResponse.from_model(created)
@@ -116,83 +185,214 @@ class PaperTradingService:
     async def place_order(
         self, account_id: uuid.UUID, request: PaperOrderRequest
     ) -> PaperOrderResponse:
-        """Fill one market order immediately, completely, and realistically.
+        """Fill one market order immediately, completely, and realistically
+        — guarded by pre-trade risk checks (halted, then position sizing,
+        then exposure), with a drawdown/halt check applied after the fill.
 
         There is no pending/partial-fill state: every order either fills
         in full right now (long-only — a buy adds to a position, a sell
         reduces one) or is rejected outright (insufficient cash for a buy,
-        insufficient held quantity for a sell — never partially executed).
+        insufficient held quantity for a sell, or a breached risk limit —
+        never partially executed).
+
+        **Concurrency.** Each attempt re-reads the account fresh, resolves
+        a live price, re-evaluates every check, and finishes with a single
+        atomic `UPDATE ... WHERE balance = :expected AND trading_halted =
+        :expected` (`PaperAccountRepository.try_apply_trade_effects`). That
+        `UPDATE` only ever matches if nothing else has touched this
+        account since this attempt's own read — exactly the guarantee
+        `TrainingJobRepository.try_transition_to_running` gives its own
+        duplicate-run race, just expressed as "the row is still what I
+        last read" instead of "the row is still `'pending'`", because this
+        feature's precondition depends on live prices and every other open
+        position, not one fixed column. When it doesn't match (another
+        order — or a resume — committed first), this attempt has *not*
+        touched the position table yet, so nothing needs to be undone: it
+        simply loops, re-reads the now-current account and positions, and
+        recomputes every check from scratch — meaning two orders that
+        would jointly breach a limit can never both succeed, because the
+        second is re-evaluated against the first's already-committed
+        effect, not the stale numbers it started with. Bounded at
+        `max_order_attempts` (default 5) so a request is never left to
+        loop forever; exhausting it raises `AccountUpdateConflictError`,
+        practically unreachable by a real two-way race (one retry is
+        always enough) but never assumed away.
         """
-        account = await self._get_account_or_404(account_id)
         market = await self.market_repository.get_by_symbol(request.symbol)
         if market is None:
             raise MarketNotFoundError(request.symbol)
 
-        quote = await resolve_current_price(
-            state_manager=self.state_manager,
-            candle_repository=self.candle_repository,
-            market_id=market.id,
-            symbol=request.symbol,
-            staleness_threshold=self.staleness_threshold,
-        )
-        fill = apply_fill_model(
-            quote,
-            side=request.side,
-            quantity=request.quantity,
-            slippage_bps=self.slippage_bps,
-            fee_bps=self.fee_bps,
-        )
+        for _attempt in range(self.max_order_attempts):
+            account = await self._get_account_or_404(account_id)
 
-        realized_pnl_this_order: Decimal | None = None
-        if request.side == "buy":
-            total_cost = fill.notional + fill.fee_applied
-            available = Decimal(account.balance)
-            if available < total_cost:
-                raise InsufficientBalanceError(total_cost, available)
-            await self.position_repository.apply_buy(
-                account_id, request.symbol, request.quantity, fill.fill_price
+            if account.trading_halted:
+                raise TradingHaltedError(
+                    account.balance, account.peak_balance, account.max_drawdown_pct
+                )
+
+            quote = await resolve_current_price(
+                state_manager=self.state_manager,
+                candle_repository=self.candle_repository,
+                market_id=market.id,
+                symbol=request.symbol,
+                staleness_threshold=self.staleness_threshold,
             )
-            new_balance = available - total_cost
-            new_realized_pnl = Decimal(account.realized_pnl) - fill.fee_applied
-            await self.account_repository.update(
-                account, {"balance": new_balance, "realized_pnl": new_realized_pnl}
+            fill = apply_fill_model(
+                quote,
+                side=request.side,
+                quantity=request.quantity,
+                slippage_bps=self.slippage_bps,
+                fee_bps=self.fee_bps,
             )
-        else:
+
             position = await self.position_repository.get_by_account_and_symbol(
                 account_id, request.symbol
             )
             held = Decimal(position.quantity) if position is not None else Decimal(0)
-            if position is None or request.quantity > held:
-                raise InsufficientPositionError(request.symbol, request.quantity, held)
-            upsert = await self.position_repository.apply_sell(position, request.quantity)
-            realized_pnl_this_order = (
-                fill.fill_price - upsert.previous_average_entry_price
-            ) * request.quantity - fill.fee_applied
-            net_proceeds = fill.notional - fill.fee_applied
-            new_balance = Decimal(account.balance) + net_proceeds
-            new_realized_pnl = Decimal(account.realized_pnl) + realized_pnl_this_order
-            await self.account_repository.update(
-                account, {"balance": new_balance, "realized_pnl": new_realized_pnl}
+            balance = Decimal(account.balance)
+
+            realized_pnl_this_order: Decimal | None = None
+            if request.side == "buy":
+                total_cost = fill.notional + fill.fee_applied
+                if balance < total_cost:
+                    raise InsufficientBalanceError(total_cost, balance)
+                new_balance = balance - total_cost
+                new_realized_pnl = Decimal(account.realized_pnl) - fill.fee_applied
+                resulting_quantity = held + request.quantity
+            else:
+                if position is None or request.quantity > held:
+                    raise InsufficientPositionError(request.symbol, request.quantity, held)
+                realized_pnl_this_order = (
+                    fill.fill_price - Decimal(position.average_entry_price)
+                ) * request.quantity - fill.fee_applied
+                net_proceeds = fill.notional - fill.fee_applied
+                new_balance = balance + net_proceeds
+                new_realized_pnl = Decimal(account.realized_pnl) + realized_pnl_this_order
+                resulting_quantity = held - request.quantity
+
+            # --- Pre-trade risk checks: current price, current balance ---
+            resulting_position_value = resulting_quantity * quote.price
+            resulting_position_pct = self._percentage_of_balance(resulting_position_value, balance)
+            max_position_pct = Decimal(account.max_position_size_pct)
+            if resulting_position_pct > max_position_pct:
+                raise MaxPositionSizeExceededError(
+                    request.symbol,
+                    resulting_position_value,
+                    balance,
+                    resulting_position_pct,
+                    max_position_pct,
+                )
+
+            other_exposure = await self._total_exposure_value(
+                account_id, exclude_symbol=request.symbol
+            )
+            resulting_exposure = other_exposure + resulting_position_value
+            resulting_exposure_pct = self._percentage_of_balance(resulting_exposure, balance)
+            max_exposure_pct = Decimal(account.max_exposure_pct)
+            if resulting_exposure_pct > max_exposure_pct:
+                raise MaxExposureExceededError(
+                    resulting_exposure, balance, resulting_exposure_pct, max_exposure_pct
+                )
+
+            new_peak_balance, new_trading_halted = self._apply_drawdown_tracking(
+                account, new_balance
             )
 
-        order = PaperOrder(
-            account_id=account_id,
-            symbol=request.symbol,
-            side=request.side,
-            quantity=request.quantity,
-            raw_price=quote.price,
-            fill_price=fill.fill_price,
-            fill_time=datetime.now(UTC),
-            price_source=quote.source,
-            price_observed_at=quote.observed_at,
-            is_stale_price=quote.is_stale,
-            slippage_applied=fill.slippage_applied,
-            fee_applied=fill.fee_applied,
-            notional=fill.notional,
-            realized_pnl=realized_pnl_this_order,
+            updated_account = await self.account_repository.try_apply_trade_effects(
+                account_id,
+                expected_balance=account.balance,
+                expected_trading_halted=account.trading_halted,
+                new_balance=new_balance,
+                new_realized_pnl=new_realized_pnl,
+                new_peak_balance=new_peak_balance,
+                new_trading_halted=new_trading_halted,
+            )
+            if updated_account is None:
+                continue  # lost the race — re-read and retry against fresh numbers
+
+            if request.side == "buy":
+                await self.position_repository.apply_buy(
+                    account_id, request.symbol, request.quantity, fill.fill_price
+                )
+            else:
+                await self.position_repository.apply_sell(position, request.quantity)
+
+            order = PaperOrder(
+                account_id=account_id,
+                symbol=request.symbol,
+                side=request.side,
+                quantity=request.quantity,
+                raw_price=quote.price,
+                fill_price=fill.fill_price,
+                fill_time=datetime.now(UTC),
+                price_source=quote.source,
+                price_observed_at=quote.observed_at,
+                is_stale_price=quote.is_stale,
+                slippage_applied=fill.slippage_applied,
+                fee_applied=fill.fee_applied,
+                notional=fill.notional,
+                realized_pnl=realized_pnl_this_order,
+            )
+            created = await self.order_repository.create(order)
+            return PaperOrderResponse.from_model(created)
+
+        raise AccountUpdateConflictError(self.max_order_attempts)
+
+    async def resume_trading(self, account_id: uuid.UUID) -> PaperAccountResponse:
+        """Explicitly clear a drawdown halt — the *only* way it ever
+        clears (this feature's own spec: no self-healing on balance
+        recovery — nothing about *this* trade or any later one ever
+        clears `trading_halted` on its own; only this explicit call does).
+
+        `peak_balance` is reset to the account's current balance as part
+        of the same action. Without that, an account resumed while still
+        deep in drawdown against its old, untouched peak would measure
+        straight back below the same threshold and re-halt after its
+        very next order — regardless of that order's own direction or
+        size — making "resume" nearly indistinguishable from "allow
+        exactly one more order." Resetting the high-water mark to *now*
+        is what a manual risk override conventionally means: the account
+        starts being measured fresh from the point someone explicitly
+        vouched for it, not from a peak that trade already lost.
+        """
+        account = await self._get_account_or_404(account_id)
+        updated = await self.account_repository.update(
+            account, {"trading_halted": False, "peak_balance": account.balance}
         )
-        created = await self.order_repository.create(order)
-        return PaperOrderResponse.from_model(created)
+        return PaperAccountResponse.from_model(updated)
+
+    async def risk_summary(self, account_id: uuid.UUID) -> RiskSummaryResponse:
+        """This account's own current exposure and drawdown against its
+        configured limits, and whether trading is halted — computed fresh
+        against live prices on every read, exactly like `summary`'s own
+        `unrealized_pnl`, never stored."""
+        account = await self._get_account_or_404(account_id)
+        balance = Decimal(account.balance)
+        peak_balance = Decimal(account.peak_balance)
+
+        total_exposure = await self._total_exposure_value(account_id)
+        current_exposure_pct = self._percentage_of_balance(total_exposure, balance)
+        current_drawdown_pct = (
+            Decimal(0)
+            if peak_balance == 0
+            else ((peak_balance - balance) / peak_balance) * Decimal(100)
+        )
+        max_exposure_pct = Decimal(account.max_exposure_pct)
+        max_drawdown_pct = Decimal(account.max_drawdown_pct)
+
+        return RiskSummaryResponse(
+            account_id=str(account.id),
+            balance=balance,
+            peak_balance=peak_balance,
+            current_exposure_pct=current_exposure_pct,
+            max_exposure_pct=max_exposure_pct,
+            exposure_headroom_pct=max_exposure_pct - current_exposure_pct,
+            current_drawdown_pct=current_drawdown_pct,
+            max_drawdown_pct=max_drawdown_pct,
+            drawdown_headroom_pct=max_drawdown_pct - current_drawdown_pct,
+            max_position_size_pct=Decimal(account.max_position_size_pct),
+            trading_halted=account.trading_halted,
+        )
 
     async def list_orders(
         self,
@@ -224,16 +424,9 @@ class PaperTradingService:
         positions = await self.position_repository.list_open(account_id)
         dtos = []
         for position in positions:
-            market = await self.market_repository.get_by_symbol(position.symbol)
-            if market is None:
+            quote = await self._current_price_for_symbol(position.symbol)
+            if quote is None:
                 continue
-            quote = await resolve_current_price(
-                state_manager=self.state_manager,
-                candle_repository=self.candle_repository,
-                market_id=market.id,
-                symbol=position.symbol,
-                staleness_threshold=self.staleness_threshold,
-            )
             dtos.append(
                 PaperPositionDTO.from_model(
                     position, current_price=quote.price, price_source=quote.source
@@ -260,3 +453,62 @@ class PaperTradingService:
         if account is None:
             raise PaperAccountNotFoundError(account_id)
         return account
+
+    async def _current_price_for_symbol(self, symbol: str) -> FillQuote | None:
+        """The live-price-with-fallback quote for `symbol` right now, or
+        `None` if the market itself no longer exists — the same "skip a
+        position whose market vanished" behavior `list_positions` already
+        had, now shared with every other current-price consumer this
+        task's risk checks added (`_total_exposure_value`)."""
+        market = await self.market_repository.get_by_symbol(symbol)
+        if market is None:
+            return None
+        return await resolve_current_price(
+            state_manager=self.state_manager,
+            candle_repository=self.candle_repository,
+            market_id=market.id,
+            symbol=symbol,
+            staleness_threshold=self.staleness_threshold,
+        )
+
+    async def _total_exposure_value(
+        self, account_id: uuid.UUID, *, exclude_symbol: str | None = None
+    ) -> Decimal:
+        """Every open position's *current* value (quantity × the same
+        live-price-with-fallback quote a fill would use), summed —
+        `exclude_symbol` lets `place_order` value the symbol it's about to
+        trade using its own already-resolved quote and *resulting*
+        quantity instead of the stored pre-trade one."""
+        positions = await self.position_repository.list_open(account_id)
+        total = Decimal(0)
+        for position in positions:
+            if position.symbol == exclude_symbol:
+                continue
+            quote = await self._current_price_for_symbol(position.symbol)
+            if quote is None:
+                continue
+            total += Decimal(position.quantity) * quote.price
+        return total
+
+    @staticmethod
+    def _percentage_of_balance(value: Decimal, balance: Decimal) -> Decimal:
+        """`value` as a percentage of `balance` — `_ZERO_BALANCE_SENTINEL_PCT`
+        (never a `ZeroDivisionError`) for the rare exact-zero-balance case."""
+        if balance == 0:
+            return Decimal(0) if value == 0 else _ZERO_BALANCE_SENTINEL_PCT
+        return (value / balance) * Decimal(100)
+
+    @staticmethod
+    def _apply_drawdown_tracking(
+        account: PaperAccount, new_balance: Decimal
+    ) -> tuple[Decimal, bool]:
+        """Peak-balance tracking and the drawdown halt, evaluated fresh
+        after every balance-changing event (this feature's own spec).
+        `peak_balance` only ever rises; `trading_halted` can only flip
+        `False -> True` here, since a halted account is rejected before
+        ever reaching this point again (see `place_order`) — never reset
+        by this method itself (only `resume_trading` clears it)."""
+        new_peak = max(Decimal(account.peak_balance), new_balance)
+        threshold = new_peak * (Decimal(1) - Decimal(account.max_drawdown_pct) / Decimal(100))
+        new_halted = new_balance < threshold
+        return new_peak, new_halted

@@ -20,6 +20,7 @@ looser numeric type.
 
 import uuid
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import (
@@ -55,6 +56,15 @@ class PaperAccount(BaseModel, TimestampMixin):
     position is flat. Unrealized PnL is never stored here — it depends on
     a live price lookup and is computed fresh on every read (`GET
     .../summary`).
+
+    Pre-trade risk limits (`max_position_size_pct`/`max_exposure_pct`/
+    `max_drawdown_pct`, each a percentage like `10` meaning 10%) and their
+    running state (`peak_balance`, `trading_halted`) live on this same row
+    — see `app/services/paper_trading.py`'s own docstring for exactly how
+    each is computed and enforced, and why they're guarded by the same
+    atomic `UPDATE ... WHERE` primitive `TrainingJobRepository
+    .try_transition_to_running` established for its own check-then-act
+    race (`PaperAccountRepository.try_apply_trade_effects`).
     """
 
     __tablename__ = "paper_accounts"
@@ -63,10 +73,53 @@ class PaperAccount(BaseModel, TimestampMixin):
     starting_balance: Mapped[Any] = mapped_column(Numeric(PRECISION, SCALE), nullable=False)
     balance: Mapped[Any] = mapped_column(Numeric(PRECISION, SCALE), nullable=False)
     realized_pnl: Mapped[Any] = mapped_column(Numeric(PRECISION, SCALE), nullable=False, default=0)
+    max_position_size_pct: Mapped[Any] = mapped_column(
+        Numeric(PRECISION, SCALE),
+        nullable=False,
+        default=Decimal("10"),
+        comment="A single order's resulting position value may never exceed this percentage of "
+        "current balance.",
+    )
+    max_exposure_pct: Mapped[Any] = mapped_column(
+        Numeric(PRECISION, SCALE),
+        nullable=False,
+        default=Decimal("50"),
+        comment="Total open-position value (every symbol, at current prices) may never exceed "
+        "this percentage of current balance.",
+    )
+    max_drawdown_pct: Mapped[Any] = mapped_column(
+        Numeric(PRECISION, SCALE),
+        nullable=False,
+        default=Decimal("20"),
+        comment="If balance falls below peak_balance * (1 - this / 100), trading_halted is set.",
+    )
+    peak_balance: Mapped[Any] = mapped_column(
+        Numeric(PRECISION, SCALE),
+        nullable=False,
+        comment="The highest balance this account has ever reached — never decreases.",
+    )
+    trading_halted: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        comment="Set once balance breaches the drawdown limit; does not clear itself on balance "
+        "recovery — only an explicit resume-trading action clears it.",
+    )
 
     __table_args__ = (
         CheckConstraint("starting_balance >= 0", name="starting_balance_non_negative"),
         CheckConstraint("balance >= 0", name="balance_non_negative"),
+        CheckConstraint("peak_balance >= 0", name="peak_balance_non_negative"),
+        CheckConstraint(
+            "max_position_size_pct > 0 AND max_position_size_pct <= 100",
+            name="max_position_size_pct_valid",
+        ),
+        CheckConstraint(
+            "max_exposure_pct > 0 AND max_exposure_pct <= 100", name="max_exposure_pct_valid"
+        ),
+        CheckConstraint(
+            "max_drawdown_pct > 0 AND max_drawdown_pct <= 100", name="max_drawdown_pct_valid"
+        ),
     )
 
 

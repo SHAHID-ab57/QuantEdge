@@ -6,6 +6,7 @@ import {
   PaperOrderSchema,
   PaperPositionListResponseSchema,
   PortfolioSummarySchema,
+  RiskSummarySchema,
   type PaperAccount,
   type PaperAccountListResponse,
   type PaperOrder,
@@ -13,6 +14,7 @@ import {
   type PaperOrderSide,
   type PaperPositionListResponse,
   type PortfolioSummary,
+  type RiskSummary,
 } from '@/types/api/paper-trading';
 
 export interface PaperAccountCreateBody {
@@ -98,4 +100,21 @@ export async function fetchPaperPortfolioSummary(accountId: string): Promise<Por
     `/api/v1/paper-trading/accounts/${encodeURIComponent(accountId)}/summary`,
   );
   return PortfolioSummarySchema.parse(data);
+}
+
+/** An account's own current exposure %, drawdown %, distance to each
+ * limit, and halted status. */
+export async function fetchPaperTradingRisk(accountId: string): Promise<RiskSummary> {
+  const { data } = await apiClient.get(
+    `/api/v1/paper-trading/accounts/${encodeURIComponent(accountId)}/risk`,
+  );
+  return RiskSummarySchema.parse(data);
+}
+
+/** Explicitly clear a drawdown halt — the only way it ever clears. */
+export async function resumePaperTrading(accountId: string): Promise<PaperAccount> {
+  const { data } = await apiClient.post(
+    `/api/v1/paper-trading/accounts/${encodeURIComponent(accountId)}/resume-trading`,
+  );
+  return PaperAccountSchema.parse(data);
 }

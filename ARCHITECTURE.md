@@ -2930,6 +2930,81 @@ being `false` in this dev environment) at fill price $2511.4551 — exactly
 $2510.20 × 1.0005 — with `fee_applied=$2.5114551` exactly matching 10bps
 of the resulting notional.
 
+**Pre-trade risk limits — position sizing, exposure, and a drawdown halt.**
+Three account-level percentage limits, extended onto `paper_accounts`
+(migration `c1e00878df40`): `max_position_size_pct` (default 10%),
+`max_exposure_pct` (default 50%), `max_drawdown_pct` (default 20%), plus
+the running state that enforces them — `peak_balance` and
+`trading_halted`. Every check in `PaperTradingService.place_order`
+(`app/services/paper_trading.py`) runs in this order:
+
+1. **Halted** — a halted account rejects every order outright
+   (`TradingHaltedError`, 400, `trading_halted`) until an explicit
+   `resume_trading` call.
+2. **Position sizing** — this order's _resulting_ quantity in its own
+   symbol, valued at the _current_ resolved quote, must not exceed
+   `max_position_size_pct` of the account's _current_ balance
+   (`MaxPositionSizeExceededError`, 400, `max_position_size_exceeded`).
+3. **Exposure** — every other open position's _current_ value (the same
+   `resolve_current_price` live-price-with-fallback lookup
+   `list_positions` already uses — never a second data path, and never
+   each position's own stale entry price) plus this order's own resulting
+   value must not exceed `max_exposure_pct` of current balance
+   (`MaxExposureExceededError`, 400, `max_exposure_exceeded`). Proven with
+   a fixture that buys a position cheap and lets the market carry its
+   _current_ value far past what its entry cost would ever suggest, then
+   shows a separate, otherwise-trivial order gets rejected purely because
+   of that revaluation — the check could not have used entry price and
+   still produce this result.
+
+After the trade completes (not before, and never blocking the trade that
+causes it), drawdown is re-evaluated: `peak_balance` only ever rises
+(`max(peak_balance, new_balance)`); if the new balance has fallen more
+than `max_drawdown_pct` below the (possibly just-raised) peak,
+`trading_halted` is set. This can only ever flip `False → True` here — a
+halted account is rejected at step 1 before ever reaching this point
+again. **No self-healing**: balance moving back above the threshold on
+its own never clears the flag — only `POST .../resume-trading` does, and
+that call also resets `peak_balance` to the account's current balance
+(without this, an account resumed while still deep in drawdown against
+its old, untouched peak would re-halt after its very next order,
+regardless of that order's own direction — making "resume" nearly
+indistinguishable from "allow exactly one more order"; resetting the
+high-water mark to _now_ is what a manual risk override conventionally
+means).
+
+**Concurrency — the same atomic-`UPDATE` guard the training-job
+duplicate-run race already established, adapted to a bounded
+retry-and-recompute loop.** `TrainingJobRepository.try_transition_to_running`
+guards a simple state transition with one
+`UPDATE ... WHERE status = 'pending'`; this feature's own check-then-act
+(read balance/positions → resolve a live price → check
+halted/position-size/exposure → compute the new balance/peak/halt state
+→ write it) can't be pinned to one fixed column the same way, because its
+precondition depends on live prices and every other open position, not
+just this row. `PaperAccountRepository.try_apply_trade_effects` guards it
+instead with `UPDATE ... WHERE balance = :expected AND trading_halted =
+:expected`: two concurrent orders against the same account can never both
+still match an unmodified row (Postgres serializes the two `UPDATE`s on
+the same primary key), so the loser's `UPDATE` matches zero rows.
+`PaperTradingService.place_order` treats that as "re-read the account and
+every open position, recompute every check from scratch, and retry" (up
+to `paper_trading_max_order_attempts`, default 5) — never as "proceed
+anyway." The loser is re-evaluated against the winner's already-committed
+effect, not the stale numbers it started with, so two orders that would
+jointly breach a limit can never both succeed. Verified empirically, not
+just asserted sequentially:
+`tests/paper_trading/test_service.py::TestConcurrentExposureRace` places
+two orders for two different symbols via real, genuine
+`asyncio.gather` concurrency (two independent `PaperTradingService`
+instances, each its own session — the identical shape
+`tests/training/test_service.py::test_two_genuinely_concurrent_starts_reject_exactly_one`
+already proved for the training-job race), each individually well under
+the exposure limit, jointly well over it — exactly one succeeds, the
+other is rejected with `MaxExposureExceededError` (not some other,
+accidental failure mode), and the database agrees only one position was
+ever created. Stable across repeated runs, not a one-off pass.
+
 **The slippage/fee model, documented plainly** (`app/paper_trading/pricing.py`):
 a simple fixed-basis-point model, per this feature's own spec — no
 order-book depth, no liquidity curve, no venue-specific fee tier.
@@ -2984,8 +3059,11 @@ outright** — `InsufficientBalanceError`/`InsufficientPositionError` (both
 position. No margin, no leverage, no shorting exists anywhere in this
 feature to make either possible in the first place.
 
-**Persistence** — three new tables (migration `7a3254fe72af`):
-`paper_accounts` (cash `balance`, cumulative `realized_pnl`),
+**Persistence** — three new tables (migration `7a3254fe72af`), extended
+once (migration `c1e00878df40`) with the risk-limit columns above:
+`paper_accounts` (cash `balance`, cumulative `realized_pnl`,
+`max_position_size_pct`/`max_exposure_pct`/`max_drawdown_pct`,
+`peak_balance`, `trading_halted`),
 `paper_orders` (every filled order — `raw_price`, `fill_price`,
 `price_source`, `price_observed_at`, `is_stale_price`,
 `slippage_applied`, `fee_applied`, `notional`, and `realized_pnl` — set
@@ -3005,7 +3083,13 @@ recovery path for "which account is mine"), `POST .../accounts/{id}/orders`
 (place and fill a market order, immediately), `GET .../accounts/{id}/orders`
 (order history), `GET .../accounts/{id}/positions` (open positions, each
 marked to a live price), `GET .../accounts/{id}/summary` (balance,
-realized PnL, live unrealized PnL, and total equity).
+realized PnL, live unrealized PnL, and total equity),
+`GET .../accounts/{id}/risk` (current exposure %, drawdown %, distance to
+the exposure/drawdown limits, and halted status — position-sizing has no
+single account-wide "current" figure of its own, since it's checked per
+order against one symbol's own resulting value, so only its threshold is
+reported here), `POST .../accounts/{id}/resume-trading` (clear a
+drawdown halt and reset `peak_balance` to the current balance).
 
 **Frontend** — a new top-level page, `/paper-trading`
 (`apps/dashboard/src/features/paper-trading/`), alongside `/trades` and
@@ -3030,7 +3114,17 @@ make visible. "My account" is a `localStorage`-remembered id
 (`usePaperTradingAccountStore`, the same deliberately-durable-not-session-
 scoped exception `use-favorite-features-store.ts` already established),
 since nothing on this platform authenticates a user to key a real account
-off of.
+off of. A `RiskSummaryPanel` (`components/risk-summary-panel.tsx`) shows
+exposure and drawdown each as a value against its own limit (a
+`LinearProgress` bar, colored `warning` past 80% of the limit and `error`
+once actually over it), the account's halted status, and — only while
+halted — a "Resume Trading" action behind the same `ConfirmActionDialog`
+pattern. Every order rejection (risk-limit or otherwise) surfaces the
+backend's own specific `detail` message verbatim in the existing
+Place-an-Order error `Alert` — no separate frontend logic needed to make
+"which limit, by how much" visible, since `src/lib/api/errors.ts`'s
+existing `toApiError` already carries the backend's `detail` through as
+`Error.message` for every endpoint on this platform.
 
 **Testing.** `tests/paper_trading/test_pricing.py`: ticker-then-trade-
 then-candle-fallback precedence, staleness marking (fresh vs. older than

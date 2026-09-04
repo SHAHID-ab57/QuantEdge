@@ -3262,6 +3262,7 @@ src/features/paper-trading/
 │   ├── order-form.tsx                          symbol / side / quantity — market orders only
 │   ├── positions-table.tsx                     open positions, marked to a live price
 │   ├── order-history-table.tsx                 fill price, source, slippage/fee — always visible
+│   ├── risk-summary-panel.tsx                   exposure/drawdown vs. limits, halted status, Resume Trading
 │   └── live-data-chip.tsx                       page-level "live data or fallback" hint
 └── paper-trading-page.tsx                       page composition root
 ```
@@ -3316,16 +3317,39 @@ dollar sign (`-$50.00`, not `$-50.00`), colored green/red/neutral by sign,
 computed in exactly one place so the three surfaces never drift into
 inconsistent formatting.
 
+**`RiskSummaryPanel` shows exposure and drawdown each against their own
+configured limit, never a bare percentage with no context.** A
+`LinearProgress` bar per limit (colored `warning` past 80% of it, `error`
+once actually over), fed by `GET .../risk` (polled every 10s — the same
+cadence the summary/positions already poll at, since exposure and
+drawdown both depend on live prices and the account's own running balance
+moving on their own). While halted, an `Alert` replaces the "Trading
+active" chip and carries the only way to clear it: "Resume Trading",
+behind the same `ConfirmActionDialog` pattern every other consequential
+action on this page uses (a halt is deliberately not one accidental
+click away from being cleared, since the account is likely still deep in
+the drawdown that caused it). Order rejections need no special-casing in
+the frontend at all — every risk-limit error (`trading_halted`,
+`max_position_size_exceeded`, `max_exposure_exceeded`) surfaces through
+the _same_ Place-an-Order error `Alert` every other rejection already
+used, because `src/lib/api/errors.ts`'s `toApiError` already carries the
+backend's own specific `detail` message (which limit, by how much) through
+as `Error.message` for every endpoint on this platform — "generic error"
+was never possible here without deliberately discarding that detail.
+
 **Testing.** `format-pnl.test.ts` (sign placement and rounding, in
 isolation). `order-history-table.test.tsx` (fill price/source/slippage/fee
 all rendered, a dash for a buy's null realized PnL, a real value for a
 sell's, a stale fallback marked with its warning chip, an empty-history
 message). `positions-table.test.tsx` (a row's own quantity/prices/PnL,
 positive and negative signed formatting, an empty-positions message).
-`paper-trading-page.test.tsx` covers the whole page end to end: the
-empty-account prompt, opening an account and seeing its summary, placing
-a buy order and the mutation firing with the exact expected body, and a
-surfaced order error.
+`risk-summary-panel.test.tsx` (active vs. halted rendering, both limit
+rows' exact percentages, the confirm-then-resume flow, a surfaced resume
+error, the loading skeleton). `paper-trading-page.test.tsx` covers the
+whole page end to end: the empty-account prompt, opening an account and
+seeing its summary, placing a buy order and the mutation firing with the
+exact expected body, a surfaced order error, and a halted risk panel's
+Resume Trading action actually calling the resume mutation.
 
 ## State management
 

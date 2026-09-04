@@ -24,6 +24,7 @@ from app.schemas.paper_trading import (
     PaperOrderResponse,
     PaperPositionListResponse,
     PortfolioSummaryResponse,
+    RiskSummaryResponse,
 )
 from app.services.paper_trading import PaperTradingService
 
@@ -52,6 +53,34 @@ _ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
                             "detail": "Cannot sell 5 of 'ETHUSD': this account holds only 2 — "
                             "this platform is long-only, so a sell can never exceed the held "
                             "quantity (no shorting)",
+                        },
+                    },
+                    "trading_halted": {
+                        "summary": "This account's trading is halted by the drawdown limit",
+                        "value": {
+                            "code": "trading_halted",
+                            "detail": "Trading is halted for this account: balance 7800.00 has "
+                            "fallen more than 20 % below its peak of 10000.00. Resume trading "
+                            "explicitly before placing another order — a halt never clears "
+                            "itself on balance recovery.",
+                        },
+                    },
+                    "max_position_size_exceeded": {
+                        "summary": "This order's resulting position value exceeds the limit",
+                        "value": {
+                            "code": "max_position_size_exceeded",
+                            "detail": "This order would bring the 'ETHUSD' position to a value "
+                            "of 15000.00 — 15 % of the current balance of 100000.00 — exceeding "
+                            "the 10 % max position size limit for this account",
+                        },
+                    },
+                    "max_exposure_exceeded": {
+                        "summary": "Total exposure after this order would exceed the limit",
+                        "value": {
+                            "code": "max_exposure_exceeded",
+                            "detail": "This order would bring total exposure to 60000.00 — 60 % "
+                            "of the current balance of 100000.00 — exceeding the 50 % max "
+                            "exposure limit for this account",
                         },
                     },
                     "invalid_paper_order_sort": {
@@ -228,3 +257,36 @@ async def get_paper_portfolio_summary(
 ) -> PortfolioSummaryResponse:
     """Return this account's own portfolio summary."""
     return await service.summary(account_id)
+
+
+@router.get(
+    "/paper-trading/accounts/{account_id}/risk",
+    response_model=RiskSummaryResponse,
+    summary="An account's own current exposure and drawdown against its risk limits",
+    responses=_ERROR_RESPONSES,
+)
+async def get_paper_risk_summary(
+    account_id: AccountIdPath, service: PaperTradingServiceDep
+) -> RiskSummaryResponse:
+    """Return this account's own current exposure %, drawdown %, distance
+    to each limit, and halted status."""
+    return await service.risk_summary(account_id)
+
+
+@router.post(
+    "/paper-trading/accounts/{account_id}/resume-trading",
+    response_model=PaperAccountResponse,
+    summary="Explicitly clear a drawdown halt",
+    description=(
+        "The only way a drawdown halt ever clears — it does not self-heal on balance "
+        "recovery. Also resets peak_balance to the account's current balance, so the account "
+        "is measured for drawdown fresh from this point rather than immediately re-halting "
+        "against its old, untouched peak on the very next order."
+    ),
+    responses=_ERROR_RESPONSES,
+)
+async def resume_paper_trading(
+    account_id: AccountIdPath, service: PaperTradingServiceDep
+) -> PaperAccountResponse:
+    """Clear this account's trading_halted flag and reset its peak_balance."""
+    return await service.resume_trading(account_id)

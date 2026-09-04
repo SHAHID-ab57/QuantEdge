@@ -5,6 +5,7 @@ All future services must follow the conventions in configs/README.md.
 Database variables follow the catalog in configs/environment.example.md.
 """
 
+from decimal import Decimal
 from functools import lru_cache
 from typing import Literal
 
@@ -129,6 +130,21 @@ class Settings(BaseSettings):
     paper_trading_accounts_max_limit: int = 100
     paper_trading_orders_default_limit: int = 20
     paper_trading_orders_max_limit: int = 100
+
+    #: Pre-trade risk limits, applied to a new account when its own
+    #: `PaperAccountCreateRequest` doesn't override them (see
+    #: `app/services/paper_trading.py`). Each is a percentage (e.g. `10`
+    #: means 10%), never hardcoded past this one place, so a test can
+    #: assert the exact configured threshold.
+    paper_trading_default_max_position_size_pct: Decimal = Decimal("10")
+    paper_trading_default_max_exposure_pct: Decimal = Decimal("50")
+    paper_trading_default_max_drawdown_pct: Decimal = Decimal("20")
+
+    #: Bounded retries for the optimistic-concurrency guard around placing
+    #: an order (`PaperAccountRepository.try_apply_trade_effects`) — see
+    #: that method's own docstring for why a single atomic `UPDATE` isn't
+    #: enough here and a bounded retry-and-recompute loop is needed instead.
+    paper_trading_max_order_attempts: int = 5
 
 
 @lru_cache

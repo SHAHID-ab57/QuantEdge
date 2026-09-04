@@ -24,6 +24,11 @@ export const PaperAccountSchema = z.object({
   starting_balance: z.string(),
   balance: z.string(),
   realized_pnl: z.string(),
+  max_position_size_pct: z.string(),
+  max_exposure_pct: z.string(),
+  max_drawdown_pct: z.string(),
+  peak_balance: z.string(),
+  trading_halted: z.boolean(),
   created_at: z.string().datetime(),
 });
 
@@ -95,3 +100,19 @@ export const PortfolioSummarySchema = z.object({
 });
 
 export type PortfolioSummary = z.infer<typeof PortfolioSummarySchema>;
+
+export const RiskSummarySchema = z.object({
+  account_id: z.string(),
+  balance: z.string(),
+  peak_balance: z.string(),
+  current_exposure_pct: z.string(),
+  max_exposure_pct: z.string(),
+  exposure_headroom_pct: z.string(),
+  current_drawdown_pct: z.string(),
+  max_drawdown_pct: z.string(),
+  drawdown_headroom_pct: z.string(),
+  max_position_size_pct: z.string(),
+  trading_halted: z.boolean(),
+});
+
+export type RiskSummary = z.infer<typeof RiskSummarySchema>;

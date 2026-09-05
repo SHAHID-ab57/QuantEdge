@@ -154,6 +154,27 @@ class Settings(BaseSettings):
     #: enough here and a bounded retry-and-recompute loop is needed instead.
     paper_trading_max_order_attempts: int = 5
 
+    #: Periodic automated strategy execution
+    #: (`app.services.paper_trading_strategy.PaperTradingStrategyScheduler`)
+    #: — mirrors `candle_sync_enabled`/`prediction_grading_enabled` exactly:
+    #: this flag only gates whether the *loop* runs at all. Each account's
+    #: own `strategy_enabled` (default `False`, `PaperAccount`) is the real,
+    #: per-account opt-in — a running loop still does nothing for an
+    #: account that never enabled it.
+    paper_trading_strategy_scheduler_enabled: bool = True
+    paper_trading_strategy_interval_seconds: int = 300
+
+    #: Defaults for a new account's own strategy configuration when its
+    #: `PaperStrategyConfigUpdateRequest` doesn't override them — the same
+    #: "never hardcoded past this one place" convention every other paper
+    #: trading default already follows.
+    paper_trading_strategy_default_confidence_threshold_pct: Decimal = Decimal("65")
+    paper_trading_strategy_default_stop_loss_pct: Decimal = Decimal("5")
+
+    #: Strategy decision log pagination (`GET .../strategy/decisions`).
+    paper_trading_strategy_decisions_default_limit: int = 20
+    paper_trading_strategy_decisions_max_limit: int = 100
+
 
 @lru_cache
 def get_settings() -> Settings:

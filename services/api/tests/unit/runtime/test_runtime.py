@@ -40,6 +40,10 @@ def _settings(**overrides: object) -> SimpleNamespace:
         "paper_trading_default_max_exposure_pct": Decimal("50"),
         "paper_trading_default_max_drawdown_pct": Decimal("20"),
         "paper_trading_max_order_attempts": 5,
+        "paper_trading_strategy_default_confidence_threshold_pct": Decimal("65"),
+        "paper_trading_strategy_default_stop_loss_pct": Decimal("5"),
+        "paper_trading_strategy_scheduler_enabled": False,
+        "paper_trading_strategy_interval_seconds": 300,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -129,6 +133,7 @@ async def test_start_and_shutdown_offline(monkeypatch: pytest.MonkeyPatch) -> No
     assert runtime.pipeline is None
     assert runtime.delta_ws is None
     assert runtime.candle_sync is None
+    assert runtime.paper_trading_strategy is None
 
     await shutdown_runtime()
     assert runtime_module._runtime is None
@@ -211,6 +216,36 @@ async def test_runtime_shutdown_stops_prediction_grading(
     await runtime.shutdown()
     assert stopped == [True]
     assert runtime.prediction_grading is None
+
+
+async def test_runtime_shutdown_stops_paper_trading_strategy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The automated strategy scheduler is stopped when configured — the
+    same start/shutdown wiring `CandleSyncScheduler`/
+    `PredictionGradingScheduler` already get."""
+    stopped = []
+
+    class FakeStrategy:
+        async def start(self) -> None:
+            pass
+
+        async def stop(self) -> None:
+            stopped.append(True)
+
+    monkeypatch.setattr(
+        runtime_module,
+        "get_settings",
+        lambda: _settings(paper_trading_strategy_scheduler_enabled=True),
+    )
+    monkeypatch.setattr(runtime_module, "PaperTradingStrategyScheduler", lambda **_: FakeStrategy())
+
+    runtime = _runtime()
+    await runtime.start()
+    assert runtime.paper_trading_strategy is not None
+    await runtime.shutdown()
+    assert stopped == [True]
+    assert runtime.paper_trading_strategy is None
 
 
 async def test_delta_connection_none_when_not_running() -> None:

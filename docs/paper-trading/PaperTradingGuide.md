@@ -573,6 +573,80 @@ a threshold, not exactly on it) still triggers correctly — the check is
 price with the wider triggered-slippage model applied on top, never at
 the stale threshold price itself.
 
+### 1.11 Automated Strategy
+
+One opt-in, off-by-default automated order path per account — four new
+columns on `paper_accounts` (migration `9a50eaff41a2`):
+
+| Column                              | Default | Meaning                                                                                                             |
+| ----------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------- |
+| `strategy_enabled`                  | `false` | Explicit per-account opt-in — no platform-wide setting turns this on.                                               |
+| `strategy_training_job_id`          | `NULL`  | The completed job to predict from every cycle; `ON DELETE SET NULL`.                                                |
+| `strategy_confidence_threshold_pct` | `65`    | A fresh prediction's own confidence (0–1) must reach at least this %, matching every other threshold on this row.   |
+| `strategy_default_stop_loss_pct`    | `5`     | Every automated buy attaches a stop-loss this % below its own fill price — never omittable, constrained `(0, 100)`. |
+
+Plus one new table, `paper_strategy_decisions` (same migration) — one row
+per strategy-enabled account per scheduler tick, unconditionally:
+`account_id`, `training_job_id`, `symbol`, `action`
+(`'opened' | 'closed' | 'no_action'`), `reason` (plain language, always
+present), `predicted_value`/`confidence` (nullable together only when no
+prediction was ever obtained), `confidence_threshold_pct` (a snapshot of
+the account's own threshold at that moment), `prediction_id`/`order_id`
+(independently nullable).
+
+Settable via `PATCH /paper-trading/accounts/{id}/strategy` — the same
+partial-update idiom § 1.10's threshold endpoint uses: only fields
+present in the request change, an explicit `null` for
+`training_job_id` clears it. Validated against the _final_, merged
+state: `enabled: true` with no `strategy_training_job_id` at all is
+rejected (`strategy_missing_training_job`, 400), an unknown job id
+reuses the Training Framework's own `training_job_not_found` (404,
+never duplicated), and a job with no recorded `symbol` (never trained on
+real market data) is rejected too
+(`strategy_training_job_missing_symbol`, 400). Disabling never requires
+any of this. Read via `GET /paper-trading/accounts/{id}/strategy/decisions`
+(paginated, most recent first) — the decision log.
+
+**The scheduler** (`app/services/paper_trading_strategy.py`'s
+`PaperTradingStrategyScheduler`) mirrors `CandleSyncScheduler`/
+`PredictionGradingScheduler` exactly: a single `asyncio` loop task, its
+own DB session per tick, gated on `paper_trading_strategy_scheduler_enabled`
+(default `true`, 300s interval — this flag only controls whether the
+_loop_ runs at all). The real opt-in,
+`PaperAccountRepository.list_strategy_enabled`, is read fresh at the top
+of _every_ tick — never cached — so disabling an account takes effect by
+its very next tick.
+
+**The decision, each tick, per enabled account:**
+
+1. Resolve `strategy_training_job_id` → that job's own recorded `symbol`
+   (never a separately-configured one). Missing/deleted/no-symbol —
+   logged `no_action`.
+2. Request a fresh prediction (`PredictionService.run`, the exact same
+   path `POST /predictions/run` uses) for that job/symbol. Any failure —
+   logged `no_action` with the failure reason.
+3. No `confidence` at all, or below `strategy_confidence_threshold_pct` —
+   logged `no_action`.
+4. `predicted_value == "up"` is bullish, `"down"` is bearish, anything
+   else (`"flat"`, a regressor's own number) is not directional — logged
+   `no_action`. Flat + bullish opens a buy (sized at half the account's
+   own `max_position_size_pct` of current balance — there is no separate
+   strategy position-sizing config; this is a deliberately conservative
+   default) with a stop-loss at `strategy_default_stop_loss_pct` below
+   the resolved price. Long + bearish closes the full held quantity.
+   Long + bullish / flat + bearish are both "already consistent" —
+   `no_action`, never a short.
+
+**"Just another caller," not a second order-placement path.** Every
+order goes through the exact same `PaperTradingService.place_order` a
+manual order uses — the same halted/position-sizing/exposure checks and
+the same `try_apply_trade_effects` atomic concurrency guard § 1.9
+describes, its fourth occurrence. A rejection (any risk limit, a moved
+price invalidating the precomputed stop-loss, a halted account) is
+caught generically and logged as a `no_action` decision — self-healing
+next tick, never silently opening an unprotected position or a second,
+unguarded fill path.
+
 ---
 
 ## 2. Frontend
@@ -596,7 +670,11 @@ apps/dashboard/src/features/paper-trading/
 │   ├── positions-table.test.tsx
 │   ├── risk-summary-panel.tsx
 │   ├── risk-summary-panel.test.tsx
-│   └── set-thresholds-dialog.tsx
+│   ├── set-thresholds-dialog.tsx
+│   ├── strategy-panel.tsx
+│   ├── strategy-panel.test.tsx
+│   ├── strategy-decision-log-table.tsx
+│   └── strategy-decision-log-table.test.tsx
 ├── hooks/
 │   └── use-paper-trading-data.ts          TanStack Query hooks
 ├── lib/
@@ -809,22 +887,27 @@ source: `GET .../risk` (`usePaperTradingRisk`, polled every 10s).
   this is ever cleared.
 - **Server state** — TanStack Query, via `hooks/use-paper-trading-data.ts`:
 
-| Hook                              | Query key                                                                              | Polling                                |
-| --------------------------------- | -------------------------------------------------------------------------------------- | -------------------------------------- |
-| `usePaperAccounts(params)`        | `['paper-trading','accounts','list',params]`                                           | None (default `staleTime`/`gcTime`)    |
-| `usePaperAccount(id)`             | `['paper-trading','account',id]`                                                       | None                                   |
-| `usePaperPortfolioSummary(id)`    | `[...accountKey,'summary']`                                                            | Every 10s while an account is selected |
-| `usePaperPositions(id)`           | `[...accountKey,'positions']`                                                          | Every 10s while an account is selected |
-| `usePaperOrders(id, params)`      | `[...accountKey,'orders',params]`                                                      | None                                   |
-| `usePaperTradingRisk(id)`         | `[...accountKey,'risk']`                                                               | Every 10s while an account is selected |
-| `useCreatePaperAccount()`         | mutation; invalidates the accounts list on success                                     | —                                      |
-| `usePlacePaperOrder(id)`          | mutation; invalidates every query under `accountKey(id)` on success                    | —                                      |
-| `useResumeTrading(id)`            | mutation; invalidates every query under `accountKey(id)` on success                    | —                                      |
-| `useUpdatePositionThresholds(id)` | mutation (`{symbol, body}`); invalidates every query under `accountKey(id)` on success | —                                      |
+| Hook                                    | Query key                                                                              | Polling                                |
+| --------------------------------------- | -------------------------------------------------------------------------------------- | -------------------------------------- |
+| `usePaperAccounts(params)`              | `['paper-trading','accounts','list',params]`                                           | None (default `staleTime`/`gcTime`)    |
+| `usePaperAccount(id)`                   | `['paper-trading','account',id]`                                                       | None                                   |
+| `usePaperPortfolioSummary(id)`          | `[...accountKey,'summary']`                                                            | Every 10s while an account is selected |
+| `usePaperPositions(id)`                 | `[...accountKey,'positions']`                                                          | Every 10s while an account is selected |
+| `usePaperOrders(id, params)`            | `[...accountKey,'orders',params]`                                                      | None                                   |
+| `usePaperTradingRisk(id)`               | `[...accountKey,'risk']`                                                               | Every 10s while an account is selected |
+| `useCreatePaperAccount()`               | mutation; invalidates the accounts list on success                                     | —                                      |
+| `usePlacePaperOrder(id)`                | mutation; invalidates every query under `accountKey(id)` on success                    | —                                      |
+| `useResumeTrading(id)`                  | mutation; invalidates every query under `accountKey(id)` on success                    | —                                      |
+| `useUpdatePositionThresholds(id)`       | mutation (`{symbol, body}`); invalidates every query under `accountKey(id)` on success | —                                      |
+| `usePaperStrategyDecisions(id, params)` | `[...accountKey,'strategy-decisions',params]`                                          | Every 10s while an account is selected |
+| `useUpdatePaperStrategyConfig(id)`      | mutation; invalidates every query under `accountKey(id)` on success                    | —                                      |
 
 Positions and the summary poll because their unrealized PnL depends on a live
 price that moves on its own, unprompted by any user action — the same
-justification `useTrainingJob` uses to poll a still-running job. Placing an
+justification `useTrainingJob` uses to poll a still-running job.
+Decisions poll for the same underlying reason: a new one can appear on
+its own, unprompted by any action taken on this page, since the strategy
+scheduler runs in the background. Placing an
 order invalidates (rather than polls) everything, since it's a
 user-triggered, one-shot event.
 
@@ -843,6 +926,36 @@ user-triggered, one-shot event.
 | Updating stop-loss/take-profit fails                        | Red `Alert role="alert"` under the Positions section, with the server's own error message (e.g. a named validation rejection)                                                                                             |
 | No open positions                                           | Centered text row in the Positions table                                                                                                                                                                                  |
 | No orders yet                                               | Centered text row in the Order History table                                                                                                                                                                              |
+| Saving the strategy config fails                            | Red `Alert role="alert"` under the Automated Strategy section, with the server's own error message (e.g. `strategy_training_job_missing_symbol`)                                                                          |
+| No strategy cycles logged yet                               | Centered text row in the Strategy Decision Log table                                                                                                                                                                      |
+
+### 2.12 Every field — Automated Strategy panel
+
+Components: `StrategyPanel` (`components/strategy-panel.tsx`) +
+`StrategyDecisionLogTable` (`components/strategy-decision-log-table.tsx`),
+inside a new "Automated Strategy" `Section`, rendered only once an
+account is selected. Data source: the account's own
+`strategy_*` fields (`usePaperAccount`) and `GET .../strategy/decisions`
+(`usePaperStrategyDecisions`, polled every 10s).
+
+| Element                  | Component type                                                                                            | Behavior                                                                                                                      |
+| ------------------------ | --------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| Disclosure               | MUI `Alert severity="info"`, always shown                                                                 | "Paper trading only — this never places a real trade and never changes anything about how live trading is gated."             |
+| Enable/disable           | MUI `Switch` + `FormControlLabel`, label states which it currently is                                     | Defaults to the account's own `strategy_enabled` (off unless already turned on).                                              |
+| Training job             | MUI `Autocomplete` over `useTrainingJobs({status:'completed'})` (cross-feature import from `ml-training`) | Required while enabled — "Save" is disabled and an inline helper text explains why until one is picked.                       |
+| Confidence threshold (%) | MUI `TextField`, `inputMode="decimal"`                                                                    | `(0, 100]` — accepts exactly 100.                                                                                             |
+| Stop-loss (%)            | MUI `TextField`, `inputMode="decimal"`                                                                    | `(0, 100)` — rejects 100 or more (would mean a fill price of zero).                                                           |
+| Save button              | MUI `Button`, disabled while any field is invalid or (while enabling) no job chosen                       | One explicit action — nothing here takes effect just by being typed into, the same posture `SetThresholdsDialog` established. |
+| Save error `Alert`       | MUI `Alert severity="error" role="alert"`, shown only if the save mutation failed                         | The backend's own error message (e.g. a rejected job).                                                                        |
+| Loading state            | 2 `Skeleton` placeholders                                                                                 | Shown while `isLoading` and no account data yet.                                                                              |
+
+`StrategyDecisionLogTable` columns: Time, Symbol, Action (a filled
+`Chip` — green "Opened", red "Closed", or an outlined default "No
+Action" — never the same chip style for all three), Signal
+(`predicted_value`, plain text), Confidence (`0-1` rendered as a
+percentage, right-aligned), Reason (the backend's own plain-language
+text, wrapped). Pagination: the same `TablePagination` (10 rows/page, no
+rows-per-page selector) every other table on this page uses.
 
 ---
 
@@ -919,6 +1032,35 @@ Key files:
   forced by writing straight to the row, still resolves deterministically
   as `"stop_loss"` — proving the monitor's defense-in-depth check order
   is real, executed code.
+- `tests/paper_trading/test_service.py::TestUpdateStrategyConfig` — a
+  new account starts disabled with the platform's own default 65%/5%
+  threshold/stop-loss; enabling against a real completed job succeeds;
+  enabling with no job named, an unknown job, and a job with no recorded
+  symbol (a `placeholder` job trained on no real market data) are each
+  rejected with their own error code; disabling never requires a job and
+  leaves one already set in place; a partial update leaves every
+  untouched field alone.
+- `tests/paper_trading/test_strategy_scheduler.py` —
+  `PaperTradingStrategyScheduler`, mirroring
+  `tests/services/test_grading_scheduler.py`'s own conventions plus a
+  stubbed `get_prediction_service` for deterministic control over
+  confidence/predicted_value. A confident, above-threshold `"up"`
+  prediction against a flat position opens a correctly-sized, correctly
+  stop-lossed buy; a below-threshold prediction places no order but is
+  still logged; a confident `"down"` prediction while long closes the
+  position (and a halted account rejects that close exactly like a
+  manual one); `TestSharesExistingRiskLimits` — a tight `max_exposure_pct`
+  pre-filled by an ordinary manual buy rejects the automated buy with the
+  identical `MaxExposureExceededError` a second manual order would hit;
+  disabling an account leaves it absent from the very next tick; three
+  ticks (below-threshold, opens, non-directional) log exactly three
+  decisions, one of each outcome; `TestRealPredictionWiring` proves the
+  unstubbed path too (a real trained job, a real `PredictionService.run`
+  call); scheduler start/stop/no-database wiring.
+- `tests/api/test_paper_trading_api.py` (strategy) —
+  `TestUpdateStrategyConfig`/`TestListStrategyDecisions`: the same
+  disabled-by-default/enable-rejection/enable-success paths at the HTTP
+  layer, and an empty decision log before any scheduler tick has run.
 
 ```bash
 # Frontend
@@ -929,12 +1071,21 @@ pnpm test -- --run src/features/paper-trading
 Key files: `paper-trading-page.test.tsx` (empty state, account creation,
 placing a buy order end-to-end with and without a stop-loss/take-profit,
 editing a position's thresholds from the positions table, a surfaced
-order error, a halted risk panel's Resume Trading action),
+order error, a halted risk panel's Resume Trading action, enabling the
+automated strategy end to end with the exact expected save body, the
+page's own "Paper trading only" disclosure),
 `order-history-table.test.tsx` (including the Manual-vs-Stop-Loss/
 Take-Profit trigger chip), `positions-table.test.tsx` (including the
 SL/TP column and its edit action), `risk-summary-panel.test.tsx`
 (active/halted rendering, the confirm-before-resume flow, a surfaced
-resume error, the loading skeleton), `format-pnl.test.ts` (the shared
+resume error, the loading skeleton), `strategy-panel.test.tsx` (the
+account's own `strategy_enabled` reflected on load, enabling requiring a
+training job before Save is enabled, the exact save body, a stop-loss of
+100+ rejected, a confidence threshold of exactly 100 accepted, a
+surfaced save error, the loading skeleton, the "Paper trading only"
+disclosure), `strategy-decision-log-table.test.tsx` (a decision's
+symbol/signal/confidence/reason rendering, the distinct Opened/Closed/No
+Action chips, an empty-log message), `format-pnl.test.ts` (the shared
 sign-before-dollar-sign formatter every PnL figure on this page uses).
 
 ---
@@ -1225,6 +1376,44 @@ curl -s -X PATCH "http://localhost:8000/api/v1/paper-trading/accounts/$ACCOUNT_I
   -d '{"stop_loss_price": "2490"}' | jq
 ```
 
+### Scenario K — Enable the Automated Strategy and read its decision log
+
+**Goal:** confirm enabling requires a real completed training job, and
+that a scheduler cycle is actually logged — not just designed to be.
+
+1. In the dashboard's **ML Training** page, create and run a
+   `logistic_regression` job against a real market/timeframe with a
+   `next_direction` target, and wait for it to reach `completed`.
+2. On the **Paper Trading** page, open the **Automated Strategy**
+   section for an existing account. Toggle the switch on — **what you
+   should see:** "Save" stays disabled, and the training job field shows
+   "Required while enabled...".
+3. Pick the job from step 1 in the **Training job** field, leave the
+   default 65% threshold/5% stop-loss, and click **Save**. **What you
+   should see:** no error, and the switch's own label reads "Strategy
+   enabled".
+4. Wait up to `paper_trading_strategy_interval_seconds` (default 300s) —
+   or restart the API process, which runs one tick immediately on
+   startup — then refresh. **What you should see:** at least one row in
+   the **Strategy Decision Log** table below the panel, with a
+   plain-language `reason` explaining what it did and why (most commonly
+   `no_action`, since a real model's own confidence rarely clears 65% on
+   the very first real cycle — that is itself the correct, honest
+   behavior, not a bug).
+5. Toggle the switch off and **Save** again. **What you should see:** no
+   new rows appear in the decision log on any later cycle for this
+   account, no matter how long you wait — confirmed directly via
+   `GET .../strategy/decisions` (the `total` count stops increasing).
+
+```bash
+# Same idea via curl.
+curl -s -X PATCH "http://localhost:8000/api/v1/paper-trading/accounts/$ACCOUNT_ID/strategy" \
+  -H 'Content-Type: application/json' \
+  -d '{"enabled": true, "training_job_id": "'"$JOB_ID"'", "confidence_threshold_pct": "65", "default_stop_loss_pct": "5"}' | jq
+
+curl -s "http://localhost:8000/api/v1/paper-trading/accounts/$ACCOUNT_ID/strategy/decisions" | jq
+```
+
 ---
 
 ## 5. Known gaps / out of scope
@@ -1241,9 +1430,14 @@ Deliberately **not** built (each is a separate, later task, not a defect):
   set), and no third/fourth exit level beyond one stop and one target.
   These remain separate, later tasks; the drawdown halt (§ 1.9) is a
   distinct, account-wide circuit breaker, not a per-position exit order.
-- No automation and no prediction-driven trading — every order is placed by
-  a human clicking the form; nothing on this platform ever calls
-  `POST .../orders` on its own.
+- One automated, prediction-driven order path exists (§ 1.11/2.12), and
+  only that one — opt-in, off by default, no separate strategy-specific
+  position-sizing config (it targets half the account's own
+  `max_position_size_pct`), only a single confidence threshold and one
+  fixed stop-loss percentage. No multi-strategy support, no strategy
+  marketplace/sharing, no backtested strategy-selection UI, and no
+  configurable signal beyond a bare directional up/down call — each a
+  separate, later task.
 - No authentication — "which account is mine" is a `localStorage`-remembered
   id with no server-side identity behind it; anyone who can reach the API can
   read or trade any account by id.

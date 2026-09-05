@@ -2907,11 +2907,14 @@ was written:**
 ### Paper Trading
 
 A virtual trading account: place simulated market orders against real
-prices, track positions, and compute PnL. The first item of Milestone 3
-(Paper Trading & Risk) — deliberately narrow in scope, per its own spec:
-long-only, market orders only, no automation, no margin, no shorting, no
-leverage, and no prediction-driven trading — each of those is a separate,
-later task, not folded in here.
+prices, track positions, and compute PnL. Milestone 3 (Paper Trading &
+Risk) — deliberately narrow in scope throughout: long-only, market
+orders only, no margin, no shorting, no leverage. Its one automated
+order path (see "Automated Strategy" below) is opt-in, off by default,
+and reuses this same order-placement machinery rather than a second one
+— everything else about "no automation" still holds: there is still no
+margin, no shorting, no leverage, and still nothing here that touches
+live trading (see Milestone 6's own gate, unaffected by any of this).
 
 **Realistic execution is the one thing this feature exists to guarantee.**
 A market order never fills at a perfect, cost-free price — that would be
@@ -3337,6 +3340,275 @@ edge case (stop-loss wins the deterministic tie-break).
 cross-validation gap between two different set times, thresholds set at
 order-open time, an unrelated later buy never clearing them, and the
 dedicated endpoint's set/update/clear/not-found paths.
+
+**Automated Strategy — the platform's one automated order path, opt-in,
+off by default, and not a new one.** An account may enable a single
+automated strategy: each scheduler tick, request a fresh prediction and,
+if its confidence clears a configured threshold, place an order through
+the exact same `PaperTradingService.place_order` a manual order already
+goes through — the same halted check, the same position-sizing/exposure
+checks against live prices, and the same atomic `try_apply_trade_effects`
+concurrency guard (its fourth occurrence, after the training-job
+duplicate-run race, the exposure-limit race, and the SL/TP
+triggered-close race). This does **not** change anything about
+Milestone 6 (Paper Trading → live trading readiness): live trading
+remains gated on extensive validation regardless of paper-trading
+performance, automated or manual — nothing here shortens or bypasses
+that gate.
+
+**Per-account config, off by default.** Three new columns on
+`paper_accounts` (migration `9a50eaff41a2`): `strategy_enabled` (boolean,
+default `false` — a researcher must explicitly opt in; there is no
+platform-wide setting that turns it on for existing or new accounts),
+`strategy_training_job_id` (nullable FK → `training_jobs.id`, `ON DELETE
+SET NULL`), `strategy_confidence_threshold_pct` (default 65%, matching
+this platform's existing percentage convention for every other
+risk/threshold field on this row — not the raw 0–1 fraction
+`PredictionResponse.confidence` itself uses), `strategy_default_stop_loss_pct`
+(default 5%, constrained `(0, 100)` — never omittable: there is no way to
+enable the strategy without a stop-loss percentage in force).
+`PATCH /paper-trading/accounts/{id}/strategy`
+(`PaperTradingService.update_strategy_config`) is the one place these
+change — the same partial-update idiom (`model_fields_set`)
+`update_position_thresholds` already established, validated against the
+_final_, merged state: enabling with no `strategy_training_job_id` at all
+is rejected (`StrategyMissingTrainingJobError`, 400,
+`strategy_missing_training_job`), naming a job that doesn't exist reuses
+`app.training.errors.TrainingJobNotFoundError` verbatim (404,
+`training_job_not_found` — not duplicated, matching this module's own
+"reuse another domain's error rather than invent a second one"
+convention), and naming a job with no recorded `symbol` (never trained on
+real market data) is rejected too
+(`StrategyTrainingJobMissingSymbolError`, 400,
+`strategy_training_job_missing_symbol`). Disabling never requires any of
+this — an account can always be turned off regardless of its training
+job's own state.
+
+**Which market the strategy trades is derived, never separately
+configured.** The account names a training job, not a symbol —
+`app.services.paper_trading_strategy` reads that job's own recorded
+`symbol` (`TrainingJob.symbol`) fresh every cycle and predicts/trades
+exactly that market, so a strategy can never be pointed at one job's
+model and a different, unrelated symbol.
+
+**The periodic scheduler mirrors `CandleSyncScheduler`/
+`PredictionGradingScheduler` exactly** — `PaperTradingStrategyScheduler`
+(`app/services/paper_trading_strategy.py`): a single `asyncio` loop task,
+its own database session per tick, `run_strategy_tick`/`run_strategy_once`
+matching the `run_catch_up`/`run_grading_tick`/`run_sync_once`/
+`run_grading_once` naming convention, gated on its own
+`paper_trading_strategy_scheduler_enabled` setting (default `true`, 300s
+interval) — but that flag only controls whether the _loop_ runs at all.
+The real, per-account opt-in is `strategy_enabled` on the database row,
+read fresh via `PaperAccountRepository.list_strategy_enabled` at the top
+of _every_ tick, never cached — so **disabling an account takes effect by
+its very next tick**, proven directly by
+`tests/paper_trading/test_strategy_scheduler.py::TestDisablingStopsFutureCycles`:
+a tick that opens a position, an explicit disable, and a second tick that
+`attempted=0`s the same account entirely (it's simply absent from that
+tick's own query) — no new decision is ever logged for it afterward.
+Wired into `Runtime.start`/`Runtime.shutdown` identically to the other
+two schedulers (`app/runtime.py`).
+
+**The decision, each tick, per enabled account:** request a fresh
+prediction (`PredictionService.run`, the exact same live-inference path
+`POST /predictions/run` uses) for the job's own symbol; if `confidence`
+is unavailable (an unsupported model kind) or below
+`strategy_confidence_threshold_pct`, do nothing; otherwise interpret
+`predicted_value` — `"up"` is bullish, `"down"` is bearish, anything else
+(`"flat"`, a regressor's own number) is not a directional call and does
+nothing either. Flat + bullish opens a buy, sized at half the account's
+own `max_position_size_pct` of current balance (there is no separate
+strategy-specific position-sizing config — this is a deliberately
+conservative default, leaving headroom for slippage/fee and any other
+open exposure) with a stop-loss attached at
+`strategy_default_stop_loss_pct` below the resolved price. Long +
+bearish closes the full held quantity. Long + bullish and flat + bearish
+are both "already consistent with the signal" — no shorting, ever, for
+an automated order exactly as for a manual one.
+
+**Every automated position carries a stop-loss — structurally, not by
+convention.** The buy request `place_order` receives always names
+`stop_loss_price`; there is no code path that opens an automated position
+without one. If the price has moved enough by fill time that the
+precomputed stop-loss would no longer be valid,
+`place_order`'s own `InvalidStopLossPriceError` is the backstop — caught
+generically alongside every other order-placement failure (see below)
+and logged as a `no_action` decision, self-healing on the next tick,
+never silently opening an unprotected position.
+`tests/paper_trading/test_strategy_scheduler.py::TestAutomatedPositionsAlwaysCarryAStopLoss`
+proves the resulting position's `stop_loss_price` is set, and matches
+the configured percentage below the order's own `raw_price` exactly.
+
+**"Just another caller," proven, not merely asserted.**
+`TestSharesExistingRiskLimits::test_a_strategy_order_that_would_breach_max_exposure_is_rejected`
+configures a tight `max_exposure_pct`, pre-fills most of that budget with
+an ordinary _manual_ buy in a different symbol, and shows the automated
+buy is rejected by the identical `MaxExposureExceededError` a manual
+order would hit in the same situation — no order placed, no position
+opened, one `no_action` decision logged naming the rejection. A halted
+account rejects an automated close exactly like a manual one too
+(`TestLongAndBearishClosesThePosition
+::test_a_rejected_automated_close_is_logged_as_no_action`).
+
+**Every cycle is logged — acted on or not, and why.** A new table,
+`paper_strategy_decisions` (migration `9a50eaff41a2`): `account_id`,
+`training_job_id`, `symbol`, `action` (`'opened' | 'closed' | 'no_action'`,
+check-constrained), `reason` (plain language, always present),
+`predicted_value`/`confidence` (both nullable together only when no
+prediction was ever obtained this cycle), `confidence_threshold_pct` (a
+snapshot of the account's own threshold _at the moment of this cycle_ —
+never re-read from a possibly-since-changed account),
+`prediction_id`/`order_id` (independently nullable — a logged `no_action`
+after a real prediction names the former without the latter). Exactly
+one row is written per strategy-enabled account per tick, unconditionally
+— proven by
+`TestEveryCycleIsLogged::test_every_tick_is_logged_whether_it_acted_or_not`
+(three ticks — below-threshold, opens, non-directional signal — three
+logged decisions, one of each outcome) and
+`TestBelowThresholdResultsInNoOrder` (a below-threshold cycle places no
+order but is still logged, reason naming the threshold). `GET
+/paper-trading/accounts/{id}/strategy/decisions` is this table's own
+paginated read, the Strategy panel's decision log data source.
+
+**API**: `PaperAccountResponse` gains `strategy_enabled`/
+`strategy_training_job_id`/`strategy_confidence_threshold_pct`/
+`strategy_default_stop_loss_pct`; `PATCH .../strategy`
+(`PaperStrategyConfigUpdateRequest`) sets them; `GET .../strategy/decisions`
+(`PaperStrategyDecisionListResponse`) lists the decision log.
+
+**Frontend**: a new "Automated Strategy" section on `/paper-trading`,
+shown once an account is selected — `StrategyPanel` (enable/disable
+switch, default off; a training-job picker restricted to completed jobs;
+confidence-threshold/stop-loss fields; an explicit "Paper trading
+only — this never places a real trade" disclosure, matching this
+platform's own no-real-money framing everywhere else on this page) and
+`StrategyDecisionLogTable` (every cycle, most recent first — a filled
+"Opened"/"Closed" chip visually distinct from an outlined "No Action"
+one, the same "make an automated outcome visibly distinct, never a plain
+row" precedent `OrderHistoryTable`'s own "Manual"/"Stop-Loss"/
+"Take-Profit" chips already established for a triggered close).
+
+**Every cycle genuinely re-requests a fresh prediction — never a cached
+or reused one — proven, not just asserted.** `_process_account` calls
+`PredictionService.run(PredictionRunRequest(training_job_id=job_id,
+symbol=symbol))` with no `as_of`, every single tick; `PredictionService
+.run` always constructs a brand-new `Prediction(...)` and persists it via
+`PredictionRepository.create` — an unconditional `INSERT`, never an
+upsert or a by-`as_of` lookup — so even two ticks run back-to-back
+against the exact same still-latest candle (nothing new has closed yet)
+genuinely call the model twice and persist two distinct rows, never
+reusing the first. `TestEachCycleRequestsAGenuinelyFreshPrediction`
+proves this by counting real calls into a stub across two consecutive
+ticks and asserting two distinct prediction ids, never one reused.
+**What actually prevents acting twice on that repeated, identical
+signal is the ordinary flat/long position-consistency check below, not
+any prediction-level deduplication** — a second, freshly-computed "up"
+while already long is simply "already consistent," logged `no_action`;
+there is no `as_of`/prediction-id dedup anywhere in this path.
+
+**Known limitation — no out-of-distribution or confidence-quality
+safeguard.** `confidence_threshold_pct` is compared directly against
+`PredictionResponse.confidence` with no other check. The Prediction
+Grading section above already documented a real, previously-observed
+case where a live feature (`volume`) sitting far outside a job's own
+training range produced a saturated, meaningless 100% confidence — that
+same failure mode passes through to the strategy identically to a
+genuine high-confidence signal; a 65% default threshold would clear it
+easily. Whether to flag/block on out-of-range live features was already
+recorded there as "a genuinely separate feature... a candidate for its
+own task, not folded into grading" — it has not been built here either,
+and this is a real gap, not a rounding error: a job known to be
+OOD-affected is not treated any differently by the strategy than a
+trustworthy one. Disclosed here plainly, the same way the SL/TP
+monitor's own silent-symbol limitation is, rather than assumed away.
+
+**Known limitation — the kill switch is a tick-boundary guarantee, not
+a mid-tick one.** `strategy_enabled` is read exactly once per tick, at
+the top (`list_strategy_enabled`); `_process_account` never re-checks it
+afterward, and `place_order` itself has no concept of `strategy_enabled`
+at all (only `trading_halted`, a different flag it re-reads fresh on its
+own). A disable landing after an account was already selected into a
+tick's own batch, but before that account's own order is placed, does
+**not** abort the in-flight cycle — the order still completes.
+`test_disabling_mid_cycle_does_not_abort_an_already_in_flight_tick`
+proves this directly: it disables the account from inside the stubbed
+prediction call itself (the exact midpoint of a cycle) and shows the buy
+still completes, with the account already showing disabled by the time
+the tick returns. "Disabling takes effect before the next cycle" (proven
+separately by `TestDisablingStopsFutureCycles`) means exactly that —
+_before the next cycle begins_ — never mid-cycle.
+
+**Stop-loss mandatory attachment, precisely.** There is no test of
+literal "an automated buy is rejected for lacking a stop-loss," because
+there is no code path that could ever attempt one without it —
+`_open_position` computes `stop_loss_price` unconditionally and always
+includes it in the `PaperOrderRequest` it builds; there is no flag or
+branch that omits it. The real question is whether the _percentage_
+itself could ever be degenerate (`0` or `NULL`), and that is blocked at
+three independent layers, each with its own test:
+`PaperStrategyConfigUpdateRequest.default_stop_loss_pct` rejects `0`
+(`gt=0`) and, since a fix made during this review, an explicit `null`
+too (`_reject_explicit_null_thresholds` — before this fix, `{"default_
+stop_loss_pct": null}` parsed successfully, since Pydantic's `gt=0`
+does not constrain an explicit `None` on an `Optional` field, and would
+have reached `update_strategy_config`'s `Decimal(None)` call, raising an
+unhandled `TypeError`/500 instead of a clean 422); and the database's
+own `ck_paper_accounts_strategy_default_stop_loss_pct_valid` check
+constraint rejects `0` even for a direct ORM write that bypasses the
+service and schema entirely (`test_the_database_itself_rejects_a_
+zero_stop_loss_even_bypassing_the_service`).
+
+**Position-consistency, all four cases, none a silent fallthrough:**
+flat + bullish opens; long + bearish closes; flat + bearish and long +
+bullish are both "already consistent" — `no_action`, logged with a reason
+naming which ("...no short is ever opened" / "...already long, no
+change to make") — each has its own dedicated test in
+`TestAllFourPositionConsistencyCases`, not left as an incidental
+byproduct of some other scenario.
+
+**Classification-only, in effect — not enforced by an explicit
+`model_kind` check.** `update_strategy_config` never inspects a
+training job's `model_kind`/`target_column`; a regression job can be
+named and enabled without any rejection. In practice it can never act:
+per `PredictionResponse`'s own docstring, `confidence` is populated only
+for an adapter that supports `predict_proba` ("today:
+`logistic_regression`") — always `None` for a regressor — so a
+regression job's every cycle is rejected at the mandatory-confidence
+gate before signal interpretation is ever reached, proven with a real
+trained `linear_regression` job, no mocking
+(`TestRegressionJobsCanBeConfiguredButNeverAct`). `_interpret_signal`
+itself is a second, defense-in-depth layer regardless — it only ever
+matches the literal strings `"up"`/`"down"`, so even a hypothetical
+future adapter that did report a confidence for a regressor would still
+never have its plain numeric `predicted_value` treated as directional
+(`test_interpret_signal_never_matches_a_numeric_value`).
+
+**Testing.** `tests/paper_trading/test_strategy_scheduler.py`: a
+confident, above-threshold prediction with a flat position opens a buy;
+a below-threshold prediction places no order but is logged; every
+automated buy carries a correctly-computed stop-loss; a strategy order
+is rejected by the same exposure limit a manual order would hit; a
+confident bearish signal while long closes the position (and a halted
+account rejects that close, same as a manual one); disabling stops the
+very next tick (and does not abort an already in-flight one); every tick
+— acted or not — is logged; all four position-consistency cases; a
+regression job can be configured but never acts; every cycle is a
+genuinely fresh prediction, never cached, with double-acting on a
+repeated signal prevented by position-consistency, not dedup; scheduler
+start/stop/no-database-configured wiring, mirroring
+`tests/services/test_grading_scheduler.py`'s own conventions.
+`TestRealPredictionWiring` proves the unstubbed path too — a genuinely
+trained job's own recorded symbol, a real `PredictionService.run` call,
+one logged decision, no mocking of the prediction pipeline itself.
+`tests/paper_trading/test_service.py`'s `TestUpdateStrategyConfig`: the
+disabled-by-default starting state, a successful enable against a real
+completed job, the three rejection paths (no job named, unknown job, a
+job with no recorded symbol), disabling never requiring a job, partial
+updates leaving untouched fields alone, a stop-loss of `0` or an explicit
+`null` rejected at the schema layer, and the database's own check
+constraint as the last-resort backstop against a `0` stop-loss even
+bypassing the service.
 
 ### Feature Store
 

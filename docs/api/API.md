@@ -1507,6 +1507,8 @@ the list endpoint) round out the rest.
 | GET    | `/api/v1/paper-trading/accounts/{id}/risk`               | Current exposure %/drawdown %, distance to each limit, halted status |
 | POST   | `/api/v1/paper-trading/accounts/{id}/resume-trading`     | Clear a drawdown halt, resetting peak_balance to the current balance |
 | PATCH  | `/api/v1/paper-trading/accounts/{id}/positions/{symbol}` | Set, update, or clear a position's stop-loss/take-profit             |
+| PATCH  | `/api/v1/paper-trading/accounts/{id}/strategy`           | Enable/disable the automated strategy, tune threshold/stop-loss      |
+| GET    | `/api/v1/paper-trading/accounts/{id}/strategy/decisions` | An account's own automated-strategy decision log, paginated          |
 
 Full design in `ARCHITECTURE.md` § "Paper Trading". A virtual trading
 account: place simulated market orders against real prices, track
@@ -1665,7 +1667,70 @@ would take the balance negative), `insufficient_position` (400 — a sell
 would exceed the held quantity), `invalid_paper_order_sort` (400 — an
 unsupported `sort`/`dir` combination on the order history endpoint),
 `invalid_stop_loss_price`/`invalid_take_profit_price` (400 — would
-trigger immediately), `stop_loss_not_below_take_profit` (400).
+trigger immediately), `stop_loss_not_below_take_profit` (400),
+`strategy_missing_training_job` (400 — `strategy_enabled: true` with no
+`strategy_training_job_id` at all), `strategy_training_job_missing_symbol`
+(400 — the named job was never trained on real market data),
+`training_job_not_found` (404 — reused verbatim from the Training
+Framework, not a paper-trading-specific code).
+
+**Automated Strategy** — a single, opt-in automated order path, off by
+default. Full design (the periodic scheduler, the confidence-threshold
+signal logic, the decision log, why this changes nothing about
+Milestone 6's live-trading gate) in `ARCHITECTURE.md` § "Paper Trading"
+→ "Automated Strategy". This platform's own API surface for it:
+
+```jsonc
+// PATCH /paper-trading/accounts/{id}/strategy
+// Only fields present in the body are changed — omit a field to leave
+// it unchanged, send an explicit null for training_job_id to clear it.
+{
+  "enabled": true,
+  "training_job_id": "b3c1a2e4-...", // a completed job trained on real market data
+  "confidence_threshold_pct": "70", // 0-100, matching every other risk/threshold field on this account
+  "default_stop_loss_pct": "7", // (0, 100) — every automated buy attaches a stop-loss this far below its fill price
+}
+
+// Response (200) — the full PaperAccountResponse, now including:
+{
+  "strategy_enabled": true,
+  "strategy_training_job_id": "b3c1a2e4-...",
+  "strategy_confidence_threshold_pct": "70.000000000000000000",
+  "strategy_default_stop_loss_pct": "7.000000000000000000",
+  // ...every other existing PaperAccountResponse field, unchanged
+}
+```
+
+```jsonc
+// GET /paper-trading/accounts/{id}/strategy/decisions
+// One page of this account's own decision log, most recent first.
+{
+  "decisions": [
+    {
+      "id": "d4e5f6...",
+      "account_id": "2cff34d9-...",
+      "training_job_id": "b3c1a2e4-...",
+      "symbol": "ETHUSD",
+      "action": "opened", // "opened" | "closed" | "no_action"
+      "reason": "Confidence 91.00% >= 70% threshold; signal 'up' while flat — opened 4.2 ETHUSD with a stop-loss at 976.50.",
+      "predicted_value": "up",
+      "confidence": 0.91, // 0-1, the raw prediction confidence — not a percentage
+      "confidence_threshold_pct": "70.000000000000000000", // snapshotted at the moment of this cycle
+      "prediction_id": "9a8b7c...",
+      "order_id": "f1e2d3...", // null for a no_action cycle
+      "created_at": "2026-09-05T18:30:00Z",
+    },
+  ],
+  "total": 1,
+  "limit": 20,
+  "offset": 0,
+}
+```
+
+Every cycle for every strategy-enabled account is logged exactly once,
+acted on or not — a below-threshold prediction, a non-directional
+signal, an order rejected by an existing risk limit, and a genuinely
+placed order all appear here, each with a plain-language `reason`.
 
 ### Platform health
 

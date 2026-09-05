@@ -108,6 +108,8 @@ from app.paper_trading.errors import (
     PaperAccountNotFoundError,
     PositionNotFoundError,
     StopLossNotBelowTakeProfitError,
+    StrategyMissingTrainingJobError,
+    StrategyTrainingJobMissingSymbolError,
     TradingHaltedError,
 )
 from app.paper_trading.pricing import apply_fill_model, resolve_current_price
@@ -118,7 +120,9 @@ from app.repositories.paper_trading import (
     PaperAccountRepository,
     PaperOrderRepository,
     PaperPositionRepository,
+    PaperStrategyDecisionRepository,
 )
+from app.repositories.training import TrainingJobRepository
 from app.schemas.paper_trading import (
     PaperAccountCreateRequest,
     PaperAccountListResponse,
@@ -128,12 +132,16 @@ from app.schemas.paper_trading import (
     PaperOrderResponse,
     PaperPositionDTO,
     PaperPositionListResponse,
+    PaperStrategyConfigUpdateRequest,
+    PaperStrategyDecisionListResponse,
+    PaperStrategyDecisionResponse,
     PortfolioSummaryResponse,
     PositionThresholdsUpdateRequest,
     RiskSummaryResponse,
 )
 from app.services.market_query import MarketNotFoundError
 from app.state.manager import MarketStateManager
+from app.training.errors import TrainingJobNotFoundError
 
 #: A nonzero exposure/position value against an exactly-zero balance (a
 #: fully cash-out account, legitimately reachable without ever going
@@ -153,6 +161,8 @@ class PaperTradingService:
         position_repository: PaperPositionRepository,
         market_repository: MarketRepository,
         candle_repository: CandleRepository,
+        training_job_repository: TrainingJobRepository,
+        strategy_decision_repository: PaperStrategyDecisionRepository,
         state_manager: MarketStateManager,
         slippage_bps: int,
         fee_bps: int,
@@ -162,12 +172,16 @@ class PaperTradingService:
         default_max_exposure_pct: Decimal,
         default_max_drawdown_pct: Decimal,
         max_order_attempts: int,
+        default_strategy_confidence_threshold_pct: Decimal,
+        default_strategy_default_stop_loss_pct: Decimal,
     ) -> None:
         self.account_repository = account_repository
         self.order_repository = order_repository
         self.position_repository = position_repository
         self.market_repository = market_repository
         self.candle_repository = candle_repository
+        self.training_job_repository = training_job_repository
+        self.strategy_decision_repository = strategy_decision_repository
         self.state_manager = state_manager
         self.slippage_bps = slippage_bps
         self.fee_bps = fee_bps
@@ -177,6 +191,8 @@ class PaperTradingService:
         self.default_max_exposure_pct = default_max_exposure_pct
         self.default_max_drawdown_pct = default_max_drawdown_pct
         self.max_order_attempts = max_order_attempts
+        self.default_strategy_confidence_threshold_pct = default_strategy_confidence_threshold_pct
+        self.default_strategy_default_stop_loss_pct = default_strategy_default_stop_loss_pct
 
     async def create_account(self, request: PaperAccountCreateRequest) -> PaperAccountResponse:
         account = PaperAccount(
@@ -201,6 +217,10 @@ class PaperTradingService:
             ),
             peak_balance=request.starting_balance,
             trading_halted=False,
+            strategy_enabled=False,
+            strategy_training_job_id=None,
+            strategy_confidence_threshold_pct=self.default_strategy_confidence_threshold_pct,
+            strategy_default_stop_loss_pct=self.default_strategy_default_stop_loss_pct,
         )
         created = await self.account_repository.create(account)
         return PaperAccountResponse.from_model(created)
@@ -575,6 +595,76 @@ class PaperTradingService:
         )
         return PaperPositionDTO.from_model(
             updated, current_price=quote.price, price_source=quote.source
+        )
+
+    async def update_strategy_config(
+        self, account_id: uuid.UUID, request: PaperStrategyConfigUpdateRequest
+    ) -> PaperAccountResponse:
+        """Enable/disable the automated strategy and tune its threshold/stop-loss.
+
+        Only fields the request actually names (`model_fields_set`) are
+        changed — the same partial-update idiom
+        `update_position_thresholds` already uses — but validation always
+        runs against the *final*, merged state: `strategy_enabled=True`
+        with no `strategy_training_job_id` at all (neither already set
+        nor named in this request) is rejected outright
+        (`StrategyMissingTrainingJobError`), as is naming a job that
+        doesn't exist (`TrainingJobNotFoundError`, reused from
+        `app.training.errors` rather than duplicated) or one with no
+        recorded `symbol` — a job never trained on real market data has
+        no market for the strategy to predict for
+        (`StrategyTrainingJobMissingSymbolError`). Disabling never
+        requires any of this: an account can always be turned off,
+        regardless of what its training job looks like.
+        """
+        account = await self._get_account_or_404(account_id)
+        fields = request.model_dump(exclude_unset=True)
+
+        new_enabled = fields.get("enabled", account.strategy_enabled)
+        new_training_job_id = fields.get("training_job_id", account.strategy_training_job_id)
+        new_confidence_threshold_pct = Decimal(
+            fields.get("confidence_threshold_pct", account.strategy_confidence_threshold_pct)
+        )
+        new_default_stop_loss_pct = Decimal(
+            fields.get("default_stop_loss_pct", account.strategy_default_stop_loss_pct)
+        )
+
+        if new_enabled:
+            if new_training_job_id is None:
+                raise StrategyMissingTrainingJobError()
+            job = await self.training_job_repository.get_by_id(new_training_job_id)
+            if job is None:
+                raise TrainingJobNotFoundError(new_training_job_id)
+            if not job.symbol:
+                raise StrategyTrainingJobMissingSymbolError(new_training_job_id)
+
+        updated = await self.account_repository.update(
+            account,
+            {
+                "strategy_enabled": new_enabled,
+                "strategy_training_job_id": new_training_job_id,
+                "strategy_confidence_threshold_pct": new_confidence_threshold_pct,
+                "strategy_default_stop_loss_pct": new_default_stop_loss_pct,
+            },
+        )
+        return PaperAccountResponse.from_model(updated)
+
+    async def list_strategy_decisions(
+        self, account_id: uuid.UUID, *, limit: int, offset: int
+    ) -> PaperStrategyDecisionListResponse:
+        """One page of an account's own automated-strategy decision log,
+        most recent first — the Strategy panel's decision log data
+        source, populated by `app.services.paper_trading_strategy
+        .PaperTradingStrategyScheduler`, never by this method itself."""
+        await self._get_account_or_404(account_id)
+        decisions, total = await self.strategy_decision_repository.list_for_account(
+            account_id, limit=limit, offset=offset
+        )
+        return PaperStrategyDecisionListResponse(
+            decisions=[PaperStrategyDecisionResponse.from_model(d) for d in decisions],
+            total=total,
+            limit=limit,
+            offset=offset,
         )
 
     async def resume_trading(self, account_id: uuid.UUID) -> PaperAccountResponse:

@@ -14,7 +14,9 @@ from app.repositories.paper_trading import (
     PaperAccountRepository,
     PaperOrderRepository,
     PaperPositionRepository,
+    PaperStrategyDecisionRepository,
 )
+from app.repositories.training import TrainingJobRepository
 from app.runtime import Runtime, get_runtime
 from app.services.paper_trading import PaperTradingService
 
@@ -35,6 +37,8 @@ def get_paper_trading_service(
         position_repository=PaperPositionRepository(session),
         market_repository=MarketRepository(session),
         candle_repository=CandleRepository(session),
+        training_job_repository=TrainingJobRepository(session),
+        strategy_decision_repository=PaperStrategyDecisionRepository(session),
         state_manager=runtime.state_manager,
         slippage_bps=settings.paper_trading_slippage_bps,
         fee_bps=settings.paper_trading_fee_bps,
@@ -44,4 +48,10 @@ def get_paper_trading_service(
         default_max_exposure_pct=settings.paper_trading_default_max_exposure_pct,
         default_max_drawdown_pct=settings.paper_trading_default_max_drawdown_pct,
         max_order_attempts=settings.paper_trading_max_order_attempts,
+        default_strategy_confidence_threshold_pct=(
+            settings.paper_trading_strategy_default_confidence_threshold_pct
+        ),
+        default_strategy_default_stop_loss_pct=(
+            settings.paper_trading_strategy_default_stop_loss_pct
+        ),
     )

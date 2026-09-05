@@ -20,6 +20,8 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
+from pydantic import ValidationError as PydanticValidationError
+from sqlalchemy.exc import IntegrityError
 
 from app.events.bus import EventBus
 from app.marketdata.bus_events import TickerUpdated
@@ -38,6 +40,8 @@ from app.paper_trading.errors import (
     PaperAccountNotFoundError,
     PositionNotFoundError,
     StopLossNotBelowTakeProfitError,
+    StrategyMissingTrainingJobError,
+    StrategyTrainingJobMissingSymbolError,
     TradingHaltedError,
 )
 from app.repositories.candles import CandleRepository
@@ -46,22 +50,32 @@ from app.repositories.paper_trading import (
     PaperAccountRepository,
     PaperOrderRepository,
     PaperPositionRepository,
+    PaperStrategyDecisionRepository,
 )
+from app.repositories.training import TrainingJobRepository
 from app.schemas.paper_trading import (
     PaperAccountCreateRequest,
     PaperOrderRequest,
+    PaperStrategyConfigUpdateRequest,
     PositionThresholdsUpdateRequest,
 )
+from app.schemas.training import TrainingJobCreateRequest
 from app.services.market_query import MarketNotFoundError
 from app.services.paper_trading import PaperTradingService
 from app.state.manager import MarketStateManager
+from app.training.errors import TrainingJobNotFoundError
 from tests.conftest import SessionFactory
+from tests.prediction.test_service import train_completed_job
+from tests.training.test_service import build_service as build_training_service
+from tests.training.test_service import seed_experiment
 
 SLIPPAGE_BPS = 5
 FEE_BPS = 10
 TRIGGERED_SLIPPAGE_BPS = 25
 STALENESS_THRESHOLD = timedelta(seconds=300)
 MAX_ORDER_ATTEMPTS = 5
+DEFAULT_STRATEGY_CONFIDENCE_THRESHOLD_PCT = Decimal("65")
+DEFAULT_STRATEGY_STOP_LOSS_PCT = Decimal("5")
 
 #: `build_service`'s own default account risk limits are deliberately
 #: wide open (100%) — every fixture in this file predates the pre-trade
@@ -106,6 +120,8 @@ def build_service(
         position_repository=PaperPositionRepository(session),
         market_repository=MarketRepository(session),
         candle_repository=CandleRepository(session),
+        training_job_repository=TrainingJobRepository(session),
+        strategy_decision_repository=PaperStrategyDecisionRepository(session),
         state_manager=state_manager,
         slippage_bps=SLIPPAGE_BPS,
         fee_bps=FEE_BPS,
@@ -115,6 +131,8 @@ def build_service(
         default_max_exposure_pct=GENEROUS_MAX_PCT,
         default_max_drawdown_pct=GENEROUS_MAX_PCT,
         max_order_attempts=MAX_ORDER_ATTEMPTS,
+        default_strategy_confidence_threshold_pct=DEFAULT_STRATEGY_CONFIDENCE_THRESHOLD_PCT,
+        default_strategy_default_stop_loss_pct=DEFAULT_STRATEGY_STOP_LOSS_PCT,
     )
 
 
@@ -1253,3 +1271,196 @@ class TestUpdatePositionThresholds:
                 "PTUPDATENOPOSUSD",
                 PositionThresholdsUpdateRequest(stop_loss_price=Decimal("900")),
             )
+
+
+@pytest.mark.asyncio
+class TestUpdateStrategyConfig:
+    """`update_strategy_config` — off by default, and enabling requires a
+    real, completed-on-real-data training job named at the moment the
+    account is actually turned on."""
+
+    async def test_a_new_account_starts_with_the_strategy_disabled(
+        self, session_factory: SessionFactory
+    ) -> None:
+        state_manager = MarketStateManager()
+        service = build_service(session_factory, state_manager)
+        account = await service.create_account(
+            PaperAccountCreateRequest(starting_balance=Decimal("100000"))
+        )
+        assert account.strategy_enabled is False
+        assert account.strategy_training_job_id is None
+        assert float(account.strategy_confidence_threshold_pct) == pytest.approx(65.0)
+        assert float(account.strategy_default_stop_loss_pct) == pytest.approx(5.0)
+
+    async def test_enabling_with_a_real_completed_job_succeeds(
+        self, session_factory: SessionFactory
+    ) -> None:
+        job_id, _ = await train_completed_job(
+            session_factory, symbol="PTSTRATOKUSD", model_type="logistic_regression"
+        )
+        state_manager = MarketStateManager()
+        service = build_service(session_factory, state_manager)
+        account = await service.create_account(
+            PaperAccountCreateRequest(starting_balance=Decimal("100000"))
+        )
+
+        updated = await service.update_strategy_config(
+            uuid.UUID(account.id),
+            PaperStrategyConfigUpdateRequest(
+                enabled=True,
+                training_job_id=uuid.UUID(job_id),
+                confidence_threshold_pct=Decimal("70"),
+                default_stop_loss_pct=Decimal("8"),
+            ),
+        )
+        assert updated.strategy_enabled is True
+        assert updated.strategy_training_job_id == job_id
+        assert float(updated.strategy_confidence_threshold_pct) == pytest.approx(70.0)
+        assert float(updated.strategy_default_stop_loss_pct) == pytest.approx(8.0)
+
+    async def test_enabling_without_ever_naming_a_training_job_is_rejected(
+        self, session_factory: SessionFactory
+    ) -> None:
+        state_manager = MarketStateManager()
+        service = build_service(session_factory, state_manager)
+        account = await service.create_account(
+            PaperAccountCreateRequest(starting_balance=Decimal("100000"))
+        )
+
+        with pytest.raises(StrategyMissingTrainingJobError):
+            await service.update_strategy_config(
+                uuid.UUID(account.id), PaperStrategyConfigUpdateRequest(enabled=True)
+            )
+
+    async def test_enabling_with_an_unknown_training_job_is_rejected(
+        self, session_factory: SessionFactory
+    ) -> None:
+        state_manager = MarketStateManager()
+        service = build_service(session_factory, state_manager)
+        account = await service.create_account(
+            PaperAccountCreateRequest(starting_balance=Decimal("100000"))
+        )
+
+        with pytest.raises(TrainingJobNotFoundError):
+            await service.update_strategy_config(
+                uuid.UUID(account.id),
+                PaperStrategyConfigUpdateRequest(enabled=True, training_job_id=uuid.uuid4()),
+            )
+
+    async def test_enabling_with_a_job_never_trained_on_real_data_is_rejected(
+        self, session_factory: SessionFactory
+    ) -> None:
+        state_manager = MarketStateManager()
+        service = build_service(session_factory, state_manager)
+        account = await service.create_account(
+            PaperAccountCreateRequest(starting_balance=Decimal("100000"))
+        )
+        # A `placeholder` job with no symbol/timeframe named at all — it
+        # doesn't train on real candle data, so `TrainingJob.symbol` stays
+        # NULL (see that column's own comment).
+        experiment_id = await seed_experiment(session_factory, dataset_version="ds-placeholder")
+        training_service = build_training_service(session_factory)
+        placeholder_job = await training_service.create(
+            TrainingJobCreateRequest(
+                experiment_id=uuid.UUID(experiment_id), model_type="placeholder"
+            )
+        )
+        completed = await training_service.run(uuid.UUID(placeholder_job.id))
+        assert completed.status == "completed", completed.error_message
+
+        with pytest.raises(StrategyTrainingJobMissingSymbolError):
+            await service.update_strategy_config(
+                uuid.UUID(account.id),
+                PaperStrategyConfigUpdateRequest(
+                    enabled=True, training_job_id=uuid.UUID(placeholder_job.id)
+                ),
+            )
+
+    async def test_disabling_never_requires_a_training_job(
+        self, session_factory: SessionFactory
+    ) -> None:
+        job_id, _ = await train_completed_job(
+            session_factory, symbol="PTSTRATOFFUSD", model_type="logistic_regression"
+        )
+        state_manager = MarketStateManager()
+        service = build_service(session_factory, state_manager)
+        account = await service.create_account(
+            PaperAccountCreateRequest(starting_balance=Decimal("100000"))
+        )
+        await service.update_strategy_config(
+            uuid.UUID(account.id),
+            PaperStrategyConfigUpdateRequest(enabled=True, training_job_id=uuid.UUID(job_id)),
+        )
+
+        updated = await service.update_strategy_config(
+            uuid.UUID(account.id), PaperStrategyConfigUpdateRequest(enabled=False)
+        )
+        assert updated.strategy_enabled is False
+        # training_job_id is left in place — disabling doesn't clear it.
+        assert updated.strategy_training_job_id == job_id
+
+    async def test_omitted_fields_are_left_unchanged(self, session_factory: SessionFactory) -> None:
+        job_id, _ = await train_completed_job(
+            session_factory, symbol="PTSTRATPARTIALUSD", model_type="logistic_regression"
+        )
+        state_manager = MarketStateManager()
+        service = build_service(session_factory, state_manager)
+        account = await service.create_account(
+            PaperAccountCreateRequest(starting_balance=Decimal("100000"))
+        )
+        await service.update_strategy_config(
+            uuid.UUID(account.id),
+            PaperStrategyConfigUpdateRequest(
+                enabled=True,
+                training_job_id=uuid.UUID(job_id),
+                confidence_threshold_pct=Decimal("77"),
+            ),
+        )
+
+        # Touching only default_stop_loss_pct must leave everything else
+        # (enabled, training_job_id, confidence_threshold_pct) untouched.
+        updated = await service.update_strategy_config(
+            uuid.UUID(account.id),
+            PaperStrategyConfigUpdateRequest(default_stop_loss_pct=Decimal("9")),
+        )
+        assert updated.strategy_enabled is True
+        assert updated.strategy_training_job_id == job_id
+        assert float(updated.strategy_confidence_threshold_pct) == pytest.approx(77.0)
+        assert float(updated.strategy_default_stop_loss_pct) == pytest.approx(9.0)
+
+    async def test_a_stop_loss_of_zero_is_rejected_at_the_schema_layer(self) -> None:
+        with pytest.raises(PydanticValidationError):
+            PaperStrategyConfigUpdateRequest(default_stop_loss_pct=Decimal("0"))
+
+    async def test_an_explicit_null_stop_loss_is_rejected_not_silently_ignored(self) -> None:
+        """`default_stop_loss_pct` has no "clear" semantics — unlike
+        `training_job_id`, there is no valid all-NULL state for it. Before
+        `_reject_explicit_null_thresholds` existed, this parsed
+        successfully (`gt=0` does not constrain an explicit `None` on an
+        `Optional` field) and would have reached `update_strategy_config`'s
+        own `Decimal(fields.get(...))` call, raising an unhandled
+        `TypeError` there instead of failing cleanly here."""
+        with pytest.raises(PydanticValidationError):
+            PaperStrategyConfigUpdateRequest(default_stop_loss_pct=None)
+        with pytest.raises(PydanticValidationError):
+            PaperStrategyConfigUpdateRequest(confidence_threshold_pct=None)
+
+    async def test_the_database_itself_rejects_a_zero_stop_loss_even_bypassing_the_service(
+        self, session_factory: SessionFactory
+    ) -> None:
+        """The last of three independent layers: even a direct ORM write
+        that skips `update_strategy_config`/`PaperStrategyConfigUpdateRequest`
+        entirely still can't leave a `0` (or any value outside `(0, 100)`)
+        in this column — `ck_paper_accounts_strategy_default_stop_loss_pct_valid`
+        enforces it at the database itself, the actual backstop under the
+        API-level validation this class otherwise tests."""
+        state_manager = MarketStateManager()
+        service = build_service(session_factory, state_manager)
+        account = await service.create_account(
+            PaperAccountCreateRequest(starting_balance=Decimal("100000"))
+        )
+        model = await service.account_repository.get_by_id(uuid.UUID(account.id))
+        assert model is not None
+        model.strategy_default_stop_loss_pct = Decimal("0")
+        with pytest.raises(IntegrityError):
+            await service.account_repository.session.commit()

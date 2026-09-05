@@ -3264,6 +3264,8 @@ src/features/paper-trading/
 │   ├── order-history-table.tsx                 fill price, source, slippage/fee, trigger (manual vs. auto-closed)
 │   ├── risk-summary-panel.tsx                   exposure/drawdown vs. limits, halted status, Resume Trading
 │   ├── set-thresholds-dialog.tsx               set/update/clear a position's stop-loss/take-profit
+│   ├── strategy-panel.tsx                      enable/disable the automated strategy, training job/threshold/stop-loss
+│   ├── strategy-decision-log-table.tsx         every strategy cycle, acted on or not, and why
 │   └── live-data-chip.tsx                       page-level "live data or fallback" hint
 └── paper-trading-page.tsx                       page composition root
 ```
@@ -3375,8 +3377,55 @@ whole page end to end: the empty-account prompt, opening an account and
 seeing its summary, placing a buy order (with and without a stop-loss/
 take-profit) and the mutation firing with the exact expected body,
 editing a position's thresholds from the positions table end to end, a
-surfaced order error, and a halted risk panel's Resume Trading action
-actually calling the resume mutation.
+surfaced order error, a halted risk panel's Resume Trading action
+actually calling the resume mutation, enabling the automated strategy
+end to end (a training job picked, threshold/stop-loss typed, the save
+mutation firing with the exact expected body), and the plain "paper
+trading only" disclosure actually being on the page.
+
+**Automated Strategy** — a new "Automated Strategy" `Section`, rendered
+only once an account is selected, holding `StrategyPanel` above
+`StrategyDecisionLogTable`. Full backend design (the periodic scheduler,
+the confidence-threshold/signal logic, why this never affects Milestone
+6's live-trading gate) in [`ARCHITECTURE.md`](ARCHITECTURE.md) § "Paper
+Trading" → "Automated Strategy"; the wire format in
+[`docs/api/API.md`](docs/api/API.md) § "Paper Trading" → "Automated
+Strategy".
+
+`StrategyPanel` reuses `useTrainingJobs` (`@/features/ml-training/hooks
+/use-training-jobs-data`) filtered to `status: 'completed'` for its
+training-job `Autocomplete` — a cross-feature import, the same
+established pattern `live-market`/`trades`/`dataset-validation` already
+use for a hook or component that genuinely belongs to another feature
+rather than a copy grown locally. The list endpoint's own summary shape
+(`TrainingJobSummary`) carries no `symbol` to pre-filter the picker
+further by, so an incomplete-for-this-purpose job (never trained on real
+market data) is still offered — its rejection surfaces as `submitError`
+from the backend's own `strategy_training_job_missing_symbol` the moment
+a save is attempted, never silently. Enable/disable defaults to the
+account's own `strategy_enabled` (off, unless already turned on) via a
+`Switch` whose accessible label states which it currently is ("Strategy
+enabled"/"Strategy disabled"), never a bare, unlabeled toggle. Saving is
+one explicit action (a "Save" button, disabled while a required field is
+invalid or, while enabling, no training job is chosen) — nothing here
+takes effect just by being typed into, the same "an explicit action, not
+a live-bound field" posture `SetThresholdsDialog`/`CreateAccountDialog`
+already established. An `Alert severity="info"` states plainly, every
+time this panel renders: "Paper trading only — this never places a real
+trade and never changes anything about how live trading is gated."
+
+`StrategyDecisionLogTable` polls `GET .../strategy/decisions` every 10s
+(a new decision can appear on its own, unprompted by any action taken on
+this page — the scheduler runs in the background, the same reason
+`usePaperPositions`/`usePaperTradingRisk` already poll) and renders every
+cycle, most recent first: a filled, color-coded "Opened"/"Closed" chip
+visually distinct from an outlined "No Action" one (the same "make an
+automated outcome visibly distinct, never a plain row" precedent
+`OrderHistoryTable`'s own trigger-reason chips already established),
+the signal (`predicted_value`) and confidence (`0-1` rendered as a
+percentage) the cycle reasoned from, and its plain-language `reason` —
+including for a cycle that changed nothing, this feature's own answer to
+"log every decision, acted or not."
 
 ## State management
 

@@ -3,9 +3,10 @@
 A virtual trading account: place simulated market orders against a real,
 realistic fill (modeled slippage and fee, always applied — see
 `app/paper_trading/pricing.py`'s own module docstring), track positions,
-and compute PnL. Long-only, market orders only, no automation — see
-`ARCHITECTURE.md` § "Paper Trading" for the full design and what's
-deliberately out of scope.
+and compute PnL. Long-only, market orders only. An account may also opt
+into a single automated strategy (`PATCH .../strategy`, off by default)
+that places orders through this exact same service — see
+`ARCHITECTURE.md` § "Paper Trading" for the full design.
 """
 
 import uuid
@@ -24,6 +25,8 @@ from app.schemas.paper_trading import (
     PaperOrderResponse,
     PaperPositionDTO,
     PaperPositionListResponse,
+    PaperStrategyConfigUpdateRequest,
+    PaperStrategyDecisionListResponse,
     PortfolioSummaryResponse,
     PositionThresholdsUpdateRequest,
     RiskSummaryResponse,
@@ -123,12 +126,31 @@ _ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
                             "both trigger conditions at once",
                         },
                     },
+                    "strategy_missing_training_job": {
+                        "summary": "strategy_enabled=true with no training job named",
+                        "value": {
+                            "code": "strategy_missing_training_job",
+                            "detail": "strategy_enabled cannot be set without a "
+                            "strategy_training_job_id — the automated strategy needs a "
+                            "completed training job to request predictions from",
+                        },
+                    },
+                    "strategy_training_job_missing_symbol": {
+                        "summary": "The named training job was never trained on real market data",
+                        "value": {
+                            "code": "strategy_training_job_missing_symbol",
+                            "detail": "Training job 6f1e4a2c-3b8d-4c9a-9e2f-1a7c5d6b8e90 has no "
+                            "recorded symbol — it was not trained on real market data, so the "
+                            "automated strategy has no market to predict for",
+                        },
+                    },
                 }
             }
         },
     },
     status.HTTP_404_NOT_FOUND: {
-        "description": "Unknown account, market, or position, or no price available at all",
+        "description": "Unknown account, market, position, or training job, or no price "
+        "available at all",
         "content": {
             "application/json": {
                 "examples": {
@@ -161,6 +183,13 @@ _ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
                             "code": "no_price_available",
                             "detail": "No price available for 'ETHUSD' — no live ticker/trade "
                             "is flowing and no candle has ever been stored for it",
+                        },
+                    },
+                    "training_job_not_found": {
+                        "summary": "The named strategy_training_job_id does not exist",
+                        "value": {
+                            "code": "training_job_not_found",
+                            "detail": "Training job 6f1e4a2c-3b8d-4c9a-9e2f-1a7c5d6b8e90 not found",
                         },
                     },
                 }
@@ -353,3 +382,55 @@ async def update_paper_position_thresholds(
 ) -> PaperPositionDTO:
     """Set/update/clear one position's stop-loss and take-profit."""
     return await service.update_position_thresholds(account_id, symbol, body)
+
+
+@router.patch(
+    "/paper-trading/accounts/{account_id}/strategy",
+    response_model=PaperAccountResponse,
+    summary="Enable/disable the automated strategy and tune its threshold/stop-loss",
+    description=(
+        "Off by default — paper trading only, and this never changes anything about live "
+        "trading (Milestone 6 remains gated on extensive validation regardless). Only fields "
+        "present in the request body are changed; send an explicit null for training_job_id "
+        "to clear it, omit a field to leave it unchanged. Enabling requires a "
+        "training_job_id that names a completed job trained on real market data (a recorded "
+        "symbol) — the strategy always predicts for that job's own market, never a "
+        "separately-configured one."
+    ),
+    responses=_ERROR_RESPONSES,
+)
+async def update_paper_strategy_config(
+    account_id: AccountIdPath,
+    body: PaperStrategyConfigUpdateRequest,
+    service: PaperTradingServiceDep,
+) -> PaperAccountResponse:
+    """Enable/disable this account's automated strategy and tune its config."""
+    return await service.update_strategy_config(account_id, body)
+
+
+@router.get(
+    "/paper-trading/accounts/{account_id}/strategy/decisions",
+    response_model=PaperStrategyDecisionListResponse,
+    summary="An account's own automated-strategy decision log",
+    description=(
+        "Every cycle the strategy scheduler ever ran for this account, acted on or not — "
+        "what it acted on (a fresh prediction's own confidence/predicted value) and why, "
+        "including a plain no_action reason for a cycle that changed nothing."
+    ),
+    responses=_ERROR_RESPONSES,
+)
+async def list_paper_strategy_decisions(
+    account_id: AccountIdPath,
+    service: PaperTradingServiceDep,
+    limit: Annotated[
+        int,
+        Query(
+            ge=1,
+            le=get_settings().paper_trading_strategy_decisions_max_limit,
+            description="Maximum decisions per page",
+        ),
+    ] = get_settings().paper_trading_strategy_decisions_default_limit,
+    offset: Annotated[int, Query(ge=0, description="Number of decisions to skip")] = 0,
+) -> PaperStrategyDecisionListResponse:
+    """Return a page of this account's own strategy decision log, most recent first."""
+    return await service.list_strategy_decisions(account_id, limit=limit, offset=offset)

@@ -2,7 +2,12 @@
 
 An unknown market symbol (`app.services.market_query.MarketNotFoundError`)
 is reused verbatim, not duplicated here — only what's genuinely new to
-placing a simulated order is defined below.
+placing a simulated order is defined below. The automated strategy's own
+config errors reuse `app.training.errors.TrainingJobNotFoundError` the
+same way, for an unknown `strategy_training_job_id` — only the two
+checks genuinely new to *this* feature (a strategy enabled with no job
+named at all, and a job with no recorded symbol to trade) get their own
+types here.
 """
 
 from fastapi import status
@@ -209,6 +214,37 @@ class InvalidPaperOrderSortError(AppError):
             f"Invalid sort {sort!r}/{direction!r}. Available sort columns: "
             f"{', '.join(available)}; direction must be 'asc' or 'desc'",
             code="invalid_paper_order_sort",
+        )
+
+
+class StrategyMissingTrainingJobError(AppError):
+    """Raised when a strategy update would leave `strategy_enabled=True`
+    with no `strategy_training_job_id` at all — the strategy has nothing
+    to request a prediction from and can never legitimately be "on" in
+    that state.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            "strategy_enabled cannot be set without a strategy_training_job_id — the "
+            "automated strategy needs a completed training job to request predictions from",
+            code="strategy_missing_training_job",
+        )
+
+
+class StrategyTrainingJobMissingSymbolError(AppError):
+    """Raised when the named training job has no recorded `symbol` —
+    i.e. it was never trained on real market data (`requires_real_data`
+    is false for its adapter, or it predates that job ever running), so
+    there is no market for the strategy to request a prediction for, let
+    alone trade.
+    """
+
+    def __init__(self, training_job_id: object) -> None:
+        super().__init__(
+            f"Training job {training_job_id} has no recorded symbol — it was not trained on "
+            "real market data, so the automated strategy has no market to predict for",
+            code="strategy_training_job_missing_symbol",
         )
 
 

@@ -21,6 +21,16 @@ order book aggregator, gateway, and stop-loss/take-profit monitor are
 always present because they are pure in-memory to construct and free to
 run — the gateway simply has nothing to relay, and the monitor nothing
 to trigger, until live mode (or a test) actually publishes events.
+
+The paper trading automated strategy
+(``app.services.paper_trading_strategy.PaperTradingStrategyScheduler``)
+is started/stopped exactly like ``CandleSyncScheduler``/
+``PredictionGradingScheduler`` — gated on its own
+``paper_trading_strategy_scheduler_enabled`` setting, database-optional.
+Unlike the monitor, it is *not* always-on: the real per-account opt-in
+(``PaperAccount.strategy_enabled``, off by default) lives in the
+database, not here — this flag only controls whether the loop that
+checks for enabled accounts runs at all.
 """
 
 import logging
@@ -43,6 +53,7 @@ from app.marketdata.orderbook import OrderBookAggregator
 from app.paper_trading.monitor import StopLossTakeProfitMonitor
 from app.services.candle_sync import CandleSyncScheduler
 from app.services.grading_scheduler import PredictionGradingScheduler
+from app.services.paper_trading_strategy import PaperTradingStrategyScheduler
 from app.state import MarketStateManager
 from app.ws.models import WSEvent
 
@@ -107,11 +118,18 @@ class Runtime:
             default_max_exposure_pct=settings.paper_trading_default_max_exposure_pct,
             default_max_drawdown_pct=settings.paper_trading_default_max_drawdown_pct,
             max_order_attempts=settings.paper_trading_max_order_attempts,
+            default_strategy_confidence_threshold_pct=(
+                settings.paper_trading_strategy_default_confidence_threshold_pct
+            ),
+            default_strategy_default_stop_loss_pct=(
+                settings.paper_trading_strategy_default_stop_loss_pct
+            ),
         ).attach(self.bus)
         self.pipeline: MarketDataPipeline | None = None
         self.delta_ws: DeltaWebSocketClient | None = None
         self.candle_sync: CandleSyncScheduler | None = None
         self.prediction_grading: PredictionGradingScheduler | None = None
+        self.paper_trading_strategy: PaperTradingStrategyScheduler | None = None
         self.last_ws_message_at: datetime | None = None
         self.last_rest_request_at: datetime | None = None
 
@@ -160,6 +178,12 @@ class Runtime:
                 interval_seconds=settings.prediction_grading_interval_seconds,
             )
             await self.prediction_grading.start()
+        if settings.paper_trading_strategy_scheduler_enabled:
+            self.paper_trading_strategy = PaperTradingStrategyScheduler(
+                state_manager=self.state_manager,
+                interval_seconds=settings.paper_trading_strategy_interval_seconds,
+            )
+            await self.paper_trading_strategy.start()
 
     async def shutdown(self) -> None:
         """Stop the WebSocket client, the candle sync/grading loops, and drain handlers."""
@@ -171,6 +195,10 @@ class Runtime:
         if prediction_grading is not None:
             await prediction_grading.stop()
             self.prediction_grading = None
+        paper_trading_strategy = self.paper_trading_strategy
+        if paper_trading_strategy is not None:
+            await paper_trading_strategy.stop()
+            self.paper_trading_strategy = None
         ws = self.delta_ws
         if ws is not None:
             await ws.close()

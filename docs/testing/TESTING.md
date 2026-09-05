@@ -1361,7 +1361,18 @@ covers a position's own quantity/average entry/current price/unrealized
 PnL rendering, both positive and negative signed formatting, an
 empty-positions message, a dash for unset stop-loss/take-profit and the
 real values once set, and the per-row edit action calling back with that
-row's own symbol. `risk-summary-panel.test.tsx` covers: the active state
+row's own symbol. `strategy-panel.test.tsx` covers: the account's own
+`strategy_enabled` reflected on load; enabling requires a training job
+before "Save" is enabled at all; saving sends the exact enabled/job/
+threshold/stop-loss body; a stop-loss of 100 or more is rejected (would
+mean a fill price of zero) while a confidence threshold of exactly 100 is
+accepted; a surfaced save error; the loading skeleton; and the plain
+"Paper trading only" disclosure always rendering. `strategy-decision-log-table.test.tsx`
+covers a decision's symbol/signal/confidence/reason all rendering; a
+filled "Opened" chip distinct from a filled "Closed" chip distinct from
+an outlined "No Action" one (never the same row for all three, the same
+"make the outcome visibly distinct" precedent `order-history-table`'s own
+trigger chip established); and an empty-log message. `risk-summary-panel.test.tsx` covers: the active state
 (a "Trading active" chip, both limit rows rendering their exact
 current/max percentages); the halted state (an `Alert` naming the
 drawdown, a "Resume Trading" action); that clicking it opens a
@@ -1384,8 +1395,12 @@ surfaced order-placement error rendering the API error's own message in
 an `Alert` (the same path a risk-limit or stop-loss/take-profit
 validation rejection's specific `detail` takes, since nothing
 frontend-specific distinguishes any of them from any other order error);
-and a halted risk panel whose confirmed "Resume Trading" action calls
-`resumePaperTrading` with the selected account's id.
+a halted risk panel whose confirmed "Resume Trading" action calls
+`resumePaperTrading` with the selected account's id; enabling the
+automated strategy end to end (picking a completed training job,
+entering a confidence threshold, saving) and asserting
+`updatePaperStrategyConfig` was called with the exact expected body; and
+the page's own "Paper trading only" disclosure actually being present.
 
 ## End-to-End Tests
 

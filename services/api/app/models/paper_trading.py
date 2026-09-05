@@ -1,10 +1,16 @@
-"""Paper Trading models — a virtual account, its filled orders, and its
-materialized open positions.
+"""Paper Trading models — a virtual account, its filled orders, its
+materialized open positions, and its optional automated strategy's own
+decision log.
 
-Long-only, market-orders-only, no automation (per this feature's own
-spec) — there is deliberately no `side="short"`, no leverage/margin
-column anywhere here, and no scheduled/strategy-driven order path. Those
-are separate, later milestones.
+Long-only, market-orders-only — there is deliberately no `side="short"`
+and no leverage/margin column anywhere here. The one automated order
+path this feature supports (`strategy_enabled` on `PaperAccount`, see
+its own field comments, and `app.services.paper_trading_strategy
+.PaperTradingStrategyScheduler`) is not a second order-placement path:
+it is "just another caller" of the exact same
+`PaperTradingService.place_order` every manual order already goes
+through, off by default, and never able to open a position without a
+stop-loss attached.
 
 `PaperPosition` is **materialized**, not recomputed from `PaperOrder`
 history on every read — the same "store the whole answer, never
@@ -24,9 +30,11 @@ from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import (
+    JSON,
     Boolean,
     CheckConstraint,
     DateTime,
+    Float,
     ForeignKey,
     Numeric,
     String,
@@ -42,6 +50,7 @@ SCALE = 18
 ORDER_SIDES = ("buy", "sell")
 PRICE_SOURCES = ("ticker", "trade", "candle_close")
 TRIGGER_REASONS = ("stop_loss", "take_profit")
+STRATEGY_DECISION_ACTIONS = ("opened", "closed", "no_action")
 
 
 class PaperAccount(BaseModel, TimestampMixin):
@@ -106,6 +115,42 @@ class PaperAccount(BaseModel, TimestampMixin):
         comment="Set once balance breaches the drawdown limit; does not clear itself on balance "
         "recovery — only an explicit resume-trading action clears it.",
     )
+    strategy_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="false",
+        comment="Opt-in automated strategy (app.services.paper_trading_strategy). Off by "
+        "default — a researcher must explicitly enable it per account; there is no "
+        "platform-wide default that turns it on.",
+    )
+    strategy_training_job_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("training_jobs.id", ondelete="SET NULL"),
+        nullable=True,
+        comment="The training job the strategy requests a fresh prediction from every cycle — "
+        "its own recorded symbol/timeframe is what the strategy trades, never a "
+        "separately-configured one. Required whenever strategy_enabled is true (enforced "
+        "in PaperTradingService.update_strategy_config, not by a DB constraint, since it "
+        "depends on two columns together).",
+    )
+    strategy_confidence_threshold_pct: Mapped[Any] = mapped_column(
+        Numeric(PRECISION, SCALE),
+        nullable=False,
+        default=Decimal("65"),
+        server_default="65",
+        comment="A fresh prediction's own confidence (0-1 probability, reported here as a % "
+        "for consistency with every other risk/threshold field on this row) must reach at "
+        "least this before the strategy acts on it at all.",
+    )
+    strategy_default_stop_loss_pct: Mapped[Any] = mapped_column(
+        Numeric(PRECISION, SCALE),
+        nullable=False,
+        default=Decimal("5"),
+        server_default="5",
+        comment="Every automated buy attaches a stop-loss this % below its own fill price — "
+        "tunable per account, but never omittable: an automated position without one is not "
+        "a configuration this feature can express.",
+    )
 
     __table_args__ = (
         CheckConstraint("starting_balance >= 0", name="starting_balance_non_negative"),
@@ -120,6 +165,14 @@ class PaperAccount(BaseModel, TimestampMixin):
         ),
         CheckConstraint(
             "max_drawdown_pct > 0 AND max_drawdown_pct <= 100", name="max_drawdown_pct_valid"
+        ),
+        CheckConstraint(
+            "strategy_confidence_threshold_pct > 0 AND strategy_confidence_threshold_pct <= 100",
+            name="strategy_confidence_threshold_pct_valid",
+        ),
+        CheckConstraint(
+            "strategy_default_stop_loss_pct > 0 AND strategy_default_stop_loss_pct < 100",
+            name="strategy_default_stop_loss_pct_valid",
         ),
     )
 
@@ -264,5 +317,90 @@ class PaperPosition(BaseModel, TimestampMixin):
         CheckConstraint(
             "take_profit_price IS NULL OR take_profit_price >= 0",
             name="take_profit_price_non_negative",
+        ),
+    )
+
+
+class PaperStrategyDecision(BaseModel, TimestampMixin):
+    """One automated-strategy cycle's own outcome for one account — acted
+    on or not, and why. `app.services.paper_trading_strategy
+    .PaperTradingStrategyScheduler` writes exactly one of these per
+    strategy-enabled account, every tick, unconditionally: this is the
+    "every decision is logged, including a no-op" requirement's actual
+    storage, not a log line a researcher would need shell access to read
+    — the Strategy panel's decision log reads this table directly
+    (`GET .../strategy/decisions`).
+
+    `predicted_value`/`confidence` are `NULL` together only when the
+    cycle never got a prediction to reason about at all (the configured
+    training job doesn't exist/isn't completed/has no recorded symbol,
+    or the live prediction call itself raised) — `reason` always
+    explains which. `confidence_threshold_pct` is always recorded even
+    then, snapshotting the account's own configured threshold *at the
+    moment of this cycle*, so a later threshold change never rewrites
+    the meaning of a past decision.
+
+    `prediction_id`/`order_id` are both nullable, independently:
+    a `no_action` decision reached after a real prediction still names
+    it (`prediction_id` set, `order_id` null); one that opened or closed
+    a position names both.
+    """
+
+    __tablename__ = "paper_strategy_decisions"
+
+    account_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("paper_accounts.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    training_job_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("training_jobs.id", ondelete="SET NULL"),
+        nullable=True,
+        comment="The job this cycle requested a prediction from — the account's own "
+        "strategy_training_job_id at the moment of this cycle.",
+    )
+    symbol: Mapped[str | None] = mapped_column(
+        String(50),
+        nullable=True,
+        index=True,
+        comment="The job's own recorded symbol; NULL only if the job itself couldn't be "
+        "resolved this cycle (see reason).",
+    )
+    action: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        comment="'opened' | 'closed' | 'no_action' — what this cycle actually did.",
+    )
+    reason: Mapped[str] = mapped_column(
+        String(500),
+        nullable=False,
+        comment="Plain-language explanation, always present — including for 'no_action'.",
+    )
+    predicted_value: Mapped[Any] = mapped_column(
+        JSON,
+        nullable=True,
+        comment="The fresh prediction's own class label (or number, for a regressor); NULL if "
+        "no prediction was obtained this cycle.",
+    )
+    confidence: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+        comment="The fresh prediction's own confidence (0-1); NULL if unavailable or no "
+        "prediction was obtained.",
+    )
+    confidence_threshold_pct: Mapped[Any] = mapped_column(
+        Numeric(PRECISION, SCALE),
+        nullable=False,
+        comment="A snapshot of the account's own strategy_confidence_threshold_pct at the "
+        "moment of this cycle — never re-read from the (possibly since-changed) account.",
+    )
+    prediction_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("predictions.id", ondelete="SET NULL"), nullable=True
+    )
+    order_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("paper_orders.id", ondelete="SET NULL"), nullable=True
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            f"action IN {STRATEGY_DECISION_ACTIONS!r}", name="paper_strategy_decision_action_valid"
         ),
     )

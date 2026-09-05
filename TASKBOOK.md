@@ -107,24 +107,25 @@ against the Definition of Done stated in `ROADMAP.md`'s own Purpose section
 (real code, a passing test, and it's actually wired in), with the commit
 that introduced it where the work has been committed.
 
-| ID       | Milestone                        | Epic                         | Task                                                                                                                                            | Status    | Priority | Dependencies | Git Commit           |
-| -------- | -------------------------------- | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | --------- | -------- | ------------ | -------------------- |
-| M1-E1-T1 | M1: Research & Training Platform | E1: Data Layer               | Market data ingestion, validation, event bus                                                                                                    | Completed | Critical | None         | `ee8c890`            |
-| M1-E2-T1 | M1: Research & Training Platform | E2: Feature Engineering      | Feature Engineering Engine                                                                                                                      | Completed | High     | M1-E1-T1     | `11d03a9`            |
-| M1-E3-T1 | M1: Research & Training Platform | E3: Dataset Validation       | Dataset Validation & Quality Engine                                                                                                             | Completed | High     | M1-E2-T1     | `d53cbde`            |
-| M1-E4-T1 | M1: Research & Training Platform | E4: ML Dataset Builder       | ML Dataset Builder                                                                                                                              | Completed | High     | M1-E2-T1     | `345341d`            |
-| M1-E5-T1 | M1: Research & Training Platform | E5: Experiment Management    | Experiment Management System                                                                                                                    | Completed | High     | M1-E4-T1     | `00d6d52`            |
-| M1-E6-T1 | M1: Research & Training Platform | E6: Training Framework       | ML Training Framework + Baseline Model Framework                                                                                                | Completed | Critical | M1-E5-T1     | `c57a19d`, `3bd31a8` |
-| M1-E6-T2 | M1: Research & Training Platform | E6: Training Framework       | Per-column feature normalization                                                                                                                | Completed | High     | M1-E6-T1     | `4376586`            |
-| M1-E7-T1 | M1: Research & Training Platform | E7: Model Evaluation         | Model Evaluation & Benchmarking Engine                                                                                                          | Completed | High     | M1-E6-T1     | `3a411c1`            |
-| M1-E8-T1 | M1: Research & Training Platform | E8: Experiment Config Editor | In-app `feature_set`/`target_config`/`split_config` editor                                                                                      | Completed | Medium   | M1-E5-T1     | `346f708`            |
-| M2-E1-T1 | M2: Prediction & Backtesting     | E1: Live Prediction          | Live Prediction Service (`app/prediction/`, `/ml/predict`)                                                                                      | Completed | Critical | M1-E6-T1     | `9871c1c`            |
-| M2-E1-T2 | M2: Prediction & Backtesting     | E1: Live Prediction          | Non-blocking `/training-jobs/{id}/run` (background `asyncio.Task`, own DB session, duplicate-run rejection, shutdown cancellation)              | Completed | High     | M1-E6-T1     | `8bb20f5`            |
-| M2-E1-T3 | M2: Prediction & Backtesting     | E1: Live Prediction          | Prediction Grading (`app/prediction/grading.py`, `PredictionGradingScheduler`, `scripts/grade_predictions.py`)                                  | Completed | High     | M2-E1-T1     | `92c4425`            |
-| M2-E2-T1 | M2: Prediction & Backtesting     | E2: Backtesting              | Backtesting Engine (`app/backtest/`, `/ml/backtest`) — reuses live prediction + grading unmodified, verified no-look-ahead                      | Completed | High     | M2-E1-T3     | `fed6259`            |
-| M3-E1-T1 | M3: Paper Trading & Risk         | E1: Paper Trading            | Paper Trading (`app/paper_trading/`, `/paper-trading`) — realistic slippage/fee always applied, long-only, no margin/automation                 | Completed | High     | M2-E2-T1     | `86396e9`            |
-| M3-E1-T2 | M3: Paper Trading & Risk         | E1: Paper Trading            | Pre-trade risk limits (position sizing, exposure, drawdown halt) — current-price checks, atomic concurrency guard verified empirically          | Completed | High     | M3-E1-T1     | `5ac5f21`            |
-| M3-E1-T3 | M3: Paper Trading & Risk         | E1: Paper Trading            | Stop-loss/take-profit (`app/paper_trading/monitor.py`) — event-bus monitor, atomic concurrency guard (3rd occurrence), wider triggered slippage | Completed | High     | M3-E1-T2     | pending commit       |
+| ID       | Milestone                        | Epic                         | Task                                                                                                                                                                                              | Status    | Priority | Dependencies | Git Commit           |
+| -------- | -------------------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------- | -------- | ------------ | -------------------- |
+| M1-E1-T1 | M1: Research & Training Platform | E1: Data Layer               | Market data ingestion, validation, event bus                                                                                                                                                      | Completed | Critical | None         | `ee8c890`            |
+| M1-E2-T1 | M1: Research & Training Platform | E2: Feature Engineering      | Feature Engineering Engine                                                                                                                                                                        | Completed | High     | M1-E1-T1     | `11d03a9`            |
+| M1-E3-T1 | M1: Research & Training Platform | E3: Dataset Validation       | Dataset Validation & Quality Engine                                                                                                                                                               | Completed | High     | M1-E2-T1     | `d53cbde`            |
+| M1-E4-T1 | M1: Research & Training Platform | E4: ML Dataset Builder       | ML Dataset Builder                                                                                                                                                                                | Completed | High     | M1-E2-T1     | `345341d`            |
+| M1-E5-T1 | M1: Research & Training Platform | E5: Experiment Management    | Experiment Management System                                                                                                                                                                      | Completed | High     | M1-E4-T1     | `00d6d52`            |
+| M1-E6-T1 | M1: Research & Training Platform | E6: Training Framework       | ML Training Framework + Baseline Model Framework                                                                                                                                                  | Completed | Critical | M1-E5-T1     | `c57a19d`, `3bd31a8` |
+| M1-E6-T2 | M1: Research & Training Platform | E6: Training Framework       | Per-column feature normalization                                                                                                                                                                  | Completed | High     | M1-E6-T1     | `4376586`            |
+| M1-E7-T1 | M1: Research & Training Platform | E7: Model Evaluation         | Model Evaluation & Benchmarking Engine                                                                                                                                                            | Completed | High     | M1-E6-T1     | `3a411c1`            |
+| M1-E8-T1 | M1: Research & Training Platform | E8: Experiment Config Editor | In-app `feature_set`/`target_config`/`split_config` editor                                                                                                                                        | Completed | Medium   | M1-E5-T1     | `346f708`            |
+| M2-E1-T1 | M2: Prediction & Backtesting     | E1: Live Prediction          | Live Prediction Service (`app/prediction/`, `/ml/predict`)                                                                                                                                        | Completed | Critical | M1-E6-T1     | `9871c1c`            |
+| M2-E1-T2 | M2: Prediction & Backtesting     | E1: Live Prediction          | Non-blocking `/training-jobs/{id}/run` (background `asyncio.Task`, own DB session, duplicate-run rejection, shutdown cancellation)                                                                | Completed | High     | M1-E6-T1     | `8bb20f5`            |
+| M2-E1-T3 | M2: Prediction & Backtesting     | E1: Live Prediction          | Prediction Grading (`app/prediction/grading.py`, `PredictionGradingScheduler`, `scripts/grade_predictions.py`)                                                                                    | Completed | High     | M2-E1-T1     | `92c4425`            |
+| M2-E2-T1 | M2: Prediction & Backtesting     | E2: Backtesting              | Backtesting Engine (`app/backtest/`, `/ml/backtest`) — reuses live prediction + grading unmodified, verified no-look-ahead                                                                        | Completed | High     | M2-E1-T3     | `fed6259`            |
+| M3-E1-T1 | M3: Paper Trading & Risk         | E1: Paper Trading            | Paper Trading (`app/paper_trading/`, `/paper-trading`) — realistic slippage/fee always applied, long-only, no margin/automation                                                                   | Completed | High     | M2-E2-T1     | `86396e9`            |
+| M3-E1-T2 | M3: Paper Trading & Risk         | E1: Paper Trading            | Pre-trade risk limits (position sizing, exposure, drawdown halt) — current-price checks, atomic concurrency guard verified empirically                                                            | Completed | High     | M3-E1-T1     | `5ac5f21`            |
+| M3-E1-T3 | M3: Paper Trading & Risk         | E1: Paper Trading            | Stop-loss/take-profit (`app/paper_trading/monitor.py`) — event-bus monitor, atomic concurrency guard (3rd occurrence), wider triggered slippage                                                   | Completed | High     | M3-E1-T2     | `ab4c64c`            |
+| M3-E1-T4 | M3: Paper Trading & Risk         | E1: Paper Trading            | Automated Strategy (`app/services/paper_trading_strategy.py`) — opt-in, off by default, reuses order-placement path (4th atomic-guard occurrence), every position stop-lossed, every cycle logged | Completed | High     | M3-E1-T3     | pending commit       |
 
 ---
 
@@ -134,7 +135,7 @@ that introduced it where the work has been committed.
 | --------- | -------------------------------------------- | ----------- |
 | M1        | Research & Training Platform                 | COMPLETE    |
 | M2        | Prediction & Backtesting                     | COMPLETE    |
-| M3        | Paper Trading & Risk                         | IN PROGRESS |
+| M3        | Paper Trading & Risk                         | COMPLETE    |
 | M4        | Data Breadth                                 | NOT STARTED |
 | M5        | Production Hardening                         | NOT STARTED |
 | M6        | Live Trading (gated on extensive validation) | NOT STARTED |
@@ -152,11 +153,11 @@ database, timed at 0.028s to return `status: "running"` — not
 `"completed"` — with the background pipeline finishing independently
 moments later (`ARCHITECTURE.md` § "Paper Trading" has the full account).
 
-M3's first item, Paper Trading, is real, tested, and wired in — a
-virtual trading account with realistic (slippage/fee-applied) market
-order fills, long-only, no margin/shorting/leverage/automation. Its
-pre-trade risk limits (position sizing, exposure, and a drawdown halt —
-all three checked against current prices/balance, guarded against
+M3 is now closed. Paper Trading, its first item, is real, tested, and
+wired in — a virtual trading account with realistic (slippage/
+fee-applied) market order fills, long-only, no margin/shorting/leverage.
+Its pre-trade risk limits (position sizing, exposure, and a drawdown
+halt — all three checked against current prices/balance, guarded against
 concurrent orders with the same atomic-`UPDATE` pattern the training-job
 duplicate-run race established, verified with two real concurrent
 requests) are also real, tested, and wired in. Stop-loss/take-profit are
@@ -164,8 +165,14 @@ also real, tested, and wired in — set at order-open time or via a
 dedicated endpoint, watched through the existing event bus (no new
 polling loop), and closed automatically at a wider modeled slippage
 through the same fill model and atomic concurrency guard (its third
-occurrence) a manual close uses. See `ROADMAP.md` for what each
-milestone actually covers.
+occurrence) a manual close uses. Automated Strategy — the milestone's
+last item — is real, tested, and wired in too: an opt-in, off-by-default
+automated order path that reuses this exact same order-placement
+machinery (the atomic guard's fourth occurrence, proven by test to share
+every existing risk limit rather than bypass it), attaches a stop-loss to
+every automated position structurally, and logs every scheduler cycle
+whether it acted or not. This does not change anything about Milestone
+6's own gate. See `ROADMAP.md` for what each milestone actually covers.
 
 ---
 

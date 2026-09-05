@@ -16,7 +16,12 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import InstrumentedAttribute
 
-from app.models.paper_trading import PaperAccount, PaperOrder, PaperPosition
+from app.models.paper_trading import (
+    PaperAccount,
+    PaperOrder,
+    PaperPosition,
+    PaperStrategyDecision,
+)
 
 ORDER_SORT_COLUMNS: dict[str, InstrumentedAttribute[Any]] = {
     "symbol": PaperOrder.symbol,
@@ -55,6 +60,17 @@ class PaperAccountRepository:
             .offset(offset)
         )
         return list(result.scalars().all()), total
+
+    async def list_strategy_enabled(self) -> list[PaperAccount]:
+        """Every account with its automated strategy currently turned on —
+        `app.services.paper_trading_strategy.PaperTradingStrategyScheduler`'s
+        own per-tick query. Read fresh at the start of every tick, never
+        cached across ticks, so disabling an account's strategy always
+        takes effect by the very next tick."""
+        result = await self.session.execute(
+            select(PaperAccount).where(PaperAccount.strategy_enabled.is_(True))
+        )
+        return list(result.scalars().all())
 
     async def update(self, account: PaperAccount, fields: dict[str, Any]) -> PaperAccount:
         for key, value in fields.items():
@@ -303,3 +319,39 @@ class PaperPositionRepository:
         await self.session.commit()
         await self.session.refresh(position)
         return PositionUpsertResult(position, previous_quantity, previous_average)
+
+
+class PaperStrategyDecisionRepository:
+    """Create/list access to the automated strategy's own decision log —
+    one row per strategy-enabled account per scheduler tick, acted on or
+    not (see `PaperStrategyDecision`'s own docstring)."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+
+    async def create(self, decision: PaperStrategyDecision) -> PaperStrategyDecision:
+        self.session.add(decision)
+        await self.session.commit()
+        await self.session.refresh(decision)
+        return decision
+
+    async def list_for_account(
+        self, account_id: uuid.UUID, *, limit: int, offset: int
+    ) -> tuple[list[PaperStrategyDecision], int]:
+        """One page of an account's own decision log, most recent first —
+        the Strategy panel's decision log data source."""
+        total = (
+            await self.session.execute(
+                select(func.count())
+                .select_from(PaperStrategyDecision)
+                .where(PaperStrategyDecision.account_id == account_id)
+            )
+        ).scalar_one()
+        result = await self.session.execute(
+            select(PaperStrategyDecision)
+            .where(PaperStrategyDecision.account_id == account_id)
+            .order_by(PaperStrategyDecision.created_at.desc(), PaperStrategyDecision.id.asc())
+            .limit(limit)
+            .offset(offset)
+        )
+        return list(result.scalars().all()), total

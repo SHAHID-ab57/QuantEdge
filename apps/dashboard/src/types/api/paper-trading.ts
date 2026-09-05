@@ -29,6 +29,10 @@ export const PaperAccountSchema = z.object({
   max_drawdown_pct: z.string(),
   peak_balance: z.string(),
   trading_halted: z.boolean(),
+  strategy_enabled: z.boolean(),
+  strategy_training_job_id: z.string().nullable(),
+  strategy_confidence_threshold_pct: z.string(),
+  strategy_default_stop_loss_pct: z.string(),
   created_at: z.string().datetime(),
 });
 
@@ -123,3 +127,35 @@ export const RiskSummarySchema = z.object({
 });
 
 export type RiskSummary = z.infer<typeof RiskSummarySchema>;
+
+export const PAPER_STRATEGY_DECISION_ACTIONS = ['opened', 'closed', 'no_action'] as const;
+export const PaperStrategyDecisionActionSchema = z.enum(PAPER_STRATEGY_DECISION_ACTIONS);
+export type PaperStrategyDecisionAction = z.infer<typeof PaperStrategyDecisionActionSchema>;
+
+export const PaperStrategyDecisionSchema = z.object({
+  id: z.string(),
+  account_id: z.string(),
+  training_job_id: z.string().nullable(),
+  symbol: z.string().nullable(),
+  action: PaperStrategyDecisionActionSchema,
+  reason: z.string(),
+  predicted_value: z.unknown().nullable(),
+  confidence: z.number().nullable(),
+  confidence_threshold_pct: z.string(),
+  prediction_id: z.string().nullable(),
+  order_id: z.string().nullable(),
+  created_at: z.string().datetime(),
+});
+
+export type PaperStrategyDecision = z.infer<typeof PaperStrategyDecisionSchema>;
+
+export const PaperStrategyDecisionListResponseSchema = z.object({
+  decisions: z.array(PaperStrategyDecisionSchema),
+  total: z.number().int().nonnegative(),
+  limit: z.number().int().positive(),
+  offset: z.number().int().nonnegative(),
+});
+
+export type PaperStrategyDecisionListResponse = z.infer<
+  typeof PaperStrategyDecisionListResponseSchema
+>;

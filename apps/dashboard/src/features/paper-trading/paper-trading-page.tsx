@@ -9,6 +9,7 @@ import TextField from '@mui/material/TextField';
 import { useState } from 'react';
 import { EmptyStateNotice } from '@/components/empty-state-notice';
 import { Section } from '@/components/section';
+import { useTrainingJobs } from '@/features/ml-training/hooks/use-training-jobs-data';
 import { AccountSummaryCard } from './components/account-summary-card';
 import { CreateAccountDialog } from './components/create-account-dialog';
 import { LiveDataChip } from './components/live-data-chip';
@@ -17,6 +18,8 @@ import { OrderHistoryTable } from './components/order-history-table';
 import { PositionsTable } from './components/positions-table';
 import { RiskSummaryPanel } from './components/risk-summary-panel';
 import { SetThresholdsDialog } from './components/set-thresholds-dialog';
+import { StrategyDecisionLogTable } from './components/strategy-decision-log-table';
+import { StrategyPanel } from './components/strategy-panel';
 import {
   useCreatePaperAccount,
   usePaperAccount,
@@ -24,14 +27,17 @@ import {
   usePaperOrders,
   usePaperPortfolioSummary,
   usePaperPositions,
+  usePaperStrategyDecisions,
   usePaperTradingRisk,
   usePlacePaperOrder,
   useResumeTrading,
+  useUpdatePaperStrategyConfig,
   useUpdatePositionThresholds,
 } from './hooks/use-paper-trading-data';
 import { usePaperTradingAccountStore } from './store/use-paper-trading-account-store';
 
 const ORDERS_PAGE_SIZE = 10;
+const DECISIONS_PAGE_SIZE = 10;
 
 /**
  * A virtual trading account: place simulated market orders against real
@@ -49,6 +55,7 @@ export function PaperTradingPage() {
   const { accountId, setAccountId } = usePaperTradingAccountStore();
   const [creating, setCreating] = useState(false);
   const [ordersPage, setOrdersPage] = useState(1);
+  const [decisionsPage, setDecisionsPage] = useState(1);
   const [editingThresholdsFor, setEditingThresholdsFor] = useState<string | null>(null);
 
   const account = usePaperAccount(accountId);
@@ -59,12 +66,18 @@ export function PaperTradingPage() {
     limit: ORDERS_PAGE_SIZE,
     offset: (ordersPage - 1) * ORDERS_PAGE_SIZE,
   });
+  const decisions = usePaperStrategyDecisions(accountId, {
+    limit: DECISIONS_PAGE_SIZE,
+    offset: (decisionsPage - 1) * DECISIONS_PAGE_SIZE,
+  });
   const accounts = usePaperAccounts({ limit: 20, offset: 0 });
+  const completedTrainingJobs = useTrainingJobs({ status: 'completed', limit: 100 });
 
   const createAccount = useCreatePaperAccount();
   const placeOrder = usePlacePaperOrder(accountId);
   const resumeTrading = useResumeTrading(accountId);
   const updateThresholds = useUpdatePositionThresholds(accountId);
+  const updateStrategyConfig = useUpdatePaperStrategyConfig(accountId);
 
   // The remembered id might no longer exist (e.g. a fresh database) —
   // fall back to "no account" rather than a permanent error banner.
@@ -108,6 +121,20 @@ export function PaperTradingPage() {
     );
   };
 
+  const handleSaveStrategy = (values: {
+    enabled: boolean;
+    trainingJobId: string | null;
+    confidenceThresholdPct: string;
+    defaultStopLossPct: string;
+  }) => {
+    updateStrategyConfig.mutate({
+      enabled: values.enabled,
+      training_job_id: values.trainingJobId,
+      confidence_threshold_pct: values.confidenceThresholdPct,
+      default_stop_loss_pct: values.defaultStopLossPct,
+    });
+  };
+
   const editingPosition = positions.data?.positions.find((p) => p.symbol === editingThresholdsFor);
 
   const selectedAccountOption = accounts.data?.accounts.find((a) => a.id === accountId) ?? null;
@@ -118,6 +145,14 @@ export function PaperTradingPage() {
       resumeTrading.error instanceof Error
         ? resumeTrading.error.message
         : 'Could not resume trading.';
+  }
+
+  let strategyErrorMessage: string | null = null;
+  if (updateStrategyConfig.isError) {
+    strategyErrorMessage =
+      updateStrategyConfig.error instanceof Error
+        ? updateStrategyConfig.error.message
+        : 'Could not update the strategy.';
   }
 
   return (
@@ -241,6 +276,31 @@ export function PaperTradingPage() {
           onPageChange={setOrdersPage}
         />
       </Section>
+
+      {hasAccount ? (
+        <Section
+          title="Automated Strategy"
+          subtitle="Optional, off by default — acts on a fresh prediction above a confidence threshold"
+        >
+          <Stack spacing={3}>
+            <StrategyPanel
+              account={account.data}
+              isLoading={account.isLoading}
+              completedJobs={completedTrainingJobs.data?.jobs ?? []}
+              submitting={updateStrategyConfig.isPending}
+              submitError={strategyErrorMessage}
+              onSave={handleSaveStrategy}
+            />
+            <StrategyDecisionLogTable
+              data={decisions.data}
+              isLoading={decisions.isLoading}
+              page={decisionsPage}
+              limit={DECISIONS_PAGE_SIZE}
+              onPageChange={setDecisionsPage}
+            />
+          </Stack>
+        </Section>
+      ) : null}
 
       <CreateAccountDialog
         open={creating}

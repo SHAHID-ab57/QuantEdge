@@ -6,6 +6,7 @@ import {
   PaperOrderSchema,
   PaperPositionListResponseSchema,
   PaperPositionSchema,
+  PaperStrategyDecisionListResponseSchema,
   PortfolioSummarySchema,
   RiskSummarySchema,
   type PaperAccount,
@@ -15,6 +16,7 @@ import {
   type PaperOrderSide,
   type PaperPosition,
   type PaperPositionListResponse,
+  type PaperStrategyDecisionListResponse,
   type PortfolioSummary,
   type RiskSummary,
 } from '@/types/api/paper-trading';
@@ -141,4 +143,45 @@ export async function updatePositionThresholds(
     body,
   );
   return PaperPositionSchema.parse(data);
+}
+
+export interface PaperStrategyConfigBody {
+  /** Omit a field to leave it unchanged; pass `null` for `training_job_id` to clear it. */
+  enabled?: boolean;
+  training_job_id?: string | null;
+  confidence_threshold_pct?: string;
+  default_stop_loss_pct?: string;
+}
+
+/**
+ * Enable/disable an account's automated strategy and tune its threshold/
+ * stop-loss — paper trading only, off by default. See `ARCHITECTURE.md`
+ * § "Automated Strategy".
+ */
+export async function updatePaperStrategyConfig(
+  accountId: string,
+  body: PaperStrategyConfigBody,
+): Promise<PaperAccount> {
+  const { data } = await apiClient.patch(
+    `/api/v1/paper-trading/accounts/${encodeURIComponent(accountId)}/strategy`,
+    body,
+  );
+  return PaperAccountSchema.parse(data);
+}
+
+export interface PaperStrategyDecisionListParams {
+  limit?: number;
+  offset?: number;
+}
+
+/** One account's own automated-strategy decision log, most recent first. */
+export async function fetchPaperStrategyDecisions(
+  accountId: string,
+  params: PaperStrategyDecisionListParams = {},
+): Promise<PaperStrategyDecisionListResponse> {
+  const { data } = await apiClient.get(
+    `/api/v1/paper-trading/accounts/${encodeURIComponent(accountId)}/strategy/decisions`,
+    { params },
+  );
+  return PaperStrategyDecisionListResponseSchema.parse(data);
 }

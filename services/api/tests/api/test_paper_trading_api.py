@@ -21,6 +21,7 @@ from app.models.market import Market
 from app.repositories.paper_trading import PaperAccountRepository
 from app.runtime import Runtime, get_runtime
 from tests.conftest import SessionFactory
+from tests.prediction.test_service import train_completed_job
 
 
 async def seed_market(session_factory: SessionFactory, *, symbol: str) -> None:
@@ -361,3 +362,109 @@ class TestRiskLimits:
             json={"symbol": "APIPTRISKUSD", "side": "buy", "quantity": "0.001"},
         )
         assert resumed_order.status_code == 201
+
+
+class TestUpdateStrategyConfig:
+    async def test_starts_disabled_and_enabling_requires_a_training_job(
+        self, client: httpx.AsyncClient
+    ) -> None:
+        account = (
+            await client.post("/api/v1/paper-trading/accounts", json={"starting_balance": "100000"})
+        ).json()
+        assert account["strategy_enabled"] is False
+        assert account["strategy_training_job_id"] is None
+        assert float(account["strategy_confidence_threshold_pct"]) == pytest.approx(65.0)
+        assert float(account["strategy_default_stop_loss_pct"]) == pytest.approx(5.0)
+
+        rejected = await client.patch(
+            f"/api/v1/paper-trading/accounts/{account['id']}/strategy",
+            json={"enabled": True},
+        )
+        assert rejected.status_code == 400
+        assert rejected.json()["code"] == "strategy_missing_training_job"
+
+    async def test_enables_with_a_real_completed_job_over_http(
+        self, client: httpx.AsyncClient, session_factory: SessionFactory
+    ) -> None:
+        job_id, _ = await train_completed_job(
+            session_factory, symbol="APIPTSTRATUSD", model_type="logistic_regression"
+        )
+        account = (
+            await client.post("/api/v1/paper-trading/accounts", json={"starting_balance": "100000"})
+        ).json()
+
+        response = await client.patch(
+            f"/api/v1/paper-trading/accounts/{account['id']}/strategy",
+            json={
+                "enabled": True,
+                "training_job_id": job_id,
+                "confidence_threshold_pct": "70",
+                "default_stop_loss_pct": "8",
+            },
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["strategy_enabled"] is True
+        assert body["strategy_training_job_id"] == job_id
+        assert float(body["strategy_confidence_threshold_pct"]) == pytest.approx(70.0)
+        assert float(body["strategy_default_stop_loss_pct"]) == pytest.approx(8.0)
+
+    async def test_returns_404_for_an_unknown_training_job(self, client: httpx.AsyncClient) -> None:
+        account = (
+            await client.post("/api/v1/paper-trading/accounts", json={"starting_balance": "100000"})
+        ).json()
+
+        response = await client.patch(
+            f"/api/v1/paper-trading/accounts/{account['id']}/strategy",
+            json={"enabled": True, "training_job_id": str(uuid.uuid4())},
+        )
+        assert response.status_code == 404
+        assert response.json()["code"] == "training_job_not_found"
+
+    async def test_returns_422_for_an_explicit_null_stop_loss_or_threshold(
+        self, client: httpx.AsyncClient
+    ) -> None:
+        """Unlike `training_job_id`, `confidence_threshold_pct`/
+        `default_stop_loss_pct` have no "clear" semantics — an account
+        always has *some* value for both. An explicit `null` for either is
+        a clean 422, not the unhandled `TypeError` (`Decimal(None)`) it
+        would raise inside the service layer if this schema-level guard
+        weren't here — the stop-loss/threshold can never end up `None`,
+        by construction, not merely by convention."""
+        account = (
+            await client.post("/api/v1/paper-trading/accounts", json={"starting_balance": "100000"})
+        ).json()
+
+        stop_loss_response = await client.patch(
+            f"/api/v1/paper-trading/accounts/{account['id']}/strategy",
+            json={"default_stop_loss_pct": None},
+        )
+        assert stop_loss_response.status_code == 422
+
+        threshold_response = await client.patch(
+            f"/api/v1/paper-trading/accounts/{account['id']}/strategy",
+            json={"confidence_threshold_pct": None},
+        )
+        assert threshold_response.status_code == 422
+
+        # The account itself is untouched — still the platform's own
+        # defaults, never left partially-updated by the rejected request.
+        unchanged = (await client.get(f"/api/v1/paper-trading/accounts/{account['id']}")).json()
+        assert float(unchanged["strategy_default_stop_loss_pct"]) == pytest.approx(5.0)
+        assert float(unchanged["strategy_confidence_threshold_pct"]) == pytest.approx(65.0)
+
+
+class TestListStrategyDecisions:
+    async def test_lists_an_empty_decision_log_before_any_scheduler_tick_has_run(
+        self, client: httpx.AsyncClient
+    ) -> None:
+        account = (
+            await client.post("/api/v1/paper-trading/accounts", json={"starting_balance": "100000"})
+        ).json()
+
+        response = await client.get(
+            f"/api/v1/paper-trading/accounts/{account['id']}/strategy/decisions"
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body == {"decisions": [], "total": 0, "limit": 20, "offset": 0}

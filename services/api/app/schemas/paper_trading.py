@@ -5,14 +5,20 @@ stays framework/database-free, and this module is the one place an order
 request is validated and a response is assembled.
 """
 
+import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, Field, field_serializer, model_validator
 
 if TYPE_CHECKING:
-    from app.models.paper_trading import PaperAccount, PaperOrder, PaperPosition
+    from app.models.paper_trading import (
+        PaperAccount,
+        PaperOrder,
+        PaperPosition,
+        PaperStrategyDecision,
+    )
 
 
 def _iso(value: datetime) -> str:
@@ -67,6 +73,21 @@ class PaperAccountResponse(BaseModel):
     max_drawdown_pct: Decimal
     peak_balance: Decimal
     trading_halted: bool
+    strategy_enabled: bool = Field(
+        description="Opt-in automated strategy — off by default, per-account"
+    )
+    strategy_training_job_id: str | None = Field(
+        default=None,
+        description="The training job the strategy predicts from; required whenever "
+        "strategy_enabled is true",
+    )
+    strategy_confidence_threshold_pct: Decimal = Field(
+        description="A fresh prediction must reach at least this % confidence before the "
+        "strategy acts"
+    )
+    strategy_default_stop_loss_pct: Decimal = Field(
+        description="Every automated buy attaches a stop-loss this % below its own fill price"
+    )
     created_at: datetime
 
     @field_serializer("created_at")
@@ -86,6 +107,14 @@ class PaperAccountResponse(BaseModel):
             max_drawdown_pct=account.max_drawdown_pct,
             peak_balance=account.peak_balance,
             trading_halted=account.trading_halted,
+            strategy_enabled=account.strategy_enabled,
+            strategy_training_job_id=(
+                str(account.strategy_training_job_id)
+                if account.strategy_training_job_id is not None
+                else None
+            ),
+            strategy_confidence_threshold_pct=account.strategy_confidence_threshold_pct,
+            strategy_default_stop_loss_pct=account.strategy_default_stop_loss_pct,
             created_at=account.created_at,
         )
 
@@ -313,6 +342,125 @@ class RiskSummaryResponse(BaseModel):
     trading_halted: bool
 
 
+class PaperStrategyConfigUpdateRequest(BaseModel):
+    """Enable/disable the automated strategy and tune its threshold/stop-loss.
+
+    The same partial-update idiom `PositionThresholdsUpdateRequest` uses:
+    only fields actually present in the request body are changed (the
+    service reads `model_fields_set`) — send an explicit `null` for
+    `training_job_id` to clear it, omit a field entirely to leave it
+    exactly as it is. Validated against the *final*, merged state: you
+    cannot enable the strategy in the same request that clears its
+    training job, and you cannot clear the training job of an account
+    that's already enabled without disabling it first (or in the same
+    request).
+    """
+
+    enabled: bool | None = Field(default=None, description="Turn the automated strategy on/off")
+    training_job_id: uuid.UUID | None = Field(
+        default=None, description="The completed, real-data job to predict from"
+    )
+    confidence_threshold_pct: Decimal | None = Field(
+        default=None,
+        gt=0,
+        le=100,
+        description="A fresh prediction must reach at least this % confidence to act on",
+    )
+    default_stop_loss_pct: Decimal | None = Field(
+        default=None,
+        gt=0,
+        lt=100,
+        description="Every automated buy attaches a stop-loss this % below its own fill price",
+    )
+
+    @model_validator(mode="after")
+    def _reject_explicit_null_thresholds(self) -> "PaperStrategyConfigUpdateRequest":
+        """Unlike `training_job_id` (which has real "clear" semantics —
+        `NULL` is a valid, meaningful state), `confidence_threshold_pct`/
+        `default_stop_loss_pct` never do: this account always has *some*
+        threshold/stop-loss percentage in force, never none at all. `gt=0`
+        only constrains a *given* Decimal — Pydantic does not apply it to
+        an explicit `null` on an `Optional` field, so `{"default_stop_loss_pct":
+        null}` would otherwise parse successfully and reach the service
+        layer's `Decimal(None)` call, raising an unhandled `TypeError`
+        (a raw 500) instead of the clean 400 this rejects it with instead.
+        `model_fields_set` is what distinguishes this from the ordinary,
+        valid "omitted entirely, leave unchanged" case — both parse to the
+        same `None` otherwise.
+        """
+        if (
+            "confidence_threshold_pct" in self.model_fields_set
+            and self.confidence_threshold_pct is None
+        ):
+            raise ValueError(
+                "confidence_threshold_pct cannot be explicitly cleared to null — omit it "
+                "entirely to leave it unchanged"
+            )
+        if "default_stop_loss_pct" in self.model_fields_set and self.default_stop_loss_pct is None:
+            raise ValueError(
+                "default_stop_loss_pct cannot be explicitly cleared to null — omit it "
+                "entirely to leave it unchanged"
+            )
+        return self
+
+
+class PaperStrategyDecisionResponse(BaseModel):
+    """One automated-strategy cycle's own outcome — acted on or not, and why."""
+
+    id: str
+    account_id: str
+    training_job_id: str | None
+    symbol: str | None
+    action: Literal["opened", "closed", "no_action"]
+    reason: str
+    predicted_value: Any | None = Field(
+        default=None, description="The class label (or number) the fresh prediction returned"
+    )
+    confidence: float | None = Field(
+        default=None, description="The fresh prediction's own confidence (0-1)"
+    )
+    confidence_threshold_pct: Decimal = Field(
+        description="The account's configured threshold at the moment of this cycle"
+    )
+    prediction_id: str | None = None
+    order_id: str | None = None
+    created_at: datetime
+
+    @field_serializer("created_at")
+    def _serialize_created_at(self, value: datetime) -> str:
+        return _iso(value)
+
+    @classmethod
+    def from_model(cls, decision: "PaperStrategyDecision") -> "PaperStrategyDecisionResponse":
+        return cls(
+            id=str(decision.id),
+            account_id=str(decision.account_id),
+            training_job_id=(
+                str(decision.training_job_id) if decision.training_job_id is not None else None
+            ),
+            symbol=decision.symbol,
+            action=decision.action,  # type: ignore[arg-type]
+            reason=decision.reason,
+            predicted_value=decision.predicted_value,
+            confidence=decision.confidence,
+            confidence_threshold_pct=decision.confidence_threshold_pct,
+            prediction_id=(
+                str(decision.prediction_id) if decision.prediction_id is not None else None
+            ),
+            order_id=str(decision.order_id) if decision.order_id is not None else None,
+            created_at=decision.created_at,
+        )
+
+
+class PaperStrategyDecisionListResponse(BaseModel):
+    """One page of an account's own strategy decision log, most recent first."""
+
+    decisions: list[PaperStrategyDecisionResponse]
+    total: int
+    limit: int
+    offset: int
+
+
 __all__ = [
     "PaperAccountCreateRequest",
     "PaperAccountListResponse",
@@ -322,6 +470,9 @@ __all__ = [
     "PaperOrderResponse",
     "PaperPositionDTO",
     "PaperPositionListResponse",
+    "PaperStrategyConfigUpdateRequest",
+    "PaperStrategyDecisionListResponse",
+    "PaperStrategyDecisionResponse",
     "PortfolioSummaryResponse",
     "PositionThresholdsUpdateRequest",
     "RiskSummaryResponse",

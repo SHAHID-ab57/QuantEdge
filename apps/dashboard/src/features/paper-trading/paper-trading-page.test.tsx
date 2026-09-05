@@ -4,12 +4,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as marketApi from '@/lib/api/market';
 import * as paperTradingApi from '@/lib/api/paper-trading';
 import * as systemApi from '@/lib/api/system';
+import * as trainingApi from '@/lib/api/training';
 import type {
   PaperAccount,
   PaperAccountListResponse,
   PaperOrder,
   PaperOrderListResponse,
   PaperPositionListResponse,
+  PaperStrategyDecisionListResponse,
   PortfolioSummary,
   RiskSummary,
 } from '@/types/api/paper-trading';
@@ -23,9 +25,11 @@ vi.mock('@/lib/api/paper-trading', () => ({
   fetchPaperOrders: vi.fn(),
   fetchPaperPortfolioSummary: vi.fn(),
   fetchPaperPositions: vi.fn(),
+  fetchPaperStrategyDecisions: vi.fn(),
   fetchPaperTradingRisk: vi.fn(),
   placePaperOrder: vi.fn(),
   resumePaperTrading: vi.fn(),
+  updatePaperStrategyConfig: vi.fn(),
   updatePositionThresholds: vi.fn(),
 }));
 
@@ -37,9 +41,15 @@ vi.mock('@/lib/api/system', () => ({
   fetchSystemStatus: vi.fn(),
 }));
 
+vi.mock('@/lib/api/training', () => ({
+  fetchTrainingJobs: vi.fn(),
+  fetchTrainingJob: vi.fn(),
+}));
+
 const mockedPaperTradingApi = vi.mocked(paperTradingApi);
 const mockedMarketApi = vi.mocked(marketApi);
 const mockedSystemApi = vi.mocked(systemApi);
+const mockedTrainingApi = vi.mocked(trainingApi);
 
 function account(overrides: Partial<PaperAccount> = {}): PaperAccount {
   return {
@@ -53,9 +63,19 @@ function account(overrides: Partial<PaperAccount> = {}): PaperAccount {
     max_drawdown_pct: '20',
     peak_balance: '100000',
     trading_halted: false,
+    strategy_enabled: false,
+    strategy_training_job_id: null,
+    strategy_confidence_threshold_pct: '65',
+    strategy_default_stop_loss_pct: '5',
     created_at: '2026-01-01T00:00:00Z',
     ...overrides,
   };
+}
+
+function decisionsResponse(
+  overrides: Partial<PaperStrategyDecisionListResponse> = {},
+): PaperStrategyDecisionListResponse {
+  return { decisions: [], total: 0, limit: 10, offset: 0, ...overrides };
 }
 
 function accountListResponse(
@@ -185,6 +205,15 @@ beforeEach(() => {
     symbols_tracked: 0,
   });
   mockedPaperTradingApi.fetchPaperAccounts.mockResolvedValue(accountListResponse());
+  mockedPaperTradingApi.fetchPaperStrategyDecisions.mockResolvedValue(decisionsResponse());
+  mockedTrainingApi.fetchTrainingJobs.mockResolvedValue({
+    jobs: [],
+    total: 0,
+    limit: 100,
+    offset: 0,
+    statuses: [],
+    stages: [],
+  });
 });
 
 afterEach(() => {
@@ -332,8 +361,10 @@ describe('PaperTradingPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Buy ETHUSD' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Buy' }));
 
-    const alert = await screen.findByRole('alert');
-    expect(alert).toHaveTextContent('insufficient balance');
+    await waitFor(async () => {
+      const alerts = await screen.findAllByRole('alert');
+      expect(alerts.some((el) => el.textContent?.includes('insufficient balance'))).toBe(true);
+    });
   });
 
   it('shows a halted risk panel and resumes trading', async () => {
@@ -362,5 +393,72 @@ describe('PaperTradingPage', () => {
     await waitFor(() =>
       expect(mockedPaperTradingApi.resumePaperTrading).toHaveBeenCalledWith('account-1'),
     );
+  });
+
+  it('enables the automated strategy with a training job, threshold, and stop-loss', async () => {
+    act(() => usePaperTradingAccountStore.getState().setAccountId('account-1'));
+    mockedPaperTradingApi.fetchPaperAccount.mockResolvedValue(account());
+    mockedPaperTradingApi.fetchPaperPortfolioSummary.mockResolvedValue(summary());
+    mockedPaperTradingApi.fetchPaperPositions.mockResolvedValue(positionsResponse());
+    mockedPaperTradingApi.fetchPaperOrders.mockResolvedValue(ordersResponse());
+    mockedPaperTradingApi.fetchPaperTradingRisk.mockResolvedValue(riskSummary());
+    mockedPaperTradingApi.fetchPaperStrategyDecisions.mockResolvedValue(decisionsResponse());
+    mockedTrainingApi.fetchTrainingJobs.mockResolvedValue({
+      jobs: [
+        {
+          id: 'job-1',
+          experiment_id: 'experiment-1',
+          dataset_version: 'ds-1',
+          model_type: 'logistic_regression',
+          status: 'completed',
+          current_stage: null,
+          log_count: 0,
+          created_at: '2026-01-01T00:00:00Z',
+          updated_at: '2026-01-01T00:00:00Z',
+        },
+      ],
+      total: 1,
+      limit: 100,
+      offset: 0,
+      statuses: ['completed'],
+      stages: [],
+    });
+    mockedPaperTradingApi.updatePaperStrategyConfig.mockResolvedValue(
+      account({ strategy_enabled: true, strategy_training_job_id: 'job-1' }),
+    );
+
+    renderPage();
+    await screen.findByText('My Account');
+
+    fireEvent.click(screen.getByLabelText('Enable automated strategy'));
+    fireEvent.mouseDown(screen.getByLabelText('Training job'));
+    fireEvent.click(await screen.findByRole('option', { name: /logistic_regression/ }));
+    fireEvent.change(screen.getByLabelText('Confidence threshold percent'), {
+      target: { value: '75' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() =>
+      expect(mockedPaperTradingApi.updatePaperStrategyConfig).toHaveBeenCalledWith('account-1', {
+        enabled: true,
+        training_job_id: 'job-1',
+        confidence_threshold_pct: '75',
+        default_stop_loss_pct: '5',
+      }),
+    );
+  });
+
+  it('states plainly that the strategy is paper trading only', async () => {
+    act(() => usePaperTradingAccountStore.getState().setAccountId('account-1'));
+    mockedPaperTradingApi.fetchPaperAccount.mockResolvedValue(account());
+    mockedPaperTradingApi.fetchPaperPortfolioSummary.mockResolvedValue(summary());
+    mockedPaperTradingApi.fetchPaperPositions.mockResolvedValue(positionsResponse());
+    mockedPaperTradingApi.fetchPaperOrders.mockResolvedValue(ordersResponse());
+    mockedPaperTradingApi.fetchPaperTradingRisk.mockResolvedValue(riskSummary());
+
+    renderPage();
+    await screen.findByText('My Account');
+
+    expect(await screen.findByText(/Paper trading only/)).toBeInTheDocument();
   });
 });

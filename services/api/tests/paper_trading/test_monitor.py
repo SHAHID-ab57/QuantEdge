@@ -28,6 +28,8 @@ from app.schemas.paper_trading import PaperAccountCreateRequest, PaperOrderReque
 from app.state.manager import MarketStateManager
 from tests.conftest import SessionFactory
 from tests.paper_trading.test_service import (
+    DEFAULT_STRATEGY_CONFIDENCE_THRESHOLD_PCT,
+    DEFAULT_STRATEGY_STOP_LOSS_PCT,
     FEE_BPS,
     GENEROUS_MAX_PCT,
     MAX_ORDER_ATTEMPTS,
@@ -56,6 +58,8 @@ def build_monitor(state_manager: MarketStateManager) -> StopLossTakeProfitMonito
         default_max_exposure_pct=GENEROUS_MAX_PCT,
         default_max_drawdown_pct=GENEROUS_MAX_PCT,
         max_order_attempts=MAX_ORDER_ATTEMPTS,
+        default_strategy_confidence_threshold_pct=DEFAULT_STRATEGY_CONFIDENCE_THRESHOLD_PCT,
+        default_strategy_default_stop_loss_pct=DEFAULT_STRATEGY_STOP_LOSS_PCT,
     )
 
 

@@ -8,14 +8,18 @@ import {
   fetchPaperOrders,
   fetchPaperPortfolioSummary,
   fetchPaperPositions,
+  fetchPaperStrategyDecisions,
   fetchPaperTradingRisk,
   placePaperOrder,
   resumePaperTrading,
+  updatePaperStrategyConfig,
   updatePositionThresholds,
   type PaperAccountCreateBody,
   type PaperAccountListParams,
   type PaperOrderBody,
   type PaperOrderListParams,
+  type PaperStrategyConfigBody,
+  type PaperStrategyDecisionListParams,
   type PositionThresholdsUpdateBody,
 } from '@/lib/api/paper-trading';
 
@@ -117,5 +121,29 @@ export function useUpdatePositionThresholds(accountId: string | null) {
     mutationFn: ({ symbol, body }: { symbol: string; body: PositionThresholdsUpdateBody }) =>
       updatePositionThresholds(accountId as string, symbol, body),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: accountKey(accountId) }),
+  });
+}
+
+export function useUpdatePaperStrategyConfig(accountId: string | null) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: PaperStrategyConfigBody) =>
+      updatePaperStrategyConfig(accountId as string, body),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: accountKey(accountId) }),
+  });
+}
+
+export function usePaperStrategyDecisions(
+  accountId: string | null,
+  params: PaperStrategyDecisionListParams,
+) {
+  return useQuery({
+    queryKey: [...accountKey(accountId), 'strategy-decisions', params],
+    queryFn: () => fetchPaperStrategyDecisions(accountId as string, params),
+    enabled: Boolean(accountId),
+    // A new decision can appear on its own, unprompted by any user action
+    // here — the scheduler runs in the background — so poll it the same
+    // way the summary/positions/risk panels already do.
+    refetchInterval: Boolean(accountId) && 10_000,
   });
 }

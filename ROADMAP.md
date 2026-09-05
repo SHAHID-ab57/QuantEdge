@@ -32,7 +32,7 @@ a versioned dataset citation, a recorded experiment) — it is now complete.
 | --------- | -------------------------------------------- | ----------- |
 | 1         | Research & Training Platform                 | COMPLETE    |
 | 2         | Prediction & Backtesting                     | COMPLETE    |
-| 3         | Paper Trading & Risk                         | IN PROGRESS |
+| 3         | Paper Trading & Risk                         | COMPLETE    |
 | 4         | Data Breadth                                 | NOT STARTED |
 | 5         | Production Hardening                         | NOT STARTED |
 | 6         | Live Trading (gated on extensive validation) | NOT STARTED |
@@ -90,26 +90,34 @@ against the real dev database, timed at 0.028s to return `status:
 independently moments later. See `ARCHITECTURE.md` § "Paper Trading" for
 the full account.
 
-**Milestone 3 — Paper Trading & Risk (IN PROGRESS).** Paper Trading
+**Milestone 3 — Paper Trading & Risk (COMPLETE).** Paper Trading
 (`app/paper_trading/`, `/paper-trading`) is the first item and is
 complete: a virtual trading account places simulated market orders
 against real prices — a modeled slippage and fee always applied, never a
 perfect, cost-free fill — tracks materialized positions, and computes
 realized/unrealized PnL, long-only with no margin, no shorting, no
-leverage, and no automation. Pre-trade risk limits are also complete:
-position sizing, total exposure, and a maximum drawdown that halts an
-account until an explicit resume — all three checked against current
-prices and current balance, never entry prices or a stale balance, and
-guarded against concurrent orders by the same atomic-`UPDATE` pattern the
-training-job duplicate-run race established. Stop-loss/take-profit are
-also complete: a threshold set on an open position is watched via the
-existing event bus (no new polling loop) and closed automatically —
-through the same fill model and atomic concurrency guard, applied to a
-third occurrence of the same race — the instant it's crossed, at a wider
-modeled slippage than a manual order. See `ARCHITECTURE.md` § "Paper
-Trading". A standalone risk engine beyond these account-level limits has
-not been started; see `docs/architecture/DomainModel.md`/
-`ContainerArchitecture.md` for the intended bounded contexts.
+leverage. Pre-trade risk limits are also complete: position sizing, total
+exposure, and a maximum drawdown that halts an account until an explicit
+resume — all three checked against current prices and current balance,
+never entry prices or a stale balance, and guarded against concurrent
+orders by the same atomic-`UPDATE` pattern the training-job duplicate-run
+race established. Stop-loss/take-profit are also complete: a threshold
+set on an open position is watched via the existing event bus (no new
+polling loop) and closed automatically — through the same fill model and
+atomic concurrency guard, applied to a third occurrence of the same
+race — the instant it's crossed, at a wider modeled slippage than a
+manual order. **Automated Strategy, the milestone's last item, is
+complete too**: an account may opt into a single automated strategy
+(off by default) that places an order through this exact same
+order-placement path on a fresh, above-threshold prediction — the fourth
+occurrence of the same atomic concurrency guard, proven by test to share
+every existing risk limit rather than bypass it, every automated position
+carrying a stop-loss structurally, and every cycle logged whether it
+acted or not. See `ARCHITECTURE.md` § "Paper Trading". This does **not**
+change anything about Milestone 6's own gate below. A standalone risk
+engine beyond these account-level limits has not been started; see
+`docs/architecture/DomainModel.md`/`ContainerArchitecture.md` for the
+intended bounded contexts.
 
 **Milestone 4 — Data Breadth.** The additional external data connectors
 this platform has designed for but never implemented — Marketaux (news/

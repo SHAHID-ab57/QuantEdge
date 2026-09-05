@@ -74,7 +74,9 @@ from app.repositories.paper_trading import (
     PaperAccountRepository,
     PaperOrderRepository,
     PaperPositionRepository,
+    PaperStrategyDecisionRepository,
 )
+from app.repositories.training import TrainingJobRepository
 from app.services.paper_trading import PaperTradingService
 from app.state.manager import MarketStateManager
 
@@ -99,6 +101,8 @@ class StopLossTakeProfitMonitor:
         default_max_exposure_pct: Decimal,
         default_max_drawdown_pct: Decimal,
         max_order_attempts: int,
+        default_strategy_confidence_threshold_pct: Decimal,
+        default_strategy_default_stop_loss_pct: Decimal,
     ) -> None:
         self._state_manager = state_manager
         self._slippage_bps = slippage_bps
@@ -109,6 +113,8 @@ class StopLossTakeProfitMonitor:
         self._default_max_exposure_pct = default_max_exposure_pct
         self._default_max_drawdown_pct = default_max_drawdown_pct
         self._max_order_attempts = max_order_attempts
+        self._default_strategy_confidence_threshold_pct = default_strategy_confidence_threshold_pct
+        self._default_strategy_default_stop_loss_pct = default_strategy_default_stop_loss_pct
 
     def attach(self, bus: EventBus) -> "StopLossTakeProfitMonitor":
         """Subscribe to the same two live-price event types
@@ -163,6 +169,8 @@ class StopLossTakeProfitMonitor:
                 position_repository=position_repository,
                 market_repository=MarketRepository(session),
                 candle_repository=CandleRepository(session),
+                training_job_repository=TrainingJobRepository(session),
+                strategy_decision_repository=PaperStrategyDecisionRepository(session),
                 state_manager=self._state_manager,
                 slippage_bps=self._slippage_bps,
                 fee_bps=self._fee_bps,
@@ -172,6 +180,12 @@ class StopLossTakeProfitMonitor:
                 default_max_exposure_pct=self._default_max_exposure_pct,
                 default_max_drawdown_pct=self._default_max_drawdown_pct,
                 max_order_attempts=self._max_order_attempts,
+                default_strategy_confidence_threshold_pct=(
+                    self._default_strategy_confidence_threshold_pct
+                ),
+                default_strategy_default_stop_loss_pct=(
+                    self._default_strategy_default_stop_loss_pct
+                ),
             )
 
             for position in positions:

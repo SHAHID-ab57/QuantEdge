@@ -8,6 +8,74 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Paper Trading — Automated Strategy: an account may opt into a single
+  automated strategy that places an order through the existing
+  order-placement path on a fresh, above-threshold prediction.** Closes
+  out Milestone 3 (Paper Trading & Risk). Off by default — explicit,
+  per-account opt-in — and does **not** change anything about
+  Milestone 6: live trading remains gated on extensive validation
+  regardless of paper-trading performance, automated or manual.
+  - **"Just another caller" of the existing order-placement path, proven
+    by test, not just designed that way.** Every automated order goes
+    through the exact same `PaperTradingService.place_order` a manual
+    order uses — the same halted/position-size/exposure checks and the
+    same `try_apply_trade_effects` atomic concurrency guard (its fourth
+    occurrence, after the training-job duplicate-run race, the
+    exposure-limit race, and the SL/TP triggered-close race). A tight
+    `max_exposure_pct`, pre-filled by an ordinary manual buy, rejects the
+    automated buy with the identical `MaxExposureExceededError` a second
+    manual order would hit.
+  - **Per-account config, off by default**: `strategy_enabled` (default
+    `false`), `strategy_training_job_id`, `strategy_confidence_threshold_pct`
+    (default 65%), `strategy_default_stop_loss_pct` (default 5%, never
+    omittable) — new columns on `paper_accounts` (migration
+    `9a50eaff41a2`), set via `PATCH /paper-trading/accounts/{id}/strategy`.
+    Enabling requires a real, completed training job with a recorded
+    symbol — the strategy always trades that job's own market, never a
+    separately-configured one.
+  - **Every automated position carries a stop-loss — structurally, not
+    by convention.** There is no code path that opens an automated
+    position without one attached at buy time.
+  - **A new periodic scheduler, mirroring `CandleSyncScheduler`/
+    `PredictionGradingScheduler` exactly** —
+    `PaperTradingStrategyScheduler` reads every strategy-enabled account
+    fresh at the top of every tick, so **disabling an account takes
+    effect by its very next tick**, proven directly (a tick that opens a
+    position, an explicit disable, and a second tick that touches zero
+    accounts).
+  - **Every cycle is logged — acted on or not, and why.** A new
+    `paper_strategy_decisions` table (same migration) records exactly one
+    row per strategy-enabled account per tick: what it acted on (a fresh
+    prediction's own confidence/predicted value) and a plain-language
+    reason, including for a cycle that changed nothing.
+  - **New frontend "Automated Strategy" section** on `/paper-trading`:
+    `StrategyPanel` (enable/disable, a completed-training-job picker,
+    threshold/stop-loss fields, an explicit "Paper trading only"
+    disclosure) and `StrategyDecisionLogTable` (every cycle, most recent
+    first, a filled "Opened"/"Closed" chip distinct from an outlined "No
+    Action" one).
+  - **Found and fixed during acceptance review**: `PATCH .../strategy`
+    with an explicit `{"default_stop_loss_pct": null}` (or
+    `confidence_threshold_pct`) parsed successfully — Pydantic's `gt=0`
+    does not constrain an explicit `null` on an `Optional` field — and
+    would have reached the service layer's `Decimal(None)` call, raising
+    an unhandled `TypeError` (a raw 500) instead of a clean rejection.
+    Neither field has "clear" semantics the way `training_job_id` does
+    (an account always has _some_ threshold/stop-loss in force), so both
+    now reject an explicit `null` at the schema layer with a clean 422.
+  - **Two known, disclosed limitations, not addressed here**: no
+    out-of-distribution/confidence-quality safeguard (a saturated,
+    meaningless confidence from an out-of-range live feature — already
+    documented as a real, observed risk under Prediction Grading — passes
+    through identically to a genuine high-confidence signal); and the
+    kill switch is a tick-boundary guarantee, not a mid-tick one (an
+    account disabled after it was already selected into a tick's own
+    batch still completes that in-flight cycle's order).
+  - Full design in `ARCHITECTURE.md` § "Paper Trading" → "Automated
+    Strategy"; API surface in `docs/api/API.md` § "Paper Trading" →
+    "Automated Strategy"; tests in `services/api/TESTING.md` §
+    "Testing Paper Trading" and `docs/testing/TESTING.md`.
+
 - **Paper Trading — stop-loss/take-profit: set a threshold on an open
   position and it closes automatically when the live price crosses it.**
   Extends Paper Trading, still Milestone 3.

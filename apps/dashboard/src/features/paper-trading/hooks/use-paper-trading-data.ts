@@ -11,10 +11,12 @@ import {
   fetchPaperTradingRisk,
   placePaperOrder,
   resumePaperTrading,
+  updatePositionThresholds,
   type PaperAccountCreateBody,
   type PaperAccountListParams,
   type PaperOrderBody,
   type PaperOrderListParams,
+  type PositionThresholdsUpdateBody,
 } from '@/lib/api/paper-trading';
 
 /** Server state for the Paper Trading page. Opening an account and placing
@@ -105,6 +107,15 @@ export function useResumeTrading(accountId: string | null) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: () => resumePaperTrading(accountId as string),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: accountKey(accountId) }),
+  });
+}
+
+export function useUpdatePositionThresholds(accountId: string | null) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ symbol, body }: { symbol: string; body: PositionThresholdsUpdateBody }) =>
+      updatePositionThresholds(accountId as string, symbol, body),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: accountKey(accountId) }),
   });
 }

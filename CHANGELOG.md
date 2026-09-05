@@ -8,6 +8,53 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Paper Trading — stop-loss/take-profit: set a threshold on an open
+  position and it closes automatically when the live price crosses it.**
+  Extends Paper Trading, still Milestone 3.
+  - **Monitored via the existing event bus, not a new polling loop** —
+    `StopLossTakeProfitMonitor` subscribes to the identical
+    `TickerUpdated`/`TradeEventReceived` events `MarketStateManager`
+    already watches, and prices every check/fill from the event's own
+    price (never a second, possibly-stale read), since the bus gives no
+    ordering guarantee between concurrent subscribers of the same event.
+  - **Validated at set-time**: a long position's stop-loss must sit
+    below the current price and its take-profit above it — a value that
+    would trigger immediately is rejected. Whenever both are set, the
+    stop-loss must also be strictly below the take-profit, closing the
+    "what if one tick crosses both" question by construction (the two
+    trigger conditions become mutually exclusive for every price) rather
+    than an arbitrary runtime tie-break — proven with a fixture where the
+    two are set at two different prices, and with a forced, otherwise-
+    unreachable inconsistent state that still resolves deterministically.
+  - **A triggered close reuses the exact same fill model and atomic
+    concurrency guard a manual close uses** (`PaperTradingService
+.trigger_close`) — the same `try_apply_trade_effects` primitive
+    guarding the training-job duplicate-run race and the exposure-limit
+    race, now a third time: a triggered auto-close racing a concurrent
+    manual close of the same position can never both succeed, verified
+    with two real concurrent operations via `asyncio.gather`.
+  - **A triggered fill applies a wider modeled slippage than a manual
+    order** (`paper_trading_triggered_slippage_bps`, default 25bps vs.
+    5bps manual) — a triggered exit during a fast move is not a perfect
+    fill either. Verified with exact numbers: a take-profit crossed at
+    $1100 fills at exactly $1097.25, never the manual model's $1099.45.
+  - **New columns**: `paper_positions.stop_loss_price`/`take_profit_price`
+    (migration `16e4c2531e7d`), `paper_orders.trigger_reason` (same
+    migration) — `"stop_loss"`/`"take_profit"` for an auto-closed order,
+    `null` for a manually-placed one.
+  - **New endpoint**: `PATCH /paper-trading/accounts/{id}/positions/{symbol}`
+    sets, updates, or clears a position's thresholds — an omitted field
+    leaves it unchanged, an explicit `null` clears it.
+  - **`OrderForm` gains optional, buy-only stop-loss/take-profit fields**
+    (hidden and cleared the instant the side switches to sell);
+    `PositionsTable` gains an "SL / TP" column and a per-row edit action;
+    `OrderHistoryTable` gains a "Trigger" column making an auto-closed
+    exit clearly distinct from a manually-placed order.
+  - Full design in `ARCHITECTURE.md` § "Paper Trading"; API surface in
+    `docs/api/API.md` § "Paper Trading"; tests in
+    `services/api/TESTING.md` § "Testing Paper Trading" and
+    `docs/testing/TESTING.md`.
+
 - **Paper Trading — a virtual trading account: place simulated market
   orders against real prices, track positions, and compute PnL.** The
   first item of Milestone 3 (Paper Trading & Risk). Long-only, market

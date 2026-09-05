@@ -1,6 +1,7 @@
 """Unit tests for the runtime composition root (start/stop/probe)."""
 
 from datetime import UTC, datetime
+from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
@@ -29,6 +30,16 @@ def _settings(**overrides: object) -> SimpleNamespace:
         "delta_api_key": "",
         "delta_api_secret": "",
         "delta_request_timeout": 10.0,
+        # Read by `StopLossTakeProfitMonitor`'s own construction in
+        # `Runtime.__init__` — mirrors `app/core/config.py`'s real defaults.
+        "paper_trading_slippage_bps": 5,
+        "paper_trading_fee_bps": 10,
+        "paper_trading_triggered_slippage_bps": 25,
+        "paper_trading_stale_price_threshold_seconds": 300,
+        "paper_trading_default_max_position_size_pct": Decimal("10"),
+        "paper_trading_default_max_exposure_pct": Decimal("50"),
+        "paper_trading_default_max_drawdown_pct": Decimal("20"),
+        "paper_trading_max_order_attempts": 5,
     }
     values.update(overrides)
     return SimpleNamespace(**values)

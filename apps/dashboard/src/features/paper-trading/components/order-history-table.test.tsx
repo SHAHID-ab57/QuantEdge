@@ -23,6 +23,7 @@ const DATA: PaperOrderListResponse = {
       fee_applied: '10.005',
       notional: '10005',
       realized_pnl: null,
+      trigger_reason: null,
       created_at: '2026-01-01T00:00:00Z',
     },
   ],
@@ -88,6 +89,48 @@ describe('OrderHistoryTable', () => {
       },
     });
     expect(screen.getByText('candle_close')).toBeInTheDocument();
+  });
+
+  it('shows a Manual chip for an ordinary order', () => {
+    renderTable();
+    expect(screen.getByText('Manual')).toBeInTheDocument();
+  });
+
+  it('shows a distinct Stop-Loss chip for a market-triggered auto-close', () => {
+    renderTable({
+      data: {
+        ...DATA,
+        orders: [
+          {
+            ...DATA.orders[0]!,
+            side: 'sell',
+            trigger_reason: 'stop_loss',
+            realized_pnl: '-50',
+          },
+        ],
+      },
+    });
+    expect(screen.getByText('Stop-Loss')).toBeInTheDocument();
+    expect(screen.queryByText('Manual')).not.toBeInTheDocument();
+  });
+
+  it('shows a distinct Take-Profit chip for a market-triggered auto-close', () => {
+    renderTable({
+      data: {
+        ...DATA,
+        orders: [
+          {
+            ...DATA.orders[0]!,
+            side: 'sell',
+            trigger_reason: 'take_profit',
+            realized_pnl: '95',
+          },
+        ],
+      },
+    });
+    expect(screen.getByText('Take-Profit')).toBeInTheDocument();
+    expect(screen.queryByText('Manual')).not.toBeInTheDocument();
+    expect(screen.queryByText('Stop-Loss')).not.toBeInTheDocument();
   });
 
   it('reports an empty history', () => {

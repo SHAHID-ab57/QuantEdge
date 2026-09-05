@@ -5,6 +5,7 @@ import {
   PaperOrderListResponseSchema,
   PaperOrderSchema,
   PaperPositionListResponseSchema,
+  PaperPositionSchema,
   PortfolioSummarySchema,
   RiskSummarySchema,
   type PaperAccount,
@@ -12,6 +13,7 @@ import {
   type PaperOrder,
   type PaperOrderListResponse,
   type PaperOrderSide,
+  type PaperPosition,
   type PaperPositionListResponse,
   type PortfolioSummary,
   type RiskSummary,
@@ -53,6 +55,9 @@ export interface PaperOrderBody {
   symbol: string;
   side: PaperOrderSide;
   quantity: string;
+  /** Buy only — sets the resulting position's stop-loss/take-profit. */
+  stop_loss_price?: string;
+  take_profit_price?: string;
 }
 
 /** Place and fill one market order for an account. */
@@ -117,4 +122,23 @@ export async function resumePaperTrading(accountId: string): Promise<PaperAccoun
     `/api/v1/paper-trading/accounts/${encodeURIComponent(accountId)}/resume-trading`,
   );
   return PaperAccountSchema.parse(data);
+}
+
+export interface PositionThresholdsUpdateBody {
+  /** Omit a field to leave it unchanged; pass `null` to clear it. */
+  stop_loss_price?: string | null;
+  take_profit_price?: string | null;
+}
+
+/** Set, update, or clear one position's stop-loss/take-profit. */
+export async function updatePositionThresholds(
+  accountId: string,
+  symbol: string,
+  body: PositionThresholdsUpdateBody,
+): Promise<PaperPosition> {
+  const { data } = await apiClient.patch(
+    `/api/v1/paper-trading/accounts/${encodeURIComponent(accountId)}/positions/${encodeURIComponent(symbol)}`,
+    body,
+  );
+  return PaperPositionSchema.parse(data);
 }

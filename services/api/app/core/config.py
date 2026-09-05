@@ -120,6 +120,14 @@ class Settings(BaseSettings):
     paper_trading_slippage_bps: int = 5
     paper_trading_fee_bps: int = 10
 
+    #: A market-triggered stop-loss/take-profit close (`StopLossTakeProfitMonitor`)
+    #: applies a *wider* slippage allowance than a manually-placed order —
+    #: a triggered exit during a fast price move is not a perfect fill
+    #: either, and pretending otherwise would understate exactly the risk
+    #: a stop-loss exists to manage. Never equal to or narrower than
+    #: `paper_trading_slippage_bps` in the default configuration.
+    paper_trading_triggered_slippage_bps: int = 25
+
     #: How old a resolved price quote (a live ticker/trade's own event_time,
     #: or a fallback candle's own open_time) can be before a fill is marked
     #: `is_stale_price=True` rather than presented as current.

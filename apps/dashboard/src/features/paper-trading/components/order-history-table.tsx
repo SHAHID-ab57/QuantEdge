@@ -29,13 +29,19 @@ function LoadingRows() {
     <>
       {Array.from({ length: 3 }, (_, index) => (
         <TableRow key={index}>
-          <TableCell colSpan={8}>
+          <TableCell colSpan={9}>
             <Skeleton variant="text" />
           </TableCell>
         </TableRow>
       ))}
     </>
   );
+}
+
+function triggerLabel(reason: PaperOrder['trigger_reason']): string {
+  if (reason === 'stop_loss') return 'Stop-Loss';
+  if (reason === 'take_profit') return 'Take-Profit';
+  return 'Manual';
 }
 
 function pnlColor(value: number): 'success.main' | 'error.main' | 'text.primary' {
@@ -56,6 +62,22 @@ function OrderRow({ order }: { order: PaperOrder }) {
           color={order.side === 'buy' ? 'success' : 'error'}
           label={order.side.toUpperCase()}
         />
+      </TableCell>
+      <TableCell>
+        <Tooltip
+          title={
+            order.trigger_reason === null
+              ? 'Placed manually'
+              : `Closed automatically — its ${triggerLabel(order.trigger_reason).toLowerCase()} price was crossed`
+          }
+        >
+          <Chip
+            size="small"
+            variant={order.trigger_reason === null ? 'outlined' : 'filled'}
+            color={order.trigger_reason === null ? 'default' : 'warning'}
+            label={triggerLabel(order.trigger_reason)}
+          />
+        </Tooltip>
       </TableCell>
       <TableCell align="right">{Number(order.quantity)}</TableCell>
       <TableCell align="right">${Number(order.fill_price).toFixed(4)}</TableCell>
@@ -102,7 +124,11 @@ function OrderRow({ order }: { order: PaperOrder }) {
  * spec: realistic execution is what matters most, so its cost must be as
  * visible as the fill itself). A stale-priced fill (the fallback candle
  * was already older than the staleness threshold) is marked with a
- * warning chip, not silently presented as current.
+ * warning chip, not silently presented as current. The "Trigger" column
+ * makes a market-triggered auto-close (a filled `warning`-colored chip,
+ * "Stop-Loss"/"Take-Profit") clearly distinct from an ordinary,
+ * manually-placed order (an outlined "Manual" chip) — never the same
+ * plain row for both.
  */
 export function OrderHistoryTable({
   data,
@@ -123,6 +149,7 @@ export function OrderHistoryTable({
               <TableCell>Fill Time</TableCell>
               <TableCell>Symbol</TableCell>
               <TableCell>Side</TableCell>
+              <TableCell>Trigger</TableCell>
               <TableCell align="right">Quantity</TableCell>
               <TableCell align="right">Fill Price</TableCell>
               <TableCell>Source</TableCell>
@@ -138,7 +165,7 @@ export function OrderHistoryTable({
             )}
             {!isLoading && orders.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={8} align="center" sx={{ py: 4 }}>
+                <TableCell colSpan={9} align="center" sx={{ py: 4 }}>
                   <Typography variant="body2" color="text.secondary" role="status">
                     No orders yet — place one above, and it will appear here.
                   </Typography>

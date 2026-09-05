@@ -49,7 +49,8 @@ running (`pnpm dev` from `apps/dashboard`, default `http://localhost:3000`).
 services/api/app/paper_trading/            Framework/database-free domain logic
 ├── base.py                                FillQuote / FillResult dataclasses
 ├── errors.py                              Domain error types
-└── pricing.py                             resolve_current_price / apply_fill_model
+├── pricing.py                             resolve_current_price / apply_fill_model / is_stale
+└── monitor.py                             StopLossTakeProfitMonitor — the event-bus subscriber
 
 services/api/app/models/paper_trading.py   SQLAlchemy ORM: PaperAccount, PaperOrder, PaperPosition
 services/api/app/repositories/paper_trading.py
@@ -58,11 +59,16 @@ services/api/app/repositories/paper_trading.py
 services/api/app/services/paper_trading.py PaperTradingService — the orchestration layer
 services/api/app/schemas/paper_trading.py  Pydantic request/response DTOs
 services/api/app/api/v1/endpoints/paper_trading.py
-                                            The 5 REST endpoints
+                                            The 8 REST endpoints
 services/api/app/dependencies/paper_trading.py
                                             get_paper_trading_service() DI wiring
+services/api/app/runtime.py                 Wires StopLossTakeProfitMonitor to the process-wide bus
 services/api/alembic/versions/20260904_7a3254fe72af_add_paper_trading_schema.py
                                             The migration that creates all 3 tables
+services/api/alembic/versions/20260904_c1e00878df40_add_paper_trading_risk_limits.py
+                                            Adds the risk-limit columns
+services/api/alembic/versions/20260905_16e4c2531e7d_add_stop_loss_take_profit.py
+                                            Adds stop_loss_price/take_profit_price/trigger_reason
 ```
 
 Same layering discipline as every other domain on this platform: routers
@@ -228,17 +234,18 @@ hypothetical exit fill.
 
 All mounted under both `/api/v1/*` and unversioned `/*`, tag `paper-trading`.
 
-| Method | Path                                                  | Purpose                                                                | Success status |
-| ------ | ----------------------------------------------------- | ---------------------------------------------------------------------- | -------------- |
-| POST   | `/paper-trading/accounts`                             | Open a new virtual trading account                                     | 201            |
-| GET    | `/paper-trading/accounts`                             | List every account, most recently created first                        | 200            |
-| GET    | `/paper-trading/accounts/{account_id}`                | Get one account                                                        | 200            |
-| POST   | `/paper-trading/accounts/{account_id}/orders`         | Place and fill one market order                                        | 201            |
-| GET    | `/paper-trading/accounts/{account_id}/orders`         | This account's own order history, paginated + sortable                 | 200            |
-| GET    | `/paper-trading/accounts/{account_id}/positions`      | This account's currently-open positions                                | 200            |
-| GET    | `/paper-trading/accounts/{account_id}/summary`        | Balance, realized PnL, live unrealized PnL, total equity               | 200            |
-| GET    | `/paper-trading/accounts/{account_id}/risk`           | Current exposure %/drawdown %, distance to each limit, halted status   | 200            |
-| POST   | `/paper-trading/accounts/{account_id}/resume-trading` | Clear a drawdown halt, resetting `peak_balance` to the current balance | 200            |
+| Method | Path                                                      | Purpose                                                                | Success status |
+| ------ | --------------------------------------------------------- | ---------------------------------------------------------------------- | -------------- |
+| POST   | `/paper-trading/accounts`                                 | Open a new virtual trading account                                     | 201            |
+| GET    | `/paper-trading/accounts`                                 | List every account, most recently created first                        | 200            |
+| GET    | `/paper-trading/accounts/{account_id}`                    | Get one account                                                        | 200            |
+| POST   | `/paper-trading/accounts/{account_id}/orders`             | Place and fill one market order                                        | 201            |
+| GET    | `/paper-trading/accounts/{account_id}/orders`             | This account's own order history, paginated + sortable                 | 200            |
+| GET    | `/paper-trading/accounts/{account_id}/positions`          | This account's currently-open positions                                | 200            |
+| GET    | `/paper-trading/accounts/{account_id}/summary`            | Balance, realized PnL, live unrealized PnL, total equity               | 200            |
+| GET    | `/paper-trading/accounts/{account_id}/risk`               | Current exposure %/drawdown %, distance to each limit, halted status   | 200            |
+| POST   | `/paper-trading/accounts/{account_id}/resume-trading`     | Clear a drawdown halt, resetting `peak_balance` to the current balance | 200            |
+| PATCH  | `/paper-trading/accounts/{account_id}/positions/{symbol}` | Set, update, or clear a position's stop-loss/take-profit               | 200            |
 
 #### `POST /paper-trading/accounts` — request
 
@@ -295,29 +302,37 @@ All mounted under both `/api/v1/*` and unversioned `/*`, tag `paper-trading`.
   "symbol": "ETHUSD", // required
   "side": "buy", // required, "buy" | "sell"
   "quantity": "10", // required, > 0, decimal string, base-asset units
+  "stop_loss_price": "900", // optional, > 0 — buy only, rejected outright on a sell
+  "take_profit_price": "1100", // optional, > 0 — buy only, rejected outright on a sell
 }
 ```
 
+`stop_loss_price`/`take_profit_price` set the resulting position's
+thresholds (validated per § 1.10); omit either to leave the position's
+existing value (if any) unchanged — never sent, never cleared by
+omission.
+
 #### Order response shape (`PaperOrderResponse`) — every field
 
-| Field               | Type                                    | Notes                                               |
-| ------------------- | --------------------------------------- | --------------------------------------------------- |
-| `id`                | string (UUID)                           | —                                                   |
-| `account_id`        | string (UUID)                           | —                                                   |
-| `symbol`            | string                                  | —                                                   |
-| `side`              | `"buy" \| "sell"`                       | —                                                   |
-| `quantity`          | decimal string                          | —                                                   |
-| `raw_price`         | decimal string                          | The resolved quote, before slippage.                |
-| `fill_price`        | decimal string                          | What was actually charged/credited.                 |
-| `fill_time`         | ISO-8601 UTC                            | —                                                   |
-| `price_source`      | `"ticker" \| "trade" \| "candle_close"` | Which real data this fill priced from.              |
-| `price_observed_at` | ISO-8601 UTC                            | When the quote itself was observed.                 |
-| `is_stale_price`    | boolean                                 | `true` if the quote was already stale at fill time. |
-| `slippage_applied`  | decimal string                          | `abs(fill_price − raw_price)`.                      |
-| `fee_applied`       | decimal string                          | —                                                   |
-| `notional`          | decimal string                          | `fill_price × quantity`.                            |
-| `realized_pnl`      | decimal string \| null                  | Set only for a sell; `null` for a buy.              |
-| `created_at`        | ISO-8601 UTC                            | —                                                   |
+| Field               | Type                                    | Notes                                                                      |
+| ------------------- | --------------------------------------- | -------------------------------------------------------------------------- |
+| `id`                | string (UUID)                           | —                                                                          |
+| `account_id`        | string (UUID)                           | —                                                                          |
+| `symbol`            | string                                  | —                                                                          |
+| `side`              | `"buy" \| "sell"`                       | —                                                                          |
+| `quantity`          | decimal string                          | —                                                                          |
+| `raw_price`         | decimal string                          | The resolved quote, before slippage.                                       |
+| `fill_price`        | decimal string                          | What was actually charged/credited.                                        |
+| `fill_time`         | ISO-8601 UTC                            | —                                                                          |
+| `price_source`      | `"ticker" \| "trade" \| "candle_close"` | Which real data this fill priced from.                                     |
+| `price_observed_at` | ISO-8601 UTC                            | When the quote itself was observed.                                        |
+| `is_stale_price`    | boolean                                 | `true` if the quote was already stale at fill time.                        |
+| `slippage_applied`  | decimal string                          | `abs(fill_price − raw_price)`.                                             |
+| `fee_applied`       | decimal string                          | —                                                                          |
+| `notional`          | decimal string                          | `fill_price × quantity`.                                                   |
+| `realized_pnl`      | decimal string \| null                  | Set only for a sell; `null` for a buy.                                     |
+| `trigger_reason`    | `"stop_loss" \| "take_profit" \| null`  | Set for a market-triggered auto-close; `null` for a manually-placed order. |
+| `created_at`        | ISO-8601 UTC                            | —                                                                          |
 
 `GET .../orders` wraps a page of these in
 `{ orders: [...], total, limit, offset }`, with query params:
@@ -342,9 +357,23 @@ An unsupported `sort`/`dir` raises `InvalidPaperOrderSortError` (400,
 | `current_price`       | decimal string                          | A fresh price-lookup at read time (same precedence as § 1.4).        |
 | `price_source`        | `"ticker" \| "trade" \| "candle_close"` | Source of `current_price`.                                           |
 | `unrealized_pnl`      | decimal string                          | `(current_price − average_entry_price) × quantity`. No slippage/fee. |
+| `stop_loss_price`     | decimal string \| null                  | Auto-closes at or below this price; `null` if unset.                 |
+| `take_profit_price`   | decimal string \| null                  | Auto-closes at or above this price; `null` if unset.                 |
 
 `GET .../positions` returns `{ positions: [...] }` — no pagination (an
-account's open-position count is always small).
+account's open-position count is always small). `PATCH .../positions/{symbol}`
+returns this same shape.
+
+#### `PATCH /paper-trading/accounts/{account_id}/positions/{symbol}` — request (`PositionThresholdsUpdateRequest`)
+
+```jsonc
+// Only fields present in the body are changed — omit a field to leave
+// it unchanged, send an explicit null to clear it.
+{ "stop_loss_price": "900", "take_profit_price": null }
+```
+
+Raises `PositionNotFoundError` (404, `position_not_found`) if the
+account holds no open position in this symbol.
 
 #### Summary response shape (`PortfolioSummaryResponse`) — every field
 
@@ -359,18 +388,22 @@ account's open-position count is always small).
 
 ### 1.8 Error codes
 
-| HTTP | `code`                       | Raised when                                                                                                         |
-| ---- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| 400  | `insufficient_balance`       | A buy's `notional + fee` exceeds the account's current cash balance.                                                |
-| 400  | `insufficient_position`      | A sell's quantity exceeds what the account currently holds.                                                         |
-| 400  | `trading_halted`             | Any order attempted while `trading_halted` is `true`.                                                               |
-| 400  | `max_position_size_exceeded` | This order's resulting position value exceeds `max_position_size_pct`.                                              |
-| 400  | `max_exposure_exceeded`      | Total exposure after this order exceeds `max_exposure_pct`.                                                         |
-| 400  | `invalid_paper_order_sort`   | An unsupported `sort`/`dir` on `GET .../orders`.                                                                    |
-| 404  | `paper_account_not_found`    | Unknown `account_id`.                                                                                               |
-| 404  | `market_not_found`           | Unknown market `symbol` (reused from `MarketNotFoundError`).                                                        |
-| 404  | `no_price_available`         | No live ticker/trade and no candle ever stored for the symbol.                                                      |
-| 409  | `account_update_conflict`    | The concurrency guard's bounded retries were all lost (see § 1.9) — practically unreachable by a real two-way race. |
+| HTTP | `code`                            | Raised when                                                                                                               |
+| ---- | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| 400  | `insufficient_balance`            | A buy's `notional + fee` exceeds the account's current cash balance.                                                      |
+| 400  | `insufficient_position`           | A sell's quantity exceeds what the account currently holds.                                                               |
+| 400  | `trading_halted`                  | Any order attempted while `trading_halted` is `true`.                                                                     |
+| 400  | `max_position_size_exceeded`      | This order's resulting position value exceeds `max_position_size_pct`.                                                    |
+| 400  | `max_exposure_exceeded`           | Total exposure after this order exceeds `max_exposure_pct`.                                                               |
+| 400  | `invalid_paper_order_sort`        | An unsupported `sort`/`dir` on `GET .../orders`.                                                                          |
+| 400  | `invalid_stop_loss_price`         | `stop_loss_price` at or above the current price — would trigger immediately.                                              |
+| 400  | `invalid_take_profit_price`       | `take_profit_price` at or below the current price — would trigger immediately.                                            |
+| 400  | `stop_loss_not_below_take_profit` | The final, merged `stop_loss_price`/`take_profit_price` pair would not have the stop-loss strictly below the take-profit. |
+| 404  | `paper_account_not_found`         | Unknown `account_id`.                                                                                                     |
+| 404  | `market_not_found`                | Unknown market `symbol` (reused from `MarketNotFoundError`).                                                              |
+| 404  | `position_not_found`              | The account holds no open position in this symbol (`PATCH .../positions/{symbol}`).                                       |
+| 404  | `no_price_available`              | No live ticker/trade and no candle ever stored for the symbol.                                                            |
+| 409  | `account_update_conflict`         | The concurrency guard's bounded retries were all lost (see § 1.9) — practically unreachable by a real two-way race.       |
 
 Every error is a structured `{code, detail}` JSON body via `AppError`
 subclasses, matching every other domain error on this platform. Every
@@ -442,6 +475,104 @@ match an unmodified row — the loser's `UPDATE` matches zero rows, and
 proceeding on stale numbers. Verified empirically with two real
 concurrent requests via `asyncio.gather` — see § 3/§ 4 below.
 
+### 1.10 Stop-loss / take-profit
+
+Two nullable columns, extended onto `paper_positions` (migration
+`16e4c2531e7d`), plus one on `paper_orders`:
+
+| Column                              | Meaning                                                                                        |
+| ----------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `paper_positions.stop_loss_price`   | Auto-closes the position when the live price falls to or below this level. `NULL` if unset.    |
+| `paper_positions.take_profit_price` | Auto-closes the position when the live price rises to or above this level. `NULL` if unset.    |
+| `paper_orders.trigger_reason`       | `"stop_loss"` \| `"take_profit"` for a market-triggered auto-close; `NULL` for a manual order. |
+
+Settable at order-open time (`PaperOrderRequest`'s optional
+`stop_loss_price`/`take_profit_price` — **buy only**, rejected at the
+schema level on a sell) or afterward via
+`PATCH /paper-trading/accounts/{id}/positions/{symbol}`. An order that
+omits both fields never touches an existing position's thresholds; the
+update endpoint distinguishes an omitted field (unchanged) from an
+explicit `null` (cleared) via `model_fields_set`/`exclude_unset`.
+
+**Validation (`PaperTradingService._validate_thresholds`):**
+
+1. `stop_loss_price` must be below the _current_ resolved price.
+2. `take_profit_price` must be above the _current_ resolved price.
+3. Whenever both are present in the final, merged pair, `stop_loss_price`
+   must be strictly below `take_profit_price` — this is the check that
+   actually closes "what if one tick crosses both levels": each
+   threshold is independently valid against its own current price at the
+   moment it's set, but that alone doesn't stop a high stop-loss and a
+   low take-profit being set at two _different_ times as the price moves
+   between them (buy a take-profit of 1100 while price is 1000; later,
+   set a stop-loss of 1150 while price is 1200 — individually valid, but
+   1150 ≥ 1100). With the cross-check, `price <= stop_loss_price` and
+   `price >= take_profit_price` become mutually exclusive for every
+   price, so the ambiguous case can never actually be reached through
+   the public API.
+
+Checks 1 and 2 apply only to whichever field a given request actually
+names — an untouched, already-valid threshold carried over from before
+is never re-rejected just because the price has since moved past it.
+
+**The monitor** (`app/paper_trading/monitor.py`'s `StopLossTakeProfitMonitor`,
+attached to the process-wide bus in `app/runtime.py`, always present —
+mirrors `MarketStateManager`'s own always-on attachment): subscribes to
+the identical `TickerUpdated`/`TradeEventReceived` event types
+`MarketStateManager` already watches — the same live data every other
+feature on this platform reads, never a second market-data path, and
+never a new polling loop. On each event, it queries every open position
+in that symbol (across every account) with a threshold set, and for each
+one whose threshold the event's own price has crossed, calls
+`PaperTradingService.trigger_close`. It deliberately prices every check
+and the resulting fill from the event's own price, not a follow-up read
+through `MarketStateManager`: the bus gives no ordering guarantee between
+concurrent subscribers of the same event, so the state manager might not
+yet reflect the very event that fired this handler — the event already
+carries the freshest possible price. Opens its own database session per
+event (`get_engine()`-gated, silently a no-op without one configured —
+the default in this test suite), never a request-scoped one, since
+there's no HTTP request behind a bus event.
+
+**`trigger_close` reuses `place_order`'s own fill model and atomic
+concurrency guard** — `apply_fill_model` and `PaperAccountRepository
+.try_apply_trade_effects`, unmodified — closing _whatever is currently
+held_, re-read fresh on every retry attempt (never a quantity fixed once,
+unlike a manual order's user-specified amount), at a **wider modeled
+slippage** than a manual fill:
+
+| Setting                                | Default | Purpose                                                                     |
+| -------------------------------------- | ------- | --------------------------------------------------------------------------- |
+| `paper_trading_triggered_slippage_bps` | `25`    | Slippage applied to a triggered close — wider than the manual 5bps default. |
+
+A take-profit crossed at $1100 (25bps triggered vs. 5bps manual) fills at
+exactly $1097.25 — never the manual model's $1099.45 — proving the
+distinct, wider model is what actually ran.
+
+**Concurrency — the same atomic guard, a third time.** A triggered
+auto-close and a genuinely concurrent manual close of the same position
+funnel through the identical `try_apply_trade_effects` call, so they can
+never both succeed — the loser re-reads the now-emptied position and
+fails cleanly (a manual loser gets `InsufficientPositionError`; a
+triggered loser finds nothing left to close and quietly stops, since a
+background trigger has no caller to report an error to).
+
+**Gap-through-both-levels, answered.** With `stop_loss_price <
+take_profit_price` enforced at set-time (check 3 above), a single price
+can never satisfy both `price <= stop_loss_price` and
+`price >= take_profit_price` — the ambiguity is closed by construction,
+not left to a runtime tie-break. As defense-in-depth against that
+invariant ever being violated some other way, the monitor still checks
+stop-loss before take-profit, deterministically — proven by forcing a
+position's row directly into the otherwise-unreachable
+`stop_loss_price=180, take_profit_price=150` state and confirming a
+single tick at $160 (satisfying both conditions) closes with
+`trigger_reason="stop_loss"`. A genuine **gap** (a tick landing far past
+a threshold, not exactly on it) still triggers correctly — the check is
+`<=`/`>=`, never an exact-match `==` — and fills at the current, post-gap
+price with the wider triggered-slippage model applied on top, never at
+the stale threshold price itself.
+
 ---
 
 ## 2. Frontend
@@ -462,7 +593,10 @@ apps/dashboard/src/features/paper-trading/
 │   ├── order-history-table.tsx
 │   ├── order-history-table.test.tsx
 │   ├── positions-table.tsx
-│   └── positions-table.test.tsx
+│   ├── positions-table.test.tsx
+│   ├── risk-summary-panel.tsx
+│   ├── risk-summary-panel.test.tsx
+│   └── set-thresholds-dialog.tsx
 ├── hooks/
 │   └── use-paper-trading-data.ts          TanStack Query hooks
 ├── lib/
@@ -491,19 +625,25 @@ Top to bottom, as rendered by `PaperTradingPage`:
      an `AccountSummaryCard`, depending on whether an account is selected.
    - An "Open Account" / "Open Another Account" button.
    - An error `Alert` if account creation just failed.
-2. **Section: "Place an Order"** (subtitle: "Market orders only — fills
+2. **Section: "Risk"** (subtitle: "Current exposure and drawdown against
+   this account's own configured limits"), rendered only once an account
+   is selected — contains `RiskSummaryPanel`.
+3. **Section: "Place an Order"** (subtitle: "Market orders only — fills
    immediately at the current real price, with a modeled slippage and fee")
    — contains `OrderForm`, and an error `Alert` if the last order attempt
    failed.
-3. **Section: "Positions"** (subtitle: "Every symbol this account currently
-   holds") — contains `PositionsTable`.
-4. **Section: "Order History"** (subtitle: "Every filled order — fill price,
+4. **Section: "Positions"** (subtitle: "Every symbol this account currently
+   holds") — contains `PositionsTable`, and an error `Alert` if the last
+   stop-loss/take-profit update failed.
+5. **Section: "Order History"** (subtitle: "Every filled order — fill price,
    source, and the slippage/fee actually applied") — contains
    `OrderHistoryTable`.
-5. `CreateAccountDialog`, rendered outside the section flow, opened by the
+6. `CreateAccountDialog`, rendered outside the section flow, opened by the
    "Open Account" button.
+7. `SetThresholdsDialog`, rendered outside the section flow, opened by the
+   Positions Table's own edit action.
 
-Source: `apps/dashboard/src/features/paper-trading/paper-trading-page.tsx:84-186`.
+Source: `apps/dashboard/src/features/paper-trading/paper-trading-page.tsx`.
 
 ### 2.3 Every field — Create Account Dialog
 
@@ -525,24 +665,30 @@ success, the new account becomes the selected account (persisted to
 
 Component: `OrderForm` — `components/order-form.tsx`.
 
-| Field                                                                                | Component type                                                                                                                | Required? | Default | Allowed values                                 | Validation                                                                                                                                                    |
-| ------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------- | --------- | ------- | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Market**                                                                           | `MarketSelector` (Autocomplete over the same generic, data-driven market picker the chart module uses, `aria-label="Market"`) | Yes       | `null`  | Any `Market.symbol` from `GET /api/v1/markets` | Submit disabled until non-empty.                                                                                                                              |
-| **Side** (Buy / Sell)                                                                | MUI `ToggleButtonGroup`, exclusive (`aria-label="Order side"`)                                                                | —         | `'buy'` | `buy`, `sell`                                  | Always has a value (exclusive toggle).                                                                                                                        |
-| **Quantity**                                                                         | MUI `TextField` (`aria-label="Quantity"`, `inputMode="decimal"`)                                                              | Yes       | `''`    | Any positive number (base-asset units)         | Submit disabled unless non-empty, finite, and `> 0`.                                                                                                          |
-| **Buy `{symbol}` / Sell `{symbol}`** button (label becomes "Placing…" while pending) | MUI `Button variant="contained"`                                                                                              | —         | —       | —                                              | Disabled unless: an account is open, a market is selected, quantity is valid, and not already submitting. Opens a `ConfirmActionDialog`, not a direct submit. |
+| Field                                                                                | Component type                                                                                                                | Required? | Default | Allowed values                                 | Validation                                                                                                                                                                                                   |
+| ------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------- | --------- | ------- | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Market**                                                                           | `MarketSelector` (Autocomplete over the same generic, data-driven market picker the chart module uses, `aria-label="Market"`) | Yes       | `null`  | Any `Market.symbol` from `GET /api/v1/markets` | Submit disabled until non-empty.                                                                                                                                                                             |
+| **Side** (Buy / Sell)                                                                | MUI `ToggleButtonGroup`, exclusive (`aria-label="Order side"`)                                                                | —         | `'buy'` | `buy`, `sell`                                  | Always has a value (exclusive toggle).                                                                                                                                                                       |
+| **Quantity**                                                                         | MUI `TextField` (`aria-label="Quantity"`, `inputMode="decimal"`)                                                              | Yes       | `''`    | Any positive number (base-asset units)         | Submit disabled unless non-empty, finite, and `> 0`.                                                                                                                                                         |
+| **Stop-loss (optional)** — buy only                                                  | MUI `TextField` (`aria-label="Stop-loss price"`, `inputMode="decimal"`)                                                       | No        | `''`    | Blank, or any positive number                  | Blank is always valid (no threshold). A non-blank value must be finite and `> 0`. Hidden and cleared the instant side switches to sell.                                                                      |
+| **Take-profit (optional)** — buy only                                                | MUI `TextField` (`aria-label="Take-profit price"`, `inputMode="decimal"`)                                                     | No        | `''`    | Blank, or any positive number                  | Same rule as Stop-loss.                                                                                                                                                                                      |
+| **Buy `{symbol}` / Sell `{symbol}`** button (label becomes "Placing…" while pending) | MUI `Button variant="contained"`                                                                                              | —         | —       | —                                              | Disabled unless: an account is open, a market is selected, quantity is valid, both optional prices (if non-blank) are valid, and not already submitting. Opens a `ConfirmActionDialog`, not a direct submit. |
 
 Each field is paired with an `InfoTooltip`. Submitting the "Buy"/"Sell"
 button does **not** place the order directly — it opens a
 `ConfirmActionDialog` (title: `"{Buy|Sell} {quantity} {symbol}?"`,
 description: "Fills immediately at the current market price, with a modeled
-slippage and fee applied — this cannot be undone.", confirm color `primary`
+slippage and fee applied — this cannot be undone." — with an added sentence
+when a buy has a stop-loss/take-profit set: "Stop-loss/take-profit will be
+set on the resulting position.", confirm color `primary`
 for buy / `error` for sell) so a real (simulated) trade is never a single
 accidental click. Confirming calls `POST .../orders` with
-`{ symbol, side, quantity }` (quantity sent as the raw string, not
-renormalized). If no account is open, an inline `Alert` reads "Open a paper
-trading account above before placing an order," and the whole form is
-disabled via `hasAccount`.
+`{ symbol, side, quantity, stop_loss_price, take_profit_price }`
+(quantities/prices sent as raw strings, not renormalized; the two
+optional prices are omitted entirely — not sent as empty strings — when
+blank or when side is sell). If no account is open, an inline `Alert`
+reads "Open a paper trading account above before placing an order," and
+the whole form is disabled via `hasAccount`.
 
 ### 2.5 Every field — Account Summary Card
 
@@ -564,18 +710,38 @@ of the metrics.
 
 Component: `PositionsTable` — `components/positions-table.tsx`, `aria-label="Open positions table"`. Data source: `GET .../positions` (`usePaperPositions`, polled every 10s).
 
-| Column         | Source field          | Format                                            | Notes                                                              |
-| -------------- | --------------------- | ------------------------------------------------- | ------------------------------------------------------------------ |
-| Symbol         | `symbol`              | Plain text                                        | —                                                                  |
-| Quantity       | `quantity`            | Bare number                                       | Right-aligned.                                                     |
-| Avg Entry      | `average_entry_price` | `$X.XX`                                           | Right-aligned.                                                     |
-| Current Price  | `current_price`       | `$X.XX`                                           | Right-aligned. The same live mark this row's PnL is computed from. |
-| Source         | `price_source`        | Outlined `Chip` (`ticker`/`trade`/`candle_close`) | —                                                                  |
-| Unrealized PnL | `unrealized_pnl`      | Signed currency                                   | Green/red/neutral, same rule as § 2.5.                             |
+| Column         | Source field                           | Format                                                                                                                    | Notes                                                              |
+| -------------- | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| Symbol         | `symbol`                               | Plain text                                                                                                                | —                                                                  |
+| Quantity       | `quantity`                             | Bare number                                                                                                               | Right-aligned.                                                     |
+| Avg Entry      | `average_entry_price`                  | `$X.XX`                                                                                                                   | Right-aligned.                                                     |
+| Current Price  | `current_price`                        | `$X.XX`                                                                                                                   | Right-aligned. The same live mark this row's PnL is computed from. |
+| Source         | `price_source`                         | Outlined `Chip` (`ticker`/`trade`/`candle_close`)                                                                         | —                                                                  |
+| Unrealized PnL | `unrealized_pnl`                       | Signed currency                                                                                                           | Green/red/neutral, same rule as § 2.5.                             |
+| SL / TP        | `stop_loss_price`, `take_profit_price` | `"$X.XX / $X.XX"`, each side a dash (`—`) if unset                                                                        | Right-aligned; e.g. `"$900.00 / —"` with only a stop-loss set.     |
+| Actions        | —                                      | `IconButton` (pencil icon, tooltip "Set stop-loss / take-profit", `aria-label="Edit stop-loss/take-profit for {symbol}"`) | Opens `SetThresholdsDialog` for this row's symbol.                 |
 
 Empty state (no open positions): a centered row reading "No open positions —
 place a buy order above to open one." Loading state (first load only): 2
 skeleton rows.
+
+#### Every field — Set Thresholds Dialog
+
+Component: `SetThresholdsDialog` — `components/set-thresholds-dialog.tsx`,
+opened by the Positions Table's own edit action.
+
+| Field                                                   | Component type                                                                 | Required? | Seeded from                                                                           | Validation                                                                   |
+| ------------------------------------------------------- | ------------------------------------------------------------------------------ | --------- | ------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| **Stop-loss price**                                     | MUI `TextField` (`aria-label="Edit stop-loss price"`, `inputMode="decimal"`)   | No        | The position's own `stop_loss_price`, or blank if unset, every time the dialog opens. | Blank is valid (means clear); non-blank must be `> 0`.                       |
+| **Take-profit price**                                   | MUI `TextField` (`aria-label="Edit take-profit price"`, `inputMode="decimal"`) | No        | Same, from `take_profit_price`.                                                       | Same rule.                                                                   |
+| **Save** button (label becomes "Saving…" while pending) | MUI `Button variant="contained"`                                               | —         | —                                                                                     | Disabled unless both fields (if non-blank) are valid, or already submitting. |
+
+On save, calls `PATCH .../positions/{symbol}` with
+`{ stop_loss_price, take_profit_price }` — a blank field is sent as an
+explicit `null` (clears it), a non-blank field as its raw string value;
+**both** fields are always sent (never omitted), since this dialog edits
+a position's whole current state rather than a partial patch typed from
+nothing. Closes automatically on success.
 
 ### 2.7 Every column — Order History Table
 
@@ -584,16 +750,17 @@ Component: `OrderHistoryTable` — `components/order-history-table.tsx`,
 (`usePaperOrders`, page size 10, **not** auto-polled — refreshes only on
 mount/page-change/after a new order is placed).
 
-| Column         | Source field(s)                                       | Format                                                                                                                                                                                                                  | Notes                                                                                        |
-| -------------- | ----------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
-| Fill Time      | `fill_time`                                           | `Date.toLocaleString()`                                                                                                                                                                                                 | —                                                                                            |
-| Symbol         | `symbol`                                              | Plain text                                                                                                                                                                                                              | —                                                                                            |
-| Side           | `side`                                                | `Chip` — green ("BUY") or red ("SELL")                                                                                                                                                                                  | Uppercased.                                                                                  |
-| Quantity       | `quantity`                                            | Bare number                                                                                                                                                                                                             | Right-aligned.                                                                               |
-| Fill Price     | `fill_price`                                          | `$X.XXXX` (4 decimals)                                                                                                                                                                                                  | Right-aligned.                                                                               |
-| Source         | `price_source`, `is_stale_price`, `price_observed_at` | Outlined `Chip` (`ticker`/`trade`/`candle_close`); if stale, a warning icon + `warning` color and a `Tooltip` reading _"Priced from a {source} quote observed {time} — older than this platform's staleness threshold"_ | The one place a stale fallback fill is visibly flagged, never silently presented as current. |
-| Slippage / Fee | `slippage_applied`, `fee_applied`                     | `$X.XXXX / $X.XXXX`                                                                                                                                                                                                     | Both always shown together, right-aligned — never hidden behind a drill-down.                |
-| Realized PnL   | `realized_pnl`                                        | Signed currency, or an em dash (`—`) when `null` (every buy)                                                                                                                                                            | Green/red/neutral when present.                                                              |
+| Column         | Source field(s)                                       | Format                                                                                                                                                                                                                  | Notes                                                                                                      |
+| -------------- | ----------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| Fill Time      | `fill_time`                                           | `Date.toLocaleString()`                                                                                                                                                                                                 | —                                                                                                          |
+| Symbol         | `symbol`                                              | Plain text                                                                                                                                                                                                              | —                                                                                                          |
+| Side           | `side`                                                | `Chip` — green ("BUY") or red ("SELL")                                                                                                                                                                                  | Uppercased.                                                                                                |
+| Trigger        | `trigger_reason`                                      | `null` → outlined, default-colored "Manual" `Chip`. `"stop_loss"`/`"take_profit"` → filled, `warning`-colored "Stop-Loss"/"Take-Profit" `Chip`, with a `Tooltip` naming what happened.                                  | Makes a market-triggered auto-close clearly, visibly distinct from an ordinary order — never the same row. |
+| Quantity       | `quantity`                                            | Bare number                                                                                                                                                                                                             | Right-aligned.                                                                                             |
+| Fill Price     | `fill_price`                                          | `$X.XXXX` (4 decimals)                                                                                                                                                                                                  | Right-aligned.                                                                                             |
+| Source         | `price_source`, `is_stale_price`, `price_observed_at` | Outlined `Chip` (`ticker`/`trade`/`candle_close`); if stale, a warning icon + `warning` color and a `Tooltip` reading _"Priced from a {source} quote observed {time} — older than this platform's staleness threshold"_ | The one place a stale fallback fill is visibly flagged, never silently presented as current.               |
+| Slippage / Fee | `slippage_applied`, `fee_applied`                     | `$X.XXXX / $X.XXXX`                                                                                                                                                                                                     | Both always shown together, right-aligned — never hidden behind a drill-down.                              |
+| Realized PnL   | `realized_pnl`                                        | Signed currency, or an em dash (`—`) when `null` (every buy)                                                                                                                                                            | Green/red/neutral when present.                                                                            |
 
 Pagination: MUI `TablePagination`, 10 rows/page, no rows-per-page selector
 (`rowsPerPageOptions={[]}`). Empty state: "No orders yet — place one above,
@@ -642,17 +809,18 @@ source: `GET .../risk` (`usePaperTradingRisk`, polled every 10s).
   this is ever cleared.
 - **Server state** — TanStack Query, via `hooks/use-paper-trading-data.ts`:
 
-| Hook                           | Query key                                                           | Polling                                |
-| ------------------------------ | ------------------------------------------------------------------- | -------------------------------------- |
-| `usePaperAccounts(params)`     | `['paper-trading','accounts','list',params]`                        | None (default `staleTime`/`gcTime`)    |
-| `usePaperAccount(id)`          | `['paper-trading','account',id]`                                    | None                                   |
-| `usePaperPortfolioSummary(id)` | `[...accountKey,'summary']`                                         | Every 10s while an account is selected |
-| `usePaperPositions(id)`        | `[...accountKey,'positions']`                                       | Every 10s while an account is selected |
-| `usePaperOrders(id, params)`   | `[...accountKey,'orders',params]`                                   | None                                   |
-| `usePaperTradingRisk(id)`      | `[...accountKey,'risk']`                                            | Every 10s while an account is selected |
-| `useCreatePaperAccount()`      | mutation; invalidates the accounts list on success                  | —                                      |
-| `usePlacePaperOrder(id)`       | mutation; invalidates every query under `accountKey(id)` on success | —                                      |
-| `useResumeTrading(id)`         | mutation; invalidates every query under `accountKey(id)` on success | —                                      |
+| Hook                              | Query key                                                                              | Polling                                |
+| --------------------------------- | -------------------------------------------------------------------------------------- | -------------------------------------- |
+| `usePaperAccounts(params)`        | `['paper-trading','accounts','list',params]`                                           | None (default `staleTime`/`gcTime`)    |
+| `usePaperAccount(id)`             | `['paper-trading','account',id]`                                                       | None                                   |
+| `usePaperPortfolioSummary(id)`    | `[...accountKey,'summary']`                                                            | Every 10s while an account is selected |
+| `usePaperPositions(id)`           | `[...accountKey,'positions']`                                                          | Every 10s while an account is selected |
+| `usePaperOrders(id, params)`      | `[...accountKey,'orders',params]`                                                      | None                                   |
+| `usePaperTradingRisk(id)`         | `[...accountKey,'risk']`                                                               | Every 10s while an account is selected |
+| `useCreatePaperAccount()`         | mutation; invalidates the accounts list on success                                     | —                                      |
+| `usePlacePaperOrder(id)`          | mutation; invalidates every query under `accountKey(id)` on success                    | —                                      |
+| `useResumeTrading(id)`            | mutation; invalidates every query under `accountKey(id)` on success                    | —                                      |
+| `useUpdatePositionThresholds(id)` | mutation (`{symbol, body}`); invalidates every query under `accountKey(id)` on success | —                                      |
 
 Positions and the summary poll because their unrealized PnL depends on a live
 price that moves on its own, unprompted by any user action — the same
@@ -672,6 +840,7 @@ user-triggered, one-shot event.
 | Account creation fails                                      | Red `Alert role="alert"` under the Account section, with the server's own error message                                                                                                                                   |
 | Placing an order fails (including any risk-limit rejection) | Red `Alert role="alert"` under the Place an Order section, with the server's own specific `detail` message (e.g. "insufficient balance", or a named-limit message like "...exceeding the 10% max position size limit...") |
 | Resuming trading fails                                      | Red `Alert role="alert"` inside the Risk panel, with the server's own error message                                                                                                                                       |
+| Updating stop-loss/take-profit fails                        | Red `Alert role="alert"` under the Positions section, with the server's own error message (e.g. a named validation rejection)                                                                                             |
 | No open positions                                           | Centered text row in the Positions table                                                                                                                                                                                  |
 | No orders yet                                               | Centered text row in the Order History table                                                                                                                                                                              |
 
@@ -724,6 +893,32 @@ Key files:
   risk limits on creation, a position-size rejection over HTTP, and a
   full risk-summary → drawdown-halt → rejected → resume → succeeds
   walkthrough via `GET .../risk` and `POST .../resume-trading`.
+- `tests/paper_trading/test_service.py` (stop-loss/take-profit
+  validation) — `TestStopLossTakeProfitValidation`: a stop-loss at or
+  above, or a take-profit at or below, the current price rejected; a
+  sell can never carry either field; valid thresholds set at order-open
+  time; a later buy that omits both never clears an existing one; and
+  the cross-validation gap (a take-profit set first while price is low,
+  then a stop-loss set later, individually valid but numerically above
+  the earlier take-profit) caught by `StopLossNotBelowTakeProfitError`.
+  `TestUpdatePositionThresholds`: the dedicated endpoint's set/
+  omit-leaves-unchanged/explicit-null-clears/not-found paths.
+- `tests/paper_trading/test_monitor.py` — `StopLossTakeProfitMonitor`,
+  mirroring `tests/services/test_grading_scheduler.py`'s own
+  `get_engine`-monkeypatch convention. `TestStopLossTrigger`/
+  `TestTakeProfitTrigger` (each closes the position the instant a
+  published ticker event crosses it, recorded with `trigger_reason`
+  set). `TestTriggeredSlippageModel` (the exact wider-slippage fill —
+  $1097.25 at 25bps, never the manual model's $1099.45).
+  `TestConcurrentTriggeredAndManualClose` — the third occurrence of this
+  project's atomic concurrency guard: a triggered auto-close racing a
+  genuinely concurrent manual close via real
+  `asyncio.gather(bus.drain(), manual_close_task)` results in exactly
+  one closing order, every time. `TestGapThroughBothLevels` — the
+  otherwise-unreachable `stop_loss_price >= take_profit_price` state,
+  forced by writing straight to the row, still resolves deterministically
+  as `"stop_loss"` — proving the monitor's defense-in-depth check order
+  is real, executed code.
 
 ```bash
 # Frontend
@@ -732,12 +927,15 @@ pnpm test -- --run src/features/paper-trading
 ```
 
 Key files: `paper-trading-page.test.tsx` (empty state, account creation,
-placing an order end-to-end, a surfaced order error, a halted risk panel's
-Resume Trading action), `order-history-table.test.tsx`,
-`positions-table.test.tsx`, `risk-summary-panel.test.tsx` (active/halted
-rendering, the confirm-before-resume flow, a surfaced resume error, the
-loading skeleton), `format-pnl.test.ts` (the shared sign-before-dollar-sign
-formatter every PnL figure on this page uses).
+placing a buy order end-to-end with and without a stop-loss/take-profit,
+editing a position's thresholds from the positions table, a surfaced
+order error, a halted risk panel's Resume Trading action),
+`order-history-table.test.tsx` (including the Manual-vs-Stop-Loss/
+Take-Profit trigger chip), `positions-table.test.tsx` (including the
+SL/TP column and its edit action), `risk-summary-panel.test.tsx`
+(active/halted rendering, the confirm-before-resume flow, a surfaced
+resume error, the loading skeleton), `format-pnl.test.ts` (the shared
+sign-before-dollar-sign formatter every PnL figure on this page uses).
 
 ---
 
@@ -979,6 +1177,54 @@ curl -s -w '\nHTTP %{http_code}\n' -X POST \
   -d '{"symbol": "<OTHER_SYMBOL>", "side": "buy", "quantity": "0.001"}'
 ```
 
+### Scenario J — Set a stop-loss/take-profit and watch it auto-close
+
+**Goal:** see a threshold you set actually get watched and acted on,
+not just stored.
+
+1. In **Place an Order**, buy a real market (e.g. `ETHUSD`) with
+   quantity `1`. Note the fill price from Order History (e.g. `$2510.20`
+   → filled around `$2511.45`).
+2. Open the **Positions** table's edit action for this row (the pencil
+   icon). In the dialog, set **Stop-loss price** to a value clearly
+   below the fill price (e.g. `$2000`) and **Take-profit price** to a
+   value clearly above it (e.g. `$3000`). Click **Save**.
+3. **What you should see:** the dialog closes, and the Positions table's
+   "SL / TP" column now reads `"$2000.00 / $3000.00"` for this row.
+4. Try setting a stop-loss at or above the current price (e.g. equal to
+   the current price) — **what you should see:** a red `Alert` naming
+   the rejection (`invalid_stop_loss_price`), and the position's existing
+   thresholds unchanged.
+5. To see it actually trigger without waiting for a real 20%+ market
+   move: reopen the dialog and set a stop-loss much closer to the
+   current price (e.g. within 1%). If live market data is flowing for
+   this symbol in your environment, the very next real price tick that
+   falls to or below it will close the position automatically —
+   **what you should see:** the position disappears from the Positions
+   table, and a new row appears at the top of Order History with a
+   **filled, warning-colored "Stop-Loss" chip** in the Trigger column
+   (never the plain outlined "Manual" chip every other row shows), a
+   `side` of `SELL`, and a `Fill Price` that reflects the wider
+   triggered-slippage model, not the manual one.
+6. In this dev environment (`market_data_live=false`, no live ticks
+   flowing), the same behavior can be proven directly against the API
+   instead — see `services/api/tests/paper_trading/test_monitor.py` for
+   the exact fixture, or publish a ticker event directly as those tests
+   do if you have a Python shell against this same backend process.
+
+```bash
+# Same idea via curl — set a tight stop-loss, then simulate the
+# triggering price event directly against a running backend that has a
+# way to publish a ticker (e.g. a live Delta WebSocket connection, or a
+# test harness) at or below it. There is no HTTP endpoint to "simulate" a
+# tick — this is deliberately only reachable through real market data or
+# a direct bus publish, matching this feature's own "reuse the existing
+# event bus, no new polling loop" design.
+curl -s -X PATCH "http://localhost:8000/api/v1/paper-trading/accounts/$ACCOUNT_ID/positions/ETHUSD" \
+  -H 'Content-Type: application/json' \
+  -d '{"stop_loss_price": "2490"}' | jq
+```
+
 ---
 
 ## 5. Known gaps / out of scope
@@ -989,8 +1235,12 @@ Deliberately **not** built (each is a separate, later task, not a defect):
   existing long position.
 - No limit/stop orders — market orders only, filled immediately and
   completely; there is no pending/partial-fill state anywhere in the schema.
-- No stop-loss/take-profit — a separate, later task; the drawdown halt is
-  an account-wide circuit breaker, not a per-position exit order.
+- Stop-loss/take-profit are built (§ 1.10), but only as a simple pair per
+  position, always closing the **entire** held quantity — no partial
+  exits, no trailing stop (the threshold never moves on its own once
+  set), and no third/fourth exit level beyond one stop and one target.
+  These remain separate, later tasks; the drawdown halt (§ 1.9) is a
+  distinct, account-wide circuit breaker, not a per-position exit order.
 - No automation and no prediction-driven trading — every order is placed by
   a human clicking the form; nothing on this platform ever calls
   `POST .../orders` on its own.

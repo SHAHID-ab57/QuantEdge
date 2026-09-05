@@ -26,6 +26,7 @@ vi.mock('@/lib/api/paper-trading', () => ({
   fetchPaperTradingRisk: vi.fn(),
   placePaperOrder: vi.fn(),
   resumePaperTrading: vi.fn(),
+  updatePositionThresholds: vi.fn(),
 }));
 
 vi.mock('@/lib/api/market', () => ({
@@ -85,6 +86,8 @@ function positionsResponse(): PaperPositionListResponse {
         current_price: '1100',
         price_source: 'ticker',
         unrealized_pnl: '995',
+        stop_loss_price: null,
+        take_profit_price: null,
       },
     ],
   };
@@ -128,6 +131,7 @@ function order(overrides: Partial<PaperOrder> = {}): PaperOrder {
     fee_applied: '10.005',
     notional: '10005',
     realized_pnl: null,
+    trigger_reason: null,
     created_at: '2026-01-01T00:00:00Z',
     ...overrides,
   };
@@ -242,7 +246,71 @@ describe('PaperTradingPage', () => {
         symbol: 'ETHUSD',
         side: 'buy',
         quantity: '10',
+        stop_loss_price: undefined,
+        take_profit_price: undefined,
       }),
+    );
+  });
+
+  it('places a buy order with a stop-loss and take-profit set', async () => {
+    act(() => usePaperTradingAccountStore.getState().setAccountId('account-1'));
+    mockedPaperTradingApi.fetchPaperAccount.mockResolvedValue(account());
+    mockedPaperTradingApi.fetchPaperPortfolioSummary.mockResolvedValue(summary());
+    mockedPaperTradingApi.fetchPaperPositions.mockResolvedValue(positionsResponse());
+    mockedPaperTradingApi.fetchPaperOrders.mockResolvedValue(ordersResponse());
+    mockedPaperTradingApi.fetchPaperTradingRisk.mockResolvedValue(riskSummary());
+    mockedPaperTradingApi.placePaperOrder.mockResolvedValue(order());
+
+    renderPage();
+    await screen.findByText('My Account');
+
+    fireEvent.mouseDown(screen.getByLabelText('Market'));
+    fireEvent.click(await screen.findByRole('option', { name: 'ETHUSD' }));
+    fireEvent.change(screen.getByLabelText('Quantity'), { target: { value: '10' } });
+    fireEvent.change(screen.getByLabelText('Stop-loss price'), { target: { value: '900' } });
+    fireEvent.change(screen.getByLabelText('Take-profit price'), { target: { value: '1200' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Buy ETHUSD' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Buy' }));
+
+    await waitFor(() =>
+      expect(mockedPaperTradingApi.placePaperOrder).toHaveBeenCalledWith('account-1', {
+        symbol: 'ETHUSD',
+        side: 'buy',
+        quantity: '10',
+        stop_loss_price: '900',
+        take_profit_price: '1200',
+      }),
+    );
+  });
+
+  it('edits a position’s stop-loss/take-profit from the positions table', async () => {
+    act(() => usePaperTradingAccountStore.getState().setAccountId('account-1'));
+    mockedPaperTradingApi.fetchPaperAccount.mockResolvedValue(account());
+    mockedPaperTradingApi.fetchPaperPortfolioSummary.mockResolvedValue(summary());
+    mockedPaperTradingApi.fetchPaperPositions.mockResolvedValue(positionsResponse());
+    mockedPaperTradingApi.fetchPaperOrders.mockResolvedValue(ordersResponse());
+    mockedPaperTradingApi.fetchPaperTradingRisk.mockResolvedValue(riskSummary());
+    mockedPaperTradingApi.updatePositionThresholds.mockResolvedValue({
+      ...positionsResponse().positions[0]!,
+      stop_loss_price: '950',
+    });
+
+    renderPage();
+    await screen.findByText('My Account');
+
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Edit stop-loss/take-profit for ETHUSD' }),
+    );
+    const stopLossInput = await screen.findByLabelText('Edit stop-loss price');
+    fireEvent.change(stopLossInput, { target: { value: '950' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() =>
+      expect(mockedPaperTradingApi.updatePositionThresholds).toHaveBeenCalledWith(
+        'account-1',
+        'ETHUSD',
+        { stop_loss_price: '950', take_profit_price: null },
+      ),
     );
   });
 

@@ -137,6 +137,70 @@ class AccountUpdateConflictError(AppError):
         )
 
 
+class InvalidStopLossPriceError(AppError):
+    """Raised when a stop-loss price would not sit below the current
+    price for a long position — it would trigger the instant it's set,
+    which is never a real stop.
+    """
+
+    def __init__(self, stop_loss_price: object, current_price: object) -> None:
+        super().__init__(
+            f"stop_loss_price {stop_loss_price} must be below the current price "
+            f"{current_price} for a long position — a value at or above the current price "
+            "would trigger immediately",
+            code="invalid_stop_loss_price",
+        )
+
+
+class InvalidTakeProfitPriceError(AppError):
+    """Raised when a take-profit price would not sit above the current
+    price for a long position — it would trigger the instant it's set.
+    """
+
+    def __init__(self, take_profit_price: object, current_price: object) -> None:
+        super().__init__(
+            f"take_profit_price {take_profit_price} must be above the current price "
+            f"{current_price} for a long position — a value at or below the current price "
+            "would trigger immediately",
+            code="invalid_take_profit_price",
+        )
+
+
+class StopLossNotBelowTakeProfitError(AppError):
+    """Raised when a stop-loss and take-profit would be set together such
+    that the stop-loss is not strictly below the take-profit.
+
+    Each is independently validated against *its own* current price at
+    the moment it's set (`InvalidStopLossPriceError`/
+    `InvalidTakeProfitPriceError`), but that alone doesn't prevent
+    setting a high stop-loss and a low take-profit at two *different*
+    times as the price moves — this closes that gap so the two trigger
+    conditions (`price <= stop_loss_price`, `price >= take_profit_price`)
+    can never both be true for the same price, ever, rather than leaving
+    a single tick able to satisfy both at once (see
+    `app.paper_trading.monitor`'s own docstring for the full reasoning).
+    """
+
+    def __init__(self, stop_loss_price: object, take_profit_price: object) -> None:
+        super().__init__(
+            f"stop_loss_price {stop_loss_price} must be strictly below take_profit_price "
+            f"{take_profit_price} — otherwise a single price could satisfy both trigger "
+            "conditions at once",
+            code="stop_loss_not_below_take_profit",
+        )
+
+
+class PositionNotFoundError(AppError):
+    """Raised when the requested account holds no open position in this symbol."""
+
+    def __init__(self, account_id: object, symbol: str) -> None:
+        super().__init__(
+            f"Account {account_id} holds no open position in {symbol!r}",
+            code="position_not_found",
+            status_code=status.HTTP_404_NOT_FOUND,
+        )
+
+
 class InvalidPaperOrderSortError(AppError):
     """Raised when an order-history list request names an unsupported sort column."""
 

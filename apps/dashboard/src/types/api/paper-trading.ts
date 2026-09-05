@@ -43,6 +43,10 @@ export const PaperAccountListResponseSchema = z.object({
 
 export type PaperAccountListResponse = z.infer<typeof PaperAccountListResponseSchema>;
 
+export const PAPER_TRIGGER_REASONS = ['stop_loss', 'take_profit'] as const;
+export const PaperTriggerReasonSchema = z.enum(PAPER_TRIGGER_REASONS);
+export type PaperTriggerReason = z.infer<typeof PaperTriggerReasonSchema>;
+
 export const PaperOrderSchema = z.object({
   id: z.string(),
   account_id: z.string(),
@@ -59,6 +63,7 @@ export const PaperOrderSchema = z.object({
   fee_applied: z.string(),
   notional: z.string(),
   realized_pnl: z.string().nullable(),
+  trigger_reason: PaperTriggerReasonSchema.nullable(),
   created_at: z.string().datetime(),
 });
 
@@ -80,6 +85,8 @@ export const PaperPositionSchema = z.object({
   current_price: z.string(),
   price_source: PaperPriceSourceSchema,
   unrealized_pnl: z.string(),
+  stop_loss_price: z.string().nullable(),
+  take_profit_price: z.string().nullable(),
 });
 
 export type PaperPosition = z.infer<typeof PaperPositionSchema>;

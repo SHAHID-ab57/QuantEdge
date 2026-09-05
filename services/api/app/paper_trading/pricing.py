@@ -50,7 +50,7 @@ PAPER_TRADING_FEE_BPS_DEFAULT = 10
 _BPS_DIVISOR = Decimal(10_000)
 
 
-def _is_stale(observed_at: datetime, threshold: timedelta) -> bool:
+def is_stale(observed_at: datetime, threshold: timedelta) -> bool:
     now = datetime.now(UTC)
     observed = observed_at if observed_at.tzinfo else observed_at.replace(tzinfo=UTC)
     return (now - observed) > threshold
@@ -80,7 +80,7 @@ async def resolve_current_price(
             price=ticker.last_price,
             source="ticker",
             observed_at=ticker.event_time,
-            is_stale=_is_stale(ticker.event_time, staleness_threshold),
+            is_stale=is_stale(ticker.event_time, staleness_threshold),
         )
 
     trade = state_manager.get_latest_trade(symbol)
@@ -89,7 +89,7 @@ async def resolve_current_price(
             price=trade.price,
             source="trade",
             observed_at=trade.event_time,
-            is_stale=_is_stale(trade.event_time, staleness_threshold),
+            is_stale=is_stale(trade.event_time, staleness_threshold),
         )
 
     timeframes = await candle_repository.get_available_timeframes(market_id)
@@ -103,7 +103,7 @@ async def resolve_current_price(
         price=candle.close,
         source="candle_close",
         observed_at=candle.open_time,
-        is_stale=_is_stale(candle.open_time, staleness_threshold),
+        is_stale=is_stale(candle.open_time, staleness_threshold),
     )
 
 

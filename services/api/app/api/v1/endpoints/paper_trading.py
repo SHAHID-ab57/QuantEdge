@@ -22,8 +22,10 @@ from app.schemas.paper_trading import (
     PaperOrderListResponse,
     PaperOrderRequest,
     PaperOrderResponse,
+    PaperPositionDTO,
     PaperPositionListResponse,
     PortfolioSummaryResponse,
+    PositionThresholdsUpdateRequest,
     RiskSummaryResponse,
 )
 from app.services.paper_trading import PaperTradingService
@@ -92,12 +94,41 @@ _ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
                             "'desc'",
                         },
                     },
+                    "invalid_stop_loss_price": {
+                        "summary": "A stop-loss at or above the current price would trigger "
+                        "immediately",
+                        "value": {
+                            "code": "invalid_stop_loss_price",
+                            "detail": "stop_loss_price 1050 must be below the current price "
+                            "1000 for a long position — a value at or above the current price "
+                            "would trigger immediately",
+                        },
+                    },
+                    "invalid_take_profit_price": {
+                        "summary": "A take-profit at or below the current price would trigger "
+                        "immediately",
+                        "value": {
+                            "code": "invalid_take_profit_price",
+                            "detail": "take_profit_price 950 must be above the current price "
+                            "1000 for a long position — a value at or below the current price "
+                            "would trigger immediately",
+                        },
+                    },
+                    "stop_loss_not_below_take_profit": {
+                        "summary": "The stop-loss and take-profit would overlap",
+                        "value": {
+                            "code": "stop_loss_not_below_take_profit",
+                            "detail": "stop_loss_price 1100 must be strictly below "
+                            "take_profit_price 1050 — otherwise a single price could satisfy "
+                            "both trigger conditions at once",
+                        },
+                    },
                 }
             }
         },
     },
     status.HTTP_404_NOT_FOUND: {
-        "description": "Unknown account or market, or no price available at all",
+        "description": "Unknown account, market, or position, or no price available at all",
         "content": {
             "application/json": {
                 "examples": {
@@ -116,6 +147,14 @@ _ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
                             "detail": "Market 'DOES-NOT-EXIST' not found",
                         },
                     },
+                    "position_not_found": {
+                        "summary": "This account holds no open position in this symbol",
+                        "value": {
+                            "code": "position_not_found",
+                            "detail": "Account 6f1e4a2c-3b8d-4c9a-9e2f-1a7c5d6b8e90 holds no "
+                            "open position in 'ETHUSD'",
+                        },
+                    },
                     "no_price_available": {
                         "summary": "No live data and no candle ever stored for this symbol",
                         "value": {
@@ -132,6 +171,7 @@ _ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
 
 PaperTradingServiceDep = Annotated[PaperTradingService, Depends(get_paper_trading_service)]
 AccountIdPath = Annotated[uuid.UUID, Path(description="Paper trading account id")]
+SymbolPath = Annotated[str, Path(description="Market symbol")]
 
 
 @router.post(
@@ -290,3 +330,26 @@ async def resume_paper_trading(
 ) -> PaperAccountResponse:
     """Clear this account's trading_halted flag and reset its peak_balance."""
     return await service.resume_trading(account_id)
+
+
+@router.patch(
+    "/paper-trading/accounts/{account_id}/positions/{symbol}",
+    response_model=PaperPositionDTO,
+    summary="Set, update, or clear a position's stop-loss/take-profit",
+    description=(
+        "Only fields present in the request body are changed — send an explicit null to "
+        "clear stop_loss_price/take_profit_price, omit a field to leave it unchanged. A long "
+        "position's stop-loss must sit below the current price and its take-profit above it "
+        "(and, when both are set, the stop-loss must be strictly below the take-profit) — a "
+        "value that would trigger immediately is rejected."
+    ),
+    responses=_ERROR_RESPONSES,
+)
+async def update_paper_position_thresholds(
+    account_id: AccountIdPath,
+    symbol: SymbolPath,
+    body: PositionThresholdsUpdateRequest,
+    service: PaperTradingServiceDep,
+) -> PaperPositionDTO:
+    """Set/update/clear one position's stop-loss and take-profit."""
+    return await service.update_position_thresholds(account_id, symbol, body)

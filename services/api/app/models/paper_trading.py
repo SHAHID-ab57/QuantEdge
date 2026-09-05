@@ -41,6 +41,7 @@ SCALE = 18
 
 ORDER_SIDES = ("buy", "sell")
 PRICE_SOURCES = ("ticker", "trade", "candle_close")
+TRIGGER_REASONS = ("stop_loss", "take_profit")
 
 
 class PaperAccount(BaseModel, TimestampMixin):
@@ -191,10 +192,20 @@ class PaperOrder(BaseModel, TimestampMixin):
         comment="Set only for a sell (this order's own contribution to realized PnL); NULL for "
         "a buy.",
     )
+    trigger_reason: Mapped[str | None] = mapped_column(
+        String(20),
+        nullable=True,
+        comment="'stop_loss' | 'take_profit' for a market-triggered auto-close; NULL for a "
+        "manually-placed order.",
+    )
 
     __table_args__ = (
         CheckConstraint(f"side IN {ORDER_SIDES!r}", name="side_valid"),
         CheckConstraint(f"price_source IN {PRICE_SOURCES!r}", name="price_source_valid"),
+        CheckConstraint(
+            f"trigger_reason IS NULL OR trigger_reason IN {TRIGGER_REASONS!r}",
+            name="trigger_reason_valid",
+        ),
         CheckConstraint("quantity > 0", name="quantity_positive"),
     )
 
@@ -208,6 +219,19 @@ class PaperPosition(BaseModel, TimestampMixin):
     = 0` rather than deleted, so re-buying the same symbol later doesn't
     need to reinvent an identity; `PaperTradingService.list_positions`
     filters to `quantity > 0` (this platform's own "open positions" view).
+
+    `stop_loss_price`/`take_profit_price` are optional, nullable
+    thresholds a researcher can set (long-only, so a stop-loss sits below
+    the current price and a take-profit above it — validated at set-time
+    in `PaperTradingService`, never here, since "below/above current
+    price" needs a live quote no DB constraint can see). Watched by
+    `app.paper_trading.monitor.StopLossTakeProfitMonitor`, which closes
+    the position automatically through the same fill logic a manual sell
+    uses the instant either is crossed. Both are cleared back to `NULL`
+    whenever a position is fully closed (`apply_sell` reaching `quantity
+    == 0`) — a flat position has nothing left to protect, and a later
+    re-buy of the same symbol at a completely different price would make
+    a carried-over threshold meaningless.
     """
 
     __tablename__ = "paper_positions"
@@ -220,8 +244,25 @@ class PaperPosition(BaseModel, TimestampMixin):
     average_entry_price: Mapped[Any] = mapped_column(
         Numeric(PRECISION, SCALE), nullable=False, default=0
     )
+    stop_loss_price: Mapped[Any] = mapped_column(
+        Numeric(PRECISION, SCALE),
+        nullable=True,
+        comment="Auto-closes the position when the live price falls to or below this level.",
+    )
+    take_profit_price: Mapped[Any] = mapped_column(
+        Numeric(PRECISION, SCALE),
+        nullable=True,
+        comment="Auto-closes the position when the live price rises to or above this level.",
+    )
 
     __table_args__ = (
         UniqueConstraint("account_id", "symbol", name="uq_paper_positions_account_symbol"),
         CheckConstraint("quantity >= 0", name="quantity_non_negative"),
+        CheckConstraint(
+            "stop_loss_price IS NULL OR stop_loss_price >= 0", name="stop_loss_price_non_negative"
+        ),
+        CheckConstraint(
+            "take_profit_price IS NULL OR take_profit_price >= 0",
+            name="take_profit_price_non_negative",
+        ),
     )

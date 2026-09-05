@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Literal
 
-from pydantic import BaseModel, Field, field_serializer
+from pydantic import BaseModel, Field, field_serializer, model_validator
 
 if TYPE_CHECKING:
     from app.models.paper_trading import PaperAccount, PaperOrder, PaperPosition
@@ -101,11 +101,40 @@ class PaperAccountListResponse(BaseModel):
 
 class PaperOrderRequest(BaseModel):
     """Place one market order — long-only: a buy opens/adds to a position,
-    a sell reduces/closes one; there is no short side."""
+    a sell reduces/closes one; there is no short side.
+
+    `stop_loss_price`/`take_profit_price` are optional and only ever
+    meaningful on a **buy** (a sell only ever reduces/closes a position —
+    there is nothing left to protect once it's flat, and a partial sell
+    doesn't change what protects the remainder). Provide a value to set
+    it on the resulting position; omit it to leave that position's
+    existing threshold (if any) unchanged — omitting is *not* the same
+    as clearing, which is only possible via
+    `PATCH .../positions/{symbol}`'s explicit `null`. Both are validated
+    against the current price (and each other) the instant this order
+    fills, using whatever price the fill itself resolved.
+    """
 
     symbol: str = Field(..., description="Market to trade")
     side: Literal["buy", "sell"]
     quantity: Decimal = Field(..., gt=0, description="Order quantity, in the base asset")
+    stop_loss_price: Decimal | None = Field(
+        default=None, gt=0, description="Set on the resulting position — buy only"
+    )
+    take_profit_price: Decimal | None = Field(
+        default=None, gt=0, description="Set on the resulting position — buy only"
+    )
+
+    @model_validator(mode="after")
+    def _reject_thresholds_on_a_sell(self) -> "PaperOrderRequest":
+        if self.side == "sell" and (
+            self.stop_loss_price is not None or self.take_profit_price is not None
+        ):
+            raise ValueError(
+                "stop_loss_price/take_profit_price only apply to a buy — a sell only reduces "
+                "or closes a position, which has nothing left to protect"
+            )
+        return self
 
 
 class PaperOrderResponse(BaseModel):
@@ -134,6 +163,11 @@ class PaperOrderResponse(BaseModel):
     realized_pnl: Decimal | None = Field(
         default=None, description="This order's own contribution to realized PnL; null for a buy"
     )
+    trigger_reason: Literal["stop_loss", "take_profit"] | None = Field(
+        default=None,
+        description="Set when this order was a market-triggered auto-close, not a manually "
+        "placed one; null for every ordinary order",
+    )
     created_at: datetime
 
     @field_serializer("fill_time", "price_observed_at", "created_at")
@@ -158,6 +192,7 @@ class PaperOrderResponse(BaseModel):
             fee_applied=order.fee_applied,
             notional=order.notional,
             realized_pnl=order.realized_pnl,
+            trigger_reason=order.trigger_reason,  # type: ignore[arg-type]
             created_at=order.created_at,
         )
 
@@ -183,6 +218,12 @@ class PaperPositionDTO(BaseModel):
         description="(current_price - average_entry_price) * quantity — no slippage/fee applied; "
         "a mark-to-market valuation, not a hypothetical exit fill"
     )
+    stop_loss_price: Decimal | None = Field(
+        default=None, description="Auto-closes the position at or below this price; null if unset"
+    )
+    take_profit_price: Decimal | None = Field(
+        default=None, description="Auto-closes the position at or above this price; null if unset"
+    )
 
     @classmethod
     def from_model(
@@ -198,7 +239,24 @@ class PaperPositionDTO(BaseModel):
             current_price=current_price,
             price_source=price_source,  # type: ignore[arg-type]
             unrealized_pnl=unrealized_pnl,
+            stop_loss_price=position.stop_loss_price,
+            take_profit_price=position.take_profit_price,
         )
+
+
+class PositionThresholdsUpdateRequest(BaseModel):
+    """Set, update, or clear a position's stop-loss/take-profit.
+
+    Only fields actually present in the request body are changed — send
+    an explicit `null` to clear one, omit a field entirely to leave it
+    exactly as it is. The service layer reads `model_fields_set` to tell
+    "omitted" from "explicitly null" apart (both parse to the same `None`
+    otherwise) — the same `exclude_unset` partial-update idiom
+    `ExperimentService.update` already uses.
+    """
+
+    stop_loss_price: Decimal | None = Field(default=None, gt=0)
+    take_profit_price: Decimal | None = Field(default=None, gt=0)
 
 
 class PaperPositionListResponse(BaseModel):
@@ -265,5 +323,6 @@ __all__ = [
     "PaperPositionDTO",
     "PaperPositionListResponse",
     "PortfolioSummaryResponse",
+    "PositionThresholdsUpdateRequest",
     "RiskSummaryResponse",
 ]

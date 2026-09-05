@@ -59,6 +59,35 @@ retry-and-recompute loop because what this feature needs to guard
 (current balance, current prices, every other open position) can't be
 pinned to one fixed status value the way a training job's `'pending'`
 can. See `place_order`'s own docstring for the full mechanics.
+
+**Stop-loss / take-profit, stated plainly** (see
+`app.paper_trading.monitor.StopLossTakeProfitMonitor` for the
+event-driven side of this): a long position's `stop_loss_price` must sit
+below the current price and `take_profit_price` above it — either would
+trigger the instant it was set otherwise — and, whenever both are
+present, `stop_loss_price` must be strictly below `take_profit_price` too
+(`_validate_thresholds`), which is what keeps the two trigger conditions
+(`price <= stop_loss_price`, `price >= take_profit_price`) mutually
+exclusive for every possible price, closing the "one tick crosses both"
+question by construction rather than a runtime tie-break — see
+`StopLossTakeProfitMonitor`'s own docstring for the deterministic
+check-order it still keeps as defense-in-depth regardless. A triggered
+close (`trigger_close`) reuses the *same* `apply_fill_model` and the
+*same* `try_apply_trade_effects` atomic guard `place_order` uses — so a
+triggered auto-close racing a concurrent manual close of the same
+position can never both succeed, exactly like the exposure-limit race
+above, just applied to `PaperPosition.quantity` instead of
+`PaperAccount.balance`/`trading_halted`. The one deliberate difference:
+`trigger_close` always closes *whatever is currently held*, re-read
+fresh on every retry, never a fixed amount decided once — so if a
+concurrent manual sell partially (not fully) closes the position first,
+the trigger still closes the real remainder, not a stale, too-large
+number. It also fills at a *wider* slippage
+(`paper_trading_triggered_slippage_bps`, default wider than
+`paper_trading_slippage_bps`) — a triggered exit during a fast price move
+is not a perfect fill either; pretending otherwise would be exactly the
+dishonest simulation this feature's realistic-execution guarantee exists
+to avoid.
 """
 
 import uuid
@@ -72,9 +101,13 @@ from app.paper_trading.errors import (
     InsufficientBalanceError,
     InsufficientPositionError,
     InvalidPaperOrderSortError,
+    InvalidStopLossPriceError,
+    InvalidTakeProfitPriceError,
     MaxExposureExceededError,
     MaxPositionSizeExceededError,
     PaperAccountNotFoundError,
+    PositionNotFoundError,
+    StopLossNotBelowTakeProfitError,
     TradingHaltedError,
 )
 from app.paper_trading.pricing import apply_fill_model, resolve_current_price
@@ -96,6 +129,7 @@ from app.schemas.paper_trading import (
     PaperPositionDTO,
     PaperPositionListResponse,
     PortfolioSummaryResponse,
+    PositionThresholdsUpdateRequest,
     RiskSummaryResponse,
 )
 from app.services.market_query import MarketNotFoundError
@@ -122,6 +156,7 @@ class PaperTradingService:
         state_manager: MarketStateManager,
         slippage_bps: int,
         fee_bps: int,
+        triggered_slippage_bps: int,
         staleness_threshold: timedelta,
         default_max_position_size_pct: Decimal,
         default_max_exposure_pct: Decimal,
@@ -136,6 +171,7 @@ class PaperTradingService:
         self.state_manager = state_manager
         self.slippage_bps = slippage_bps
         self.fee_bps = fee_bps
+        self.triggered_slippage_bps = triggered_slippage_bps
         self.staleness_threshold = staleness_threshold
         self.default_max_position_size_pct = default_max_position_size_pct
         self.default_max_exposure_pct = default_max_exposure_pct
@@ -252,6 +288,8 @@ class PaperTradingService:
             balance = Decimal(account.balance)
 
             realized_pnl_this_order: Decimal | None = None
+            effective_stop_loss_price: Decimal | None = None
+            effective_take_profit_price: Decimal | None = None
             if request.side == "buy":
                 total_cost = fill.notional + fill.fee_applied
                 if balance < total_cost:
@@ -259,6 +297,49 @@ class PaperTradingService:
                 new_balance = balance - total_cost
                 new_realized_pnl = Decimal(account.realized_pnl) - fill.fee_applied
                 resulting_quantity = held + request.quantity
+
+                thresholds_provided = (
+                    request.stop_loss_price is not None or request.take_profit_price is not None
+                )
+                if thresholds_provided:
+                    existing_stop_loss = (
+                        Decimal(position.stop_loss_price)
+                        if position is not None and position.stop_loss_price is not None
+                        else None
+                    )
+                    existing_take_profit = (
+                        Decimal(position.take_profit_price)
+                        if position is not None and position.take_profit_price is not None
+                        else None
+                    )
+                    # Merge: a value named in *this* request overrides; a
+                    # field this request doesn't mention keeps whatever
+                    # the position already had (never silently cleared by
+                    # an order that never mentioned it). The cross-check
+                    # (stop_loss < take_profit) always runs on the final,
+                    # merged pair — but the vs-current-price check only
+                    # applies to whichever field *this* request actually
+                    # names, so an untouched, already-valid threshold is
+                    # never re-rejected just because the price has since
+                    # moved past it.
+                    effective_stop_loss_price = (
+                        request.stop_loss_price
+                        if request.stop_loss_price is not None
+                        else existing_stop_loss
+                    )
+                    effective_take_profit_price = (
+                        request.take_profit_price
+                        if request.take_profit_price is not None
+                        else existing_take_profit
+                    )
+                    self._validate_thresholds(
+                        current_price=quote.price,
+                        stop_loss_price=effective_stop_loss_price,
+                        take_profit_price=effective_take_profit_price,
+                        check_stop_loss_against_current_price=request.stop_loss_price is not None,
+                        check_take_profit_against_current_price=request.take_profit_price
+                        is not None,
+                    )
             else:
                 if position is None or request.quantity > held:
                     raise InsufficientPositionError(request.symbol, request.quantity, held)
@@ -312,7 +393,15 @@ class PaperTradingService:
 
             if request.side == "buy":
                 await self.position_repository.apply_buy(
-                    account_id, request.symbol, request.quantity, fill.fill_price
+                    account_id,
+                    request.symbol,
+                    request.quantity,
+                    fill.fill_price,
+                    stop_loss_price=effective_stop_loss_price,
+                    take_profit_price=effective_take_profit_price,
+                    thresholds_provided=(
+                        request.stop_loss_price is not None or request.take_profit_price is not None
+                    ),
                 )
             else:
                 await self.position_repository.apply_sell(position, request.quantity)
@@ -337,6 +426,156 @@ class PaperTradingService:
             return PaperOrderResponse.from_model(created)
 
         raise AccountUpdateConflictError(self.max_order_attempts)
+
+    async def trigger_close(
+        self,
+        account_id: uuid.UUID,
+        symbol: str,
+        *,
+        reason: str,
+        quote: FillQuote,
+    ) -> PaperOrderResponse | None:
+        """Close `symbol` entirely for this account, market-triggered by a
+        crossed stop-loss/take-profit threshold — called only by
+        `app.paper_trading.monitor.StopLossTakeProfitMonitor`, never a
+        router (there is no HTTP caller to report a rejection to, so this
+        never raises; it returns `None` when there is nothing to do).
+
+        Reuses `apply_fill_model` and `PaperAccountRepository
+        .try_apply_trade_effects` — the exact same fill model and atomic
+        concurrency guard `place_order` uses — but is otherwise its own,
+        smaller loop rather than a shared code path with `place_order`,
+        for one deliberate reason: this always sells *whatever is
+        currently held*, re-read fresh on every retry attempt, not a
+        fixed quantity decided once. That matters for the concurrency
+        guarantee this method exists to provide — if a concurrent manual
+        sell partially (not fully) closes the position before this
+        attempt's retry, the trigger adapts and closes the real
+        remainder rather than failing on a now-stale, too-large number.
+        `place_order`'s fixed, user-specified quantity is the right
+        contract for a manual order; it would be the wrong one here.
+
+        Position-sizing/exposure are not checked: a full close only ever
+        *reduces* both, so they can never be breached by this. A halted
+        account accepts no orders, including a triggered exit — halting
+        is meant to stop trading entirely, not just new risk-taking.
+        """
+        market = await self.market_repository.get_by_symbol(symbol)
+        if market is None:
+            return None
+
+        for _attempt in range(self.max_order_attempts):
+            account = await self._get_account_or_404(account_id)
+            if account.trading_halted:
+                return None
+
+            position = await self.position_repository.get_by_account_and_symbol(account_id, symbol)
+            held = Decimal(position.quantity) if position is not None else Decimal(0)
+            if held <= 0 or position is None:
+                return None  # already closed — e.g. a concurrent manual close won
+
+            balance = Decimal(account.balance)
+            fill = apply_fill_model(
+                quote,
+                side="sell",
+                quantity=held,
+                slippage_bps=self.triggered_slippage_bps,
+                fee_bps=self.fee_bps,
+            )
+            realized_pnl_this_order = (
+                fill.fill_price - Decimal(position.average_entry_price)
+            ) * held - fill.fee_applied
+            net_proceeds = fill.notional - fill.fee_applied
+            new_balance = balance + net_proceeds
+            new_realized_pnl = Decimal(account.realized_pnl) + realized_pnl_this_order
+
+            new_peak_balance, new_trading_halted = self._apply_drawdown_tracking(
+                account, new_balance
+            )
+
+            updated_account = await self.account_repository.try_apply_trade_effects(
+                account_id,
+                expected_balance=account.balance,
+                expected_trading_halted=account.trading_halted,
+                new_balance=new_balance,
+                new_realized_pnl=new_realized_pnl,
+                new_peak_balance=new_peak_balance,
+                new_trading_halted=new_trading_halted,
+            )
+            if updated_account is None:
+                continue  # lost the race — re-read the (possibly now-smaller) position and retry
+
+            await self.position_repository.apply_sell(position, held)
+
+            order = PaperOrder(
+                account_id=account_id,
+                symbol=symbol,
+                side="sell",
+                quantity=held,
+                raw_price=quote.price,
+                fill_price=fill.fill_price,
+                fill_time=datetime.now(UTC),
+                price_source=quote.source,
+                price_observed_at=quote.observed_at,
+                is_stale_price=quote.is_stale,
+                slippage_applied=fill.slippage_applied,
+                fee_applied=fill.fee_applied,
+                notional=fill.notional,
+                realized_pnl=realized_pnl_this_order,
+                trigger_reason=reason,
+            )
+            created = await self.order_repository.create(order)
+            return PaperOrderResponse.from_model(created)
+
+        return None  # retries exhausted — the next price tick gives this another chance
+
+    async def update_position_thresholds(
+        self, account_id: uuid.UUID, symbol: str, request: PositionThresholdsUpdateRequest
+    ) -> PaperPositionDTO:
+        """Set, update, or clear a position's stop-loss/take-profit.
+
+        Only fields the request actually names (`model_fields_set`) are
+        changed; an omitted field keeps the position's existing value.
+        The cross-check (stop-loss below take-profit) always runs on the
+        *final*, merged pair, so a newly-set stop-loss can't be left
+        un-checked against an untouched, already-set take-profit — but
+        the vs-current-price check only applies to whichever field this
+        request actually names, so an untouched, already-valid threshold
+        is never re-rejected just because the price has since moved.
+        """
+        await self._get_account_or_404(account_id)
+        position = await self.position_repository.get_by_account_and_symbol(account_id, symbol)
+        if position is None or Decimal(position.quantity) <= 0:
+            raise PositionNotFoundError(account_id, symbol)
+
+        quote = await self._current_price_for_symbol(symbol)
+        if quote is None:
+            raise MarketNotFoundError(symbol)
+
+        fields = request.model_dump(exclude_unset=True)
+        raw_stop_loss_price = fields.get("stop_loss_price", position.stop_loss_price)
+        raw_take_profit_price = fields.get("take_profit_price", position.take_profit_price)
+        new_stop_loss_price = (
+            Decimal(raw_stop_loss_price) if raw_stop_loss_price is not None else None
+        )
+        new_take_profit_price = (
+            Decimal(raw_take_profit_price) if raw_take_profit_price is not None else None
+        )
+        self._validate_thresholds(
+            current_price=quote.price,
+            stop_loss_price=new_stop_loss_price,
+            take_profit_price=new_take_profit_price,
+            check_stop_loss_against_current_price="stop_loss_price" in fields,
+            check_take_profit_against_current_price="take_profit_price" in fields,
+        )
+
+        updated = await self.position_repository.update(
+            position,
+            {"stop_loss_price": new_stop_loss_price, "take_profit_price": new_take_profit_price},
+        )
+        return PaperPositionDTO.from_model(
+            updated, current_price=quote.price, price_source=quote.source
+        )
 
     async def resume_trading(self, account_id: uuid.UUID) -> PaperAccountResponse:
         """Explicitly clear a drawdown halt — the *only* way it ever
@@ -512,3 +751,55 @@ class PaperTradingService:
         threshold = new_peak * (Decimal(1) - Decimal(account.max_drawdown_pct) / Decimal(100))
         new_halted = new_balance < threshold
         return new_peak, new_halted
+
+    @staticmethod
+    def _validate_thresholds(
+        *,
+        current_price: Decimal,
+        stop_loss_price: Decimal | None,
+        take_profit_price: Decimal | None,
+        check_stop_loss_against_current_price: bool,
+        check_take_profit_against_current_price: bool,
+    ) -> None:
+        """A long position's stop-loss must sit below `current_price` and
+        its take-profit above it — either would trigger the instant it's
+        set otherwise. That check only applies to whichever of the two
+        *this* call is actually setting
+        (`check_stop_loss_against_current_price`/
+        `check_take_profit_against_current_price` — false for a field
+        merely carried over, unmentioned, from the position's existing
+        value): an untouched, already-valid threshold must never be
+        re-rejected just because the price has since moved past it — that
+        would make an unrelated order (or an update to the *other*
+        threshold) fail for a reason it never asked about.
+
+        The cross-check is different: whenever both are present in the
+        *final*, merged pair — touched or not — `stop_loss_price` must be
+        strictly less than `take_profit_price`. Each was independently
+        valid against its own current price at whatever moment it was
+        set, but that alone doesn't stop a high stop-loss and a low
+        take-profit being set at two different times as the price moved
+        between them — this is what actually closes that gap, keeping
+        `price <= stop_loss_price` and `price >= take_profit_price`
+        mutually exclusive for every possible price. See
+        `app.paper_trading.monitor`'s own docstring for why that's this
+        feature's actual answer to "what if one tick crosses both."
+        """
+        if (
+            check_stop_loss_against_current_price
+            and stop_loss_price is not None
+            and stop_loss_price >= current_price
+        ):
+            raise InvalidStopLossPriceError(stop_loss_price, current_price)
+        if (
+            check_take_profit_against_current_price
+            and take_profit_price is not None
+            and take_profit_price <= current_price
+        ):
+            raise InvalidTakeProfitPriceError(take_profit_price, current_price)
+        if (
+            stop_loss_price is not None
+            and take_profit_price is not None
+            and stop_loss_price >= take_profit_price
+        ):
+            raise StopLossNotBelowTakeProfitError(stop_loss_price, take_profit_price)

@@ -7,21 +7,26 @@ coherent per-symbol L2 book from the state manager's own last-writer-wins
 event stream, see its module docstring for why that reconstruction can't
 live in the state manager itself), the browser-facing streaming gateway
 (``app.marketdata.gateway.MarketStreamGateway``, served at
-``/api/v1/ws/market``), and — when live mode is enabled — the Delta
-WebSocket client and the processing pipeline. The ``/api/v1/system/*``
-endpoints read component status and metrics from this container, so the
-dashboard observes the same stack the service actually runs.
+``/api/v1/ws/market``), the paper trading stop-loss/take-profit monitor
+(``app.paper_trading.monitor.StopLossTakeProfitMonitor`` — subscribes to
+the same live-price events, gated on its own at the database layer rather
+than here, see that module's own docstring), and — when live mode is
+enabled — the Delta WebSocket client and the processing pipeline. The
+``/api/v1/system/*`` endpoints read component status and metrics from
+this container, so the dashboard observes the same stack the service
+actually runs.
 
 Live mode is opt-in via ``MARKET_DATA_LIVE``; the bus, state manager,
-order book aggregator, and gateway are always present because they are
-pure in-memory and free to run — the gateway simply has nothing to relay
-until live mode publishes events.
+order book aggregator, gateway, and stop-loss/take-profit monitor are
+always present because they are pure in-memory to construct and free to
+run — the gateway simply has nothing to relay, and the monitor nothing
+to trigger, until live mode (or a test) actually publishes events.
 """
 
 import logging
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from app.core.config import get_settings
 from app.events.bus import EventBus
@@ -35,6 +40,7 @@ from app.integrations.delta.websocket.client import (
 from app.marketdata import DeltaNormalizer, MarketDataPipeline
 from app.marketdata.gateway import MarketStreamGateway
 from app.marketdata.orderbook import OrderBookAggregator
+from app.paper_trading.monitor import StopLossTakeProfitMonitor
 from app.services.candle_sync import CandleSyncScheduler
 from app.services.grading_scheduler import PredictionGradingScheduler
 from app.state import MarketStateManager
@@ -88,6 +94,20 @@ class Runtime:
         self.state_manager = MarketStateManager().attach(self.bus)
         self.order_book = OrderBookAggregator().attach(self.bus)
         self.gateway = MarketStreamGateway(self.state_manager, self.order_book).attach(self.bus)
+        settings = get_settings()
+        self.stop_loss_take_profit_monitor = StopLossTakeProfitMonitor(
+            state_manager=self.state_manager,
+            slippage_bps=settings.paper_trading_slippage_bps,
+            fee_bps=settings.paper_trading_fee_bps,
+            triggered_slippage_bps=settings.paper_trading_triggered_slippage_bps,
+            staleness_threshold=timedelta(
+                seconds=settings.paper_trading_stale_price_threshold_seconds
+            ),
+            default_max_position_size_pct=settings.paper_trading_default_max_position_size_pct,
+            default_max_exposure_pct=settings.paper_trading_default_max_exposure_pct,
+            default_max_drawdown_pct=settings.paper_trading_default_max_drawdown_pct,
+            max_order_attempts=settings.paper_trading_max_order_attempts,
+        ).attach(self.bus)
         self.pipeline: MarketDataPipeline | None = None
         self.delta_ws: DeltaWebSocketClient | None = None
         self.candle_sync: CandleSyncScheduler | None = None

@@ -3259,10 +3259,11 @@ src/features/paper-trading/
 ├── components/
 │   ├── account-summary-card.tsx                balance, realized PnL, unrealized PnL, total equity
 │   ├── create-account-dialog.tsx               open a new account (name, starting balance)
-│   ├── order-form.tsx                          symbol / side / quantity — market orders only
-│   ├── positions-table.tsx                     open positions, marked to a live price
-│   ├── order-history-table.tsx                 fill price, source, slippage/fee — always visible
+│   ├── order-form.tsx                          symbol / side / quantity / optional buy-only stop-loss / take-profit
+│   ├── positions-table.tsx                     open positions, marked to a live price, SL/TP column + edit action
+│   ├── order-history-table.tsx                 fill price, source, slippage/fee, trigger (manual vs. auto-closed)
 │   ├── risk-summary-panel.tsx                   exposure/drawdown vs. limits, halted status, Resume Trading
+│   ├── set-thresholds-dialog.tsx               set/update/clear a position's stop-loss/take-profit
 │   └── live-data-chip.tsx                       page-level "live data or fallback" hint
 └── paper-trading-page.tsx                       page composition root
 ```
@@ -3337,19 +3338,45 @@ backend's own specific `detail` message (which limit, by how much) through
 as `Error.message` for every endpoint on this platform — "generic error"
 was never possible here without deliberately discarding that detail.
 
+**Stop-loss/take-profit are optional, buy-only fields on `OrderForm`,
+hidden and cleared the instant the side switches to sell** — a sell only
+ever reduces/closes a position, which has nothing left to protect, so
+the backend rejects the combination outright and the form never even
+offers it. `PositionsTable` gains an "SL / TP" column (a dash for
+whichever is unset) and a per-row edit action (an `IconButton`, tooltipped
+"Set stop-loss / take-profit") opening `SetThresholdsDialog` — seeded
+from that position's own current values every time it opens, so editing
+shows what's already set rather than a blank form; a field left blank on
+save is sent as an explicit clear (`null`), never "leave unchanged" (this
+dialog always edits the position's whole current state, unlike
+`OrderForm`'s own fields, which only ever _set_, never clear, since
+omitting them there means "don't touch"). `OrderHistoryTable` gains a
+"Trigger" column: a filled, `warning`-colored "Stop-Loss"/"Take-Profit"
+chip for a market-triggered auto-close, a plain outlined "Manual" chip
+otherwise — a triggered exit is never rendered as if it were an ordinary
+order a human placed. Every rejection here also needs no special frontend
+handling: `invalid_stop_loss_price`/`invalid_take_profit_price`/
+`stop_loss_not_below_take_profit` surface through the same error `Alert`
+path every other domain error already uses on this page.
+
 **Testing.** `format-pnl.test.ts` (sign placement and rounding, in
 isolation). `order-history-table.test.tsx` (fill price/source/slippage/fee
 all rendered, a dash for a buy's null realized PnL, a real value for a
 sell's, a stale fallback marked with its warning chip, an empty-history
-message). `positions-table.test.tsx` (a row's own quantity/prices/PnL,
-positive and negative signed formatting, an empty-positions message).
+message, a "Manual" chip for an ordinary order, a distinct "Stop-Loss"
+chip for a triggered close). `positions-table.test.tsx` (a row's own
+quantity/prices/PnL, positive and negative signed formatting, an
+empty-positions message, a dash then real values for stop-loss/take-profit
+once set, the edit action calling back with the row's own symbol).
 `risk-summary-panel.test.tsx` (active vs. halted rendering, both limit
 rows' exact percentages, the confirm-then-resume flow, a surfaced resume
 error, the loading skeleton). `paper-trading-page.test.tsx` covers the
 whole page end to end: the empty-account prompt, opening an account and
-seeing its summary, placing a buy order and the mutation firing with the
-exact expected body, a surfaced order error, and a halted risk panel's
-Resume Trading action actually calling the resume mutation.
+seeing its summary, placing a buy order (with and without a stop-loss/
+take-profit) and the mutation firing with the exact expected body,
+editing a position's thresholds from the positions table end to end, a
+surfaced order error, and a halted risk panel's Resume Trading action
+actually calling the resume mutation.
 
 ## State management
 

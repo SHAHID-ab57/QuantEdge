@@ -101,11 +101,15 @@ position sizing, total exposure, and a maximum drawdown that halts an
 account until an explicit resume — all three checked against current
 prices and current balance, never entry prices or a stale balance, and
 guarded against concurrent orders by the same atomic-`UPDATE` pattern the
-training-job duplicate-run race established. See `ARCHITECTURE.md` §
-"Paper Trading". Stop-loss/take-profit orders and a standalone risk
-engine beyond these three account-level limits have not been started;
-see `docs/architecture/DomainModel.md`/`ContainerArchitecture.md` for the
-intended bounded contexts.
+training-job duplicate-run race established. Stop-loss/take-profit are
+also complete: a threshold set on an open position is watched via the
+existing event bus (no new polling loop) and closed automatically —
+through the same fill model and atomic concurrency guard, applied to a
+third occurrence of the same race — the instant it's crossed, at a wider
+modeled slippage than a manual order. See `ARCHITECTURE.md` § "Paper
+Trading". A standalone risk engine beyond these account-level limits has
+not been started; see `docs/architecture/DomainModel.md`/
+`ContainerArchitecture.md` for the intended bounded contexts.
 
 **Milestone 4 — Data Breadth.** The additional external data connectors
 this platform has designed for but never implemented — Marketaux (news/

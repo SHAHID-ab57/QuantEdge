@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import InstrumentedAttribute
@@ -204,12 +204,59 @@ class PaperPositionRepository:
         )
         return list(result.scalars().all())
 
+    async def list_open_with_thresholds(self, symbol: str) -> list[PaperPosition]:
+        """Every open position (across *every* account) in `symbol` that
+        has a stop-loss and/or take-profit set — `StopLossTakeProfitMonitor`'s
+        own query, run once per relevant price event for that symbol."""
+        result = await self.session.execute(
+            select(PaperPosition).where(
+                PaperPosition.symbol == symbol,
+                PaperPosition.quantity > 0,
+                or_(
+                    PaperPosition.stop_loss_price.is_not(None),
+                    PaperPosition.take_profit_price.is_not(None),
+                ),
+            )
+        )
+        return list(result.scalars().all())
+
+    async def update(self, position: PaperPosition, fields: dict[str, Any]) -> PaperPosition:
+        """Apply a partial update — the same "every key applied
+        unconditionally, including an explicit `None`" contract
+        `PaperAccountRepository.update` uses, so an explicit `None` here
+        clears a threshold rather than being mistaken for "leave it
+        unchanged" (the caller — `PaperTradingService
+        .update_position_thresholds` — has already distinguished
+        "omitted" from "explicitly null" before calling this)."""
+        for key, value in fields.items():
+            setattr(position, key, value)
+        await self.session.commit()
+        await self.session.refresh(position)
+        return position
+
     async def apply_buy(
-        self, account_id: uuid.UUID, symbol: str, quantity: Decimal, fill_price: Decimal
+        self,
+        account_id: uuid.UUID,
+        symbol: str,
+        quantity: Decimal,
+        fill_price: Decimal,
+        *,
+        stop_loss_price: Decimal | None = None,
+        take_profit_price: Decimal | None = None,
+        thresholds_provided: bool = False,
     ) -> PositionUpsertResult:
         """Add `quantity` at `fill_price` to this account's position in
         `symbol`, VWAP-averaging into any existing holding — creating the
-        row on a symbol held for the first time."""
+        row on a symbol held for the first time.
+
+        `stop_loss_price`/`take_profit_price` are set on the position
+        only when `thresholds_provided` is true (the caller — an order
+        that explicitly named at least one of them — already validated
+        both against the current price and each other); otherwise any
+        existing thresholds on the position are left completely
+        untouched, so an unrelated buy that doesn't mention them can
+        never silently clear a stop-loss someone set earlier.
+        """
         position = await self.get_by_account_and_symbol(account_id, symbol)
         if position is None:
             previous_quantity = Decimal(0)
@@ -219,6 +266,8 @@ class PaperPositionRepository:
                 symbol=symbol,
                 quantity=quantity,
                 average_entry_price=fill_price,
+                stop_loss_price=stop_loss_price if thresholds_provided else None,
+                take_profit_price=take_profit_price if thresholds_provided else None,
             )
             self.session.add(position)
         else:
@@ -229,18 +278,28 @@ class PaperPositionRepository:
                 previous_quantity * previous_average + quantity * fill_price
             ) / new_quantity
             position.quantity = new_quantity
+            if thresholds_provided:
+                position.stop_loss_price = stop_loss_price
+                position.take_profit_price = take_profit_price
         await self.session.commit()
         await self.session.refresh(position)
         return PositionUpsertResult(position, previous_quantity, previous_average)
 
     async def apply_sell(self, position: PaperPosition, quantity: Decimal) -> PositionUpsertResult:
         """Reduce `position` by `quantity` — the caller (`PaperTradingService
-        .place_order`) has already verified `quantity <= position.quantity`
-        (no shorting); `average_entry_price` is left unchanged by a sell
-        (it only ever moves via a *buy*'s own VWAP average)."""
+        .place_order`/`.trigger_close`) has already verified `quantity <=
+        position.quantity` (no shorting); `average_entry_price` is left
+        unchanged by a sell (it only ever moves via a *buy*'s own VWAP
+        average). Reaching exactly `0` also clears
+        `stop_loss_price`/`take_profit_price` — a flat position has
+        nothing left to protect, and either would be meaningless against
+        whatever price a later re-buy happens to open at."""
         previous_quantity = Decimal(position.quantity)
         previous_average = Decimal(position.average_entry_price)
         position.quantity = previous_quantity - quantity
+        if position.quantity == 0:
+            position.stop_loss_price = None
+            position.take_profit_price = None
         await self.session.commit()
         await self.session.refresh(position)
         return PositionUpsertResult(position, previous_quantity, previous_average)

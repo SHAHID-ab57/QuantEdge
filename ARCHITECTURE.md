@@ -3154,6 +3154,190 @@ order end to end, a surfaced order error), `order-history-table.test.tsx`,
 `positions-table.test.tsx`, and `format-pnl.test.ts` (the shared
 sign-before-dollar-sign formatter every PnL figure on this page uses).
 
+**Stop-loss / take-profit — a researcher sets a threshold on an open
+position, and it's watched and closed automatically.** Extends
+`paper_positions` with `stop_loss_price`/`take_profit_price` (both
+nullable, migration `16e4c2531e7d`), settable at order-open time
+(`PaperOrderRequest`'s optional fields, buy only — rejected outright on a
+sell, since a sell only ever reduces/closes a position and has nothing
+left to protect) or afterward via a dedicated
+`PATCH /paper-trading/accounts/{id}/positions/{symbol}`.
+
+**Validation, stated plainly** (`PaperTradingService._validate_thresholds`):
+for a long position, `stop_loss_price` must sit below the current price
+and `take_profit_price` above it — either would trigger the instant it
+was set otherwise. Whenever both are present in the final, merged pair,
+`stop_loss_price` must also be strictly below `take_profit_price` — each
+is independently valid against its own current price at the moment it's
+set, but that alone doesn't stop a high stop-loss and a low take-profit
+being set at two _different_ times as the price moves between them; the
+cross-check closes exactly that gap. The vs-current-price check applies
+only to whichever field a given request actually names — an untouched,
+already-valid threshold is never re-rejected just because the price has
+since moved past it (proven by a fixture: a take-profit set while price
+is low, then a stop-loss set later, individually valid against the new
+higher price, but rejected once checked against the earlier, untouched
+take-profit — `StopLossNotBelowTakeProfitError`). An order that omits
+both fields never touches a position's existing thresholds; the
+dedicated update endpoint distinguishes an omitted field (unchanged) from
+an explicit `null` (cleared) via Pydantic's `model_fields_set`/
+`exclude_unset`, the same partial-update idiom `ExperimentService.update`
+already established.
+
+**Monitoring reuses the existing event bus — no new polling loop**
+(`app/paper_trading/monitor.py`'s `StopLossTakeProfitMonitor`). It
+subscribes to the identical two event types
+`MarketStateManager.attach` already does (`TickerUpdated`/
+`TradeEventReceived`) via the same `bus.subscribe(event_type, handler)`
+pattern, so it's fed by data this platform's bus already carries end to
+end, never a second market-data path. Deliberately prices every trigger
+check and the resulting fill from the _event's own_ price, not a
+follow-up read through `MarketStateManager`: `EventBus.publish` schedules
+one `asyncio.Task` per subscriber concurrently with no ordering
+guarantee between them, so this monitor's own handler and
+`MarketStateManager`'s handler for the _same_ event can run in either
+order — the event already carries the freshest possible price, so
+re-deriving one through a cache that might not yet reflect this exact
+event would only be a slower, riskier path to data already in hand.
+Opens its own database session per relevant price event
+(`get_engine()`-gated exactly like `PredictionGradingScheduler`'s own
+pattern — a silent no-op without a configured database, the default in
+this test suite), never a request-scoped one, since there is no HTTP
+request behind a bus event.
+
+**A triggered close reuses the exact same fill model and atomic
+concurrency guard a manual close uses** (`PaperTradingService
+.trigger_close`) — `apply_fill_model` and
+`PaperAccountRepository.try_apply_trade_effects`, unmodified — with one
+deliberate difference: it always closes _whatever is currently held_,
+re-read fresh on every retry, never a quantity fixed once, so a
+concurrent partial manual sell doesn't leave it trying to close a
+stale, too-large number. **A triggered fill uses a wider slippage
+allowance than a manual order**
+(`paper_trading_triggered_slippage_bps`, default 25bps vs. the manual
+default of 5bps) — a triggered exit during a fast price move is not a
+perfect fill either, and pretending otherwise would understate exactly
+the risk a stop-loss exists to manage. Verified live-shaped, not just
+asserted: a take-profit crossed at exactly $1100 (5x wider than the
+manual model) fills at exactly $1097.25 (`1100 × (1 − 25/10000)`), never
+the manual model's $1099.45.
+
+**Concurrency — the third occurrence of this project's own atomic
+check-then-act guard**, after the training-job duplicate-run race and
+the exposure-limit race: a triggered auto-close and a genuinely
+concurrent manual close of the same position can never both succeed,
+because both funnel through the identical
+`try_apply_trade_effects` atomic `UPDATE` on the account row. The loser's
+retry re-reads the now-emptied position and fails cleanly — the manual
+side with `InsufficientPositionError` (surfaced to its caller normally),
+the triggered side by finding nothing left to close and quietly
+stopping (a background trigger has no caller to report to). Verified
+empirically with two real concurrent operations
+(`asyncio.gather(bus.drain(), manual_close_task)`, mirroring the exact
+shape `tests/training/test_service.py`'s own duplicate-run race test and
+`TestConcurrentExposureRace` already established) — exactly one closing
+order results, every time, across repeated runs.
+
+**"What if one tick crosses both levels at once," answered.** With
+`stop_loss_price < take_profit_price` enforced at set-time (above),
+`price <= stop_loss_price` and `price >= take_profit_price` are
+mutually exclusive for _every_ price — the ambiguity is closed by
+construction, not resolved by an arbitrary runtime tie-break, so it can't
+actually arise through the public API. The monitor still keeps a
+deterministic check order (stop-loss checked first) as defense-in-depth
+against that invariant ever being violated some other way (a direct DB
+write, a future bug); treating downside protection as the higher-priority
+signal is the more conservative failure mode if a row is ever
+inconsistent. Proven directly: a position's thresholds forced into that
+otherwise-unreachable state (`stop_loss_price=180`, `take_profit_price=150`)
+by writing straight to the row bypasses `_validate_thresholds`
+on purpose — a single tick at $160 (satisfying both `160 <= 180` and
+`160 >= 150`) closes with `trigger_reason="stop_loss"`, deterministically.
+A **gap** — a tick landing far past a threshold rather than exactly on
+it — still triggers correctly (`<=`/`>=`, never an exact-match `==`) and
+fills at the _current_, post-gap price with the wider triggered-slippage
+model applied on top, never at the stale threshold price itself, exactly
+like a real stop order during a fast move.
+
+**Known limitation — a silent symbol never triggers.** Being purely
+event-driven (no polling loop, by design — see above), a stop-loss/
+take-profit on a position in a symbol that simply stops producing
+`TickerUpdated`/`TradeEventReceived` events (an illiquid market, a data
+gap upstream) is never re-checked and never fires, no matter how long it
+sits past its threshold on whatever price was last actually observed —
+there is nothing to wake the monitor for that symbol until a new event
+arrives. This is disclosed plainly rather than silently assumed away, the
+same way the training-job/backtest "still running at shutdown is left
+however the crash found it, with only a log line" limitation is.
+
+**Fill pricing, precisely: the triggering event's own price, never a
+fresh `resolve_current_price` call.** `PaperTradingService.trigger_close`
+receives the monitor's already-resolved `quote` as a parameter and reuses
+it, unmodified, on every retry attempt inside its loop — `apply_fill_model
+(quote, side="sell", ...)` is the only place that quote is used, and
+`resolve_current_price` does not appear anywhere in `trigger_close`'s own
+body (it's called only from `place_order` and `_current_price_for_symbol`,
+neither of which this method touches). Proven, not merely reasoned about:
+`tests/paper_trading/test_monitor.py::TestTriggeredFillPricesFromTheEventNotAFreshResolve`
+builds the monitor with its own `MarketStateManager` that is deliberately
+never attached to the bus and never fed a single event (and seeds no
+candle either) — if `trigger_close` ever called `resolve_current_price`
+against it, that call would raise `NoPriceAvailableError` and the trigger
+would be silently logged and swallowed, leaving the position open. The
+close still succeeds, which is only possible because the fill priced
+directly from the event.
+
+**Registered exactly like `MarketStateManager` — always-on, no special
+shutdown handling, and verified race-free.** `Runtime.__init__` constructs
+`StopLossTakeProfitMonitor` and calls `.attach(self.bus)` unconditionally,
+the same line-for-line pattern `self.state_manager = MarketStateManager()
+.attach(self.bus)` already uses (see `app/runtime.py`) — both exist purely
+in-memory and are cheap to build, so neither is gated behind
+`market_data_live` or a database check at construction time (only the
+monitor's own per-event handler is `get_engine()`-gated, at call time).
+`Runtime.shutdown()` gives neither an individual unsubscribe call; both
+are discarded together when `shutdown_runtime()` drops the whole `Runtime`
+(and its `EventBus`) once `bus.drain()` returns. Unlike the training-job/
+backtest background tasks — which `app/application.py`'s `shutdown()`
+forcibly _cancels_ at whatever point they're at — `EventBus.drain()` never
+cancels a handler task; it _awaits_ every pending one to completion. And
+because `Runtime.shutdown()` closes the Delta WebSocket client (the only
+source of new such events) _before_ calling `bus.drain()`, no new trigger
+can even be scheduled during the drain — so an in-flight trigger is
+guaranteed to finish its own DB work before `app/application.py`'s
+`shutdown()` disposes the engine afterward. This is a genuine difference
+from the training-job/backtest limitation above, not the same one worn
+differently — there is no analogous "left however it was found" risk here.
+
+**API**: `PaperOrderRequest` gains optional `stop_loss_price`/
+`take_profit_price` (buy only); `PaperPositionDTO`/`PaperOrderResponse`
+gain `stop_loss_price`/`take_profit_price` and `trigger_reason`
+(`"stop_loss" | "take_profit" | null`) respectively;
+`PATCH /paper-trading/accounts/{id}/positions/{symbol}` sets/updates/
+clears a position's thresholds.
+
+**Frontend**: `OrderForm` gains two optional, buy-only fields (hidden and
+cleared the instant the side switches to sell); `PositionsTable` gains an
+"SL / TP" column and a per-row edit action opening `SetThresholdsDialog`
+(seeded from the position's own current values, a blank field saved as
+an explicit clear); `OrderHistoryTable` gains a "Trigger" column — a
+filled, `warning`-colored "Stop-Loss"/"Take-Profit" chip for a
+market-triggered close, a plain outlined "Manual" chip otherwise —
+making an auto-closed exit clearly, visibly distinct from an ordinary
+order, never the same row.
+
+**Testing.** `tests/paper_trading/test_monitor.py`: a stop-loss and a
+take-profit each close the position when crossed;
+the triggered fill's exact wider-slippage arithmetic ($1097.25, never
+the manual model's $1099.45); the concurrent triggered-vs-manual-close
+race (exactly one closing order, every time); the gap-through-both-levels
+edge case (stop-loss wins the deterministic tie-break).
+`tests/paper_trading/test_service.py`'s `TestStopLossTakeProfitValidation`/
+`TestUpdatePositionThresholds`: both vs-current-price rejections, the
+cross-validation gap between two different set times, thresholds set at
+order-open time, an unrelated later buy never clearing them, and the
+dedicated endpoint's set/update/clear/not-found paths.
+
 ### Feature Store
 
 > Not built. Features are computed on demand and exported; no persisted,

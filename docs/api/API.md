@@ -1495,17 +1495,18 @@ the list endpoint) round out the rest.
 
 ### Paper Trading
 
-| Method | Path                                                 | Purpose                                                              |
-| ------ | ---------------------------------------------------- | -------------------------------------------------------------------- |
-| POST   | `/api/v1/paper-trading/accounts`                     | Open a new virtual trading account                                   |
-| GET    | `/api/v1/paper-trading/accounts`                     | List every account, most recently created first                      |
-| GET    | `/api/v1/paper-trading/accounts/{id}`                | Get one account                                                      |
-| POST   | `/api/v1/paper-trading/accounts/{id}/orders`         | Place and fill a market order                                        |
-| GET    | `/api/v1/paper-trading/accounts/{id}/orders`         | List an account's own order history                                  |
-| GET    | `/api/v1/paper-trading/accounts/{id}/positions`      | List an account's currently-open positions                           |
-| GET    | `/api/v1/paper-trading/accounts/{id}/summary`        | Balance, realized PnL, and live unrealized PnL                       |
-| GET    | `/api/v1/paper-trading/accounts/{id}/risk`           | Current exposure %/drawdown %, distance to each limit, halted status |
-| POST   | `/api/v1/paper-trading/accounts/{id}/resume-trading` | Clear a drawdown halt, resetting peak_balance to the current balance |
+| Method | Path                                                     | Purpose                                                              |
+| ------ | -------------------------------------------------------- | -------------------------------------------------------------------- |
+| POST   | `/api/v1/paper-trading/accounts`                         | Open a new virtual trading account                                   |
+| GET    | `/api/v1/paper-trading/accounts`                         | List every account, most recently created first                      |
+| GET    | `/api/v1/paper-trading/accounts/{id}`                    | Get one account                                                      |
+| POST   | `/api/v1/paper-trading/accounts/{id}/orders`             | Place and fill a market order                                        |
+| GET    | `/api/v1/paper-trading/accounts/{id}/orders`             | List an account's own order history                                  |
+| GET    | `/api/v1/paper-trading/accounts/{id}/positions`          | List an account's currently-open positions                           |
+| GET    | `/api/v1/paper-trading/accounts/{id}/summary`            | Balance, realized PnL, and live unrealized PnL                       |
+| GET    | `/api/v1/paper-trading/accounts/{id}/risk`               | Current exposure %/drawdown %, distance to each limit, halted status |
+| POST   | `/api/v1/paper-trading/accounts/{id}/resume-trading`     | Clear a drawdown halt, resetting peak_balance to the current balance |
+| PATCH  | `/api/v1/paper-trading/accounts/{id}/positions/{symbol}` | Set, update, or clear a position's stop-loss/take-profit             |
 
 Full design in `ARCHITECTURE.md` § "Paper Trading". A virtual trading
 account: place simulated market orders against real prices, track
@@ -1516,8 +1517,15 @@ exist anywhere in this surface.
 **Place an order** (`POST /paper-trading/accounts/{id}/orders`):
 
 ```jsonc
-// Request
-{ "symbol": "ETHUSD", "side": "buy", "quantity": "10" }
+// Request — stop_loss_price/take_profit_price are optional and buy-only
+// (rejected outright on a sell)
+{
+  "symbol": "ETHUSD",
+  "side": "buy",
+  "quantity": "10",
+  "stop_loss_price": "900", // optional — sets the resulting position's stop-loss
+  "take_profit_price": "1100", // optional — sets the resulting position's take-profit
+}
 
 // Response (201) — fills immediately and completely; there is no
 // pending/partial-fill state
@@ -1537,6 +1545,7 @@ exist anywhere in this surface.
   "fee_applied": "10.005000000000000000",
   "notional": "10005.000000000000000000", // fill_price * quantity
   "realized_pnl": null, // set only for a sell; null for a buy
+  "trigger_reason": null, // "stop_loss" | "take_profit" for a market-triggered auto-close; null for a manual order
   "created_at": "2026-01-05T12:00:03Z",
 }
 ```
@@ -1609,12 +1618,54 @@ no request body) returns the updated `PaperAccountResponse` with
 `trading_halted: false` and `peak_balance` reset to the account's current
 balance.
 
+**Stop-loss / take-profit** — set at order-open time (above) or via the
+dedicated update endpoint:
+
+```jsonc
+// PATCH /paper-trading/accounts/{id}/positions/{symbol}
+// Only fields present in the body are changed — omit a field to leave
+// it unchanged, send an explicit null to clear it.
+{ "stop_loss_price": "900", "take_profit_price": null }
+
+// Response (200) — the position, marked to a live price like any other read
+{
+  "symbol": "ETHUSD",
+  "quantity": "10.000000000000000000",
+  "average_entry_price": "1000.500000000000000000",
+  "current_price": "1050.000000000000000000",
+  "price_source": "ticker",
+  "unrealized_pnl": "495.000000000000000000",
+  "stop_loss_price": "900.000000000000000000",
+  "take_profit_price": null,
+}
+```
+
+A long position's stop-loss must sit below the current price and its
+take-profit above it — a value that would trigger immediately is
+rejected (`invalid_stop_loss_price`/`invalid_take_profit_price`, 400).
+Whenever both are set, the stop-loss must also be strictly below the
+take-profit (`stop_loss_not_below_take_profit`, 400) — this is what
+keeps a single price from ever satisfying both trigger conditions at
+once. Once either is crossed by a live price event, the position closes
+automatically through the exact same fill logic a manual sell uses, at a
+_wider_ modeled slippage than a manual order
+(`paper_trading_triggered_slippage_bps`, default 25bps) — a triggered
+exit during a fast price move is not a perfect fill either. The
+resulting order's `trigger_reason` (`"stop_loss"`/`"take_profit"`) marks
+it as distinct from a manually-placed order. Full design — including the
+concurrency guard against a triggered close racing a concurrent manual
+one, and why a single tick can never satisfy both conditions at once —
+in `ARCHITECTURE.md` § "Paper Trading".
+
 **Error codes**: `paper_account_not_found` (404), `market_not_found`
-(404), `no_price_available` (404 — no live ticker/trade and no candle has
+(404), `position_not_found` (404 — no open position in this symbol),
+`no_price_available` (404 — no live ticker/trade and no candle has
 ever been stored for this symbol), `insufficient_balance` (400 — a buy
 would take the balance negative), `insufficient_position` (400 — a sell
 would exceed the held quantity), `invalid_paper_order_sort` (400 — an
-unsupported `sort`/`dir` combination on the order history endpoint).
+unsupported `sort`/`dir` combination on the order history endpoint),
+`invalid_stop_loss_price`/`invalid_take_profit_price` (400 — would
+trigger immediately), `stop_loss_not_below_take_profit` (400).
 
 ### Platform health
 

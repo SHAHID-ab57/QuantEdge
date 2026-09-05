@@ -31,9 +31,13 @@ from app.paper_trading.errors import (
     AccountUpdateConflictError,
     InsufficientBalanceError,
     InsufficientPositionError,
+    InvalidStopLossPriceError,
+    InvalidTakeProfitPriceError,
     MaxExposureExceededError,
     MaxPositionSizeExceededError,
     PaperAccountNotFoundError,
+    PositionNotFoundError,
+    StopLossNotBelowTakeProfitError,
     TradingHaltedError,
 )
 from app.repositories.candles import CandleRepository
@@ -43,7 +47,11 @@ from app.repositories.paper_trading import (
     PaperOrderRepository,
     PaperPositionRepository,
 )
-from app.schemas.paper_trading import PaperAccountCreateRequest, PaperOrderRequest
+from app.schemas.paper_trading import (
+    PaperAccountCreateRequest,
+    PaperOrderRequest,
+    PositionThresholdsUpdateRequest,
+)
 from app.services.market_query import MarketNotFoundError
 from app.services.paper_trading import PaperTradingService
 from app.state.manager import MarketStateManager
@@ -51,6 +59,7 @@ from tests.conftest import SessionFactory
 
 SLIPPAGE_BPS = 5
 FEE_BPS = 10
+TRIGGERED_SLIPPAGE_BPS = 25
 STALENESS_THRESHOLD = timedelta(seconds=300)
 MAX_ORDER_ATTEMPTS = 5
 
@@ -100,6 +109,7 @@ def build_service(
         state_manager=state_manager,
         slippage_bps=SLIPPAGE_BPS,
         fee_bps=FEE_BPS,
+        triggered_slippage_bps=TRIGGERED_SLIPPAGE_BPS,
         staleness_threshold=STALENESS_THRESHOLD,
         default_max_position_size_pct=GENEROUS_MAX_PCT,
         default_max_exposure_pct=GENEROUS_MAX_PCT,
@@ -916,3 +926,330 @@ class TestConcurrencyGuardExhaustion:
             account_id, sort="created_at", direction="desc", limit=10, offset=0
         )
         assert orders.total == 0
+
+
+@pytest.mark.asyncio
+class TestStopLossTakeProfitValidation:
+    """Set-time validation — `PaperTradingService._validate_thresholds`,
+    exercised through both entry points: a buy order's own optional
+    `stop_loss_price`/`take_profit_price`, and the dedicated
+    `update_position_thresholds` endpoint. The monitor that actually
+    *acts* on these once set is covered separately in
+    `tests/paper_trading/test_monitor.py`."""
+
+    async def test_a_stop_loss_at_or_above_the_current_price_is_rejected(
+        self, session_factory: SessionFactory
+    ) -> None:
+        await seed_market(session_factory, symbol="PTVALSLUSD")
+        bus = EventBus()
+        state_manager = MarketStateManager().attach(bus)
+        await publish_ticker(bus, "PTVALSLUSD", "1000")
+        service = build_service(session_factory, state_manager)
+        account = await service.create_account(
+            PaperAccountCreateRequest(
+                starting_balance=Decimal("100000"),
+                max_position_size_pct=GENEROUS_MAX_PCT,
+                max_exposure_pct=GENEROUS_MAX_PCT,
+                max_drawdown_pct=GENEROUS_MAX_PCT,
+            )
+        )
+        account_id = uuid.UUID(account.id)
+
+        # Exactly at the current price — would trigger immediately.
+        with pytest.raises(InvalidStopLossPriceError):
+            await service.place_order(
+                account_id,
+                PaperOrderRequest(
+                    symbol="PTVALSLUSD",
+                    side="buy",
+                    quantity=Decimal("1"),
+                    stop_loss_price=Decimal("1000"),
+                ),
+            )
+
+        # Rejected outright — no order, no position, nothing partially applied.
+        positions = await service.list_positions(account_id)
+        assert positions.positions == []
+        orders = await service.list_orders(
+            account_id, sort="created_at", direction="desc", limit=10, offset=0
+        )
+        assert orders.total == 0
+
+    async def test_a_take_profit_at_or_below_the_current_price_is_rejected(
+        self, session_factory: SessionFactory
+    ) -> None:
+        await seed_market(session_factory, symbol="PTVALTPUSD")
+        bus = EventBus()
+        state_manager = MarketStateManager().attach(bus)
+        await publish_ticker(bus, "PTVALTPUSD", "1000")
+        service = build_service(session_factory, state_manager)
+        account = await service.create_account(
+            PaperAccountCreateRequest(
+                starting_balance=Decimal("100000"),
+                max_position_size_pct=GENEROUS_MAX_PCT,
+                max_exposure_pct=GENEROUS_MAX_PCT,
+                max_drawdown_pct=GENEROUS_MAX_PCT,
+            )
+        )
+        account_id = uuid.UUID(account.id)
+
+        with pytest.raises(InvalidTakeProfitPriceError):
+            await service.place_order(
+                account_id,
+                PaperOrderRequest(
+                    symbol="PTVALTPUSD",
+                    side="buy",
+                    quantity=Decimal("1"),
+                    take_profit_price=Decimal("1000"),
+                ),
+            )
+
+    async def test_a_sell_can_never_carry_thresholds(self) -> None:
+        with pytest.raises(ValueError, match="only apply to a buy"):
+            PaperOrderRequest(
+                symbol="PTVALSELLUSD",
+                side="sell",
+                quantity=Decimal("1"),
+                stop_loss_price=Decimal("900"),
+            )
+
+    async def test_valid_thresholds_are_set_at_order_open_time(
+        self, session_factory: SessionFactory
+    ) -> None:
+        await seed_market(session_factory, symbol="PTVALOKUSD")
+        bus = EventBus()
+        state_manager = MarketStateManager().attach(bus)
+        await publish_ticker(bus, "PTVALOKUSD", "1000")
+        service = build_service(session_factory, state_manager)
+        account = await service.create_account(
+            PaperAccountCreateRequest(
+                starting_balance=Decimal("100000"),
+                max_position_size_pct=GENEROUS_MAX_PCT,
+                max_exposure_pct=GENEROUS_MAX_PCT,
+                max_drawdown_pct=GENEROUS_MAX_PCT,
+            )
+        )
+        account_id = uuid.UUID(account.id)
+        await service.place_order(
+            account_id,
+            PaperOrderRequest(
+                symbol="PTVALOKUSD",
+                side="buy",
+                quantity=Decimal("1"),
+                stop_loss_price=Decimal("900"),
+                take_profit_price=Decimal("1100"),
+            ),
+        )
+
+        positions = await service.list_positions(account_id)
+        assert len(positions.positions) == 1
+        position = positions.positions[0]
+        assert float(position.stop_loss_price) == pytest.approx(900.0)
+        assert float(position.take_profit_price) == pytest.approx(1100.0)
+
+    async def test_a_later_buy_that_omits_thresholds_never_clears_an_existing_one(
+        self, session_factory: SessionFactory
+    ) -> None:
+        await seed_market(session_factory, symbol="PTVALKEEPUSD")
+        bus = EventBus()
+        state_manager = MarketStateManager().attach(bus)
+        await publish_ticker(bus, "PTVALKEEPUSD", "1000")
+        service = build_service(session_factory, state_manager)
+        account = await service.create_account(
+            PaperAccountCreateRequest(
+                starting_balance=Decimal("100000"),
+                max_position_size_pct=GENEROUS_MAX_PCT,
+                max_exposure_pct=GENEROUS_MAX_PCT,
+                max_drawdown_pct=GENEROUS_MAX_PCT,
+            )
+        )
+        account_id = uuid.UUID(account.id)
+        await service.place_order(
+            account_id,
+            PaperOrderRequest(
+                symbol="PTVALKEEPUSD",
+                side="buy",
+                quantity=Decimal("1"),
+                stop_loss_price=Decimal("900"),
+            ),
+        )
+
+        # A second buy of the same symbol, mentioning neither threshold.
+        await service.place_order(
+            account_id,
+            PaperOrderRequest(symbol="PTVALKEEPUSD", side="buy", quantity=Decimal("1")),
+        )
+
+        positions = await service.list_positions(account_id)
+        assert len(positions.positions) == 1
+        assert float(positions.positions[0].stop_loss_price) == pytest.approx(900.0)
+
+    async def test_stop_loss_and_take_profit_set_at_two_different_prices_are_cross_validated(
+        self, session_factory: SessionFactory
+    ) -> None:
+        """Each threshold is independently valid against *its own*
+        current price at the moment it's set — that alone doesn't stop a
+        high stop-loss and a low take-profit being set at two different
+        times as the price moves between them. This proves the cross-
+        check (`stop_loss_price < take_profit_price`) catches exactly
+        that gap: a take-profit set first while price is low, then a
+        stop-loss set later while price is high enough to individually
+        validate but that ends up numerically above the earlier
+        take-profit."""
+        await seed_market(session_factory, symbol="PTVALCROSSUSD")
+        bus = EventBus()
+        state_manager = MarketStateManager().attach(bus)
+        service = build_service(session_factory, state_manager)
+        account = await service.create_account(
+            PaperAccountCreateRequest(
+                starting_balance=Decimal("100000"),
+                max_position_size_pct=GENEROUS_MAX_PCT,
+                max_exposure_pct=GENEROUS_MAX_PCT,
+                max_drawdown_pct=GENEROUS_MAX_PCT,
+            )
+        )
+        account_id = uuid.UUID(account.id)
+
+        # Take-profit set first, while price is 1000 — 1100 is valid (above 1000).
+        await publish_ticker(bus, "PTVALCROSSUSD", "1000")
+        await service.place_order(
+            account_id,
+            PaperOrderRequest(
+                symbol="PTVALCROSSUSD",
+                side="buy",
+                quantity=Decimal("1"),
+                take_profit_price=Decimal("1100"),
+            ),
+        )
+
+        # Price rises; a stop-loss of 1150 is individually valid against
+        # the *new* current price (1200) but is >= the earlier take-profit (1100).
+        await publish_ticker(bus, "PTVALCROSSUSD", "1200")
+        with pytest.raises(StopLossNotBelowTakeProfitError):
+            await service.update_position_thresholds(
+                account_id,
+                "PTVALCROSSUSD",
+                PositionThresholdsUpdateRequest(stop_loss_price=Decimal("1150")),
+            )
+
+        # The existing, valid take-profit is untouched by the rejected attempt.
+        positions = await service.list_positions(account_id)
+        assert float(positions.positions[0].take_profit_price) == pytest.approx(1100.0)
+        assert positions.positions[0].stop_loss_price is None
+
+
+@pytest.mark.asyncio
+class TestUpdatePositionThresholds:
+    """`update_position_thresholds` — the dedicated set/update/clear
+    endpoint, independent of placing any order."""
+
+    async def test_sets_both_thresholds_on_an_existing_position(
+        self, session_factory: SessionFactory
+    ) -> None:
+        await seed_market(session_factory, symbol="PTUPDATESETUSD")
+        bus = EventBus()
+        state_manager = MarketStateManager().attach(bus)
+        await publish_ticker(bus, "PTUPDATESETUSD", "1000")
+        service = build_service(session_factory, state_manager)
+        account = await service.create_account(
+            PaperAccountCreateRequest(starting_balance=Decimal("100000"))
+        )
+        account_id = uuid.UUID(account.id)
+        await service.place_order(
+            account_id,
+            PaperOrderRequest(symbol="PTUPDATESETUSD", side="buy", quantity=Decimal("1")),
+        )
+
+        updated = await service.update_position_thresholds(
+            account_id,
+            "PTUPDATESETUSD",
+            PositionThresholdsUpdateRequest(
+                stop_loss_price=Decimal("900"), take_profit_price=Decimal("1100")
+            ),
+        )
+        assert float(updated.stop_loss_price) == pytest.approx(900.0)
+        assert float(updated.take_profit_price) == pytest.approx(1100.0)
+
+    async def test_omitting_a_field_leaves_it_unchanged(
+        self, session_factory: SessionFactory
+    ) -> None:
+        await seed_market(session_factory, symbol="PTUPDATEKEEPUSD")
+        bus = EventBus()
+        state_manager = MarketStateManager().attach(bus)
+        await publish_ticker(bus, "PTUPDATEKEEPUSD", "1000")
+        service = build_service(session_factory, state_manager)
+        account = await service.create_account(
+            PaperAccountCreateRequest(starting_balance=Decimal("100000"))
+        )
+        account_id = uuid.UUID(account.id)
+        await service.place_order(
+            account_id,
+            PaperOrderRequest(
+                symbol="PTUPDATEKEEPUSD",
+                side="buy",
+                quantity=Decimal("1"),
+                stop_loss_price=Decimal("900"),
+                take_profit_price=Decimal("1100"),
+            ),
+        )
+
+        # Only stop_loss_price is named — take_profit_price is *omitted*,
+        # not sent as null, so it must survive untouched.
+        updated = await service.update_position_thresholds(
+            account_id,
+            "PTUPDATEKEEPUSD",
+            PositionThresholdsUpdateRequest(stop_loss_price=Decimal("950")),
+        )
+        assert float(updated.stop_loss_price) == pytest.approx(950.0)
+        assert float(updated.take_profit_price) == pytest.approx(1100.0)
+
+    async def test_an_explicit_null_clears_a_threshold(
+        self, session_factory: SessionFactory
+    ) -> None:
+        await seed_market(session_factory, symbol="PTUPDATECLEARUSD")
+        bus = EventBus()
+        state_manager = MarketStateManager().attach(bus)
+        await publish_ticker(bus, "PTUPDATECLEARUSD", "1000")
+        service = build_service(session_factory, state_manager)
+        account = await service.create_account(
+            PaperAccountCreateRequest(starting_balance=Decimal("100000"))
+        )
+        account_id = uuid.UUID(account.id)
+        await service.place_order(
+            account_id,
+            PaperOrderRequest(
+                symbol="PTUPDATECLEARUSD",
+                side="buy",
+                quantity=Decimal("1"),
+                stop_loss_price=Decimal("900"),
+                take_profit_price=Decimal("1100"),
+            ),
+        )
+
+        # stop_loss_price explicitly null — cleared, not left unchanged;
+        # take_profit_price omitted — untouched.
+        updated = await service.update_position_thresholds(
+            account_id,
+            "PTUPDATECLEARUSD",
+            PositionThresholdsUpdateRequest(stop_loss_price=None),
+        )
+        assert updated.stop_loss_price is None
+        assert float(updated.take_profit_price) == pytest.approx(1100.0)
+
+    async def test_raises_for_an_account_with_no_open_position_in_this_symbol(
+        self, session_factory: SessionFactory
+    ) -> None:
+        await seed_market(session_factory, symbol="PTUPDATENOPOSUSD")
+        state_manager = MarketStateManager()
+        service = build_service(session_factory, state_manager)
+        account = await service.create_account(
+            PaperAccountCreateRequest(starting_balance=Decimal("100000"))
+        )
+        account_id = uuid.UUID(account.id)
+
+        with pytest.raises(PositionNotFoundError):
+            await service.update_position_thresholds(
+                account_id,
+                "PTUPDATENOPOSUSD",
+                PositionThresholdsUpdateRequest(stop_loss_price=Decimal("900")),
+            )

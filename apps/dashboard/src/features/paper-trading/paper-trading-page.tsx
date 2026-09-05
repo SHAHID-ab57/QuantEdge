@@ -16,6 +16,7 @@ import { OrderForm, type OrderFormValues } from './components/order-form';
 import { OrderHistoryTable } from './components/order-history-table';
 import { PositionsTable } from './components/positions-table';
 import { RiskSummaryPanel } from './components/risk-summary-panel';
+import { SetThresholdsDialog } from './components/set-thresholds-dialog';
 import {
   useCreatePaperAccount,
   usePaperAccount,
@@ -26,6 +27,7 @@ import {
   usePaperTradingRisk,
   usePlacePaperOrder,
   useResumeTrading,
+  useUpdatePositionThresholds,
 } from './hooks/use-paper-trading-data';
 import { usePaperTradingAccountStore } from './store/use-paper-trading-account-store';
 
@@ -47,6 +49,7 @@ export function PaperTradingPage() {
   const { accountId, setAccountId } = usePaperTradingAccountStore();
   const [creating, setCreating] = useState(false);
   const [ordersPage, setOrdersPage] = useState(1);
+  const [editingThresholdsFor, setEditingThresholdsFor] = useState<string | null>(null);
 
   const account = usePaperAccount(accountId);
   const summary = usePaperPortfolioSummary(accountId);
@@ -61,6 +64,7 @@ export function PaperTradingPage() {
   const createAccount = useCreatePaperAccount();
   const placeOrder = usePlacePaperOrder(accountId);
   const resumeTrading = useResumeTrading(accountId);
+  const updateThresholds = useUpdatePositionThresholds(accountId);
 
   // The remembered id might no longer exist (e.g. a fresh database) —
   // fall back to "no account" rather than a permanent error banner.
@@ -81,8 +85,30 @@ export function PaperTradingPage() {
 
   const handlePlaceOrder = (values: OrderFormValues) => {
     setOrdersPage(1);
-    placeOrder.mutate({ symbol: values.symbol, side: values.side, quantity: values.quantity });
+    placeOrder.mutate({
+      symbol: values.symbol,
+      side: values.side,
+      quantity: values.quantity,
+      stop_loss_price: values.stopLossPrice,
+      take_profit_price: values.takeProfitPrice,
+    });
   };
+
+  const handleSaveThresholds = (values: {
+    stopLossPrice: string | null;
+    takeProfitPrice: string | null;
+  }) => {
+    if (!editingThresholdsFor) return;
+    updateThresholds.mutate(
+      {
+        symbol: editingThresholdsFor,
+        body: { stop_loss_price: values.stopLossPrice, take_profit_price: values.takeProfitPrice },
+      },
+      { onSuccess: () => setEditingThresholdsFor(null) },
+    );
+  };
+
+  const editingPosition = positions.data?.positions.find((p) => p.symbol === editingThresholdsFor);
 
   const selectedAccountOption = accounts.data?.accounts.find((a) => a.id === accountId) ?? null;
 
@@ -187,7 +213,20 @@ export function PaperTradingPage() {
       </Section>
 
       <Section title="Positions" subtitle="Every symbol this account currently holds">
-        <PositionsTable data={positions.data} isLoading={positions.isLoading} />
+        <Stack spacing={1}>
+          <PositionsTable
+            data={positions.data}
+            isLoading={positions.isLoading}
+            onEditThresholds={setEditingThresholdsFor}
+          />
+          {updateThresholds.isError ? (
+            <Alert severity="error" role="alert">
+              {updateThresholds.error instanceof Error
+                ? updateThresholds.error.message
+                : 'Could not update stop-loss/take-profit.'}
+            </Alert>
+          ) : null}
+        </Stack>
       </Section>
 
       <Section
@@ -208,6 +247,16 @@ export function PaperTradingPage() {
         submitting={createAccount.isPending}
         onCancel={() => setCreating(false)}
         onCreate={handleCreate}
+      />
+
+      <SetThresholdsDialog
+        open={editingThresholdsFor !== null}
+        symbol={editingThresholdsFor}
+        currentStopLossPrice={editingPosition?.stop_loss_price ?? null}
+        currentTakeProfitPrice={editingPosition?.take_profit_price ?? null}
+        submitting={updateThresholds.isPending}
+        onCancel={() => setEditingThresholdsFor(null)}
+        onSave={handleSaveThresholds}
       />
     </Stack>
   );

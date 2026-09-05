@@ -29,6 +29,7 @@ pipeline in scope at the same time).
 
 import logging
 import uuid
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from time import perf_counter
@@ -179,6 +180,7 @@ class MLDatasetBuilder:
         drop_warmup: bool = True,
         drop_undefined_targets: bool = True,
         split_ratios: SplitRatios | None = None,
+        external_data: Mapping[str, Sequence[Any]] | None = None,
     ) -> MLDataset:
         """Build, validate, and split one ML dataset.
 
@@ -189,10 +191,24 @@ class MLDatasetBuilder:
         target values onto the warmup-trimmed rows by timestamp → trim
         trailing rows with an undefined target → validate the assembled
         matrix → split it chronologically.
+
+        `external_data` is passed straight through to the feature half —
+        see `FeatureDatasetBuilder.build`'s own docstring. Threading it
+        through here too (not just `app.services.features.FeatureService
+        .build_raw`'s own live-dataset path) is what keeps a
+        connector-backed feature like `fear_greed` computing identically
+        whether a dataset is being previewed or actually trained on — the
+        no train/serve skew guarantee `app.features.base`'s own module
+        docstring states as this whole context's reason to exist.
         """
         ratios = split_ratios or SplitRatios()
         feature_dataset = self._feature_builder.build(
-            symbol, timeframe, candles, feature_requests, drop_warmup=drop_warmup
+            symbol,
+            timeframe,
+            candles,
+            feature_requests,
+            drop_warmup=drop_warmup,
+            external_data=external_data,
         )
 
         owner_of_column: dict[str, str] = {}

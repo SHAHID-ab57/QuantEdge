@@ -15,9 +15,15 @@ from app.models.experiment import (
     ExperimentMetric,
     ExperimentTag,
 )
+from app.models.external_data import ExternalDataPoint
 from app.models.market import Market
 from app.models.ml_dataset_build import MLDatasetBuild
-from app.models.paper_trading import PaperAccount, PaperOrder, PaperPosition
+from app.models.paper_trading import (
+    PaperAccount,
+    PaperOrder,
+    PaperPosition,
+    PaperStrategyDecision,
+)
 from app.models.prediction import Prediction
 from app.models.training import TrainingJob, TrainingJobLog
 
@@ -32,11 +38,13 @@ __all__ = [
     "ExperimentArtifact",
     "ExperimentMetric",
     "ExperimentTag",
+    "ExternalDataPoint",
     "Market",
     "MLDatasetBuild",
     "PaperAccount",
     "PaperOrder",
     "PaperPosition",
+    "PaperStrategyDecision",
     "Prediction",
     "TrainingJob",
     "TrainingJobLog",

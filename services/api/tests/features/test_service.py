@@ -14,6 +14,7 @@ from app.features.errors import FeatureNotFoundError
 from app.features.pipeline import FeaturePipeline
 from app.features.registry import default_registry
 from app.repositories.candles import CandleRepository
+from app.repositories.external_data import ExternalDataRepository
 from app.repositories.markets import MarketRepository
 from app.schemas.features import FeatureDatasetRequest, FeatureRequestItem
 from app.services.features import FeatureService
@@ -34,6 +35,7 @@ def build_service(session_factory: SessionFactory) -> FeatureService:
     return FeatureService(
         candle_repository=CandleRepository(session),
         market_repository=MarketRepository(session),
+        external_data_repository=ExternalDataRepository(session),
         builder=FeatureDatasetBuilder(FeaturePipeline(default_registry)),
         default_limit=100,
         max_limit=1000,

@@ -108,12 +108,22 @@ class FeaturePipeline:
         name: str,
         candles: Sequence[OHLCVPoint],
         raw_params: Mapping[str, Any] | None = None,
+        *,
+        external_data: Mapping[str, Sequence[Any]] | None = None,
     ) -> FeatureRun:
         """Generate one feature's columns over ``candles``.
 
         ``raw_params`` may hold un-coerced values (strings from a query or
         JSON layer); they are validated against the generator's own specs
         before anything is computed.
+
+        ``external_data`` is passed straight through to
+        ``FeatureContext.external_data`` for a generator that declares
+        ``metadata.external_sources`` — see that field's own docstring.
+        Omitted by every caller that never requested such a feature, which
+        is every caller of this method except
+        ``app.services.features.FeatureService.build_raw`` /
+        ``app.services.ml_datasets.MLDatasetService``.
         """
         started = perf_counter()
         generator = self._registry.get(name)
@@ -129,7 +139,14 @@ class FeaturePipeline:
         if len(candles) < warmup:
             raise InsufficientFeatureDataError(name, warmup, len(candles))
 
-        cached, key = self._lookup(name, params, candles)
+        # A generator backed by external connector data is never cached:
+        # `FeatureCacheKey` fingerprints candles/params only, so a cache
+        # hit here could silently serve a result computed before a newer
+        # data point existed — staleness this platform's cache exists to
+        # avoid, not reproduce. Always a "disabled" miss for this one
+        # generator, never a correctness trade-off for a speed gain.
+        skip_cache = bool(metadata.external_sources)
+        cached, key = (None, None) if skip_cache else self._lookup(name, params, candles)
         if cached is not None:
             return FeatureRun(
                 metadata=metadata,
@@ -140,7 +157,10 @@ class FeaturePipeline:
                 execution_time_ms=(perf_counter() - started) * 1000,
             )
 
-        output = self._generate(generator, FeatureContext(candles=candles, params=params))
+        output = self._generate(
+            generator,
+            FeatureContext(candles=candles, params=params, external_data=external_data or {}),
+        )
         self._verify_alignment(name, output, len(candles))
         self._verify_unique_columns(name, output)
 
@@ -160,7 +180,7 @@ class FeaturePipeline:
             params=params,
             output=output,
             warmup=warmup,
-            cache_status="miss" if self._cache is not None else "disabled",
+            cache_status="miss" if self._cache is not None and not skip_cache else "disabled",
             execution_time_ms=elapsed_ms,
         )
 

@@ -26,6 +26,7 @@ only one that sees more than one generator at a time:
 
 import logging
 import uuid
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from time import perf_counter
@@ -176,8 +177,18 @@ class FeatureDatasetBuilder:
         requests: list[FeatureRequest],
         *,
         drop_warmup: bool = True,
+        external_data: Mapping[str, Sequence[Any]] | None = None,
     ) -> FeatureDataset:
         """Run every requested feature over ``candles`` and assemble the matrix.
+
+        ``external_data`` is passed straight through to every requested
+        generator's own `FeaturePipeline.run` call — see
+        `FeatureContext.external_data`'s own docstring. Omitted by any
+        caller that never resolved a connector-backed feature's declared
+        sources (which is every caller except the two dataset-building
+        services); a generator that needs a source it wasn't given simply
+        produces `None` for every row, the same "not available" outcome
+        an under-sized warmup already produces, never an error.
 
         ``drop_warmup`` defaults to ``True`` because the output is a
         *dataset*: a training matrix must not contain nulls, and the
@@ -211,7 +222,9 @@ class FeatureDatasetBuilder:
         generation_started = perf_counter()
         for request in requests:
             try:
-                run = self._pipeline.run(request.feature, candles, request.params)
+                run = self._pipeline.run(
+                    request.feature, candles, request.params, external_data=external_data
+                )
             except _REQUEST_ERRORS as exc:
                 failures.append(
                     FeatureFailure(

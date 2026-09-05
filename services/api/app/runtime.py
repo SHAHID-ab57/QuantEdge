@@ -31,6 +31,12 @@ Unlike the monitor, it is *not* always-on: the real per-account opt-in
 (``PaperAccount.strategy_enabled``, off by default) lives in the
 database, not here — this flag only controls whether the loop that
 checks for enabled accounts runs at all.
+
+``app.services.external_data_sync.ExternalDataSyncScheduler`` (External
+Data Connectors — ``app/connectors/``) is wired in the same way as
+``CandleSyncScheduler``: gated on ``external_data_sync_enabled``,
+database-optional, keeping every registered connector's own stored data
+current on its own interval.
 """
 
 import logging
@@ -52,6 +58,7 @@ from app.marketdata.gateway import MarketStreamGateway
 from app.marketdata.orderbook import OrderBookAggregator
 from app.paper_trading.monitor import StopLossTakeProfitMonitor
 from app.services.candle_sync import CandleSyncScheduler
+from app.services.external_data_sync import ExternalDataSyncScheduler
 from app.services.grading_scheduler import PredictionGradingScheduler
 from app.services.paper_trading_strategy import PaperTradingStrategyScheduler
 from app.state import MarketStateManager
@@ -130,6 +137,7 @@ class Runtime:
         self.candle_sync: CandleSyncScheduler | None = None
         self.prediction_grading: PredictionGradingScheduler | None = None
         self.paper_trading_strategy: PaperTradingStrategyScheduler | None = None
+        self.external_data_sync: ExternalDataSyncScheduler | None = None
         self.last_ws_message_at: datetime | None = None
         self.last_rest_request_at: datetime | None = None
 
@@ -184,6 +192,18 @@ class Runtime:
                 interval_seconds=settings.paper_trading_strategy_interval_seconds,
             )
             await self.paper_trading_strategy.start()
+        if settings.external_data_sync_enabled:
+            configured_sources = [
+                part.strip()
+                for part in settings.external_data_sync_sources.split(",")
+                if part.strip()
+            ] or None
+            self.external_data_sync = ExternalDataSyncScheduler(
+                sources=configured_sources,
+                interval_seconds=settings.external_data_sync_interval_seconds,
+                backfill_days=settings.external_data_sync_backfill_days,
+            )
+            await self.external_data_sync.start()
 
     async def shutdown(self) -> None:
         """Stop the WebSocket client, the candle sync/grading loops, and drain handlers."""
@@ -199,6 +219,10 @@ class Runtime:
         if paper_trading_strategy is not None:
             await paper_trading_strategy.stop()
             self.paper_trading_strategy = None
+        external_data_sync = self.external_data_sync
+        if external_data_sync is not None:
+            await external_data_sync.stop()
+            self.external_data_sync = None
         ws = self.delta_ws
         if ws is not None:
             await ws.close()

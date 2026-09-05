@@ -175,6 +175,32 @@ class Settings(BaseSettings):
     paper_trading_strategy_decisions_default_limit: int = 20
     paper_trading_strategy_decisions_max_limit: int = 100
 
+    #: Alternative.me's free, unauthenticated Fear & Greed Index API
+    #: (`app/connectors/fear_greed.py`) — no API key, no signing, unlike
+    #: Delta. `fear_greed_request_timeout` mirrors `delta_request_timeout`'s
+    #: own role for this connector's own HTTP client.
+    fear_greed_base_url: str = "https://api.alternative.me"
+    fear_greed_request_timeout: float = 10.0
+
+    #: Periodic external data sync (`app.services.external_data_sync
+    #: .ExternalDataSyncScheduler`) — mirrors `candle_sync_enabled`/
+    #: `candle_sync_interval_seconds` exactly: a lightweight in-process
+    #: loop, its own enable flag, no queue/broker. Fear & Greed itself
+    #: updates once daily, so the default interval is deliberately much
+    #: longer than `candle_sync_interval_seconds`'s own 300s — there is
+    #: nothing new to fetch more often than that.
+    external_data_sync_enabled: bool = True
+    external_data_sync_interval_seconds: int = 3600
+    #: Comma-separated connector source names to keep synced; every
+    #: registered connector when empty (mirrors `candle_sync_symbols`'s
+    #: own "empty means resolve a sensible default" convention).
+    external_data_sync_sources: str = ""
+    #: Window seeded for a source with no stored data points yet — wider
+    #: than `candle_sync_backfill_days`'s own default (7d), since this is
+    #: a much lower-volume, lower-frequency data source and a full history
+    #: is cheap to fetch in one request (see `FearGreedConnector.fetch`).
+    external_data_sync_backfill_days: int = 3650
+
 
 @lru_cache
 def get_settings() -> Settings:

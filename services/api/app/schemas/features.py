@@ -74,6 +74,14 @@ class FeatureDTO(BaseModel):
         default=False,
         description="Whether this generator can produce nulls beyond its declared warmup",
     )
+    external_sources: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Registered connector sources this generator reads (see "
+            "'External Data Connectors' in ARCHITECTURE.md) — empty for every "
+            "generator computed purely from candle data"
+        ),
+    )
 
     @classmethod
     def from_metadata(cls, metadata: FeatureMetadata) -> "FeatureDTO":
@@ -95,6 +103,7 @@ class FeatureDTO(BaseModel):
             dependencies=list(metadata.dependencies),
             is_deterministic=metadata.is_deterministic,
             missing_values_expected=metadata.missing_values_expected,
+            external_sources=list(metadata.external_sources),
         )
 
 

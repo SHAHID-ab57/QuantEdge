@@ -18,15 +18,18 @@ and a feature's parameters *are* validated the same way an indicator's are;
 two parallel definitions of either would be a guaranteed source of drift.
 """
 
+import bisect
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, ClassVar, Literal
 
 from app.indicators.base import OHLCVPoint
 from app.indicators.params import ParameterSpec
 
 __all__ = [
+    "ExternalDataPoint",
     "FeatureColumn",
     "FeatureContext",
     "FeatureGenerator",
@@ -36,6 +39,7 @@ __all__ = [
     "FeatureValue",
     "OHLCVPoint",
     "ParameterSpec",
+    "most_recent_value_at_or_before",
 ]
 
 #: What one cell of a dataset may hold. ``None`` marks a warmup position
@@ -46,6 +50,46 @@ FeatureValue = float | int | bool | str | None
 #: The declared type of a feature column, for consumers that need to know
 #: how to encode it (a model needs to one-hot a categorical, not scale it).
 FeatureDType = Literal["float", "int", "bool", "categorical"]
+
+
+@dataclass(frozen=True, slots=True)
+class ExternalDataPoint:
+    """One external data point, reduced to what a generator's own as-of
+    lookup actually needs — `timestamp` and `value` only, the same
+    "reduced view of the stored row" role `OHLCVPoint` plays for a
+    `Candle`. Deliberately not `app.connectors.base.RawDataPoint` (which
+    also carries `symbol`/`raw_payload`, neither of which feature math
+    needs) and not the ORM row itself — this module stays
+    framework/database-free, the same discipline every other type here
+    already follows.
+    """
+
+    timestamp: datetime
+    value: float
+
+
+def most_recent_value_at_or_before(
+    points: Sequence[ExternalDataPoint], at: datetime
+) -> float | None:
+    """The most recent `value` from `points` observed at or before `at`.
+
+    `points` must already be sorted ascending by `timestamp` — the order
+    `app.repositories.external_data.ExternalDataRepository.list_between`
+    already returns. Returns `None` when there are no points at all, or
+    every one of them is *after* `at` — this is the whole no-look-ahead
+    guarantee: a point with `timestamp > at` is structurally invisible to
+    this lookup, regardless of when it was actually ingested (which could
+    be long after `at`, for a backfilled point, or before `at`, for one
+    ingested in real time — neither ever matters here, only `timestamp`
+    does). `bisect_right` with a `key=` (Python 3.10+) finds the
+    insertion point in O(log n) without rebuilding a parallel timestamp
+    list on every call — this runs once per candle, so that matters for
+    anything beyond a tiny dataset.
+    """
+    index = bisect.bisect_right(points, at, key=lambda point: point.timestamp) - 1
+    if index < 0:
+        return None
+    return points[index].value
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,15 +138,30 @@ class FeatureOutput:
 
 @dataclass(frozen=True, slots=True)
 class FeatureContext:
-    """Everything a generator is given: the candles and its parameters.
+    """Everything a generator is given: the candles, its parameters, and
+    any pre-fetched external connector data it declared a need for.
 
     ``params`` is always complete and already coerced/validated against the
     generator's own ``ParameterSpec`` list — an implementation never has to
     re-check a bound, supply a default, or parse a string.
+
+    ``external_data`` is keyed by connector source name (e.g.
+    ``"fear_greed"``) and pre-loaded, in full, by whichever service builds
+    this context (``app.services.features.FeatureService.build_raw`` /
+    ``app.services.ml_datasets.MLDatasetService``) *before* generation
+    ever starts — the same reason candles themselves are loaded once
+    upstream rather than fetched lazily. This keeps ``generate()`` itself
+    synchronous and database-free: a generator that needs a source
+    declares it via ``FeatureMetadata.external_sources`` and reads
+    ``ctx.external_data[source]`` (via ``most_recent_value_at_or_before``,
+    above) — it never queries anything itself. Empty by default so every
+    existing generator, and every existing direct construction of this
+    dataclass, keeps working unchanged.
     """
 
     candles: Sequence[OHLCVPoint]
     params: Mapping[str, Any]
+    external_data: Mapping[str, Sequence[ExternalDataPoint]] = field(default_factory=dict)
 
     def int_param(self, name: str) -> int:
         """Read a validated ``int`` parameter."""
@@ -176,6 +235,17 @@ class FeatureMetadata:
     #: ``ARCHITECTURE.md`` § "Feature Engineering Engine" for the full
     #: extension-point rationale.
     dependencies: tuple[str, ...] = field(default_factory=tuple)
+    #: Registered connector *source* names (``app.connectors.registry
+    #: .ConnectorMetadata.source``, e.g. ``"fear_greed"``) this generator
+    #: needs pre-fetched into ``FeatureContext.external_data`` before it
+    #: can run. Unlike ``dependencies`` (other *features*), this is never
+    #: validated against a features-only registry — the dataset-building
+    #: service resolves each declared source directly against the
+    #: connector registry and pre-fetches it (see that field's own
+    #: docstring on ``FeatureContext``). Empty for every generator that
+    #: only needs candles, which is every one of them except
+    #: ``fear_greed``.
+    external_sources: tuple[str, ...] = field(default_factory=tuple)
     #: Whether repeated calls with identical candles and parameters always
     #: produce identical output. True for every generator today (plain
     #: arithmetic over fixed inputs); exists for a future generator with

@@ -21,6 +21,7 @@ from app.features.export import EXPORT_FORMATS, dataset_filename
 from app.features.lineage import build_lineage_graph
 from app.features.statistics import compute_dataset_statistics
 from app.repositories.candles import CandleRepository
+from app.repositories.external_data import ExternalDataRepository
 from app.repositories.markets import MarketRepository
 from app.schemas.features import (
     FeatureCatalogResponse,
@@ -33,6 +34,7 @@ from app.schemas.features import (
     FeatureStatisticsResponse,
 )
 from app.services.candle_points import load_candle_points
+from app.services.external_data_context import resolve_external_data
 from app.services.market_query import validate_limit
 
 logger = logging.getLogger("app.services.features")
@@ -59,6 +61,7 @@ class FeatureService:
 
     candle_repository: CandleRepository
     market_repository: MarketRepository
+    external_data_repository: ExternalDataRepository
     builder: FeatureDatasetBuilder
     default_limit: int
     max_limit: int
@@ -201,12 +204,20 @@ class FeatureService:
             limit=widened if widened is not None else request.limit,
         )
 
+        external_data = await resolve_external_data(
+            pipeline=self.builder.pipeline,
+            requests=requests,
+            candles=loaded.points,
+            repository=self.external_data_repository,
+        )
+
         dataset = self.builder.build(
             symbol,
             request.timeframe,
             loaded.points,
             requests,
             drop_warmup=request.drop_warmup,
+            external_data=external_data,
         )
         # `limit` means "rows in the dataset", not "candles loaded": the
         # extra candles above were read solely to satisfy warmup, and

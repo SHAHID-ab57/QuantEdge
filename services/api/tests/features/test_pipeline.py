@@ -18,6 +18,7 @@ from app.features.base import (
     FeatureMetadata,
     FeatureOutput,
     FeatureSeries,
+    FeatureValue,
     OHLCVPoint,
     ParameterSpec,
 )
@@ -164,7 +165,7 @@ class RepeatedColumn(FeatureGenerator):
     )
 
     def generate(self, ctx: FeatureContext) -> FeatureOutput:
-        values = [1.0] * len(ctx.candles)
+        values: list[FeatureValue] = [1.0] * len(ctx.candles)
         column = FeatureColumn(name="same", label="Same")
         return FeatureOutput(
             series=[
@@ -206,6 +207,28 @@ class Counting(FeatureGenerator):
         return one_column("count", [float(Counting.calls)] * len(ctx.candles))
 
 
+class ExternallySourced(FeatureGenerator):
+    """Declares `external_sources` — the connector-backed cache-bypass probe.
+
+    Otherwise identical to `Counting`: `generate()` is instrumented so a
+    test can tell "skipped the cache" from "happened to recompute the same
+    value" even with a real `FeatureCache` wired in.
+    """
+
+    metadata = FeatureMetadata(
+        name="externally_sourced",
+        label="Externally Sourced",
+        description="Counts its own calls; declares an external source.",
+        category="test",
+        external_sources=("fake_source",),
+    )
+    calls: int = 0
+
+    def generate(self, ctx: FeatureContext) -> FeatureOutput:
+        ExternallySourced.calls += 1
+        return one_column("count", [float(ExternallySourced.calls)] * len(ctx.candles))
+
+
 @pytest.fixture
 def pipeline() -> FeaturePipeline:
     """An isolated pipeline holding only this module's test generators."""
@@ -229,8 +252,9 @@ def pipeline() -> FeaturePipeline:
 def cached_pipeline() -> FeaturePipeline:
     """The same test registry, wired to a real `FeatureCache`."""
     Counting.calls = 0
+    ExternallySourced.calls = 0
     registry = FeatureRegistry()
-    for cls in (Doubler, Counting):
+    for cls in (Doubler, Counting, ExternallySourced):
         registry.register(cls)
     return FeaturePipeline(registry, FeatureCache())
 
@@ -433,3 +457,18 @@ class TestCache:
         run = cached_pipeline.run("counting", candles(2))
         assert run.metadata.name == "counting"
         assert run.warmup == 0
+
+    def test_a_generator_declaring_external_sources_never_hits_even_with_a_cache_wired(
+        self, cached_pipeline: FeaturePipeline
+    ) -> None:
+        """`FeatureCacheKey` only fingerprints candles and parameters, never
+        a connector's own freshness — so a generator naming
+        `external_sources` must bypass the cache on *every* call, not just
+        the first. Proven the same way `Counting` proves a genuine hit:
+        by an actual call counter, not by comparing output values (which
+        would look identical either way here)."""
+        first = cached_pipeline.run("externally_sourced", candles(2))
+        second = cached_pipeline.run("externally_sourced", candles(2))
+        assert first.cache_status == "disabled"
+        assert second.cache_status == "disabled"
+        assert ExternallySourced.calls == 2  # generate() ran both times, never skipped

@@ -245,10 +245,14 @@ unchanged.
 | POST   | `/api/v1/markets/{symbol}/features/statistics`  | Build the same dataset and summarize every column, complete   |
 
 Registered today: `ohlcv` (`category: "raw"`), `candle_shape`
-(`price_action`), and `sma`/`ema`/`wma` (`trend`). The set is queried from
-`GET /api/v1/features` at runtime, never hardcoded by a client; see
-`ARCHITECTURE.md` § "Feature Engineering Engine" for how a new generator
-joins this list with no API change.
+(`price_action`), `sma`/`ema`/`wma` (`trend`), and `fear_greed`
+(`sentiment`). The set is queried from `GET /api/v1/features` at
+runtime, never hardcoded by a client; see `ARCHITECTURE.md` § "Feature
+Engineering Engine" for how a new generator joins this list with no API
+change, and § "External Data Connectors" for `fear_greed` specifically —
+its own value comes from a registered connector
+(`app/connectors/fear_greed.py`), not from candle math, but it is
+requested and returned exactly like every other feature.
 
 **The catalogue is the contract**, exactly as for indicators — each entry
 publishes every parameter's type, bounds, choices, default, and
@@ -256,16 +260,24 @@ required-ness, so a client builds a correctly-constrained selection form
 from this response alone. Entries carry the same engineering metadata
 (`version`, `author`, `complexity`, `warmup_description`, `aliases`) plus
 `outputs`, the column-name templates the generator produces (e.g.
-`["sma_{period}"]`), and five additive fields from the production-hardening
+`["sma_{period}"]`), five additive fields from the production-hardening
 pass: `unit` (e.g. `"price"`, `""` when not applicable), `value_type`
 (`"float"` / `"categorical"` / `"mixed"`), `dependencies` (other feature
 names this one requires in the same request — empty for every generator
 shipped today), `is_deterministic` (always `true` currently — reserved for
 a future stochastic generator), and `missing_values_expected` (whether nulls
 beyond warmup are a normal outcome, e.g. `candle_shape`'s normalized wick
-ratios on a flat candle). A feature declaring `dependencies` that is
-requested without them yields `missing_feature_dependency` (400) — see
-"Feature-specific error codes" below.
+ratios on a flat candle); and one further additive field from the External
+Data Connectors work: `external_sources` — the connector source names (see
+`ARCHITECTURE.md` § "External Data Connectors") this generator reads instead
+of, or alongside, candle data — empty for every generator except
+`fear_greed` (`("fear_greed",)`). A feature declaring `external_sources` is
+never served from the feature cache (`cache_status` reports `"disabled"`,
+not `"miss"`, for that column), because the cache key fingerprints candles
+and parameters only, never a connector's own freshness. A feature declaring
+`dependencies` that is requested without them yields
+`missing_feature_dependency` (400) — see "Feature-specific error codes"
+below.
 
 `version` is a **generator-level** semver, bumped when a change would alter
 previously-computed values — so a dataset recorded against 1.0.0 is known

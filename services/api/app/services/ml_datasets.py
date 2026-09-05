@@ -20,6 +20,7 @@ from app.ml_datasets.split import ChronologicalSplitter
 from app.ml_datasets.targets import load_builtin_targets
 from app.models.ml_dataset_build import MLDatasetBuild
 from app.repositories.candles import CandleRepository
+from app.repositories.external_data import ExternalDataRepository
 from app.repositories.markets import MarketRepository
 from app.repositories.ml_dataset_builds import (
     SORT_COLUMNS,
@@ -38,6 +39,7 @@ from app.schemas.ml_datasets import (
     TargetDTO,
 )
 from app.services.candle_points import load_candle_points
+from app.services.external_data_context import resolve_external_data
 from app.services.market_query import validate_limit
 
 logger = logging.getLogger("app.services.ml_datasets")
@@ -58,6 +60,7 @@ class MLDatasetService:
 
     candle_repository: CandleRepository
     market_repository: MarketRepository
+    external_data_repository: ExternalDataRepository
     builder: MLDatasetBuilder
     default_limit: int
     max_limit: int
@@ -249,6 +252,13 @@ class MLDatasetService:
             limit=widened if widened is not None else request.limit,
         )
 
+        external_data = await resolve_external_data(
+            pipeline=self.builder.feature_builder.pipeline,
+            requests=feature_requests,
+            candles=loaded.points,
+            repository=self.external_data_repository,
+        )
+
         ml_dataset = self.builder.build(
             symbol,
             request.timeframe,
@@ -258,6 +268,7 @@ class MLDatasetService:
             drop_warmup=request.drop_warmup,
             drop_undefined_targets=request.drop_undefined_targets,
             split_ratios=ratios,
+            external_data=external_data,
         )
         ml_dataset = _cap_rows(ml_dataset, resolved_limit)
         logger.info(

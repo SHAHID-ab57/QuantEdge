@@ -44,6 +44,12 @@ def _settings(**overrides: object) -> SimpleNamespace:
         "paper_trading_strategy_default_stop_loss_pct": Decimal("5"),
         "paper_trading_strategy_scheduler_enabled": False,
         "paper_trading_strategy_interval_seconds": 300,
+        # Read by `ExternalDataSyncScheduler`'s own construction in
+        # `Runtime.start` — mirrors `app/core/config.py`'s real defaults.
+        "external_data_sync_enabled": False,
+        "external_data_sync_interval_seconds": 3600,
+        "external_data_sync_sources": "",
+        "external_data_sync_backfill_days": 3650,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -134,6 +140,7 @@ async def test_start_and_shutdown_offline(monkeypatch: pytest.MonkeyPatch) -> No
     assert runtime.delta_ws is None
     assert runtime.candle_sync is None
     assert runtime.paper_trading_strategy is None
+    assert runtime.external_data_sync is None
 
     await shutdown_runtime()
     assert runtime_module._runtime is None
@@ -246,6 +253,39 @@ async def test_runtime_shutdown_stops_paper_trading_strategy(
     await runtime.shutdown()
     assert stopped == [True]
     assert runtime.paper_trading_strategy is None
+
+
+async def test_runtime_shutdown_stops_external_data_sync(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The external data sync scheduler is stopped when configured — the
+    same start/shutdown wiring `CandleSyncScheduler`/
+    `PredictionGradingScheduler`/`PaperTradingStrategyScheduler` already
+    get."""
+    stopped = []
+
+    class FakeExternalDataSync:
+        async def start(self) -> None:
+            pass
+
+        async def stop(self) -> None:
+            stopped.append(True)
+
+    monkeypatch.setattr(
+        runtime_module,
+        "get_settings",
+        lambda: _settings(external_data_sync_enabled=True),
+    )
+    monkeypatch.setattr(
+        runtime_module, "ExternalDataSyncScheduler", lambda **_: FakeExternalDataSync()
+    )
+
+    runtime = _runtime()
+    await runtime.start()
+    assert runtime.external_data_sync is not None
+    await runtime.shutdown()
+    assert stopped == [True]
+    assert runtime.external_data_sync is None
 
 
 async def test_delta_connection_none_when_not_running() -> None:

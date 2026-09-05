@@ -15,6 +15,7 @@ from app.features.dataset import FeatureDatasetBuilder
 from app.features.pipeline import FeaturePipeline
 from app.features.registry import default_registry
 from app.repositories.candles import CandleRepository
+from app.repositories.external_data import ExternalDataRepository
 from app.repositories.markets import MarketRepository
 from app.services.features import FeatureService
 
@@ -55,6 +56,7 @@ def get_feature_service(
     return FeatureService(
         candle_repository=CandleRepository(session),
         market_repository=MarketRepository(session),
+        external_data_repository=ExternalDataRepository(session),
         builder=get_dataset_builder(),
         default_limit=settings.candles_default_limit,
         max_limit=settings.candles_max_limit,

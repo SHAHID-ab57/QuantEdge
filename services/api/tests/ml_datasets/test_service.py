@@ -28,6 +28,7 @@ from app.ml_datasets.registry import default_registry as target_registry
 from app.ml_datasets.split import ChronologicalSplitter
 from app.ml_datasets.targets import load_builtin_targets
 from app.repositories.candles import CandleRepository
+from app.repositories.external_data import ExternalDataRepository
 from app.repositories.markets import MarketRepository
 from app.repositories.ml_dataset_builds import MLDatasetBuildRepository
 from app.schemas.features import FeatureRequestItem
@@ -46,6 +47,7 @@ def build_service(session_factory: SessionFactory) -> MLDatasetService:
     return MLDatasetService(
         candle_repository=CandleRepository(session),
         market_repository=MarketRepository(session),
+        external_data_repository=ExternalDataRepository(session),
         builder=MLDatasetBuilder(
             feature_builder=FeatureDatasetBuilder(FeaturePipeline(feature_registry)),
             target_pipeline=TargetPipeline(target_registry),

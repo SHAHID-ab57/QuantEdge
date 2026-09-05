@@ -33,7 +33,7 @@ a versioned dataset citation, a recorded experiment) — it is now complete.
 | 1         | Research & Training Platform                 | COMPLETE    |
 | 2         | Prediction & Backtesting                     | COMPLETE    |
 | 3         | Paper Trading & Risk                         | COMPLETE    |
-| 4         | Data Breadth                                 | NOT STARTED |
+| 4         | Data Breadth                                 | IN PROGRESS |
 | 5         | Production Hardening                         | NOT STARTED |
 | 6         | Live Trading (gated on extensive validation) | NOT STARTED |
 
@@ -119,11 +119,26 @@ engine beyond these account-level limits has not been started; see
 `docs/architecture/DomainModel.md`/`ContainerArchitecture.md` for the
 intended bounded contexts.
 
-**Milestone 4 — Data Breadth.** The additional external data connectors
-this platform has designed for but never implemented — Marketaux (news/
-sentiment), Etherscan (on-chain), FRED (macro), Alternative.me (Fear &
-Greed), DefiLlama (DeFi metrics), CoinGecko (market statistics). Not
-started; see `docs/architecture/SystemContext.md`.
+**Milestone 4 — Data Breadth (IN PROGRESS).** The additional external data
+connectors this platform has designed for but never implemented —
+Marketaux (news/sentiment), Etherscan (on-chain), FRED (macro),
+Alternative.me (Fear & Greed), DefiLlama (DeFi metrics), CoinGecko (market
+statistics); see `docs/architecture/SystemContext.md`. The reusable
+abstraction every one of these will sit on top of is now built — a
+`Connector` protocol and registry (mirroring `Normalizer`/`FeatureRegistry`),
+a generic `external_data_points` table (one table for every source, not
+one per source), and periodic ingestion mirroring `CandleSyncScheduler` —
+proved end to end by the first, lowest-risk connector: **Fear & Greed is
+done**, fetched, stored, and available as a real feature
+(`fear_greed`, verified to never look ahead), reaching the existing
+`/features` selector with zero frontend change. The remaining five
+sources (Marketaux, Etherscan, FRED, DefiLlama, CoinGecko) have not been
+started — each needs its own auth handling and response shape, unlike
+Fear & Greed's unauthenticated single daily value. Whether Fear & Greed
+(or any future source) actually improves predictions has deliberately not
+been evaluated — that depends on the backtest loop being independently
+confirmed reliable first. See `ARCHITECTURE.md` § "External Data
+Connectors".
 
 **Milestone 5 — Production Hardening.** Authentication/authorization (none
 exists on any route today), CI/CD (none exists — all quality gates are

@@ -8,6 +8,81 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **External Data Connectors: a reusable abstraction for ingesting
+  non-exchange data, proved end to end with the first concrete source —
+  the Fear & Greed Index.** Opens Milestone 4 (Data Breadth) — Fear &
+  Greed is the first of six sources named there (Marketaux, Etherscan,
+  FRED, DefiLlama, and CoinGecko remain unbuilt); no auth required, one
+  daily value, the lowest-risk possible first case.
+  - **`app/connectors/`: a `Connector` protocol + `ConnectorRegistry`**,
+    mirroring `Normalizer`/`FeatureRegistry`'s own role as the extension
+    point for a future exchange/generator. One deliberate difference: the
+    registry stores the connector _class_, not a shared instance, and
+    builds a fresh one per `get()` call — a connector may hold a live,
+    pooled HTTP client, unlike a stateless feature generator.
+  - **A generic `external_data_points` table** (`source`, `symbol`
+    nullable, `timestamp`, `value`, `raw_payload`, `ingested_at` —
+    migration `fadfaba274eb`), built for this and every future connector,
+    not one table per source. Its `UniqueConstraint(source, symbol,
+timestamp)` is a defensive backstop only — both Postgres and SQLite
+    treat two `NULL` symbols as distinct for uniqueness, so a
+    source-wide connector like Fear & Greed relies on an
+    application-layer existing-timestamps check before every insert,
+    mirroring `candle_ingest.py`'s own idempotent-insert pattern exactly.
+  - **`FearGreedClient`** (`app/connectors/fear_greed.py`) mirrors
+    `DeltaClient`'s own error-typing and bounded-retry conventions
+    against alternative.me's free, unauthenticated API, with everything
+    Delta-specific stripped (no HMAC signing, no success-flag envelope).
+  - **Ingestion and sync mirror the candle pipeline's own split exactly**
+    — `app/services/external_data_ingest.py`/`external_data_sync.py`
+    structured line-for-line after `candle_ingest.py`/`candle_sync.py`,
+    plus `scripts/backfill_fear_greed.py` matching
+    `scripts/sync_candles.py`'s own shape for manual/ops use.
+  - **A new feature, `fear_greed`**: the most recent index value at or
+    before each candle's own timestamp — **verified explicitly,
+    adversarially, to never look ahead** (a fake data point dated after
+    every candle in a series never changes that series' already-computed
+    values, proven once purely in-memory and once through a real row
+    written to the database mid-test).
+  - **Wired into both `FeatureService` and `MLDatasetService` — a
+    deliberate no-train/serve-skew fix**, not something named by the
+    original request. Wiring only the live-inference path would have let
+    `fear_greed` compute correctly in a preview while silently returning
+    `null` for every row during actual model training.
+  - **Never cached**: a generator declaring `external_sources` bypasses
+    the feature cache on every call (`cache_status: "disabled"`), since a
+    cache hit could otherwise silently serve a value computed before a
+    newer data point existed — proven against a real, active
+    `FeatureCache`, not only the pre-existing "no cache configured" case.
+  - **Zero frontend change**: `fear_greed` reaches `/features`'s
+    catalogue and appears in the existing `FeatureSelector` automatically
+    — that component has no per-feature code of its own.
+  - **Found and fixed while writing the ingestion/sync tests, not by
+    inspection**: `_persist_points` opened an explicit `session.begin()`
+    after a query that had already auto-begun a transaction, raising
+    `InvalidRequestError` on every real insert; and
+    `ExternalDataRepository.list_existing_timestamps` was returning
+    _naive_ datetimes on SQLite (the same round-trip quirk already worked
+    around elsewhere in this codebase) while every freshly-fetched point
+    is timezone-aware, silently defeating the duplicate check on SQLite
+    specifically — no exception, just always re-inserting. Both fixed;
+    see `ARCHITECTURE.md` § "External Data Connectors" for the full
+    detail.
+  - **A third bug, found post-acceptance by hitting the real, running
+    dev server directly**: `external_sources` was read internally but
+    never threaded onto the Pydantic DTO `GET /api/v1/features` actually
+    serializes, so the real HTTP catalogue silently omitted it for every
+    generator despite already being documented as part of the response.
+    Fixed in `app/schemas/features.py`, with a new regression test
+    proving it over real HTTP.
+  - **Explicitly out of scope, stated as such**: whether Fear & Greed
+    actually helps any model's predictions was not evaluated here — that
+    depends on the backtest loop being independently confirmed reliable
+    first, a separate, later step.
+  - Full design in `ARCHITECTURE.md` § "External Data Connectors"; API
+    surface in `docs/api/API.md` § "Feature engineering"; tests in
+    `services/api/TESTING.md` § "Testing External Data Connectors".
+
 - **Paper Trading — Automated Strategy: an account may opt into a single
   automated strategy that places an order through the existing
   order-placement path on a fresh, above-threshold prediction.** Closes

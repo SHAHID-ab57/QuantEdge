@@ -16,6 +16,7 @@ from app.ml_datasets.registry import default_registry as default_target_registry
 from app.ml_datasets.split import ChronologicalSplitter
 from app.ml_datasets.targets import load_builtin_targets
 from app.repositories.candles import CandleRepository
+from app.repositories.external_data import ExternalDataRepository
 from app.repositories.markets import MarketRepository
 from app.repositories.ml_dataset_builds import MLDatasetBuildRepository
 from app.services.ml_datasets import MLDatasetService
@@ -55,6 +56,7 @@ def get_ml_dataset_service(
     return MLDatasetService(
         candle_repository=CandleRepository(session),
         market_repository=MarketRepository(session),
+        external_data_repository=ExternalDataRepository(session),
         builder=get_ml_dataset_builder(),
         default_limit=settings.candles_default_limit,
         max_limit=settings.candles_max_limit,

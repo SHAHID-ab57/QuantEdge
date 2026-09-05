@@ -3610,6 +3610,262 @@ updates leaving untouched fields alone, a stop-loss of `0` or an explicit
 constraint as the last-resort backstop against a `0` stop-loss even
 bypassing the service.
 
+### External Data Connectors
+
+Milestone 4 (Data Breadth) begins here — a reusable abstraction every
+future external data source sits on top of (`docs/architecture
+/SystemContext.md` § 3 names six: Marketaux, Etherscan, FRED,
+Alternative.me, DefiLlama, CoinGecko), proven end to end with the
+lowest-risk possible first case: the Fear & Greed Index —
+no authentication, one value per day, against alternative.me's free,
+public API. **Only Fear & Greed is implemented**; the other five remain
+future connectors on top of the same abstraction, not built here.
+
+**The `Connector` protocol** (`app/connectors/base.py`) mirrors
+`app.marketdata.normalizer.Normalizer`'s own role exactly — a plain
+`Protocol`, not an ABC, so a connector is defined purely by shape:
+
+```python
+class Connector(Protocol):
+    metadata: ClassVar[ConnectorMetadata]
+    async def fetch(self, start: datetime, end: datetime) -> Sequence[RawDataPoint]: ...
+```
+
+`RawDataPoint` (`timestamp`, `value`, `symbol: str | None`, `raw_payload:
+dict | None`) is the one shape every connector reports in — `symbol` is
+`None` for a source-wide/global value (Fear & Greed has no per-market
+variant); a future connector reporting one value per chain/asset would
+use it. `ConnectorMetadata` (`source`, `label`, `description`,
+`frequency`, `requires_auth`, `version`) is the same "describe yourself
+before anyone instantiates you" shape `FeatureMetadata`/
+`IndicatorMetadata` already establish.
+
+**The registry** (`app/connectors/registry.py`, `ConnectorRegistry`)
+mirrors `app.features.registry.FeatureRegistry` with one deliberate
+difference: a feature generator is required to be stateless, so
+`FeatureRegistry` instantiates it once at registration and reuses that
+instance forever; a connector is not stateless — it may hold a live,
+pooled HTTP client — so this registry registers the _class_ and builds a
+fresh instance only when `get(source)` is actually called. Registration
+therefore stays a side-effect-free import, and the caller that gets a
+live connector back owns its own lifecycle (`aclose()`/`async with`,
+mirroring `DeltaClient`), never an ever-shared instance. `app/connectors
+/__init__.py`'s `load_builtin_connectors()` auto-discovers every module
+in the package via `pkgutil.iter_modules` — the identical mechanism
+`app.features.builtin.load_builtin_features` already uses — so **adding
+a connector means adding one file to `app/connectors/` and nothing
+else**: no registry edit, no scheduler change, no import to remember.
+
+**One generic table, not one per source** — `external_data_points`
+(migration `fadfaba274eb`): `source` (the connector's own registered
+name), `symbol` (nullable — `NULL` for Fear & Greed), `timestamp` (when
+the source reported the value — never the ingestion time), `value`
+(`Float`), `raw_payload` (`JSON`, the connector's own untouched record,
+kept for audit, never re-parsed), `ingested_at` (when this platform
+actually stored the row, `server_default=now()`). Deliberately **not**
+`TimestampMixin`: a point is fetched once and never mutated, so an
+`updated_at` column would be permanently equal to `ingested_at` and mean
+nothing. A `UniqueConstraint(source, symbol, timestamp)` exists as a
+defensive backstop, but is **not** the real idempotency guarantee: both
+Postgres and SQLite treat two `NULL` `symbol`s as distinct for
+uniqueness purposes, so a source-wide connector like Fear & Greed cannot
+rely on it alone. The real guarantee is application-level —
+`ExternalDataRepository.list_existing_timestamps` is checked _before_
+every insert (`app/services/external_data_ingest.py`, mirroring
+`app.services.candle_ingest`'s own "load existing keys, skip what's
+already there" idempotent-insert pattern exactly, including the same
+per-row savepoint + `IntegrityError` isolation as the last-resort
+backstop for a genuine race).
+
+**`FearGreedClient`** (`app/connectors/fear_greed.py`) mirrors
+`DeltaClient`'s own error-typing and bounded-retry conventions
+(`ConnectorNetworkError`/`ConnectorAPIError`/`ConnectorRateLimitError`,
+exponential backoff with jitter on transient failures, mirroring
+`app.integrations.delta.exceptions`'s own hierarchy in
+`app/connectors/errors.py`) with everything Delta-specific stripped: no
+HMAC signing, no `api-key`/`api-secret`, no `{"success": ..., "result":
+...}` envelope — alternative.me's own shape is a plain `{"name": ...,
+"data": [...], "metadata": {"error": ...}}` object, and both `value`
+and `timestamp` in each entry arrive as JSON _strings_, verified against
+the real API, never assumed numeric.
+
+**Why a full-history fetch, not a paginated one.** alternative.me's API
+has no `start`/`end` query parameters at all — only `limit` (the most
+recent N entries). `FearGreedConnector.fetch(start, end)` translates the
+requested range into a bounded `limit` (the range's own span in days,
+capped at `_MAX_LOOKBACK_DAYS=4000`, past which it uses alternative.me's
+own `limit=0` "everything" sentinel) and filters the response to
+`[start, end]` (inclusive both ends — this table's own convention,
+deliberately different from `Candle.open_time`'s half-open range, since
+an external source's own cadence is coarse enough that a half-open range
+risks silently excluding an edge value) locally. The whole index's
+history to date is a few thousand small JSON objects — cheap enough to
+fetch in one request even for a full backfill; a periodic daily sync
+tick naturally computes a small `limit` instead, since its own range is
+only a day or two wide.
+
+**Ingestion and sync mirror the candle pipeline's own split exactly.**
+`app/services/external_data_ingest.py`'s `ingest_external_data(source,
+start, end)` is `candle_ingest.ingest_candles`'s counterpart — fetch via
+the registered connector, validate, persist idempotently, return a
+report (`received`/`inserted`/`duplicates_skipped`/`rejected`).
+`app/services/external_data_sync.py`'s `ExternalDataSyncScheduler`
+mirrors `CandleSyncScheduler` line-for-line (a single `asyncio` loop
+task, `get_engine()`-gated, isolated per-source failures,
+`run_catch_up`/`run_sync_once` matching the established naming
+convention) — gated on its own `external_data_sync_enabled` setting
+(default `true`, `external_data_sync_interval_seconds` default 3600s —
+deliberately much longer than candles' own 300s, since Fear & Greed
+updates once daily and there is nothing new to fetch more often than
+that). `scripts/backfill_fear_greed.py` matches `scripts/sync_candles.py`'s
+own shape for manual/ops use.
+
+**The feature: looks up the most recent value at or before a candle's
+own timestamp — verified to never look ahead.** `app/features/builtin
+/fear_greed.py`'s `FearGreedFeature` is registered exactly like any other
+generator (`@register`, auto-discovered by `load_builtin_features`) with
+one new thing: `FeatureMetadata.external_sources=("fear_greed",)`, a new
+field (alongside the existing `dependencies`, which names other
+_features_) naming which registered connector sources this generator
+needs pre-fetched into `FeatureContext.external_data` before it can run.
+
+**Why pre-fetched, not looked up live.** `FeatureGenerator.generate` is
+synchronous and database-free by design (`app/features/base.py`'s own
+module docstring: "nothing in this module imports SQLAlchemy... a
+feature must compute identically wherever it runs"). Rather than break
+that contract, `app/services/external_data_context.py`'s
+`resolve_external_data` — a new, shared bridge — resolves the _union_ of
+every requested feature's declared `external_sources`, then loads each
+distinct source exactly once (one query per source, `[earliest candle -
+30 days, latest candle]`, never one query per candle) _before_
+generation starts, the same "candles are loaded once upstream, never
+fetched lazily per row" discipline this whole engine already follows.
+`FeatureContext` gained one new optional field
+(`external_data: Mapping[str, Sequence[ExternalDataPoint]]`, empty by
+default so every existing generator and every existing direct
+construction of the dataclass keeps working unchanged) and one new
+module-level helper, `most_recent_value_at_or_before` — an O(log n)
+`bisect_right(points, at, key=lambda p: p.timestamp)` search, since this
+runs once per candle.
+
+**Wired into both dataset-building services, not just one — a
+deliberate no-train/serve-skew fix.** `resolve_external_data` is called
+from both `app.services.features.FeatureService.build_raw` (the live
+`/features`/prediction path — `PredictionService.run` itself composes a
+`FeatureService`, so a live model inference also sees real Fear & Greed
+values) _and_ `app.services.ml_datasets.MLDatasetService`'s own build
+(the training path, via `MLDatasetBuilder.build`'s new `external_data`
+parameter). Wiring only the first would have left a connector-backed
+feature computing correctly in a dataset preview or at live-inference
+time while silently returning `None` for every row during actual model
+training — exactly the "looks fine, is wrong" asymmetry `app/features
+/base.py`'s own docstring names train/serve skew as this whole context's
+reason to exist. Both services now share one path; neither could drift
+from the other without both changing together.
+
+**Never cached.** `FeatureCacheKey` fingerprints candles and params only
+— a generator backed by external data is explicitly excluded from
+`FeaturePipeline`'s own per-generator cache (`skip_cache = bool
+(metadata.external_sources)`), since a cache hit there could silently
+serve a result computed before a newer data point existed. Correctness
+over a speed gain that would otherwise risk staleness this platform's
+cache exists to avoid, not reproduce.
+
+**Verified explicitly, adversarially — never looks ahead.**
+`tests/features/test_fear_greed_feature.py::TestNoLookAhead` inserts a
+fake data point dated _after_ a candle's own timestamp (once purely
+in-memory, once — the strongest proof — via a real row written to
+`external_data_points` mid-test) and recomputes: the past computation
+comes back byte-for-byte identical both times, and the future value
+never appears anywhere in the output. A second variant lists the future
+point _first_ in an unsorted input, confirming the bisect search itself
+— not merely "the last element happens to be excluded" — is what
+enforces this.
+
+**Confirmed: the feature selector needs zero frontend changes.**
+`FeatureSelector` (`apps/dashboard/src/features/feature-engineering
+/components/feature-selector.tsx`) has no per-feature code of its own —
+its own module docstring: "the list, each generator's parameters, their
+bounds, and their descriptions all come from the catalogue response...
+the consequence is the frontend half of the extensibility guarantee: a
+generator registered on the backend appears here... with no change to
+this file." `fear_greed` reaching `GET /features`'s catalogue (`app
+.services.features.FeatureService.list_features`, which "reads straight
+from the registry") is therefore the entire proof —
+`tests/features/test_fear_greed_feature.py::TestDiscovery` pins it down
+on the backend side; no new frontend test was needed because the
+component's own existing tests already exercise arbitrary catalogue
+fixtures, never a hardcoded feature list.
+
+**Explicitly out of scope, stated as such.** Whether the Fear & Greed
+feature actually helps any model's predictions was **not** evaluated
+here — that depends on the backtest loop being independently confirmed
+reliable first, which is a separate, later step, not something this
+task attempted or claims.
+
+**Testing.** `tests/connectors/test_fear_greed.py`: the client's
+successful fetch, every malformed-response shape (non-JSON body, missing
+`data` field, non-object envelope, an API-reported error, an HTTP error
+status), a network failure (timeout, and a connect error retried then
+raised) mapping to `ConnectorNetworkError`, rate-limit retry-then-succeed
+and retries-exhausted paths; the connector's own range-filting and
+malformed-entry (bad value, missing key) rejection, and its own
+naive-input/`end < start` guards. `tests/connectors/test_registry.py`:
+register/get/describe/duplicate/not-found mechanics against an isolated
+registry, a fresh instance per `get()` call (never a shared singleton),
+and — against the real, application-wide registry — that `fear_greed` is
+genuinely discoverable after `load_builtin_connectors()`.
+`tests/features/test_fear_greed_feature.py`: the lookup itself (most
+recent at-or-before, `None` before the earliest recorded value, `None`
+with no external data provided at all, an exact-timestamp match still
+counting), the no-look-ahead adversarial proof above, and the feature
+selector's own backend-side confirmation.
+`tests/features/test_pipeline.py::TestCache::test_a_generator_declaring_external_sources_never_hits_even_with_a_cache_wired`
+proves the never-cached guarantee against a real, _active_ `FeatureCache`
+— not merely the pre-existing "no cache configured" case.
+
+`tests/services/test_external_data_ingest.py` and
+`test_external_data_sync.py` give `ingest_external_data`/`_persist_points`
+and `ExternalDataSyncScheduler` the same direct, fake-double-backed
+coverage `test_candle_ingest.py`/`test_candle_sync.py` already give the
+candle pipeline (duplicate-skip idempotency, the database-level
+savepoint backstop, window computation, per-source failure isolation, the
+background loop). Writing them surfaced two real, previously-untested
+bugs, both fixed on the spot: `_persist_points` opened an explicit
+`session.begin()` after a query that had already auto-begun a
+transaction (`InvalidRequestError: A transaction is already begun on this
+Session`), fixed by relying on the session's own autobegin instead of a
+second explicit one; and `ExternalDataRepository
+.list_existing_timestamps` was returning **naive** datetimes on SQLite —
+the same round-trip quirk already worked around in
+`candle_sync.py`/`external_data_context.py` — while every freshly-fetched
+`RawDataPoint.timestamp` is timezone-aware, so the `in`-based duplicate
+check silently never matched on SQLite specifically (no exception, just
+always re-inserting). Fixed with the same `_as_utc()` normalization
+pattern used everywhere else this quirk appears. Neither bug could have
+been caught by the higher-level tests above, since none of them exercise
+`_persist_points`/`list_existing_timestamps` on a second, independent
+ingestion pass the way these new tests do.
+
+**A third bug, found during a post-acceptance re-verification pass, not
+by any test above**: `FeatureMetadata.external_sources` was read
+internally (the cache-bypass check, `resolve_external_data`) but never
+threaded onto `FeatureDTO`, the Pydantic model `GET /api/v1/features`
+actually serializes — so the real HTTP catalogue silently omitted this
+field entirely, for every generator, despite `ARCHITECTURE.md`/`API.md`
+already documenting it as part of the wire response. Caught by hitting
+the real, already-running dev server's `GET /api/v1/features` directly
+(not a test — no test exercised the DTO layer for this field at all)
+and comparing the live JSON against the documented shape. Fixed by adding
+`external_sources: list[str]` to `FeatureDTO`/`FeatureDTO.from_metadata`
+in `app/schemas/features.py`, with a new regression test,
+`tests/api/test_features_api.py::TestCatalogueEndpoint
+::test_publishes_external_sources_for_a_connector_backed_feature`,
+proving it over real HTTP for both `fear_greed` (`["fear_greed"]`) and an
+ordinary candle-only generator (`[]`) — re-verified live against the
+running dev server afterward (`curl http://localhost:8000/api/v1/features
+/fear_greed` now returns the field).
+
 ### Feature Store
 
 > Not built. Features are computed on demand and exported; no persisted,

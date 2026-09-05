@@ -55,6 +55,24 @@ class TestCatalogueEndpoint:
         assert response.status_code == 200
         assert response.json()["category"] == "price_action"
 
+    async def test_publishes_external_sources_for_a_connector_backed_feature(
+        self, client: httpx.AsyncClient
+    ) -> None:
+        """`external_sources` is a real, wire-visible catalogue field, not
+        just an internal `FeatureMetadata` attribute — this is what lets a
+        client (or this very test) tell a connector-backed generator like
+        `fear_greed` apart from an ordinary candle-only one over HTTP,
+        with no access to the Python dataclass at all."""
+        body = (await client.get("/api/v1/features")).json()
+        fear_greed = next(e for e in body["features"] if e["name"] == "fear_greed")
+        assert fear_greed["external_sources"] == ["fear_greed"]
+
+        ohlcv = next(e for e in body["features"] if e["name"] == "ohlcv")
+        assert ohlcv["external_sources"] == []
+
+        single = (await client.get("/api/v1/features/fear_greed")).json()
+        assert single["external_sources"] == ["fear_greed"]
+
     async def test_a_delegating_feature_inherits_the_indicators_metadata(
         self, client: httpx.AsyncClient
     ) -> None:

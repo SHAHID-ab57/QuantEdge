@@ -15,6 +15,7 @@ from app.evaluation.registry import default_registry as default_metric_registry
 from app.prediction.engine import default_engine
 from app.repositories.candles import CandleRepository
 from app.repositories.experiments import ExperimentRepository
+from app.repositories.external_data import ExternalDataRepository
 from app.repositories.markets import MarketRepository
 from app.repositories.predictions import PredictionRepository
 from app.services.experiments import ExperimentService
@@ -53,6 +54,7 @@ def get_prediction_service(
         feature_service=FeatureService(
             candle_repository=CandleRepository(session),
             market_repository=MarketRepository(session),
+            external_data_repository=ExternalDataRepository(session),
             builder=get_dataset_builder(),
             default_limit=settings.candles_default_limit,
             max_limit=settings.candles_max_limit,

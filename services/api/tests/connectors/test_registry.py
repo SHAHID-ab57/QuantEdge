@@ -154,3 +154,32 @@ class TestFearGreedIsRegistered:
         # `connector` has been narrowed to the concrete class this way.
         assert isinstance(connector, FearGreedConnector)
         await connector.aclose()
+
+
+class TestFredIsRegistered:
+    """The real, application-wide registry — proves the FRED connector is
+    genuinely discoverable, not just the isolated-registry mechanics
+    above."""
+
+    def test_the_default_registry_lists_fred_after_loading_builtins(self) -> None:
+        from app.connectors import load_builtin_connectors
+        from app.connectors.fred import FRED_SOURCE
+        from app.connectors.registry import default_registry
+
+        load_builtin_connectors()
+
+        assert FRED_SOURCE in default_registry.names()
+        metadata = default_registry.describe(FRED_SOURCE)
+        assert metadata.label == "Federal Funds Rate"
+        assert metadata.requires_auth is True
+        assert metadata.frequency == "monthly"
+
+    async def test_get_builds_a_real_fred_connector(self) -> None:
+        from app.connectors import load_builtin_connectors
+        from app.connectors.fred import FRED_SOURCE, FredConnector
+        from app.connectors.registry import default_registry
+
+        load_builtin_connectors()
+        connector = default_registry.get(FRED_SOURCE)
+        assert isinstance(connector, FredConnector)
+        await connector.aclose()

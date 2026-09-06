@@ -8,6 +8,70 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **FRED macroeconomic connector (`fed_funds_rate`, M4-E1-T2): the second
+  concrete connector, and the first requiring authentication.** Re-issued
+  and built here after this same task was previously reported as issued
+  and never actually executed — `docs/audits/MILESTONE_2_3_VERIFICATION.md`
+  independently confirmed Milestones 2 and 3 are genuinely real, and this
+  gap was the one real miss it found. No leftovers from that earlier
+  attempt existed to clean up — a genuinely clean slate.
+  - **A real publication lag, investigated before writing any
+    feature-lookup code**: the chosen series, FRED's `FEDFUNDS` (monthly
+    effective federal funds rate), dates a monthly average at the first
+    day of the month it averages, but that average isn't actually known
+    until roughly a month later. Using the reference date directly would
+    have been a genuine look-ahead bug. Fixed by using FRED's own
+    `realtime_start` (the date a value actually became publicly known)
+    as this connector's effective timestamp, never `date` — verified end
+    to end with a fixture test proving a mid-reference-month candle sees
+    no value yet, while one after the real publication date does.
+  - **Kept FEDFUNDS over a finer-grained alternative (e.g. daily `DFF`)**
+    deliberately: a slow-moving macro backdrop is the right granularity
+    for FRED's own documented role on this platform, and handling its
+    real lag correctly is more valuable than sidestepping it.
+  - **`app/connectors/fred.py`** mirrors `fear_greed.py`'s own
+    error-typing/retry conventions, adapted for FRED's own error
+    envelope (`{"error_code", "error_message"}`) and its documented `"."`
+    missing-value sentinel (skipped, never fabricated as `0.0`). An
+    empty/unconfigured `FRED_API_KEY` raises `ConnectorAuthenticationError`
+    with no network call.
+  - **A new feature, `fed_funds_rate`**, and the connector appearing
+    automatically in `GET /connectors`/`/data-sources` and
+    `GET /features` with zero code change to either — confirmed by test,
+    not assumed.
+  - **A second real bug, found only once a real `FRED_API_KEY` was
+    available and the mocked test suite could no longer be the last
+    word**: FRED silently defaults `realtime_start`/`realtime_end` to
+    today when they're omitted, collapsing every observation's own
+    vintage date onto today's — the real backfill's own numbers caught it
+    immediately (865 of 866 real historical values discarded as false
+    in-batch duplicates). Fixed by always passing FRED's own documented
+    sentinels (`realtime_start=1776-07-04`, `realtime_end=9999-12-31`);
+    re-verified against the real API afterward — 364 genuinely distinct
+    values landed, and a hand-checked spot example (a real rate cut
+    between April and May 2026) confirmed correct over real HTTP against
+    `/markets/ETHUSD/features/dataset`, not inferred.
+  - Full design in `ARCHITECTURE.md` § "External Data Connectors" →
+    "FRED Connector"; API surface in `docs/api/API.md`; tests in
+    `services/api/TESTING.md`.
+
+- **Milestones 2 and 3 independently re-verified against real code and
+  live test runs**, not re-asserted from their own prior "COMPLETE"
+  status — all seven audited claims (async training execution,
+  prediction grading, backtesting, the virtual portfolio, pre-trade risk
+  limits, stop-loss/take-profit, the automated strategy) came back
+  genuinely real. See `docs/audits/MILESTONE_2_3_VERIFICATION.md`.
+  `ROADMAP.md`/`TASKBOOK.md` now reference this audit directly rather
+  than only asserting completion. One tracked (not fixed) item came out
+  of it: `tests/training/test_service.py::TestCreate
+::test_creates_a_pending_job`'s order-dependent failure, recorded as
+  `TD-001` in `TASKBOOK.md`'s Technical Debt Tracking.
+  - A new standing habit added to `CLAUDE.md`: before starting a task,
+    confirm its immediate prerequisite actually exists in the repo with
+    a quick check, not a full audit — added after the FRED miss above
+    was requested and treated as in progress for several further "next
+    task" requests before anyone checked.
+
 - **Data Sources page (`/data-sources`, M4-E1-T3): visibility into every
   ingested external data source, plus what's coming next in Milestone 4
   — without querying the database directly.** A display feature only —

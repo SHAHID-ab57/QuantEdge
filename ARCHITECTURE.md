@@ -3952,6 +3952,160 @@ section's static list proven to render identically regardless of the
 Active section's own loading, error, or success state — three separate
 assertions, not inferred from one.
 
+#### FRED Connector (M4-E1-T2)
+
+The second concrete connector, and the first requiring authentication
+(`requires_auth=True` on its own `ConnectorMetadata`) — this task was
+initially reported as issued and treated as in progress for several
+further "next task" requests before anyone checked and found it had
+never actually been built (`docs/audits/MILESTONE_2_3_VERIFICATION.md`
+records the standard applied retroactively to Milestones 2–3, all of
+which came back genuinely real). Re-issued and built here, unchanged in
+substance from the original spec. Before building it, the repository was
+checked for anything left over from that abandoned first attempt — none
+was found: no stray migration, no unused import, no empty file, nothing
+under `app/connectors/` beyond `fear_greed.py` — a genuinely clean slate,
+not a half-start to clean up.
+
+**Publication lag — investigated before writing any feature-lookup
+code.** FRED's own API distinguishes `date` (the economic reference
+period an observation describes) from `realtime_start` (the date that
+exact value actually became — or, on revision, most recently became —
+publicly known); see `fred.py`'s own module docstring for the full
+account and its own sources. The chosen series, `FEDFUNDS` (the monthly
+effective federal funds rate), dates a monthly average at the _first day
+of the month it averages_ — e.g. `date: "2026-08-01"` for August — but
+that average cannot possibly be known until August has ended; FRED's own
+real-time tracking confirms it is actually published in the first few
+days of the _following_ month. Using `date` as this connector's effective
+timestamp would have been a genuine look-ahead bug: a feature "at or
+before" a mid-August candle would see August's own average as if it were
+already knowable mid-August. `FredConnector`/`_to_point`
+(`app/connectors/fred.py`) use `realtime_start` as `RawDataPoint
+.timestamp`, keeping both fields in `raw_payload` for audit. FEDFUNDS is
+documented as rarely revised (small, sub-basis-point corrections), so
+most observations carry exactly one real vintage — the field is used on
+principle, not because this series happens to make the distinction
+unimportant. Verified end to end, not just asserted: `tests/features
+/test_fed_funds_rate_feature.py::TestPublicationLagFixture` runs a real
+mock FRED response (August, dated `2026-08-01`, published `2026-09-01`)
+through the actual connector and real ingestion, then proves a candle at
+`2026-08-15` (after the reference date, before the real publication date)
+sees `null`, while one at `2026-09-02` sees the value.
+
+**A second, real bug this same design caught — but only once tested
+against the live API, not the mocked test suite.** A real `FRED_API_KEY`
+was added after this task's first pass, and the real backfill it enabled
+immediately exposed a mismatch the mocked tests could never have caught:
+`realtime_start`/`realtime_end` only reflect an observation's own _true_
+individual vintage history when the request itself supplies an explicit,
+wide `realtime_start`/`realtime_end` range. Omit them — as the original
+implementation did, verified only against a _fabricated_ mock response
+that hand-picked plausible-looking `realtime_start` values per entry —
+and FRED silently defaults both to today, collapsing **every**
+observation's `realtime_start` onto today's date regardless of how long
+ago it actually became known. The real backfill's own numbers exposed it
+immediately: `received=866, inserted=1, duplicates_skipped=865` — 865
+real, distinct historical values silently discarded as a false in-batch
+"duplicate timestamp," with only whichever single observation FRED
+listed first actually landing. Left unfixed, every future periodic sync
+tick would have kept re-inserting the same already-stored value under a
+new, different "today" timestamp, forever. Fixed by always passing
+FRED's own documented "as far as possible" sentinels —
+`realtime_start=1776-07-04`, `realtime_end=9999-12-31`
+(`_REALTIME_START_SENTINEL`/`_REALTIME_END_SENTINEL` in `fred.py`) —
+which, combined with the default `output_type=1`, returns exactly one
+row per genuine vintage (initial publication, plus one row per real
+later revision) in the same simple flat shape already parsed; no parsing
+changes were needed, only the two missing parameters. Re-verified against
+the real API after the fix: 364 rows landed (`1996-12-03` through
+`2026-09-01`), each a genuinely distinct real publication date, with a
+hand-checked spot example — a candle at `2026-05-15` correctly reads
+`3.64` (April's rate, published May 1), a candle at `2026-06-02`
+correctly reads `3.63` (May's rate cut, published June 1) — both
+confirmed over real HTTP against `/markets/ETHUSD/features/dataset`, not
+inferred. One accepted, harmless edge: ALFRED's own vintage tracking for
+this series does not reach back before `1996-12-03`; an observation older
+than that reports whenever ALFRED's own tracking began as its
+`realtime_start`, not FEDFUNDS's true 1954-era original publication date
+— irrelevant here, since no candle on this platform predates 1996 by
+decades in the other direction (the earliest real market data is from
+2024 onward).
+
+**Why FEDFUNDS, not a finer-grained alternative (e.g. the daily `DFF`
+series).** `ROADMAP.md`/`docs/architecture/SystemContext.md` both
+characterize FRED's own role on this platform as "macro" — a slow-moving
+policy backdrop, not a high-frequency signal the way Fear & Greed's daily
+sentiment index already is. A monthly average is the right granularity
+for that role, and its real, month-scale publication lag is exactly the
+kind of correctness problem worth handling properly rather than
+sidestepping by picking a series where it would be small enough to
+ignore.
+
+**FRED's own error envelope, and the one genuinely new error path this
+connector adds.** Unlike alternative.me's `{"metadata": {"error": ...}}`
+shape, FRED reports errors as `{"error_code": ..., "error_message": ...}`,
+using the _same_ HTTP 400 for a bad/missing API key as for any other
+malformed request — the two are told apart only by whether
+`error_message` mentions `api_key` (verified against FRED's own API
+docs), the one case mapped to `ConnectorAuthenticationError` rather than
+`ConnectorAPIError`. An empty/unconfigured `FRED_API_KEY` is checked
+locally and raises the same error with no network call at all — a
+predictable local failure, not one worth a wasted round-trip to learn
+from the server. FRED's own documented "no value yet" sentinel (the
+literal string `"."`, never `null`) is explicitly skipped, never
+fabricated as `0.0` — the same "missing, not failed" contract
+`missing_values_expected` already gives every other feature.
+
+**Why a full-history fetch, not a range-scoped one — the same reasoning
+as Fear & Greed, applied to a genuinely different constraint.** FRED's
+own `observation_start`/`observation_end` parameters filter by `date`,
+not `realtime_start` — a date-filtered request for a recent window could
+silently miss an older-dated observation only just published (or
+revised) inside that window. FEDFUNDS's entire history back to July 1954
+is under a thousand small JSON objects, so `fetch` always requests the
+whole history and filters locally on `realtime_start`, sidestepping any
+need to estimate a worst-case lag buffer. One consequence worth knowing:
+`ExternalDataSyncScheduler`'s own automatic backfill-on-first-sync only
+seeds `external_data_sync_backfill_days` (default 3650, ~10 years) of
+history for a source with nothing stored yet — enough for Fear & Greed's
+own 2018-onward history, but not for FEDFUNDS's full 1954-onward one. A
+full historical backfill needs one explicit manual run:
+`uv run python scripts/backfill_fred.py --start 1954-07-01`.
+
+**Registered exactly like Fear & Greed, with zero special-casing
+anywhere else.** `app/connectors/fred.py` is auto-discovered by
+`load_builtin_connectors()` (the same `pkgutil.iter_modules` mechanism,
+no registry edit needed); `app/features/builtin/fed_funds_rate.py` is
+auto-discovered by `load_builtin_features()` the same way; the periodic
+`ExternalDataSyncScheduler` picks it up automatically since its own
+`external_data_sync_sources` setting defaults to "every registered
+connector." Confirmed, not assumed: `fed_funds_rate` appears in `GET
+/api/v1/features` (`tests/api/test_features_api.py
+::test_publishes_external_sources_for_a_connector_backed_feature`,
+extended to check a second connector-backed feature alongside
+`fear_greed`) and `fed_funds_rate` (the source) appears in `GET
+/connectors` (`tests/api/test_connectors_api.py
+::test_a_newly_registered_connector_appears_with_zero_code_change`) —
+both with no change to either endpoint or to the Data Sources page.
+`lib/planned-connectors.ts`'s own static list had FRED removed the same
+day this connector actually landed, per that file's own stated upkeep
+rule.
+
+**Testing.** `tests/connectors/test_fred.py` mirrors `test_fear_greed
+.py`'s own coverage shape (successful fetch, every malformed-response
+case, network failure, rate-limit retry/exhaustion) plus what's new to
+this connector: no API key configured raises `ConnectorAuthenticationError`
+with no network call; a bad/unregistered key (`error_message` mentioning
+`api_key`) raises the same; a 400 for an unrelated reason (e.g. an
+unknown series id) raises `ConnectorAPIError`, never miscategorized as an
+auth failure; the `"."` missing-value sentinel is skipped, not
+fabricated. `tests/connectors/test_registry.py::TestFredIsRegistered`
+confirms discoverability on the real, shared `default_registry`.
+`tests/features/test_fed_funds_rate_feature.py` mirrors the Fear & Greed
+feature's own lookup/no-look-ahead tests, plus `TestPublicationLagFixture`
+described above.
+
 ### Feature Store
 
 > Not built. Features are computed on demand and exported; no persisted,

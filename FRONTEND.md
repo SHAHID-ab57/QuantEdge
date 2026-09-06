@@ -3474,7 +3474,7 @@ in; no page-specific handling was needed for that case.
 
 **"Planned Data Sources" is the one deliberate exception to
 "nothing hardcoded."** `lib/planned-connectors.ts` is a static array —
-Marketaux, Etherscan, FRED, DefiLlama, CoinGecko — rendered by
+Marketaux, Etherscan, DefiLlama, CoinGecko — rendered by
 `PlannedDataSources` with zero API call, since there is nothing in the
 registry for an unbuilt connector to read. This list is **not**
 automatically kept in sync: an entry must be removed the same day its
@@ -3482,10 +3482,12 @@ connector actually ships (appears in `GET /connectors`), never before —
 otherwise a source briefly shows as both "planned" and "active" at once.
 This file's own module docstring states this is part of every future
 connector task's own Definition of Done, not a separate cleanup pass.
-FRED specifically stayed on this list at the time this page shipped: it
-had been reported elsewhere as issued (tracked as M4-E1-T2), but had not
-actually landed in this repository's connector registry — the list
-reflects the registry's real state, not an unconfirmed status report.
+FRED is the worked example of exactly this discipline: it was originally
+reported elsewhere as issued (tracked as M4-E1-T2) while still absent
+from the connector registry, and stayed on this list on that basis —
+`TASKBOOK.md` records that history — until it actually landed
+(`app/connectors/fred.py`), at which point it was removed from here in
+the same change that shipped it, not before and not after.
 
 ## State management
 

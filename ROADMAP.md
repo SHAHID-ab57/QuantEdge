@@ -80,7 +80,10 @@ same evaluation metrics every other milestone already reads from. Runs
 asynchronously through the same shared background-task registry training
 jobs use — no second mechanism. See `ARCHITECTURE.md` § "Backtesting
 Engine". Every capability in this milestone has real code, passing tests,
-and is wired into the running API and dashboard.
+and is wired into the running API and dashboard. **Independently
+re-verified 2026-09-06**, against real code and live test runs rather
+than re-asserted from this document's own prior status — see
+`docs/audits/MILESTONE_2_3_VERIFICATION.md`.
 
 Before Milestone 3 began, two items left outstanding from Milestone 2 were
 re-verified: the backtesting no-look-ahead adversarial test was re-run
@@ -117,7 +120,9 @@ acted or not. See `ARCHITECTURE.md` § "Paper Trading". This does **not**
 change anything about Milestone 6's own gate below. A standalone risk
 engine beyond these account-level limits has not been started; see
 `docs/architecture/DomainModel.md`/`ContainerArchitecture.md` for the
-intended bounded contexts.
+intended bounded contexts. **Independently re-verified 2026-09-06**, the
+same way as Milestone 2 — see
+`docs/audits/MILESTONE_2_3_VERIFICATION.md`.
 
 **Milestone 4 — Data Breadth (IN PROGRESS).** The additional external data
 connectors this platform has designed for but never implemented —
@@ -131,18 +136,28 @@ one per source), and periodic ingestion mirroring `CandleSyncScheduler` —
 proved end to end by the first, lowest-risk connector: **Fear & Greed is
 done**, fetched, stored, and available as a real feature
 (`fear_greed`, verified to never look ahead), reaching the existing
-`/features` selector with zero frontend change. The remaining five
-sources (Marketaux, Etherscan, FRED, DefiLlama, CoinGecko) have not been
-started — each needs its own auth handling and response shape, unlike
-Fear & Greed's unauthenticated single daily value. Whether Fear & Greed
-(or any future source) actually improves predictions has deliberately not
-been evaluated — that depends on the backtest loop being independently
-confirmed reliable first. A Data Sources page (`/data-sources`) is also
-done: two read-only endpoints and a registry-driven "Active" section
-(zero frontend change for a future connector, the same guarantee
-`/features` already gives) alongside a static "Planned" section for the
-five sources not yet built — needing per-connector upkeep as each ships.
-See `ARCHITECTURE.md` § "External Data Connectors".
+`/features` selector with zero frontend change. **FRED is also done** —
+the second connector, and the first requiring authentication:
+`fed_funds_rate` (FRED's `FEDFUNDS` series), with a real ~1-month
+publication lag investigated up front and handled correctly by
+timestamping every point with FRED's own real publication date, never
+the reference month it describes (see `ARCHITECTURE.md` § "FRED
+Connector" for the full account). This task was previously reported as
+issued elsewhere without ever actually landing in this repository — see
+`docs/audits/MILESTONE_2_3_VERIFICATION.md`, which found this the one
+real gap while independently confirming Milestones 2–3 were genuinely
+complete. The remaining four sources (Marketaux, Etherscan, DefiLlama,
+CoinGecko) have not been started — each needs its own auth handling and
+response shape. Whether Fear & Greed, FRED, (or any future source)
+actually improves predictions has deliberately not been evaluated — that
+depends on the backtest loop being independently confirmed reliable
+first. A Data Sources page (`/data-sources`) is also done: two read-only
+endpoints and a registry-driven "Active" section (zero frontend change
+for a future connector, the same guarantee `/features` already gives)
+alongside a static "Planned" section for the sources not yet built —
+needing per-connector upkeep as each ships (FRED came off that list the
+same change it landed in the registry). See `ARCHITECTURE.md` §
+"External Data Connectors".
 
 **Milestone 5 — Production Hardening.** Authentication/authorization (none
 exists on any route today), CI/CD (none exists — all quality gates are

@@ -587,3 +587,13 @@ DECISIONS.md duplication above; `docs/database/DATABASE.md` and
   `docs/architecture/*` and the service READMEs, which stayed accurate. Update
   the relevant status doc in the same commit/PR as any milestone-level change,
   per `TASKBOOK.md`'s own stated working rules.
+- **Before starting a task, confirm its immediate prerequisite actually
+  exists in the repo** — a quick existence check (does the file/module/
+  migration the task depends on actually exist, does `git log` show a real
+  commit for it), not a full audit. Added after a FRED connector task was
+  reported as issued and treated as in progress for several further "next
+  task" requests before anyone checked and found it had never actually been
+  built (`docs/audits/MILESTONE_2_3_VERIFICATION.md` records the same
+  standard applied retroactively to Milestones 2–3, which all came back
+  genuinely real). A chat-reported status is not evidence; the repository
+  is.

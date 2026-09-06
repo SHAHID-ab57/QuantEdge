@@ -10,10 +10,13 @@
  * future connector task's own Definition of Done, per `ARCHITECTURE.md`
  * § "External Data Connectors" → "Data Sources Page".
  *
- * As of this page shipping, only Fear & Greed (`fear_greed`) is registered
- * — FRED (M4-E1-T2) was reported elsewhere as issued but had not actually
- * landed in this repository's connector registry, so it stays listed here
- * rather than being removed on an unconfirmed report.
+ * FRED (M4-E1-T2) was removed from this list once it actually landed in
+ * the connector registry (`app/connectors/fred.py`) — it had previously
+ * been reported elsewhere as issued while still absent from the repo, and
+ * had stayed listed here on that basis; see `TASKBOOK.md` for that
+ * history. Do not repeat that mistake for the remaining sources below:
+ * confirm a source actually appears in `GET /connectors` before removing
+ * it from here.
  */
 export interface PlannedConnector {
   name: string;
@@ -28,10 +31,6 @@ export const PLANNED_CONNECTORS: PlannedConnector[] = [
   {
     name: 'Etherscan',
     description: 'On-chain Ethereum metrics — gas fees, network activity, contract data.',
-  },
-  {
-    name: 'FRED',
-    description: 'Macroeconomic indicators from the Federal Reserve Economic Data service.',
   },
   {
     name: 'DefiLlama',

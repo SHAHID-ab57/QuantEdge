@@ -182,6 +182,18 @@ class Settings(BaseSettings):
     fear_greed_base_url: str = "https://api.alternative.me"
     fear_greed_request_timeout: float = 10.0
 
+    #: The St. Louis Fed's FRED API (`app/connectors/fred.py`) — the first
+    #: connector that actually requires authentication (`requires_auth=True`
+    #: on its own `ConnectorMetadata`, unlike Fear & Greed). An empty key
+    #: is a valid, deliberate "not configured yet" state (mirrors every
+    #: other optional integration credential on this platform): the
+    #: connector still registers, still appears in the catalogue, and only
+    #: fails at fetch time with `ConnectorAuthenticationError` if actually
+    #: called.
+    fred_api_key: str = ""
+    fred_base_url: str = "https://api.stlouisfed.org"
+    fred_request_timeout: float = 10.0
+
     #: Periodic external data sync (`app.services.external_data_sync
     #: .ExternalDataSyncScheduler`) — mirrors `candle_sync_enabled`/
     #: `candle_sync_interval_seconds` exactly: a lightweight in-process

@@ -38,6 +38,20 @@ class TestConnectorCatalogueEndpoint:
         assert "fear_greed" in sources
         assert body["total"] == len(body["connectors"])
 
+    async def test_a_newly_registered_connector_appears_with_zero_code_change(
+        self, client: httpx.AsyncClient
+    ) -> None:
+        """The Data Sources page's own registry-driven guarantee: `fed_funds_rate`
+        (`app/connectors/fred.py`) was added well after this endpoint/page was
+        first built, and appears here with no change to either — the same
+        proof `test_features_api.py` already gives `/features`."""
+        body = (await client.get("/api/v1/connectors")).json()
+        sources = {entry["source"] for entry in body["connectors"]}
+        assert "fed_funds_rate" in sources
+        fed_funds = next(e for e in body["connectors"] if e["source"] == "fed_funds_rate")
+        assert fed_funds["label"] == "Federal Funds Rate"
+        assert fed_funds["requires_auth"] is True
+
     async def test_reports_null_latest_value_before_anything_is_ingested(
         self, client: httpx.AsyncClient
     ) -> None:

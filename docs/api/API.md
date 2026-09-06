@@ -245,14 +245,18 @@ unchanged.
 | POST   | `/api/v1/markets/{symbol}/features/statistics`  | Build the same dataset and summarize every column, complete   |
 
 Registered today: `ohlcv` (`category: "raw"`), `candle_shape`
-(`price_action`), `sma`/`ema`/`wma` (`trend`), and `fear_greed`
-(`sentiment`). The set is queried from `GET /api/v1/features` at
-runtime, never hardcoded by a client; see `ARCHITECTURE.md` § "Feature
-Engineering Engine" for how a new generator joins this list with no API
-change, and § "External Data Connectors" for `fear_greed` specifically —
-its own value comes from a registered connector
-(`app/connectors/fear_greed.py`), not from candle math, but it is
-requested and returned exactly like every other feature.
+(`price_action`), `sma`/`ema`/`wma` (`trend`), `fear_greed` (`sentiment`),
+and `fed_funds_rate` (`macro`). The set is queried from `GET
+/api/v1/features` at runtime, never hardcoded by a client; see
+`ARCHITECTURE.md` § "Feature Engineering Engine" for how a new generator
+joins this list with no API change, and § "External Data Connectors" for
+`fear_greed`/`fed_funds_rate` specifically — both come from a registered
+connector (`app/connectors/fear_greed.py`, `app/connectors/fred.py`), not
+from candle math, but each is requested and returned exactly like every
+other feature. `fed_funds_rate` is timestamped by its real publication
+date (`external_sources: ["fed_funds_rate"]`), never the calendar month
+it describes — see `ARCHITECTURE.md` § "FRED Connector" for why that
+distinction matters.
 
 **The catalogue is the contract**, exactly as for indicators — each entry
 publishes every parameter's type, bounds, choices, default, and
@@ -583,6 +587,14 @@ connector with zero stored points, never a 404 or a crash:
   "total": 1,
 }
 ```
+
+A second connector, `fed_funds_rate` (`app/connectors/fred.py`), is
+registered the same way with `"requires_auth": true` — the catalogue
+publishes this so a client can show that fact without knowing anything
+connector-specific; whether an API key is actually configured on the
+backend has no separate field, since a missing key surfaces the same way
+any other fetch failure would (internally, at ingestion time — never at
+this read-only endpoint, which only ever reports already-stored data).
 
 **History uses the same inclusive-both-ends range this table already
 has**, unlike `/candles`'s half-open `[start, end)` — see

@@ -215,6 +215,17 @@ class Settings(BaseSettings):
     defillama_chain: str = "Ethereum"
     defillama_request_timeout: float = 10.0
 
+    #: CoinGecko's free/Demo API (`app/connectors/coingecko.py`) — the
+    #: fifth connector. Unlike FRED/Etherscan, `coingecko_api_key` is
+    #: genuinely optional, not merely "not configured yet": `/global`
+    #: works fully keyless (confirmed live), and a Demo key only upgrades
+    #: the rate limit (100 calls/min, documented) from keyless's own
+    #: shared, IP-based limiting — never required for the request to
+    #: succeed at all.
+    coingecko_base_url: str = "https://api.coingecko.com/api/v3"
+    coingecko_api_key: str = ""
+    coingecko_request_timeout: float = 10.0
+
     #: Periodic external data sync (`app.services.external_data_sync
     #: .ExternalDataSyncScheduler`) — mirrors `candle_sync_enabled`/
     #: `candle_sync_interval_seconds` exactly: a lightweight in-process

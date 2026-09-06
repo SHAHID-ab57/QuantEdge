@@ -169,11 +169,23 @@ TVL figures for the same day; handled by a new, opt-in
 connector unaffected) that lets a later sync tick overwrite an
 already-stored value in place, rather than silently keeping a
 stale/uncorrected figure forever (see `ARCHITECTURE.md` §
-"DefiLlama Connector" for the full account). The remaining two sources
-(Marketaux, CoinGecko) have not been started — each needs its own auth
-handling and response shape. Whether Fear & Greed, FRED, Etherscan,
-DefiLlama (or any future source) actually improves predictions has
-deliberately not been evaluated — that
+"DefiLlama Connector" for the full account). **CoinGecko is also done**
+— the fifth connector, and the first whose API key is genuinely optional
+rather than merely unconfigured: `btc_dominance` (CoinGecko's `/global`,
+`market_cap_percentage.btc`), confirmed fully keyless against the real
+live API, with a Demo key only raising the rate limit. Chosen over ETH's
+own market cap or total market cap on a structural argument (a share of
+the total market cannot be derived from any single asset's own price
+series, unlike ETH's own market cap or total market cap's own broad
+correlation with price-like movement) rather than an empirical
+correlation check, since no free historical BTC-dominance series exists
+to run one against (see `ARCHITECTURE.md` § "CoinGecko Connector" for the
+full account, including why this source — like Etherscan — has no
+historical backfill capability at all). The remaining source (Marketaux)
+has not been started — it needs its own investigation into
+sentiment-scoring usability, not just auth/response shape. Whether Fear &
+Greed, FRED, Etherscan, DefiLlama, CoinGecko (or any future source)
+actually improves predictions has deliberately not been evaluated — that
 depends on the backtest loop being independently confirmed reliable
 first. A Data Sources page (`/data-sources`) is also done: two read-only
 endpoints and a registry-driven "Active" section (zero frontend change

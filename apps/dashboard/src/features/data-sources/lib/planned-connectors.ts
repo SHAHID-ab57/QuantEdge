@@ -28,8 +28,4 @@ export const PLANNED_CONNECTORS: PlannedConnector[] = [
     name: 'Marketaux',
     description: 'News and sentiment coverage for crypto and macro markets.',
   },
-  {
-    name: 'CoinGecko',
-    description: 'Broad cryptocurrency market statistics and rankings.',
-  },
 ];

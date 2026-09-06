@@ -79,6 +79,9 @@ class TestCatalogueEndpoint:
         eth_tvl = next(e for e in body["features"] if e["name"] == "eth_tvl")
         assert eth_tvl["external_sources"] == ["eth_tvl"]
 
+        btc_dominance = next(e for e in body["features"] if e["name"] == "btc_dominance")
+        assert btc_dominance["external_sources"] == ["btc_dominance"]
+
         ohlcv = next(e for e in body["features"] if e["name"] == "ohlcv")
         assert ohlcv["external_sources"] == []
 

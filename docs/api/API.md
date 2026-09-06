@@ -246,15 +246,16 @@ unchanged.
 
 Registered today: `ohlcv` (`category: "raw"`), `candle_shape`
 (`price_action`), `sma`/`ema`/`wma` (`trend`), `fear_greed` (`sentiment`),
-`fed_funds_rate` (`macro`), `eth_gas_price` (`on-chain`), and `eth_tvl`
-(`on-chain`). The set is queried from `GET /api/v1/features` at runtime,
-never hardcoded by a client; see `ARCHITECTURE.md` § "Feature Engineering
-Engine" for how a new generator joins this list with no API change, and
-§ "External Data Connectors" for
-`fear_greed`/`fed_funds_rate`/`eth_gas_price`/`eth_tvl` specifically — all
-four come from a registered connector (`app/connectors/fear_greed.py`,
-`app/connectors/fred.py`, `app/connectors/etherscan.py`,
-`app/connectors/defillama.py`), not from candle math, but each is
+`fed_funds_rate` (`macro`), `eth_gas_price` (`on-chain`), `eth_tvl`
+(`on-chain`), and `btc_dominance` (`market`). The set is queried from
+`GET /api/v1/features` at runtime, never hardcoded by a client; see
+`ARCHITECTURE.md` § "Feature Engineering Engine" for how a new generator
+joins this list with no API change, and § "External Data Connectors" for
+`fear_greed`/`fed_funds_rate`/`eth_gas_price`/`eth_tvl`/`btc_dominance`
+specifically — all five come from a registered connector
+(`app/connectors/fear_greed.py`, `app/connectors/fred.py`,
+`app/connectors/etherscan.py`, `app/connectors/defillama.py`,
+`app/connectors/coingecko.py`), not from candle math, but each is
 requested and returned exactly like every other feature. `fed_funds_rate`
 is timestamped by its real publication date
 (`external_sources: ["fed_funds_rate"]`), never the calendar month it
@@ -269,7 +270,11 @@ timestamp across two dataset builds — DefiLlama does not guarantee a
 published TVL figure is final, and an already-stored value is overwritten
 in place when a re-fetch reports a genuine revision (`ConnectorMetadata
 .revisable`) — see `ARCHITECTURE.md` § "DefiLlama Connector" for the full
-investigation and decision.
+investigation and decision. `btc_dominance` is timestamped by CoinGecko's
+own `updated_at`, never a value this platform computes itself, and — like
+`eth_gas_price` — has no historical query capability at all, so a candle
+older than this platform's first poll always reads `null` — see
+`ARCHITECTURE.md` § "CoinGecko Connector".
 
 **The catalogue is the contract**, exactly as for indicators — each entry
 publishes every parameter's type, bounds, choices, default, and
@@ -289,8 +294,9 @@ Data Connectors work: `external_sources` — the connector source names (see
 `ARCHITECTURE.md` § "External Data Connectors") this generator reads instead
 of, or alongside, candle data — empty for every generator except
 `fear_greed` (`("fear_greed",)`), `fed_funds_rate`
-(`("fed_funds_rate",)`), `eth_gas_price` (`("eth_gas_price",)`), and
-`eth_tvl` (`("eth_tvl",)`). A feature declaring `external_sources` is
+(`("fed_funds_rate",)`), `eth_gas_price` (`("eth_gas_price",)`),
+`eth_tvl` (`("eth_tvl",)`), and `btc_dominance`
+(`("btc_dominance",)`). A feature declaring `external_sources` is
 never served from the feature cache (`cache_status` reports `"disabled"`,
 not `"miss"`, for that column), because the cache key fingerprints candles
 and parameters only, never a connector's own freshness. A feature declaring
@@ -622,7 +628,14 @@ with no new data having been ingested for any _newer_ date: DefiLlama
 does not guarantee a published TVL figure is final, so an already-stored
 value can be overwritten in place by a later sync tick if a re-fetch
 reports a genuine revision (see `ARCHITECTURE.md` § "DefiLlama Connector"
-for the live evidence behind this decision).
+for the live evidence behind this decision). A fifth, `btc_dominance`
+(`app/connectors/coingecko.py`), is registered with
+`"requires_auth": false` — CoinGecko's `/global` works fully keyless; an
+optional API key only raises the rate limit, never gating whether the
+request succeeds at all. Like `eth_gas_price`, its `latest_timestamp` is
+always CoinGecko's own reported refresh instant (`updated_at`), never a
+value this platform computes itself, since this endpoint has no
+historical query capability on the free tier.
 
 **History uses the same inclusive-both-ends range this table already
 has**, unlike `/candles`'s half-open `[start, end)` — see

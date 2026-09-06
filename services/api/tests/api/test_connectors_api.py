@@ -65,6 +65,12 @@ class TestConnectorCatalogueEndpoint:
         assert eth_tvl["label"] == "Ethereum Chain TVL"
         assert eth_tvl["requires_auth"] is False
 
+        # A fifth connector, added later still — same guarantee again.
+        assert "btc_dominance" in sources
+        btc_dominance = next(e for e in body["connectors"] if e["source"] == "btc_dominance")
+        assert btc_dominance["label"] == "Bitcoin Dominance"
+        assert btc_dominance["requires_auth"] is False
+
     async def test_reports_null_latest_value_before_anything_is_ingested(
         self, client: httpx.AsyncClient
     ) -> None:

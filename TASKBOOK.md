@@ -130,7 +130,8 @@ that introduced it where the work has been committed.
 | M4-E1-T2 | M4: Data Breadth                 | E1: External Data Connectors | FRED macroeconomic connector (`app/connectors/fred.py`, `fed_funds_rate` feature) — first connector requiring authentication; a real ~1-month publication lag investigated and handled via FRED's own `realtime_start`, never the reference `date`, verified by a dedicated fixture test. Re-issued after being reported issued but never actually built the first time (see `docs/audits/MILESTONE_2_3_VERIFICATION.md`)                                               | Completed | High     | M4-E1-T1     | `e4dcc5b`            |
 | M4-E1-T3 | M4: Data Breadth                 | E1: External Data Connectors | Data Sources page (`/data-sources`) — registry-driven `GET /connectors`/`GET /connectors/{source}/history`, an Active section with zero source hardcoding, a static Planned section needing per-connector upkeep                                                                                                                                                                                                                                                        | Completed | Medium   | M4-E1-T1     | `cd8e037`            |
 | M4-E1-T4 | M4: Data Breadth                 | E1: External Data Connectors | Etherscan on-chain connector (`app/connectors/etherscan.py`, `eth_gas_price` feature) — third connector, second requiring authentication; migrated to Etherscan's current V2 API after the old endpoint's deprecation was caught live, handles a genuinely tighter rate limit (3/sec, 100k/day) via JSON-body-content retry dispatch since Etherscan always returns HTTP 200, and discloses (rather than hides) that no historical backfill is possible for this metric | Completed | High     | M4-E1-T1     | `30eb9b0`            |
-| M4-E1-T5 | M4: Data Breadth                 | E1: External Data Connectors | DefiLlama TVL connector (`app/connectors/defillama.py`, `eth_tvl` feature) — fourth connector, first requiring no authentication; investigation found DefiLlama revises published TVL figures, handled by a new opt-in `ConnectorMetadata.revisable` flag (default `false`, every prior connector unaffected) that lets ingestion overwrite an already-stored value rather than silently keep it stale                                                                  | Completed | High     | M4-E1-T1     | pending commit       |
+| M4-E1-T5 | M4: Data Breadth                 | E1: External Data Connectors | DefiLlama TVL connector (`app/connectors/defillama.py`, `eth_tvl` feature) — fourth connector, first requiring no authentication; investigation found DefiLlama revises published TVL figures, handled by a new opt-in `ConnectorMetadata.revisable` flag (default `false`, every prior connector unaffected) that lets ingestion overwrite an already-stored value rather than silently keep it stale                                                                  | Completed | High     | M4-E1-T1     | `2cf66f8`            |
+| M4-E1-T6 | M4: Data Breadth                 | E1: External Data Connectors | CoinGecko market data connector (`app/connectors/coingecko.py`, `btc_dominance` feature) — fifth connector, first whose API key is genuinely optional; BTC dominance chosen over ETH's own market cap on a structural non-redundancy argument, confirmed keyless against the real live API, no historical query capability on the free tier (same limitation as Etherscan)                                                                                              | Completed | High     | M4-E1-T1     | pending commit       |
 
 ---
 
@@ -196,12 +197,12 @@ schedule mirroring `CandleSyncScheduler`, and available as a real feature
 both the live-inference and training dataset-building paths deliberately,
 to prevent a train/serve skew a future connector-backed feature could
 otherwise introduce silently. Reaches the existing `/features` selector
-with zero frontend change. Three of the remaining sources this milestone
-names, FRED, Etherscan, and DefiLlama, have since landed too — see
-`M4-E1-T2`, `M4-E1-T4`, and `M4-E1-T5` below. The remaining two sources
-(Marketaux, CoinGecko) have not been started — each has its own auth
-model and response shape to design against, unlike Fear & Greed's
-unauthenticated single daily value. See `ARCHITECTURE.md` § "External
+with zero frontend change. Four of the remaining sources this milestone
+names, FRED, Etherscan, DefiLlama, and CoinGecko, have since landed too —
+see `M4-E1-T2`, `M4-E1-T4`, `M4-E1-T5`, and `M4-E1-T6` below. The
+remaining source (Marketaux) has not been started — it needs its own
+investigation into sentiment-scoring usability, not just an auth model
+and response shape to design against. See `ARCHITECTURE.md` § "External
 Data Connectors".
 
 M4-E1-T3, the Data Sources page (`/data-sources`), is also real, tested,
@@ -302,6 +303,37 @@ fact, already performed a real, complete 3,267-row backfill
 (`2017-09-27` through `2026-09-06`) entirely on its own, the moment the
 connector file was saved. See `ARCHITECTURE.md` § "External Data
 Connectors" → "DefiLlama Connector".
+
+**M4-E1-T6, CoinGecko, is now real, tested, and wired in.** The fifth
+concrete connector, and the first whose API key is genuinely optional:
+`app/connectors/coingecko.py` fetches CoinGecko's `/global` endpoint,
+available as a real feature (`btc_dominance`) — the first in a new
+`"market"` category. Its own investigation, done before any client code
+was written, confirmed `/global` works fully keyless (a real,
+unauthenticated request returned real data), unlike FRED/Etherscan which
+both hard-require a key; a free Demo key only raises the rate limit from
+keyless's own shared, IP-based limiting to a documented 100 calls/min. A
+real burst of 20 concurrent keyless requests confirmed the rate limit is
+genuinely enforced (15 of 20 throttled, with a plain-text `"Throttled\n"`
+body, not CoinGecko's own JSON error shape). The metric itself was chosen
+on a structural argument, not an empirical one: BTC dominance
+(`market_cap_percentage.btc`) is a share of the total market, which no
+single asset's own price series can derive even in principle — unlike
+ETH's own market cap (nearly redundant with Delta's own candles) or total
+market cap (a broad size measure correlated with the same price movement
+ETH's own candles already show). No empirical correlation check was
+possible since CoinGecko's only historical global-market endpoint is
+Analyst-plan-and-above, the same Pro-tier trap Etherscan and DefiLlama
+each had. Confirmed live, not assumed: `/global` carries its own
+`updated_at`, so this connector never computes its own timestamp — a
+direct live simulation of a routine sync tick's own window confirmed no
+Etherscan-style race condition exists here. Like Etherscan, this source
+has no historical query capability at all. Appears in
+`GET /connectors`/`/data-sources` and `GET /features` automatically,
+confirmed live against the already-running dev server — which had, in
+fact, already landed two real, distinct BTC dominance values ten minutes
+apart before any manual verification was run. See `ARCHITECTURE.md` §
+"External Data Connectors" → "CoinGecko Connector".
 
 ---
 

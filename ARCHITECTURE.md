@@ -3618,10 +3618,10 @@ external data source sits on top of (`docs/architecture
 Alternative.me, DefiLlama, CoinGecko), proven end to end with the
 lowest-risk possible first case: the Fear & Greed Index —
 no authentication, one value per day, against alternative.me's free,
-public API. **Four are implemented so far** — Fear & Greed, FRED
-(§ "FRED Connector"), Etherscan (§ "Etherscan Connector"), and DefiLlama
-(§ "DefiLlama Connector") — with Marketaux and CoinGecko remaining on top
-of the same abstraction, not yet built.
+public API. **Five are implemented so far** — Fear & Greed, FRED
+(§ "FRED Connector"), Etherscan (§ "Etherscan Connector"), DefiLlama
+(§ "DefiLlama Connector"), and CoinGecko (§ "CoinGecko Connector") — with
+Marketaux remaining on top of the same abstraction, not yet built.
 
 **The `Connector` protocol** (`app/connectors/base.py`) mirrors
 `app.marketdata.normalizer.Normalizer`'s own role exactly — a plain
@@ -4481,6 +4481,126 @@ regression proof that this feature cannot silently change any existing
 connector's behavior — while a revisable source correctly overwrites
 only the point that actually changed in a mixed batch, never an
 all-or-nothing rewrite.
+
+#### CoinGecko Connector (M4-E1-T6)
+
+The fifth concrete connector, and the first whose API key is genuinely
+_optional_ rather than merely "not configured yet" — FRED and Etherscan
+both hard-require a key and fail immediately with no network call when
+one is missing; CoinGecko's `/global` works fully keyless, confirmed
+live, and a key only raises the rate limit.
+
+**Investigation, checked directly against CoinGecko's current API
+documentation and the real live API, not assumed from how the API used
+to work:**
+
+- **`/global` requires no key at all** — a real, unauthenticated request
+  returned real HTTP 200 data. CoinGecko's own current docs
+  (`docs.coingecko.com/docs/errors-and-rate-limits`) name three access
+  tiers explicitly: keyless (IP-based, shared rate limiting), a free
+  Demo plan (a registered key, `x-cg-demo-api-key` header, **100
+  calls/min**, documented), and paid plans. This connector supports an
+  optional Demo key (`COINGECKO_API_KEY`) sent as a header, never a query
+  parameter — CoinGecko's own docs explicitly warn against the query-
+  string form in production.
+- **The keyless rate limit is real and was actually exercised, not just
+  documented.** A burst of 20 concurrent keyless requests returned real
+  HTTP 429 for 15 of them, with a **plain-text** `"Throttled\n"` body —
+  not CoinGecko's own documented JSON error envelope. `CoinGeckoClient`'s
+  response parsing tolerates a non-JSON body on any status code,
+  including 429, rather than assuming CoinGecko's own JSON shape always
+  applies; a separate, deliberate test proves a 429 carrying CoinGecko's
+  own JSON envelope is handled identically.
+- **A real bad key produces a real, live-confirmed 401** —
+  `{"status": {"error_code": 10002, "error_message": "API Key
+Missing..."}}` — the same code CoinGecko documents for a _missing_
+  key, confirmed live to also cover an invalid one. This connector cannot
+  distinguish "wrong key" from "no key" beyond what CoinGecko's own error
+  reporting already conflates.
+- **No historical query capability on the free tier — confirmed by
+  reading documentation, not discovered by trial and error.** A separate
+  "Global Market Cap Chart Data" endpoint does exist, but its own
+  reference page is explicitly tagged `Analyst Plan and Above` — the same
+  Pro-tier trap Etherscan's `dailyavggasprice` and DefiLlama's Pro API
+  each were, ruled out by checking the docs directly rather than assuming
+  a promising-sounding endpoint is free.
+
+**The three known bug patterns from this milestone's prior four
+connectors, checked explicitly rather than left to a live call to
+discover:**
+
+- _An omitted parameter defaulting to something surprising_ (FRED's
+  `realtime_start`/`realtime_end`): does not apply — `/global` takes no
+  query parameters at all.
+- _A timestamp computed at the wrong moment relative to a network call_
+  (Etherscan's `end`-before-round-trip bug): structurally cannot recur
+  here. Unlike Etherscan's dateless Gas Oracle, `/global` carries its own
+  `updated_at` (Unix seconds) — this connector always uses CoinGecko's
+  own reported refresh instant, never a value it computes itself.
+  Directly verified live, not just reasoned about: simulating a real
+  routine sync tick's own window (`start` = the real last-stored
+  timestamp, `end` = now, ~460ms real HTTP round trip in between)
+  returned `received=1`, correctly matched — no analogous race exists,
+  because the point's own timestamp never depends on when _this
+  connector's_ request happened to complete.
+- _A response field silently not captured_ (Fear & Greed's own
+  `external_sources` DTO gap): guarded the same way every connector since
+  has been.
+
+**Why BTC dominance, not ETH's own market cap or total market cap —
+checked, not assumed just because it sounded plausible.** ETH's own
+market cap (price × slowly-changing circulating supply) would have been
+nearly redundant with Delta's own ETHUSD candles already in this
+platform. Total market cap is not strictly redundant, but as an aggregate
+_size_ measure it still tends to move with the same broad direction
+ETH's own price usually reflects. BTC dominance
+(`market_cap_percentage.btc`) is structurally different, not just
+empirically different: it is a _share_ of the total market, and no
+absolute price series for any single asset — however transformed — can
+even in principle reveal what fraction of the whole market is currently
+held in a _different_ asset. This is a structural argument, not an
+empirical correlation study, because no free historical BTC-dominance
+series exists to run one against (the same Analyst-plan-only chart
+endpoint named above).
+
+**No historical backfill is possible — the same disclosed limitation
+Etherscan has, for the same reason.** `/global` only ever answers "what
+is BTC dominance right now." `fetch(start, end)` makes exactly one live
+request regardless of the requested range, and returns that single point
+only if its own `updated_at` falls within `[start, end]` — an honest
+empty result for a genuinely past-only range, never a fabricated value.
+
+**Registered exactly like the other four, with zero special-casing
+anywhere else.** `app/connectors/coingecko.py` is auto-discovered by
+`load_builtin_connectors()`; `app/features/builtin/btc_dominance.py` is
+auto-discovered by `load_builtin_features()` — the first feature in a new
+`"market"` category, distinct from `"on-chain"` (a single chain's own
+network state), `"macro"` (policy backdrop), and `"sentiment"` (an
+aggregated mood index), since BTC dominance describes capital allocation
+across the whole cryptocurrency market. Confirmed, not assumed, against
+the already-running dev server: `btc_dominance` appears in both
+`GET /api/v1/features` and `GET /connectors` automatically, and its own
+periodic scheduler tick had already landed two real, distinct values
+(`59.217620949379814` at `17:45:15Z`, `59.22997531037991` at `17:55:16Z`)
+before any manual verification was even run.
+
+**Testing.** `tests/connectors/test_coingecko.py` covers: a successful
+fetch with header assertions (no key configured -> no
+`x-cg-demo-api-key` header sent at all; a configured key -> sent as a
+header, never in the URL); a real 401 for a bad key raising
+`ConnectorAuthenticationError`; three malformed-response shapes
+(non-JSON body, non-object envelope, missing `data` field); a network
+timeout; a connect error retried to exhaustion; a 429 carrying
+CoinGecko's own JSON envelope retried then succeeding; a 429 carrying the
+real, live-confirmed plain-text `"Throttled\n"` body retried then
+succeeding; a 429 exhausted raising `ConnectorRateLimitError`.
+`TestCoinGeckoConnector` proves the two properties unique to this
+connector: a fetch is always timestamped by the response's own
+`updated_at`, never a locally-computed value; a past-only requested range
+returns an honest empty tuple. `tests/connectors/test_registry.py
+::TestCoinGeckoIsRegistered` confirms discoverability on the real, shared
+`default_registry`. `tests/features/test_btc_dominance_feature.py`
+mirrors the other four features' own lookup/no-look-ahead tests in full.
 
 ### Feature Store
 

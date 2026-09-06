@@ -170,6 +170,52 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
     "DefiLlama Connector"; API surface in `docs/api/API.md`; tests in
     `services/api/TESTING.md`.
 
+- **CoinGecko market data connector (`btc_dominance`, M4-E1-T6): the
+  fifth connector, and the first whose API key is genuinely optional.**
+  Bitcoin dominance, chosen after confirming CoinGecko's current
+  access model directly and checking the same three bug patterns each
+  of the prior four connectors had independently hit.
+  - **`/global` works fully keyless, confirmed live** — no key, no
+    header, real HTTP 200 data. CoinGecko's own current docs describe a
+    keyless tier (shared, IP-based rate limiting) alongside a free Demo
+    plan (a registered key, `x-cg-demo-api-key` header, 100 calls/min,
+    documented); a key here only raises the rate limit, never gates
+    whether the request succeeds — a genuine architectural difference
+    from FRED/Etherscan's hard-required keys.
+  - **The keyless rate limit was actually exercised, not just
+    documented**: 20 concurrent keyless requests produced real HTTP 429
+    for 15 of them, with a plain-text `"Throttled\n"` body — not
+    CoinGecko's own documented JSON error envelope. Response parsing
+    tolerates a non-JSON body on any status code, including 429.
+  - **The three known bug patterns, checked against documentation before
+    writing any code**: no omittable parameter exists on `/global`;
+    `/global` carries its own `updated_at`, so no local `datetime.now()`
+    timestamp is ever computed — directly verified live by simulating a
+    real routine sync tick's own window and confirming no Etherscan-style
+    race exists; the `external_sources` DTO field is proven present the
+    same way every connector since Fear & Greed has been.
+  - **BTC dominance over ETH's own market cap or total market cap**,
+    justified structurally rather than empirically (no free historical
+    BTC-dominance series exists to run a correlation check against — the
+    only historical endpoint is Analyst-plan-and-above, the same
+    Pro-tier trap Etherscan and DefiLlama each had): a _share_ of the
+    total market cannot, even in principle, be derived from any single
+    asset's own absolute price series, unlike ETH's own market cap
+    (price × supply) or total market cap's own broad correlation with
+    price-like movement.
+  - **No historical backfill is possible** — the same disclosed
+    limitation Etherscan has, for the same reason: `/global` only
+    answers "what is it right now."
+  - **A new feature, `btc_dominance`**, the first in a new `"market"`
+    category, and the connector appearing automatically in
+    `GET /connectors`/`/data-sources` and `GET /features` with zero code
+    change to either — confirmed live against the already-running dev
+    server, which had in fact already landed two real, distinct values
+    ten minutes apart before any manual verification was run.
+  - Full design in `ARCHITECTURE.md` § "External Data Connectors" →
+    "CoinGecko Connector"; API surface in `docs/api/API.md`; tests in
+    `services/api/TESTING.md`.
+
 - **Milestones 2 and 3 independently re-verified against real code and
   live test runs**, not re-asserted from their own prior "COMPLETE"
   status — all seven audited claims (async training execution,

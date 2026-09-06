@@ -3452,9 +3452,9 @@ src/features/data-sources/
 Engineering page's own `FeatureSelector`.** Neither `data-sources-page
 .tsx` nor `connector-card.tsx` names `fear_greed` (or any other source)
 anywhere — the section renders whatever `GET /connectors` returns, so a
-future connector (Marketaux, CoinGecko) appears here the day it's
-registered on the backend, with no frontend change — `fed_funds_rate`,
-`eth_gas_price`, and `eth_tvl` already proved this guarantee once each.
+future connector (Marketaux) appears here the day it's registered on the
+backend, with no frontend change — `fed_funds_rate`, `eth_gas_price`,
+`eth_tvl`, and `btc_dominance` already proved this guarantee once each.
 Each `ConnectorCard` fetches its own history independently via
 its own `useConnectorHistory` call, rather than the page prefetching
 every connector's history up front — a slow or failing history request
@@ -3475,23 +3475,23 @@ in; no page-specific handling was needed for that case.
 
 **"Planned Data Sources" is the one deliberate exception to
 "nothing hardcoded."** `lib/planned-connectors.ts` is a static array —
-Marketaux, CoinGecko — rendered by `PlannedDataSources` with zero API
-call, since there is nothing in the registry for an unbuilt connector to
-read. This list is **not** automatically kept in sync: an entry must be
-removed the same day its connector actually ships (appears in
-`GET /connectors`), never before — otherwise a source briefly shows as
-both "planned" and "active" at once. This file's own module docstring
-states this is part of every future connector task's own Definition of
-Done, not a separate cleanup pass. FRED is the worked example of exactly
-this discipline gone wrong once: it was originally reported elsewhere as
-issued (tracked as M4-E1-T2) while still absent from the connector
-registry, and stayed on this list on that basis — `TASKBOOK.md` records
-that history — until it actually landed (`app/connectors/fred.py`), at
-which point it was removed from here in the same change that shipped it,
-not before and not after. Etherscan (M4-E1-T4) and DefiLlama (M4-E1-T5)
-are the more ordinary case: no prior "wrongly reported" history to
-record, just a plain removal from this array the same day each
-connector's own module actually landed.
+Marketaux — rendered by `PlannedDataSources` with zero API call, since
+there is nothing in the registry for an unbuilt connector to read. This
+list is **not** automatically kept in sync: an entry must be removed the
+same day its connector actually ships (appears in `GET /connectors`),
+never before — otherwise a source briefly shows as both "planned" and
+"active" at once. This file's own module docstring states this is part
+of every future connector task's own Definition of Done, not a separate
+cleanup pass. FRED is the worked example of exactly this discipline gone
+wrong once: it was originally reported elsewhere as issued (tracked as
+M4-E1-T2) while still absent from the connector registry, and stayed on
+this list on that basis — `TASKBOOK.md` records that history — until it
+actually landed (`app/connectors/fred.py`), at which point it was removed
+from here in the same change that shipped it, not before and not after.
+Etherscan (M4-E1-T4), DefiLlama (M4-E1-T5), and CoinGecko (M4-E1-T6) are
+the more ordinary case: no prior "wrongly reported" history to record,
+just a plain removal from this array the same day each connector's own
+module actually landed.
 
 ## State management
 

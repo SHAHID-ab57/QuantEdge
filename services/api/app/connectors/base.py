@@ -66,6 +66,18 @@ class ConnectorMetadata:
     requires_auth: bool = False
     version: str = "1.0.0"
     aliases: tuple[str, ...] = field(default_factory=tuple)
+    #: Whether an already-stored `(source, symbol, timestamp)` may need to
+    #: be *overwritten*, not merely skipped as a duplicate, when a later
+    #: fetch reports a different `value` for it — true for a source whose
+    #: upstream provider revises already-published history (DefiLlama's
+    #: TVL, confirmed to differ between its "current" and "historical"
+    #: endpoints for the same in-progress day — see
+    #: `app.connectors.defillama`'s own module docstring for the full
+    #: investigation). `False` (every connector before DefiLlama) keeps
+    #: today's existing behavior byte-for-byte: `app.services
+    #: .external_data_ingest._persist_points` never even loads existing
+    #: values to compare, exactly as before this field existed.
+    revisable: bool = False
 
 
 class Connector(Protocol):

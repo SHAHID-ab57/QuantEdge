@@ -76,6 +76,9 @@ class TestCatalogueEndpoint:
         gas_price = next(e for e in body["features"] if e["name"] == "eth_gas_price")
         assert gas_price["external_sources"] == ["eth_gas_price"]
 
+        eth_tvl = next(e for e in body["features"] if e["name"] == "eth_tvl")
+        assert eth_tvl["external_sources"] == ["eth_tvl"]
+
         ohlcv = next(e for e in body["features"] if e["name"] == "ohlcv")
         assert ohlcv["external_sources"] == []
 

@@ -32,6 +32,26 @@ from tests.conftest import SessionFactory
 BASE = datetime(2026, 1, 1, tzinfo=UTC)
 
 
+class RevisableFakeConnector:
+    """Same role as `FakeConnector`, but registered `revisable=True` — a
+    stand-in for `app.connectors.defillama.DefiLlamaConnector` without any
+    real network call, for `TestRevisableIngestion` below."""
+
+    metadata: ClassVar[ConnectorMetadata] = ConnectorMetadata(
+        source="fake_revisable_source",
+        label="Fake Revisable",
+        description="A test double for a revisable source.",
+        revisable=True,
+    )
+
+    points: tuple[RawDataPoint, ...] = ()
+    calls: int = 0
+
+    async def fetch(self, start: datetime, end: datetime) -> tuple[RawDataPoint, ...]:
+        RevisableFakeConnector.calls += 1
+        return RevisableFakeConnector.points
+
+
 class FakeConnector:
     """A controllable stand-in for a real `Connector` — returns whatever
     `points` were configured, or raises `error` if one was set. Class-level
@@ -62,7 +82,21 @@ def reset_fake_connector():
     FakeConnector.points = ()
     FakeConnector.error = None
     FakeConnector.calls = 0
+    RevisableFakeConnector.points = ()
+    RevisableFakeConnector.calls = 0
     yield
+
+
+@pytest.fixture
+def revisable_fake_registry(monkeypatch: pytest.MonkeyPatch) -> ConnectorRegistry:
+    """An isolated registry holding only `RevisableFakeConnector` — kept
+    separate from `fake_registry` so a `revisable=True` source is never
+    accidentally exercised by `TestIngestExternalData`'s own tests."""
+    registry = ConnectorRegistry()
+    registry.register(RevisableFakeConnector)
+    monkeypatch.setattr(external_data_ingest, "default_connector_registry", registry)
+    monkeypatch.setattr(external_data_ingest, "load_builtin_connectors", lambda: None)
+    return registry
 
 
 @pytest.fixture
@@ -182,6 +216,130 @@ class TestIngestExternalData:
 
 
 @pytest.mark.asyncio
+class TestRevisableIngestion:
+    """`ConnectorMetadata.revisable=True`'s own ingestion-layer behavior —
+    `app.connectors.defillama`'s reason for existing. Kept separate from
+    `TestIngestExternalData` above: every one of those tests uses the
+    ordinary `revisable=False` `FakeConnector` and must stay byte-for-byte
+    unaffected by this feature existing at all (each one already passed
+    before this class was added — see the full suite run, not just this
+    file, for that regression proof)."""
+
+    async def test_a_non_revisable_source_still_skips_a_changed_value_unconditionally(
+        self, fake_registry: ConnectorRegistry, session_factory: SessionFactory
+    ) -> None:
+        """The critical regression proof: `revisable=False` (every
+        connector before DefiLlama) must keep skipping a timestamp
+        collision even when the newly-fetched value genuinely differs —
+        exactly today's existing behavior, untouched by this feature."""
+        FakeConnector.points = (RawDataPoint(timestamp=BASE, value=30.0),)
+        first = await ingest_external_data(
+            source="fake_source", start=BASE, end=BASE, session=session_factory()
+        )
+        assert first.inserted == 1
+        assert first.updated == 0
+
+        FakeConnector.points = (RawDataPoint(timestamp=BASE, value=99.0),)
+        second = await ingest_external_data(
+            source="fake_source", start=BASE, end=BASE, session=session_factory()
+        )
+        assert second.inserted == 0
+        assert second.updated == 0
+        assert second.duplicates_skipped == 1
+
+        async with session_factory() as session:
+            stored = (await session.execute(select(ExternalDataPoint.value))).scalar_one()
+        assert stored == 30.0  # the original value, never overwritten
+
+    async def test_a_revisable_source_overwrites_a_changed_value(
+        self, revisable_fake_registry: ConnectorRegistry, session_factory: SessionFactory
+    ) -> None:
+        RevisableFakeConnector.points = (RawDataPoint(timestamp=BASE, value=40.0),)
+        first = await ingest_external_data(
+            source="fake_revisable_source", start=BASE, end=BASE, session=session_factory()
+        )
+        assert first.inserted == 1
+        assert first.updated == 0
+        assert first.duplicates_skipped == 0
+
+        RevisableFakeConnector.points = (RawDataPoint(timestamp=BASE, value=41.0),)
+        second = await ingest_external_data(
+            source="fake_revisable_source", start=BASE, end=BASE, session=session_factory()
+        )
+        assert second.inserted == 0
+        assert second.updated == 1
+        assert second.duplicates_skipped == 0
+
+        async with session_factory() as session:
+            stored = (await session.execute(select(ExternalDataPoint.value))).scalar_one()
+        assert stored == 41.0  # overwritten in place
+
+    async def test_a_revisable_source_still_skips_an_unchanged_re_fetch(
+        self, revisable_fake_registry: ConnectorRegistry, session_factory: SessionFactory
+    ) -> None:
+        """Revisable does not mean "always rewrite" — an unchanged
+        re-fetch is still just a duplicate skip, never a wasted write."""
+        RevisableFakeConnector.points = (RawDataPoint(timestamp=BASE, value=40.0),)
+        await ingest_external_data(
+            source="fake_revisable_source", start=BASE, end=BASE, session=session_factory()
+        )
+
+        second = await ingest_external_data(
+            source="fake_revisable_source", start=BASE, end=BASE, session=session_factory()
+        )
+        assert second.inserted == 0
+        assert second.updated == 0
+        assert second.duplicates_skipped == 1
+
+    async def test_a_revisable_source_only_overwrites_the_point_that_actually_changed(
+        self, revisable_fake_registry: ConnectorRegistry, session_factory: SessionFactory
+    ) -> None:
+        """A batch mixing an unchanged point and a genuinely revised one
+        must resolve each independently — never an all-or-nothing rewrite
+        of the whole batch."""
+        RevisableFakeConnector.points = (
+            RawDataPoint(timestamp=BASE, value=40.0),
+            RawDataPoint(timestamp=BASE + timedelta(days=1), value=50.0),
+        )
+        await ingest_external_data(
+            source="fake_revisable_source",
+            start=BASE,
+            end=BASE + timedelta(days=1),
+            session=session_factory(),
+        )
+
+        RevisableFakeConnector.points = (
+            RawDataPoint(timestamp=BASE, value=40.0),  # unchanged
+            RawDataPoint(timestamp=BASE + timedelta(days=1), value=51.0),  # revised
+        )
+        second = await ingest_external_data(
+            source="fake_revisable_source",
+            start=BASE,
+            end=BASE + timedelta(days=1),
+            session=session_factory(),
+        )
+        assert second.updated == 1
+        assert second.duplicates_skipped == 1
+
+        async with session_factory() as session:
+            # `.replace(tzinfo=UTC)` works around SQLite's own naive
+            # datetime round-trip quirk (`ExternalDataRepository`'s own
+            # `_as_utc` docstring has the full account) — this test reads
+            # the raw column directly rather than through a repository
+            # method that already normalizes it.
+            values = {
+                row[0].replace(tzinfo=UTC): row[1]
+                for row in (
+                    await session.execute(
+                        select(ExternalDataPoint.timestamp, ExternalDataPoint.value)
+                    )
+                ).all()
+            }
+        assert values[BASE] == 40.0
+        assert values[BASE + timedelta(days=1)] == 51.0
+
+
+@pytest.mark.asyncio
 async def test_database_conflict_is_isolated_and_rejected(
     session_factory: SessionFactory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -216,13 +374,14 @@ async def test_database_conflict_is_isolated_and_rejected(
     )
 
     async with session_factory() as session:
-        inserted, duplicates_skipped, rejected = await _persist_points(
+        inserted, updated, duplicates_skipped, rejected = await _persist_points(
             session,
             "fake_source",
             [RawDataPoint(timestamp=existing_time, value=9.0, symbol="BTC")],
         )
 
     assert inserted == 0
+    assert updated == 0
     assert duplicates_skipped == 0
     assert rejected == 1
 

@@ -1,13 +1,21 @@
-"""Command-line entry point for a manual Federal Funds Rate backfill.
+"""Command-line entry point for a manual DefiLlama Ethereum TVL backfill.
 
 Fetches every recorded value in the requested range using the same
 idempotent ingestion path the periodic scheduler uses — matches
-`scripts/backfill_fear_greed.py`'s own shape, applied to the FRED
-connector instead.
+`scripts/backfill_fear_greed.py`'s own shape, applied to this connector.
+
+Because `eth_tvl` is registered `revisable=True`
+(`app.connectors.defillama`), re-running this script over a range already
+ingested is not a pure no-op the way it is for every other connector: any
+date whose value DefiLlama now reports differently than what is stored
+will be *overwritten*, counted in `report.updated`, separate from
+`inserted`/`duplicates_skipped` — see this connector's own module
+docstring for why that is the deliberate, documented design here, not a
+regression from the platform's usual idempotent-skip behavior.
 
 Usage:
-    uv run python scripts/backfill_fred.py
-    uv run python scripts/backfill_fred.py --start 1954-07-01 --end 2026-01-01
+    uv run python scripts/backfill_defillama.py
+    uv run python scripts/backfill_defillama.py --start 2017-09-01 --end 2026-01-01
 """
 
 import argparse
@@ -15,7 +23,7 @@ import asyncio
 import sys
 from datetime import UTC, datetime, timedelta
 
-from app.connectors.fred import FRED_SOURCE
+from app.connectors.defillama import DEFILLAMA_SOURCE
 from app.core.config import get_settings
 from app.core.logging import setup_logging
 from app.services.external_data_ingest import run_ingest_once
@@ -24,7 +32,7 @@ from app.services.external_data_ingest import run_ingest_once
 def build_parser() -> argparse.ArgumentParser:
     """Build the command-line argument parser."""
     parser = argparse.ArgumentParser(
-        description="Backfill the Federal Funds Rate into external_data_points.",
+        description="Backfill DefiLlama's Ethereum chain TVL into external_data_points.",
     )
     parser.add_argument(
         "--start",
@@ -50,12 +58,11 @@ async def _main(start: str | None, end: str | None) -> int:
     resolved_start = _parse_date(start) or (
         resolved_end - timedelta(days=settings.external_data_sync_backfill_days)
     )
-    report = await run_ingest_once(source=FRED_SOURCE, start=resolved_start, end=resolved_end)
+    report = await run_ingest_once(source=DEFILLAMA_SOURCE, start=resolved_start, end=resolved_end)
     print(
         f"source={report.source} received={report.received} inserted={report.inserted} "
         f"updated={report.updated} duplicates_skipped={report.duplicates_skipped} "
-        f"rejected={report.rejected} "
-        f"duration={report.duration_seconds:.2f}s"
+        f"rejected={report.rejected} duration={report.duration_seconds:.2f}s"
     )
     return 0 if report.rejected == 0 else 1
 

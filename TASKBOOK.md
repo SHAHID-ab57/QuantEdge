@@ -129,7 +129,8 @@ that introduced it where the work has been committed.
 | M4-E1-T1 | M4: Data Breadth                 | E1: External Data Connectors | Connector abstraction (`app/connectors/`: protocol + registry) and generic `external_data_points` table, proved end to end by the first connector — Fear & Greed Index, ingested/synced and available as a real, no-look-ahead-verified feature                                                                                                                                                                                                                         | Completed | High     | M1-E2-T1     | `f3dd088`            |
 | M4-E1-T2 | M4: Data Breadth                 | E1: External Data Connectors | FRED macroeconomic connector (`app/connectors/fred.py`, `fed_funds_rate` feature) — first connector requiring authentication; a real ~1-month publication lag investigated and handled via FRED's own `realtime_start`, never the reference `date`, verified by a dedicated fixture test. Re-issued after being reported issued but never actually built the first time (see `docs/audits/MILESTONE_2_3_VERIFICATION.md`)                                               | Completed | High     | M4-E1-T1     | `e4dcc5b`            |
 | M4-E1-T3 | M4: Data Breadth                 | E1: External Data Connectors | Data Sources page (`/data-sources`) — registry-driven `GET /connectors`/`GET /connectors/{source}/history`, an Active section with zero source hardcoding, a static Planned section needing per-connector upkeep                                                                                                                                                                                                                                                        | Completed | Medium   | M4-E1-T1     | `cd8e037`            |
-| M4-E1-T4 | M4: Data Breadth                 | E1: External Data Connectors | Etherscan on-chain connector (`app/connectors/etherscan.py`, `eth_gas_price` feature) — third connector, second requiring authentication; migrated to Etherscan's current V2 API after the old endpoint's deprecation was caught live, handles a genuinely tighter rate limit (3/sec, 100k/day) via JSON-body-content retry dispatch since Etherscan always returns HTTP 200, and discloses (rather than hides) that no historical backfill is possible for this metric | Completed | High     | M4-E1-T1     | pending commit       |
+| M4-E1-T4 | M4: Data Breadth                 | E1: External Data Connectors | Etherscan on-chain connector (`app/connectors/etherscan.py`, `eth_gas_price` feature) — third connector, second requiring authentication; migrated to Etherscan's current V2 API after the old endpoint's deprecation was caught live, handles a genuinely tighter rate limit (3/sec, 100k/day) via JSON-body-content retry dispatch since Etherscan always returns HTTP 200, and discloses (rather than hides) that no historical backfill is possible for this metric | Completed | High     | M4-E1-T1     | `30eb9b0`            |
+| M4-E1-T5 | M4: Data Breadth                 | E1: External Data Connectors | DefiLlama TVL connector (`app/connectors/defillama.py`, `eth_tvl` feature) — fourth connector, first requiring no authentication; investigation found DefiLlama revises published TVL figures, handled by a new opt-in `ConnectorMetadata.revisable` flag (default `false`, every prior connector unaffected) that lets ingestion overwrite an already-stored value rather than silently keep it stale                                                                  | Completed | High     | M4-E1-T1     | pending commit       |
 
 ---
 
@@ -195,12 +196,13 @@ schedule mirroring `CandleSyncScheduler`, and available as a real feature
 both the live-inference and training dataset-building paths deliberately,
 to prevent a train/serve skew a future connector-backed feature could
 otherwise introduce silently. Reaches the existing `/features` selector
-with zero frontend change. Two of the remaining sources this milestone
-names, FRED and Etherscan, have since landed too — see `M4-E1-T2` and
-`M4-E1-T4` below. The remaining three sources (Marketaux, DefiLlama,
-CoinGecko) have not been started — each has its own auth model and
-response shape to design against, unlike Fear & Greed's unauthenticated
-single daily value. See `ARCHITECTURE.md` § "External Data Connectors".
+with zero frontend change. Three of the remaining sources this milestone
+names, FRED, Etherscan, and DefiLlama, have since landed too — see
+`M4-E1-T2`, `M4-E1-T4`, and `M4-E1-T5` below. The remaining two sources
+(Marketaux, CoinGecko) have not been started — each has its own auth
+model and response shape to design against, unlike Fear & Greed's
+unauthenticated single daily value. See `ARCHITECTURE.md` § "External
+Data Connectors".
 
 M4-E1-T3, the Data Sources page (`/data-sources`), is also real, tested,
 and wired in: two new read-only endpoints (`GET /connectors`,
@@ -272,6 +274,34 @@ inside the requested range. Appears in `GET /connectors`/`/data-sources`
 and `GET /features` automatically, confirmed by test, the same
 zero-code-change guarantee every other connector already has. See
 `ARCHITECTURE.md` § "External Data Connectors" → "Etherscan Connector".
+
+**M4-E1-T5, DefiLlama, is now real, tested, and wired in.** The fourth
+concrete connector, and the first requiring no authentication at all:
+`app/connectors/defillama.py` fetches DefiLlama's
+`v2/historicalChainTvl/Ethereum` series, available as a real feature
+(`eth_tvl`). Its own investigation, done before any client code was
+written, confirmed the free tier's real auth/rate-limit behavior
+directly (no key, no documented numeric limit, empirically tolerant of
+15 concurrent requests where Etherscan itself begins rate-limiting at 10) and checked all three bug patterns that had each independently
+bitten a prior connector — none applied here (no omittable parameter
+exists on this endpoint, every entry carries its own `date`, and the
+`external_sources` DTO field is proven present the same way every
+connector since Fear & Greed has been). It also surfaced a genuinely new
+risk: a live comparison found a persistent ~0.19% divergence between
+DefiLlama's own "current" and "historical" TVL figures for the same
+calendar day, with no documented guarantee any published figure is
+final. Handled by a new, opt-in `ConnectorMetadata.revisable` flag
+(default `false` — every connector before DefiLlama byte-for-byte
+unaffected, regression-proven by a dedicated `TestRevisableIngestion`
+test class) that lets a later sync tick overwrite an already-stored
+value in place when a re-fetch reports a genuine revision, rather than
+silently keeping a stale figure forever. Appears in
+`GET /connectors`/`/data-sources` and `GET /features` automatically,
+confirmed live against the already-running dev server — which had, in
+fact, already performed a real, complete 3,267-row backfill
+(`2017-09-27` through `2026-09-06`) entirely on its own, the moment the
+connector file was saved. See `ARCHITECTURE.md` § "External Data
+Connectors" → "DefiLlama Connector".
 
 ---
 

@@ -53,7 +53,8 @@ async def _main(start: str | None, end: str | None) -> int:
     report = await run_ingest_once(source=FEAR_GREED_SOURCE, start=resolved_start, end=resolved_end)
     print(
         f"source={report.source} received={report.received} inserted={report.inserted} "
-        f"duplicates_skipped={report.duplicates_skipped} rejected={report.rejected} "
+        f"updated={report.updated} duplicates_skipped={report.duplicates_skipped} "
+        f"rejected={report.rejected} "
         f"duration={report.duration_seconds:.2f}s"
     )
     return 0 if report.rejected == 0 else 1

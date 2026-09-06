@@ -43,6 +43,7 @@ def fake_ingest(*, failure_source: str | None = None):
             end=end,
             received=1,
             inserted=1,
+            updated=0,
             duplicates_skipped=0,
             rejected=0,
             duration_seconds=0.01,

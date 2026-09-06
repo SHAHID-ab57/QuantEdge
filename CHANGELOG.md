@@ -122,6 +122,54 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
     "Etherscan Connector"; API surface in `docs/api/API.md`; tests in
     `services/api/TESTING.md`.
 
+- **DefiLlama TVL connector (`eth_tvl`, M4-E1-T5): the fourth connector,
+  and the first requiring no authentication at all.** Ethereum chain
+  TVL, chosen after confirming the free tier's real auth/rate-limit
+  behavior directly rather than trusting history, and after checking the
+  three bug patterns Fear & Greed/FRED/Etherscan had each independently
+  hit.
+  - **No API key, no documented rate limit number** — confirmed against
+    DefiLlama's own current docs (free vs. a $300/month Pro tier, a
+    completely separate base URL) and empirically (15 concurrent real
+    requests all succeeded, unlike Etherscan's own real rate-limiting at
+    just 10).
+  - **The three known bug patterns, checked against documentation before
+    writing any code, not left to a live call to discover**: no omittable
+    parameter exists on this endpoint at all; every entry carries its own
+    `date`, so no local `datetime.now()` timestamp is ever computed; the
+    `external_sources` DTO field is proven present the same way every
+    connector since Fear & Greed has been.
+  - **A real, live-confirmed revision risk, genuinely new to this
+    connector**: DefiLlama's docs make no promise a published TVL figure
+    is final, and a direct live comparison found a persistent ~0.19%
+    divergence between `v2/chains`'s own _current_ Ethereum TVL and
+    `v2/historicalChainTvl`'s own _most recent_ entry for that same
+    calendar day, unchanged across a several-hour recheck. Decided (not
+    defaulted into): this source is registered `revisable=True`, and an
+    already-stored point is now overwritten, not silently skipped, when
+    a re-fetch reports a genuinely different value — deliberately not
+    narrowed to a "recent days only" window, since none is documented or
+    evidenced.
+  - **A shared-code addition, not a connector-only hack**:
+    `ConnectorMetadata.revisable` (default `False`, every connector
+    before DefiLlama byte-for-byte unaffected) and a new
+    `ExternalDataRepository.update_value`; `ExternalDataIngestReport`
+    gained an `updated` count alongside `inserted`/`duplicates_skipped`/
+    `rejected`. Regression-proven: every existing connector's own test
+    suite re-run clean, plus a dedicated `TestRevisableIngestion` class
+    proving a non-revisable source still skips a changed value
+    unconditionally.
+  - **A new feature, `eth_tvl`**, and the connector appearing
+    automatically in `GET /connectors`/`/data-sources` and
+    `GET /features` with zero code change to either — confirmed live
+    against the already-running dev server, which had in fact already
+    performed a real, complete 3,267-row backfill (2017-09-27 through
+    2026-09-06) entirely on its own, the moment the connector file was
+    saved.
+  - Full design in `ARCHITECTURE.md` § "External Data Connectors" →
+    "DefiLlama Connector"; API surface in `docs/api/API.md`; tests in
+    `services/api/TESTING.md`.
+
 - **Milestones 2 and 3 independently re-verified against real code and
   live test runs**, not re-asserted from their own prior "COMPLETE"
   status — all seven audited claims (async training execution,

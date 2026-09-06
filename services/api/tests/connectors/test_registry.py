@@ -211,3 +211,32 @@ class TestEtherscanIsRegistered:
         connector = default_registry.get(ETHERSCAN_SOURCE)
         assert isinstance(connector, EtherscanConnector)
         await connector.aclose()
+
+
+class TestDefiLlamaIsRegistered:
+    """The real, application-wide registry — proves the DefiLlama
+    connector is genuinely discoverable, not just the isolated-registry
+    mechanics above."""
+
+    def test_the_default_registry_lists_defillama_after_loading_builtins(self) -> None:
+        from app.connectors import load_builtin_connectors
+        from app.connectors.defillama import DEFILLAMA_SOURCE
+        from app.connectors.registry import default_registry
+
+        load_builtin_connectors()
+
+        assert DEFILLAMA_SOURCE in default_registry.names()
+        metadata = default_registry.describe(DEFILLAMA_SOURCE)
+        assert metadata.label == "Ethereum Chain TVL"
+        assert metadata.requires_auth is False
+        assert metadata.revisable is True
+
+    async def test_get_builds_a_real_defillama_connector(self) -> None:
+        from app.connectors import load_builtin_connectors
+        from app.connectors.defillama import DEFILLAMA_SOURCE, DefiLlamaConnector
+        from app.connectors.registry import default_registry
+
+        load_builtin_connectors()
+        connector = default_registry.get(DEFILLAMA_SOURCE)
+        assert isinstance(connector, DefiLlamaConnector)
+        await connector.aclose()

@@ -246,14 +246,15 @@ unchanged.
 
 Registered today: `ohlcv` (`category: "raw"`), `candle_shape`
 (`price_action`), `sma`/`ema`/`wma` (`trend`), `fear_greed` (`sentiment`),
-`fed_funds_rate` (`macro`), and `eth_gas_price` (`on-chain`). The set is
-queried from `GET /api/v1/features` at runtime, never hardcoded by a
-client; see `ARCHITECTURE.md` § "Feature Engineering Engine" for how a new
-generator joins this list with no API change, and § "External Data
-Connectors" for `fear_greed`/`fed_funds_rate`/`eth_gas_price` specifically
-— all three come from a registered connector
-(`app/connectors/fear_greed.py`, `app/connectors/fred.py`,
-`app/connectors/etherscan.py`), not from candle math, but each is
+`fed_funds_rate` (`macro`), `eth_gas_price` (`on-chain`), and `eth_tvl`
+(`on-chain`). The set is queried from `GET /api/v1/features` at runtime,
+never hardcoded by a client; see `ARCHITECTURE.md` § "Feature Engineering
+Engine" for how a new generator joins this list with no API change, and
+§ "External Data Connectors" for
+`fear_greed`/`fed_funds_rate`/`eth_gas_price`/`eth_tvl` specifically — all
+four come from a registered connector (`app/connectors/fear_greed.py`,
+`app/connectors/fred.py`, `app/connectors/etherscan.py`,
+`app/connectors/defillama.py`), not from candle math, but each is
 requested and returned exactly like every other feature. `fed_funds_rate`
 is timestamped by its real publication date
 (`external_sources: ["fed_funds_rate"]`), never the calendar month it
@@ -263,6 +264,12 @@ connector last polled the live Etherscan API — it has no historical query
 capability of its own, so a candle older than that first poll always
 reads `null`, never a fabricated value — see `ARCHITECTURE.md` §
 "Etherscan Connector" for the full "no backfill possible" account.
+`eth_tvl` may report a _different_ value for the same historical
+timestamp across two dataset builds — DefiLlama does not guarantee a
+published TVL figure is final, and an already-stored value is overwritten
+in place when a re-fetch reports a genuine revision (`ConnectorMetadata
+.revisable`) — see `ARCHITECTURE.md` § "DefiLlama Connector" for the full
+investigation and decision.
 
 **The catalogue is the contract**, exactly as for indicators — each entry
 publishes every parameter's type, bounds, choices, default, and
@@ -282,8 +289,8 @@ Data Connectors work: `external_sources` — the connector source names (see
 `ARCHITECTURE.md` § "External Data Connectors") this generator reads instead
 of, or alongside, candle data — empty for every generator except
 `fear_greed` (`("fear_greed",)`), `fed_funds_rate`
-(`("fed_funds_rate",)`), and `eth_gas_price` (`("eth_gas_price",)`). A
-feature declaring `external_sources` is
+(`("fed_funds_rate",)`), `eth_gas_price` (`("eth_gas_price",)`), and
+`eth_tvl` (`("eth_tvl",)`). A feature declaring `external_sources` is
 never served from the feature cache (`cache_status` reports `"disabled"`,
 not `"miss"`, for that column), because the cache key fingerprints candles
 and parameters only, never a connector's own freshness. A feature declaring
@@ -608,6 +615,14 @@ same way, also with `"requires_auth": true` — its `latest_timestamp` is
 always the moment its own connector last polled the live API, never a
 value read out of the response body, since Etherscan's Gas Oracle carries
 no date field of its own (see `ARCHITECTURE.md` § "Etherscan Connector").
+A fourth, `eth_tvl` (`app/connectors/defillama.py`), is registered with
+`"requires_auth": false` — free and unauthenticated, like Fear & Greed —
+but its `latest_value` may change between two calls to this endpoint even
+with no new data having been ingested for any _newer_ date: DefiLlama
+does not guarantee a published TVL figure is final, so an already-stored
+value can be overwritten in place by a later sync tick if a re-fetch
+reports a genuine revision (see `ARCHITECTURE.md` § "DefiLlama Connector"
+for the live evidence behind this decision).
 
 **History uses the same inclusive-both-ends range this table already
 has**, unlike `/candles`'s half-open `[start, end)` — see

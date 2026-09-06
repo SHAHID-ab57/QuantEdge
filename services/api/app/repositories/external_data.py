@@ -6,8 +6,9 @@ every other domain on this platform already follows.
 """
 
 from datetime import UTC, datetime
+from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.external_data import ExternalDataPoint
@@ -60,6 +61,57 @@ class ExternalDataRepository:
             )
         )
         return {_as_utc(timestamp) for timestamp in result.scalars()}
+
+    async def list_existing_values(self, source: str, symbol: str | None) -> dict[datetime, float]:
+        """Timestamp -> value for every point already stored for this
+        source/symbol — `list_existing_timestamps` plus the value each one
+        actually holds, so a revisable connector's ingestion can tell "a
+        genuine revision" from "the same value re-fetched" without a
+        second query per point. Only ever called for a connector whose own
+        `ConnectorMetadata.revisable` is true (see
+        `app.services.external_data_ingest._persist_points`) — every other
+        connector's ingestion path never pays for this extra column.
+        """
+        result = await self.session.execute(
+            select(ExternalDataPoint.timestamp, ExternalDataPoint.value).where(
+                ExternalDataPoint.source == source,
+                ExternalDataPoint.symbol.is_(symbol)
+                if symbol is None
+                else ExternalDataPoint.symbol == symbol,
+            )
+        )
+        return {_as_utc(timestamp): value for timestamp, value in result.all()}
+
+    async def update_value(
+        self,
+        source: str,
+        symbol: str | None,
+        timestamp: datetime,
+        *,
+        value: float,
+        raw_payload: dict[str, Any] | None,
+    ) -> None:
+        """Overwrite an already-stored point's `value`/`raw_payload` in
+        place, for a revisable source only (see `list_existing_values`).
+        `ingested_at` is set to now — it is *this platform's* own audit
+        trail of "when was this row last actually written," distinct from
+        `timestamp` (still the source's own original reporting date,
+        unchanged) — so a revised row still says exactly when this
+        platform last saw a real difference worth recording. Does not
+        commit — the caller's own transaction covers this alongside
+        whatever else the same ingestion pass does.
+        """
+        await self.session.execute(
+            update(ExternalDataPoint)
+            .where(
+                ExternalDataPoint.source == source,
+                ExternalDataPoint.symbol.is_(symbol)
+                if symbol is None
+                else ExternalDataPoint.symbol == symbol,
+                ExternalDataPoint.timestamp == timestamp,
+            )
+            .values(value=value, raw_payload=raw_payload, ingested_at=datetime.now(UTC))
+        )
 
     async def list_between(
         self,

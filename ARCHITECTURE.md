@@ -3613,13 +3613,15 @@ bypassing the service.
 ### External Data Connectors
 
 Milestone 4 (Data Breadth) begins here — a reusable abstraction every
-future external data source sits on top of (`docs/architecture
+external data source sits on top of (`docs/architecture
 /SystemContext.md` § 3 names six: Marketaux, Etherscan, FRED,
 Alternative.me, DefiLlama, CoinGecko), proven end to end with the
 lowest-risk possible first case: the Fear & Greed Index —
 no authentication, one value per day, against alternative.me's free,
-public API. **Only Fear & Greed is implemented**; the other five remain
-future connectors on top of the same abstraction, not built here.
+public API. **Four are implemented so far** — Fear & Greed, FRED
+(§ "FRED Connector"), Etherscan (§ "Etherscan Connector"), and DefiLlama
+(§ "DefiLlama Connector") — with Marketaux and CoinGecko remaining on top
+of the same abstraction, not yet built.
 
 **The `Connector` protocol** (`app/connectors/base.py`) mirrors
 `app.marketdata.normalizer.Normalizer`'s own role exactly — a plain
@@ -3676,6 +3678,22 @@ every insert (`app/services/external_data_ingest.py`, mirroring
 already there" idempotent-insert pattern exactly, including the same
 per-row savepoint + `IntegrityError` isolation as the last-resort
 backstop for a genuine race).
+
+**One deliberate, opt-in exception to "a stored point is fetched once and
+never mutated": `ConnectorMetadata.revisable`** (added for DefiLlama —
+see § "DefiLlama Connector" below for the full investigation behind it).
+A source whose upstream provider revises already-published history sets
+`revisable=True`; every connector before DefiLlama defaults to `False`
+and is byte-for-byte unaffected — `_persist_points` never even loads
+existing values to compare unless a connector opts in. When it is set, a
+timestamp collision is no longer an unconditional skip: the existing
+point's own stored `value` is compared, and only a genuine difference
+triggers `ExternalDataRepository.update_value` (an in-place overwrite,
+`ingested_at` refreshed to now, `timestamp` — the source's own original
+reporting date — left unchanged); an unchanged re-fetch is still just a
+duplicate skip, never a wasted write. `ExternalDataIngestReport` gained a
+new `updated` count alongside `inserted`/`duplicates_skipped`/`rejected`
+to make this observable in every backfill script's own printed report.
 
 **`FearGreedClient`** (`app/connectors/fear_greed.py`) mirrors
 `DeltaClient`'s own error-typing and bounded-retry conventions
@@ -4282,6 +4300,187 @@ that a future point never changes a past candle's value — run here too,
 not skipped, even though the connector's own zero-lag guarantee makes it
 sound unnecessary; the generic lookup mechanism has no way to know that on
 its own.
+
+#### DefiLlama Connector (M4-E1-T5)
+
+The fourth concrete connector, and the first requiring no authentication
+at all — the same low-risk profile Fear & Greed had, but the first
+connector whose own investigation surfaced a genuinely new risk none of
+the prior three needed to handle: **already-published historical data
+can itself be revised**, not just newly arriving data carrying a
+publication lag (FRED) or a single live value with no history at all
+(Etherscan).
+
+**Investigation, checked directly against DefiLlama's current API
+documentation and the real live API, not assumed from history:**
+
+- **No API key required** — confirmed against DefiLlama's own current
+  docs (`api-docs.defillama.com`), which describe two entirely separate
+  services: the free API (`api.llama.fi`) and a $300/month Pro API
+  (`pro-api.llama.fi/{KEY}`, a different base URL, not a header). The
+  endpoint this connector uses, `v2/historicalChainTvl/{chain}`, is
+  explicitly free-tier; confirmed live with a plain unauthenticated
+  request.
+- **No documented numeric rate limit** — DefiLlama's own docs describe
+  the free tier only as "Standard" (vs. Pro's "Higher"), unlike
+  Etherscan's explicit "3/sec, 100k/day." Checked empirically rather than
+  left unverified: 15 concurrent real requests all succeeded (HTTP 200),
+  in contrast to Etherscan's own real rate-limit responses at just 10
+  concurrent requests.
+- **Real HTTP status codes carry real errors** — unlike Etherscan (always
+  HTTP 200, errors only in the JSON body), a genuinely unknown chain slug
+  returns a real HTTP 404 (plain nginx HTML, not even DefiLlama's own
+  JSON), confirmed live. `DefiLlamaClient`'s error handling is
+  status-code-based, the same shape as `FearGreedClient`/`FredClient`.
+
+**The three known bug patterns from this milestone's first three
+connectors, checked explicitly rather than left to a live call to
+discover:**
+
+- _An omitted parameter defaulting to something surprising_ (FRED's
+  `realtime_start`/`realtime_end`): does not apply —
+  `v2/historicalChainTvl/{chain}` takes no query parameters at all beyond
+  the chain itself.
+- _A timestamp computed at the wrong moment relative to a network call_
+  (Etherscan's `end`-before-round-trip bug): does not apply — every entry
+  carries its own `date` field from the response body; this connector
+  never calls `datetime.now()` to invent one.
+- _A response field silently not captured_ (Fear & Greed's own
+  `external_sources` DTO gap): guarded the same way every connector since
+  has been — proven again by `tests/api/test_features_api.py`'s own
+  extended assertion, now checking a fourth connector-backed feature.
+
+**A real, live-confirmed revision risk, genuinely new to this
+milestone.** DefiLlama's docs make no promise that a published TVL figure
+is final. A direct live comparison found concrete evidence that it is
+not, at least for an in-progress day: at 2026-09-06T13:58Z, `v2/chains`'s
+own _current_ Ethereum TVL read ~49.62B, while
+`v2/historicalChainTvl/Ethereum`'s own _most recent_ entry for that same
+calendar day read ~49.53B — a ~0.19% difference between "current" and
+"today's own historical entry," for the same day, at the same moment.
+Re-checked roughly three hours later: the historical entry's value had
+not changed, so this is a confirmed, persistent divergence between the
+two endpoints rather than directly caught mid-revision — but the absence
+of any documented immutability guarantee, combined with a real, measured
+gap between "current" and "historical" for the same date, is enough on
+its own to treat every stored value as potentially revisable rather than
+assume none of DefiLlama's ~3,267 daily entries will ever change once
+first ingested.
+
+**Decision: `revisable=True`, not narrowed to a "recent days only"
+window.** See `ConnectorMetadata.revisable`'s own docstring above for the
+mechanical fix. Deliberately not narrowed further: no revision window is
+documented or evidenced, and inventing an unverified number would repeat
+the exact mistake this investigation was meant to avoid. Precisely what
+"not narrowed" does and does not mean, verified by directly simulating a
+routine tick's own window (`start` = the real max stored timestamp,
+`end` = now) rather than assumed from reading the code alone:
+
+- **The revision-check _window_ — which dates are ever compared against
+  a re-fetch — is what stays unnarrowed.** No code path hard-limits this
+  to "the last N days"; a wide manual backfill genuinely re-examines
+  every date it's given, not just a recent slice.
+- **What a _routine_ tick actually re-examines is naturally narrow**, as
+  a consequence of `ExternalDataSyncScheduler`'s own pre-existing
+  "resume from the last stored timestamp" convention (`_catch_up_window`)
+  — not something this connector added. Confirmed live: with `eth_tvl`
+  already caught up through `2026-09-06`, simulating the scheduler's own
+  next window (`start=2026-09-06T00:00Z, end=now`) returned exactly one
+  point (`received=1`), correctly identified as an unchanged value
+  (`duplicates_skipped=1, updated=0`) — not all 3,267 stored rows.
+- **Two costs are _not_ narrowed by this, and are worth stating
+  precisely rather than left implicit.** (1) The HTTP fetch itself is
+  always the _entire_ history — confirmed by the same live test, exactly
+  one real request to `historicalChainTvl`, ~120KB, ~180ms — because the
+  endpoint has no parameter to narrow it by at all, on a routine tick or
+  a full backfill alike. (2) `ExternalDataRepository.list_existing_values`
+  (only called when `revisable=True`) loads _every_ existing stored
+  value for the source into memory once per ingestion call, to build the
+  comparison map — this scales with the source's own total row count
+  (currently 3,267, growing by ~1/day), not with how many points survive
+  the window filter. Both are trivially cheap at today's scale (a single
+  ~120KB payload; a few hundred KB of floats/timestamps) and grow slowly
+  (one calendar day at a time) — an accepted, disclosed characteristic,
+  not a hidden one, and a reasonable candidate to revisit only if this
+  platform ever tracks a much higher-frequency revisable source.
+
+A deep historical revision, if one is ever suspected, needs an explicit
+wide manual backfill (`scripts/backfill_defillama.py --start
+2017-09-01`) to actually re-verify — this is an accepted, documented
+limitation, not an oversight.
+
+**Which endpoint is canonical, stated explicitly so the divergence above
+is never later mistaken for an unexplained revision.** This connector
+fetches and stores only `historicalChainTvl`'s own value — never
+`v2/chains`'s "current" value, which appears in this module's own
+docstring solely as investigation evidence, never called by any real
+code path. Used identically for both the periodic scheduler and
+`scripts/backfill_defillama.py` — both call the same
+`DefiLlamaConnector.fetch()`, with no branching by caller. A future
+apparent change in an already-stored value is therefore a genuine
+`historicalChainTvl` revision, not an artifact of this connector
+sometimes reading one endpoint and sometimes the other.
+
+**Why the Ethereum chain TVL, not a protocol-level or all-chains
+metric.** `v2/chains` gives only _current_ TVL for every chain — no
+history, unusable as a time-series feature. `/protocol/{protocol}` needs
+picking one specific protocol, a far more arbitrary choice than "the
+chain itself" for a platform whose own focus is Ethereum broadly.
+`v2/historicalChainTvl/Ethereum` is DefiLlama's own directly-relevant,
+free, unauthenticated, full-history answer to "how much value is locked
+in DeFi on Ethereum, over time" — the metric this task itself named as
+the default candidate.
+
+**Why a full-history fetch every time, not a narrower request.** There is
+no parameter to narrow it by even if this connector wanted to — the
+endpoint always returns its entire history (currently ~3,267 daily
+entries, ~120KB) regardless of any query string. `fetch` always requests
+the whole array and filters locally to `[start, end]`, the same
+trade-off `FearGreedConnector.fetch` already makes, with even less to
+compute (no `limit` translation needed at all).
+
+**Registered exactly like the other three, with zero special-casing
+anywhere else.** `app/connectors/defillama.py` is auto-discovered by
+`load_builtin_connectors()`; `app/features/builtin/defillama_eth_tvl.py`
+is auto-discovered by `load_builtin_features()`; the periodic
+`ExternalDataSyncScheduler` picks it up automatically the same way.
+Confirmed, not assumed: `eth_tvl` appears in `GET /api/v1/features` and
+`eth_tvl` (the source) appears in `GET /connectors` — both live, against
+the real running dev server, not just the test suite. The already-running
+dev server's own periodic scheduler picked up this connector on its next
+reload and performed a real full backfill entirely on its own: 3,267
+rows landed, `2017-09-27` through `2026-09-06`, exactly matching the live
+API's own full history length — confirmed by querying `external_data_points`
+directly, not inferred from a log line. `lib/planned-connectors.ts`'s own
+static list had its DefiLlama entry removed the same day this connector
+actually landed, per that file's own stated upkeep rule.
+
+**Testing.** `tests/connectors/test_defillama.py` covers: a successful
+fetch with URL assertions (no auth header, no query string at all — this
+endpoint takes none); a non-list (object-envelope) body correctly
+rejected, unlike Fear & Greed's own object-envelope expectation; a real
+404 (non-JSON nginx body) correctly raising `ConnectorAPIError` without
+attempting to parse it as JSON; a generic 5xx; a network timeout; a
+connect error retried to exhaustion; a 429 retried then succeeding; a 429
+exhausted raising `ConnectorRateLimitError`. `TestDefiLlamaConnector`
+mirrors Fear & Greed's own range-filtering and malformed-entry proofs.
+`tests/connectors/test_registry.py::TestDefiLlamaIsRegistered` confirms
+discoverability and `revisable is True` on the real, shared
+`default_registry`. `tests/features/test_defillama_eth_tvl_feature.py`
+mirrors the other three features' own lookup/no-look-ahead tests, plus
+`TestRevisionHandling` — the test this task's own investigation
+explicitly required: a fake revisable connector's re-fetch reporting a
+genuinely different value for an already-stored date is proven to
+overwrite it in place, through the real ingestion path and this
+feature's own lookup, while an unchanged re-fetch is still just a
+duplicate skip. `tests/services/test_external_data_ingest.py`'s new
+`TestRevisableIngestion` class proves the shared-code change itself at
+the lowest level: a non-revisable source (every connector before
+DefiLlama) still skips a changed value unconditionally — the critical
+regression proof that this feature cannot silently change any existing
+connector's behavior — while a revisable source correctly overwrites
+only the point that actually changed in a mixed batch, never an
+all-or-nothing rewrite.
 
 ### Feature Store
 

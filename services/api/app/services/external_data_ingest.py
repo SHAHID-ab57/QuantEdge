@@ -10,6 +10,15 @@ unique constraint — `ExternalDataPoint`'s own docstring explains why a
 `NULL` `symbol` (Fear & Greed's own case) can't rely on that alone — so
 this module checks existing timestamps itself, in the application layer,
 *before* ever inserting, which is correct regardless of backend.
+
+One connector-specific exception: a source whose `ConnectorMetadata
+.revisable` is `True` (DefiLlama's TVL, whose upstream provider still
+settles an in-progress day's own figure after it first appears — see
+`app.connectors.defillama`) additionally *overwrites* an already-stored
+point when a re-fetch reports a genuinely different value, rather than
+skipping it as a duplicate. Every connector before DefiLlama defaults to
+`revisable=False` and is completely unaffected — `_persist_points` never
+even loads existing values to compare unless a connector opts in.
 """
 
 import logging
@@ -17,6 +26,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from time import perf_counter
+from typing import Any
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -45,6 +55,11 @@ class ExternalDataIngestReport:
     end: datetime
     received: int
     inserted: int
+    #: Count of already-stored points overwritten because a re-fetch
+    #: reported a genuinely different value — always `0` for a connector
+    #: whose `ConnectorMetadata.revisable` is `False` (every connector
+    #: before DefiLlama); see `_persist_points`.
+    updated: int
     duplicates_skipped: int
     rejected: int
     duration_seconds: float
@@ -106,7 +121,9 @@ async def ingest_external_data(
     connector = default_connector_registry.get(source)
     try:
         points = await connector.fetch(start, end)
-        inserted, duplicates_skipped, rejected = await _persist_points(session, source, points)
+        inserted, updated, duplicates_skipped, rejected = await _persist_points(
+            session, source, points, revisable=connector.metadata.revisable
+        )
     finally:
         aclose = getattr(connector, "aclose", None)
         if aclose is not None:
@@ -120,6 +137,7 @@ async def ingest_external_data(
         end=end,
         received=len(points),
         inserted=inserted,
+        updated=updated,
         duplicates_skipped=duplicates_skipped,
         rejected=rejected,
         duration_seconds=perf_counter() - started_at,
@@ -127,15 +145,27 @@ async def ingest_external_data(
 
 
 async def _persist_points(
-    session: AsyncSession, source: str, points: Sequence[RawDataPoint]
-) -> tuple[int, int, int]:
-    """Insert points idempotently; return (inserted, duplicates_skipped, rejected).
+    session: AsyncSession, source: str, points: Sequence[RawDataPoint], *, revisable: bool = False
+) -> tuple[int, int, int, int]:
+    """Insert points idempotently; return (inserted, updated, duplicates_skipped, rejected).
 
     Mirrors `app.services.candle_ingest._persist_candles` exactly: records
     whose `(symbol, timestamp)` already exist are skipped without touching
     the database; a row that still fails at the database level (a race,
     or a genuine constraint violation) is isolated via a savepoint,
     logged, and counted as rejected — never silently accepted.
+
+    `revisable=False` (every connector before DefiLlama) is byte-for-byte
+    the original behavior: existing timestamps are loaded once and any
+    collision is an unconditional skip, no value ever compared or
+    overwritten. `revisable=True` additionally loads each existing point's
+    own stored `value` and, on a timestamp collision, overwrites it via
+    `ExternalDataRepository.update_value` *only* when the freshly-fetched
+    value genuinely differs — an unchanged re-fetch is still just a
+    duplicate skip, not a wasted write. See `ConnectorMetadata.revisable`'s
+    own docstring for why this exists at all (DefiLlama's TVL, confirmed
+    to still be settling for an in-progress day) and
+    `app.connectors.defillama` for the full investigation.
     """
     repository = ExternalDataRepository(session)
     # `symbol` genuinely varies per point for a future per-market connector
@@ -143,17 +173,30 @@ async def _persist_points(
     # loaded per distinct symbol actually present, not assumed to be one
     # value for the whole batch.
     existing_by_symbol: dict[str | None, set[datetime]] = {}
+    existing_values_by_symbol: dict[str | None, dict[datetime, float]] = {}
 
     pending: list[ExternalDataPoint] = []
+    to_update: list[tuple[str | None, datetime, float, dict[str, Any] | None]] = []
     duplicates_skipped = 0
     for point in points:
         if point.symbol not in existing_by_symbol:
-            existing_by_symbol[point.symbol] = await repository.list_existing_timestamps(
-                source, point.symbol
-            )
+            if revisable:
+                existing_values = await repository.list_existing_values(source, point.symbol)
+                existing_values_by_symbol[point.symbol] = existing_values
+                existing_by_symbol[point.symbol] = set(existing_values)
+            else:
+                existing_by_symbol[point.symbol] = await repository.list_existing_timestamps(
+                    source, point.symbol
+                )
         existing = existing_by_symbol[point.symbol]
         if point.timestamp in existing:
-            duplicates_skipped += 1
+            if (
+                revisable
+                and existing_values_by_symbol[point.symbol][point.timestamp] != point.value
+            ):
+                to_update.append((point.symbol, point.timestamp, point.value, point.raw_payload))
+            else:
+                duplicates_skipped += 1
             continue
         existing.add(point.timestamp)
         pending.append(
@@ -166,8 +209,8 @@ async def _persist_points(
             )
         )
 
-    if not pending:
-        return 0, duplicates_skipped, 0
+    if not pending and not to_update:
+        return 0, 0, duplicates_skipped, 0
 
     # No explicit `session.begin()` here, deliberately: the existing-keys
     # reads above already autobegan a transaction on this session (plain
@@ -179,6 +222,13 @@ async def _persist_points(
     # `session.begin()` *before* loading existing keys; this module reads
     # existing keys per-symbol as it goes, so the ordering is reversed and
     # an explicit outer `begin()` here would double-begin instead.
+    updated = 0
+    for symbol, timestamp, value, raw_payload in to_update:
+        await repository.update_value(
+            source, symbol, timestamp, value=value, raw_payload=raw_payload
+        )
+        updated += 1
+
     inserted = 0
     rejected = 0
     for row in pending:
@@ -199,7 +249,7 @@ async def _persist_points(
             )
     await session.commit()
 
-    return inserted, duplicates_skipped, rejected
+    return inserted, updated, duplicates_skipped, rejected
 
 
 async def run_ingest_once(
@@ -221,11 +271,12 @@ async def run_ingest_once(
     )
     report = await ingest_external_data(source=source, start=resolved_start, end=resolved_end)
     logger.info(
-        "External data ingestion completed (source=%s): received=%d inserted=%d "
+        "External data ingestion completed (source=%s): received=%d inserted=%d updated=%d "
         "duplicates_skipped=%d rejected=%d in %.2fs",
         report.source,
         report.received,
         report.inserted,
+        report.updated,
         report.duplicates_skipped,
         report.rejected,
         report.duration_seconds,

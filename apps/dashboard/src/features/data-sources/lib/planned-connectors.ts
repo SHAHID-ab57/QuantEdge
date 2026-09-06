@@ -29,10 +29,6 @@ export const PLANNED_CONNECTORS: PlannedConnector[] = [
     description: 'News and sentiment coverage for crypto and macro markets.',
   },
   {
-    name: 'DefiLlama',
-    description: 'DeFi protocol metrics — total value locked, yields, and volumes.',
-  },
-  {
     name: 'CoinGecko',
     description: 'Broad cryptocurrency market statistics and rankings.',
   },

@@ -156,11 +156,24 @@ handling a genuinely tighter rate limit (3/sec, 100k/day, reverified
 against Etherscan's current docs) via a JSON-body-content retry dispatch
 since Etherscan always answers HTTP 200 even on failure (see
 `ARCHITECTURE.md` § "Etherscan Connector" for the full account, including
-why no historical backfill is possible for this source). The remaining
-three sources (Marketaux, DefiLlama, CoinGecko) have not been started —
-each needs its own auth handling and response shape. Whether Fear & Greed,
-FRED, Etherscan (or any future source)
-actually improves predictions has deliberately not been evaluated — that
+why no historical backfill is possible for this source). **DefiLlama is
+also done** — the fourth connector, and the first requiring no
+authentication at all: `eth_tvl` (DefiLlama's `v2/historicalChainTvl`
+for Ethereum), confirmed free/unauthenticated and empirically rate-limit
+-tolerant against the real live API, and the first connector whose own
+investigation surfaced a genuinely new risk — already-published
+historical data can itself be revised. A live comparison found a
+persistent divergence between DefiLlama's own "current" and "historical"
+TVL figures for the same day; handled by a new, opt-in
+`ConnectorMetadata.revisable` flag (default `false`, every other
+connector unaffected) that lets a later sync tick overwrite an
+already-stored value in place, rather than silently keeping a
+stale/uncorrected figure forever (see `ARCHITECTURE.md` §
+"DefiLlama Connector" for the full account). The remaining two sources
+(Marketaux, CoinGecko) have not been started — each needs its own auth
+handling and response shape. Whether Fear & Greed, FRED, Etherscan,
+DefiLlama (or any future source) actually improves predictions has
+deliberately not been evaluated — that
 depends on the backtest loop being independently confirmed reliable
 first. A Data Sources page (`/data-sources`) is also done: two read-only
 endpoints and a registry-driven "Active" section (zero frontend change

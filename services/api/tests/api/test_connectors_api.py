@@ -58,6 +58,13 @@ class TestConnectorCatalogueEndpoint:
         assert gas_price["label"] == "Ethereum Gas Price"
         assert gas_price["requires_auth"] is True
 
+        # A fourth connector — the first requiring no authentication since
+        # Fear & Greed itself.
+        assert "eth_tvl" in sources
+        eth_tvl = next(e for e in body["connectors"] if e["source"] == "eth_tvl")
+        assert eth_tvl["label"] == "Ethereum Chain TVL"
+        assert eth_tvl["requires_auth"] is False
+
     async def test_reports_null_latest_value_before_anything_is_ingested(
         self, client: httpx.AsyncClient
     ) -> None:

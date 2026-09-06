@@ -205,6 +205,16 @@ class Settings(BaseSettings):
     etherscan_chain_id: int = 1
     etherscan_request_timeout: float = 10.0
 
+    #: DefiLlama's free API (`app/connectors/defillama.py`) — the fourth
+    #: connector, and the first requiring no authentication at all
+    #: (confirmed live against DefiLlama's own current docs, not assumed
+    #: from history): `defillama_chain` names which chain's TVL to track
+    #: (`v2/historicalChainTvl/{chain}`), defaulting to this platform's own
+    #: `Ethereum`.
+    defillama_base_url: str = "https://api.llama.fi"
+    defillama_chain: str = "Ethereum"
+    defillama_request_timeout: float = 10.0
+
     #: Periodic external data sync (`app.services.external_data_sync
     #: .ExternalDataSyncScheduler`) — mirrors `candle_sync_enabled`/
     #: `candle_sync_interval_seconds` exactly: a lightweight in-process

@@ -3427,6 +3427,66 @@ percentage) the cycle reasoned from, and its plain-language `reason` —
 including for a cycle that changed nothing, this feature's own answer to
 "log every decision, acted or not."
 
+## Data Sources
+
+`/data-sources` (`src/features/data-sources/`) is a new **top-level**
+page — alongside `/paper-trading`, not under `/ml/`, since it displays
+raw ingested external data rather than anything model- or
+prediction-related. Backend design lives in
+[`ARCHITECTURE.md`](ARCHITECTURE.md) § "External Data Connectors" → "Data
+Sources Page"; the API surface is in [`docs/api/API.md`](docs/api/API.md)
+§ "External Data Connectors".
+
+```text
+src/features/data-sources/
+├── hooks/use-connector-data.ts        useConnectorCatalog, useConnectorHistory
+├── lib/format.ts                       formatConnectorValue, formatLastUpdated
+├── lib/planned-connectors.ts           static "not yet built" list — needs manual upkeep
+├── components/
+│   ├── connector-card.tsx             current value + sparkline + last-updated, one per registered connector
+│   └── planned-data-sources.tsx        the static list — no API call backs this component
+└── data-sources-page.tsx               page composition root
+```
+
+**"Active Data Sources" is exactly as hardcoding-free as the Feature
+Engineering page's own `FeatureSelector`.** Neither `data-sources-page
+.tsx` nor `connector-card.tsx` names `fear_greed` (or any other source)
+anywhere — the section renders whatever `GET /connectors` returns, so a
+future connector (Marketaux, Etherscan, FRED, DefiLlama, CoinGecko)
+appears here the day it's registered on the backend, with no frontend
+change. Each `ConnectorCard` fetches its own history independently via
+its own `useConnectorHistory` call, rather than the page prefetching
+every connector's history up front — a slow or failing history request
+for one source never blocks another card's current value from
+rendering. `EmptyStateNotice` (reused verbatim, the same component
+`ML Training Framework`/`Model Evaluation` already established it for)
+covers zero registered connectors — shouldn't happen post-M4-E1-T1, but
+handled rather than crashed on.
+
+**The trend sparkline reuses `Sparkline`
+(`features/trades/components/sparkline.tsx`), not a new small-chart
+component.** That component is already the established answer to "a tiny,
+dependency-free SVG line for a few dozen points" — the Trade Analytics
+dashboard's own rolling VWAP trend uses it for the identical shape of
+problem. A registered connector with zero ingested points yet renders the
+same "not enough data" flat-line fallback `Sparkline` already has built
+in; no page-specific handling was needed for that case.
+
+**"Planned Data Sources" is the one deliberate exception to
+"nothing hardcoded."** `lib/planned-connectors.ts` is a static array —
+Marketaux, Etherscan, FRED, DefiLlama, CoinGecko — rendered by
+`PlannedDataSources` with zero API call, since there is nothing in the
+registry for an unbuilt connector to read. This list is **not**
+automatically kept in sync: an entry must be removed the same day its
+connector actually ships (appears in `GET /connectors`), never before —
+otherwise a source briefly shows as both "planned" and "active" at once.
+This file's own module docstring states this is part of every future
+connector task's own Definition of Done, not a separate cleanup pass.
+FRED specifically stayed on this list at the time this page shipped: it
+had been reported elsewhere as issued (tracked as M4-E1-T2), but had not
+actually landed in this repository's connector registry — the list
+reflects the registry's real state, not an unconfirmed status report.
+
 ## State management
 
 - Server state: TanStack Query (`src/lib/query/queryClient.ts`).

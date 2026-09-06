@@ -3866,6 +3866,92 @@ ordinary candle-only generator (`[]`) — re-verified live against the
 running dev server afterward (`curl http://localhost:8000/api/v1/features
 /fear_greed` now returns the field).
 
+#### Data Sources Page (M4-E1-T3)
+
+A display feature only: it does not touch the Feature Engineering Engine,
+does not affect any model, and does not depend on the backtest
+no-look-ahead confirmation still outstanding elsewhere in this project —
+it is safe to build precisely because it cannot move that open question
+in either direction. The point is visibility: before this task, the only
+way to know Fear & Greed data existed was to query `external_data_points`
+directly.
+
+**Two new read-only endpoints, mirroring `/features`'s own contract.**
+`GET /connectors` (`app/api/v1/endpoints/connectors.py` →
+`app/services/connectors.py`'s `ConnectorService.list_connectors`) reads
+straight from `ConnectorRegistry.describe_all()` and, for each entry,
+`ExternalDataRepository.get_latest` — a new repository method returning
+the single most recent point for a source/symbol, or `None` if nothing
+has been ingested yet. A connector registered but never synced reports
+`latest_value`/`latest_timestamp` as `null`, never a crash or a
+fabricated value — the same "registered, no data yet" state
+`FeatureDTO`'s own `missing_values_expected` concept represents for a
+feature still in warmup. `GET /connectors/{source}/history` (`?start=&
+end=&limit=&offset=`) mirrors `/candles`'s own limit/offset pagination
+shape (`ExternalDataRepository.list_paginated`/`count`, new methods
+alongside the existing `list_between`), but keeps `external_data_points`'s
+own inclusive-both-ends range convention rather than adopting candles'
+half-open one — this table's cadence is still coarse enough that a
+half-open range risks silently excluding an edge value, the same
+reasoning `FearGreedConnector.fetch`'s own docstring already gives.
+
+**A new, HTTP-facing 404, deliberately not a reuse of the internal one.**
+`app/connectors/errors.py`'s own module docstring previously stated
+"nothing on this platform exposes a connector by name over HTTP yet" —
+now false. Rather than repurpose `ConnectorNotFoundError` (a plain
+`RuntimeError`, correct for its actual callers: a scheduler, a backfill
+script), a new `ConnectorSourceNotFoundError(AppError)` was added
+alongside it, `code="connector_not_found"`, `404` — keeping the internal
+error's contract (an uncaught `RuntimeError` a script lets crash loudly)
+untouched for its existing callers while giving the new HTTP route a
+real, structured error a client can branch on.
+
+**Frontend: `/data-sources`, two sections, only one of them
+registry-driven.** "Active Data Sources" (`ConnectorCard`, one per
+`GET /connectors` entry) is exactly as hardcoding-free as
+`FeatureSelector` already is for `/features` — a future connector
+(Marketaux, Etherscan, FRED, DefiLlama, CoinGecko) appears here with no
+frontend change, proven the same way: nothing in `data-sources-page.tsx`
+or `connector-card.tsx` names `fear_greed`. Each card fetches its own
+history independently (rather than the page prefetching every
+connector's history up front), so one slow or failing history request
+never blocks another card's current value from rendering. The trend
+sparkline reuses `features/trades/components/sparkline.tsx` — the same
+tiny, dependency-free SVG line the Trade Analytics dashboard already uses
+for a rolling VWAP trend — rather than a second small-chart
+implementation. Zero registered connectors (shouldn't happen
+post-M4-E1-T1) reuses `EmptyStateNotice` rather than crashing.
+
+"Planned Data Sources" is the deliberate exception: a static,
+hardcoded list (`lib/planned-connectors.ts` — Marketaux, Etherscan, FRED,
+DefiLlama, CoinGecko) backed by no API call at all, since there is
+nothing in the registry for an unbuilt connector to read. This list
+needs active upkeep — an entry must come off the same day its connector
+actually ships (appears in `GET /connectors`), not before, or a source
+would show as both "planned" and "active" at once. Treat that removal as
+part of every future connector task's own Definition of Done, not a
+separate cleanup pass. As of this page shipping, FRED (reported elsewhere
+as M4-E1-T2, "issued") had **not** actually landed in this repository's
+connector registry (`app/connectors/` held only `fear_greed.py`), so it
+stays listed rather than being removed on an unconfirmed report — see
+`TASKBOOK.md`'s own note on this task's corrected numbering.
+
+**Testing.** `tests/api/test_connectors_api.py`: the catalogue lists the
+registered connector; a connector with zero ingested points reports
+`null` latest value/timestamp, never a crash; the real latest value once
+seeded; a zero-registered-connectors catalogue (registry monkeypatched
+empty) still returns a clean, empty response; history returns points
+within an inclusive `[start, end]` range, omitting either queries all
+history; `limit`/`offset` pagination proven across two pages; an unknown
+source 404s `connector_not_found`; both endpoints confirmed mounted
+unversioned too. `data-sources-page.test.tsx`: the Active section's
+loading/error/retry/empty states, a real connector rendering its actual
+value, and a registered-but-never-ingested connector rendering
+"Unavailable"/"No data yet" rather than a fabricated figure; the Planned
+section's static list proven to render identically regardless of the
+Active section's own loading, error, or success state — three separate
+assertions, not inferred from one.
+
 ### Feature Store
 
 > Not built. Features are computed on demand and exported; no persisted,

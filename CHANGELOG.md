@@ -8,6 +8,49 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Data Sources page (`/data-sources`, M4-E1-T3): visibility into every
+  ingested external data source, plus what's coming next in Milestone 4
+  — without querying the database directly.** A display feature only —
+  it does not touch the Feature Engineering Engine, does not affect any
+  model, and does not depend on the backtest no-look-ahead confirmation
+  still outstanding elsewhere in this project.
+  - **Two new read-only endpoints**: `GET /connectors` (every registered
+    connector, each with its own most recent value — `null` for one
+    registered but never ingested, never a crash) and
+    `GET /connectors/{source}/history` (paginated stored history,
+    mirroring `/candles`'s own limit/offset shape, but keeping
+    `external_data_points`'s own inclusive-both-ends range convention).
+  - **A new, HTTP-facing 404** (`connector_not_found`), added alongside
+    the existing internal, non-HTTP `ConnectorNotFoundError` rather than
+    reusing it — that one stays a plain `RuntimeError` for its real
+    callers (a scheduler, a backfill script), which never trigger it
+    with an unknown name the way an API client now can.
+  - **"Active Data Sources" is entirely registry-driven**, exactly as
+    hardcoding-free as `/features`'s own `FeatureSelector`: a future
+    connector (Marketaux, Etherscan, FRED, DefiLlama, CoinGecko) appears
+    on this page with no frontend change. Each card fetches its own
+    history independently, so one slow or failing history request never
+    blocks another card. Reuses `Sparkline` (the Trade Analytics
+    dashboard's own trend-line component) and `EmptyStateNotice` (for
+    zero registered connectors) rather than new implementations of
+    either.
+  - **"Planned Data Sources" is the deliberate exception**: a static,
+    hardcoded list, since there is nothing in the registry yet for an
+    unbuilt connector to read. Needs active upkeep — an entry comes off
+    the list the same day its connector actually ships, not before, or a
+    source would show as both "planned" and "active" at once; stated as
+    part of every future connector task's own Definition of Done.
+  - **A task-numbering correction**: this is `M4-E1-T3`, not `M4-E1-T2`
+    — that id had already been assigned elsewhere (reported as issued,
+    for a FRED connector) that, as of this page shipping, had not
+    actually landed in this repository's connector registry. FRED
+    therefore stays on the "Planned" list above rather than being
+    removed on an unconfirmed report.
+  - Full design in `ARCHITECTURE.md` § "External Data Connectors" → "Data
+    Sources Page"; API surface in `docs/api/API.md` § "External Data
+    Connectors"; tests in `services/api/TESTING.md` and
+    `docs/testing/TESTING.md`.
+
 - **External Data Connectors: a reusable abstraction for ingesting
   non-exchange data, proved end to end with the first concrete source —
   the Fear & Greed Index.** Opens Milestone 4 (Data Breadth) — Fear &

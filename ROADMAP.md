@@ -137,8 +137,12 @@ started — each needs its own auth handling and response shape, unlike
 Fear & Greed's unauthenticated single daily value. Whether Fear & Greed
 (or any future source) actually improves predictions has deliberately not
 been evaluated — that depends on the backtest loop being independently
-confirmed reliable first. See `ARCHITECTURE.md` § "External Data
-Connectors".
+confirmed reliable first. A Data Sources page (`/data-sources`) is also
+done: two read-only endpoints and a registry-driven "Active" section
+(zero frontend change for a future connector, the same guarantee
+`/features` already gives) alongside a static "Planned" section for the
+five sources not yet built — needing per-connector upkeep as each ships.
+See `ARCHITECTURE.md` § "External Data Connectors".
 
 **Milestone 5 — Production Hardening.** Authentication/authorization (none
 exists on any route today), CI/CD (none exists — all quality gates are

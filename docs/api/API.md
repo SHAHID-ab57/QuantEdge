@@ -549,6 +549,65 @@ for CSV/JSON downloads. Both endpoints surface the exact same error codes
 as `/features/dataset` (`market_not_found`, `invalid_feature_parameter`,
 etc.), since both build through the identical path.
 
+### External Data Connectors
+
+| Method | Path                                  | Purpose                                                          |
+| ------ | ------------------------------------- | ---------------------------------------------------------------- |
+| GET    | `/api/v1/connectors`                  | List every registered connector, each with its most recent value |
+| GET    | `/api/v1/connectors/{source}/history` | Paginated stored history for one connector, oldest first         |
+
+Full design in `ARCHITECTURE.md` § "External Data Connectors" → "Data
+Sources Page". Both routes are read-only — ingestion (a periodic
+scheduler, a manual backfill script) stays internal, never triggered over
+HTTP. `source` is a registered connector's own name (e.g. `fear_greed`,
+returned by `/api/v1/connectors` itself), not a market symbol.
+
+**The catalogue is registry-driven, not database-driven.** Every
+registered connector appears in `GET /connectors`, whether or not it has
+been ingested yet — `latest_value`/`latest_timestamp` are `null` for a
+connector with zero stored points, never a 404 or a crash:
+
+```jsonc
+{
+  "connectors": [
+    {
+      "source": "fear_greed",
+      "label": "Fear & Greed Index",
+      "description": "A daily sentiment index (0-100: 'Extreme Fear' to 'Extreme Greed') ...",
+      "frequency": "daily",
+      "requires_auth": false,
+      "latest_value": 42.0,
+      "latest_timestamp": "2026-01-02T00:00:00Z",
+    },
+  ],
+  "total": 1,
+}
+```
+
+**History uses the same inclusive-both-ends range this table already
+has**, unlike `/candles`'s half-open `[start, end)` — see
+`ExternalDataPoint`'s own docstring in `ARCHITECTURE.md` for why. `start`/
+`end` may each be omitted independently to leave that side of the range
+open; omitting both queries all stored history. Pages use limit/offset
+with total/returned/has_more metadata, mirroring `/candles`:
+
+```jsonc
+// GET /connectors/fear_greed/history?start=2026-01-01T00:00:00Z&limit=2
+{
+  "source": "fear_greed",
+  "items": [
+    { "timestamp": "2026-01-01T00:00:00Z", "value": 30.0 },
+    { "timestamp": "2026-01-02T00:00:00Z", "value": 50.0 },
+  ],
+  "pagination": { "total": 5, "returned": 2, "has_more": true, "limit": 2, "offset": 0 },
+}
+```
+
+An unknown `source` 404s `connector_not_found` on the history endpoint —
+a distinct error from the internal, non-HTTP `ConnectorNotFoundError` a
+scheduler or backfill script raises, per `ARCHITECTURE.md`'s own note on
+why those two are kept apart.
+
 ### Dataset validation
 
 | Method | Path                                         | Purpose                                                          |

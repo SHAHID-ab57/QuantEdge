@@ -126,7 +126,8 @@ that introduced it where the work has been committed.
 | M3-E1-T2 | M3: Paper Trading & Risk         | E1: Paper Trading            | Pre-trade risk limits (position sizing, exposure, drawdown halt) — current-price checks, atomic concurrency guard verified empirically                                                                                                          | Completed | High     | M3-E1-T1     | `5ac5f21`            |
 | M3-E1-T3 | M3: Paper Trading & Risk         | E1: Paper Trading            | Stop-loss/take-profit (`app/paper_trading/monitor.py`) — event-bus monitor, atomic concurrency guard (3rd occurrence), wider triggered slippage                                                                                                 | Completed | High     | M3-E1-T2     | `ab4c64c`            |
 | M3-E1-T4 | M3: Paper Trading & Risk         | E1: Paper Trading            | Automated Strategy (`app/services/paper_trading_strategy.py`) — opt-in, off by default, reuses order-placement path (4th atomic-guard occurrence), every position stop-lossed, every cycle logged                                               | Completed | High     | M3-E1-T3     | `00a5879`            |
-| M4-E1-T1 | M4: Data Breadth                 | E1: External Data Connectors | Connector abstraction (`app/connectors/`: protocol + registry) and generic `external_data_points` table, proved end to end by the first connector — Fear & Greed Index, ingested/synced and available as a real, no-look-ahead-verified feature | Completed | High     | M1-E2-T1     | pending commit       |
+| M4-E1-T1 | M4: Data Breadth                 | E1: External Data Connectors | Connector abstraction (`app/connectors/`: protocol + registry) and generic `external_data_points` table, proved end to end by the first connector — Fear & Greed Index, ingested/synced and available as a real, no-look-ahead-verified feature | Completed | High     | M1-E2-T1     | `f3dd088`            |
+| M4-E1-T3 | M4: Data Breadth                 | E1: External Data Connectors | Data Sources page (`/data-sources`) — registry-driven `GET /connectors`/`GET /connectors/{source}/history`, an Active section with zero source hardcoding, a static Planned section needing per-connector upkeep                                | Completed | Medium   | M4-E1-T1     | pending commit       |
 
 ---
 
@@ -192,6 +193,25 @@ names (Marketaux, Etherscan, FRED, DefiLlama, CoinGecko) have not been
 started — each has its own auth model and response shape to design
 against, unlike Fear & Greed's unauthenticated single daily value. See
 `ARCHITECTURE.md` § "External Data Connectors".
+
+M4-E1-T3, the Data Sources page (`/data-sources`), is also real, tested,
+and wired in: two new read-only endpoints (`GET /connectors`,
+`GET /connectors/{source}/history`) and an "Active Data Sources" section
+that is entirely registry-driven — a future connector appears with no
+frontend change, the same guarantee `/features` already gives — plus a
+static "Planned Data Sources" section for the five sources named above,
+requiring per-connector upkeep as each one ships. **A numbering note**:
+this task was originally going to be `M4-E1-T2`, but that id had already
+been assigned in a different chat, for a FRED connector reported as
+issued — this task was renumbered to `M4-E1-T3` to avoid the collision.
+As of this page shipping, that FRED work had **not** actually landed in
+this repository's connector registry (`app/connectors/` held only
+`fear_greed.py`), so no `M4-E1-T2` row appears above yet — per this
+document's own rule, a row here names an actually-completed capability,
+not a report of one. The exact same drift this document's own discipline
+exists to catch; the next task in this milestone should check
+`ROADMAP.md`/`TASKBOOK.md`'s real current state before assuming either
+FRED's status or the next free task id.
 
 ---
 

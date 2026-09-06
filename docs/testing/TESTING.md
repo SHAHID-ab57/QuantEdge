@@ -1402,6 +1402,31 @@ entering a confidence threshold, saving) and asserting
 `updatePaperStrategyConfig` was called with the exact expected body; and
 the page's own "Paper trading only" disclosure actually being present.
 
+### Testing the Data Sources page (frontend)
+
+`apps/dashboard/src/features/data-sources/` — `data-sources-page.test.tsx`
+covers both sections together, since the whole point of the split is that
+one section's state can never affect the other's rendering.
+
+**Active Data Sources.** A loading skeleton until the catalogue arrives;
+one real card per registered connector rendering its actual label,
+description, and current value from mock `GET /connectors` data — not a
+placeholder; a connector registered but never ingested (`latest_value`/
+`latest_timestamp` both `null`) rendering "Unavailable"/"No data yet"
+rather than a fabricated figure; a zero-registered-connectors catalogue
+rendering `EmptyStateNotice`'s own "No data sources registered yet"
+message rather than an empty page or a crash; a load failure surfaced in
+an `Alert` naming the real error message with a Retry action; and Retry
+actually re-fetching and rendering real data once the mocked API call
+succeeds on the second attempt.
+
+**Planned Data Sources.** Proven to render its identical static list
+(every name in `lib/planned-connectors.ts`, each with a "Planned" chip)
+in three separate scenarios — while the Active section is still loading,
+after its catalogue request has failed, and once real connector data has
+loaded successfully — rather than asserting it once and assuming the
+independence holds under every Active-section state.
+
 ## End-to-End Tests
 
 Not implemented. `tests/` at the repo root is reserved for this; no browser

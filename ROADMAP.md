@@ -146,9 +146,20 @@ Connector" for the full account). This task was previously reported as
 issued elsewhere without ever actually landing in this repository — see
 `docs/audits/MILESTONE_2_3_VERIFICATION.md`, which found this the one
 real gap while independently confirming Milestones 2–3 were genuinely
-complete. The remaining four sources (Marketaux, Etherscan, DefiLlama,
-CoinGecko) have not been started — each needs its own auth handling and
-response shape. Whether Fear & Greed, FRED, (or any future source)
+complete. **Etherscan is also done** — the third connector: `eth_gas_price`
+(Etherscan's Gas Oracle `ProposeGasPrice`), chosen only after confirming
+which of the free tier's narrower endpoints was actually usable (ETH
+supply too flat to be informative and hard-fails with no key;
+`dailyavggasprice` confirmed Pro-tier-only), migrated to Etherscan's
+current V2 API after the old endpoint's deprecation was caught live, and
+handling a genuinely tighter rate limit (3/sec, 100k/day, reverified
+against Etherscan's current docs) via a JSON-body-content retry dispatch
+since Etherscan always answers HTTP 200 even on failure (see
+`ARCHITECTURE.md` § "Etherscan Connector" for the full account, including
+why no historical backfill is possible for this source). The remaining
+three sources (Marketaux, DefiLlama, CoinGecko) have not been started —
+each needs its own auth handling and response shape. Whether Fear & Greed,
+FRED, Etherscan (or any future source)
 actually improves predictions has deliberately not been evaluated — that
 depends on the backtest loop being independently confirmed reliable
 first. A Data Sources page (`/data-sources`) is also done: two read-only

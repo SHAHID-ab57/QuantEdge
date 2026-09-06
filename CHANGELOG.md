@@ -55,6 +55,73 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
     "FRED Connector"; API surface in `docs/api/API.md`; tests in
     `services/api/TESTING.md`.
 
+- **Etherscan on-chain connector (`eth_gas_price`, M4-E1-T4): the third
+  concrete connector, picking one metric after investigating what's
+  genuinely on the free tier rather than assuming.** Etherscan's own free
+  tier is a collection of narrower, more tightly rate-limited endpoints
+  than Fear & Greed's or FRED's single clean daily value, so the metric
+  choice itself needed the same kind of investigation FRED's publication
+  lag did.
+  - **The V1 API is deprecated — caught live, not from documentation**: a
+    real, unauthenticated call against the historically-documented
+    endpoint returned an explicit "switch to Etherscan API V2" error with
+    HTTP 200. `app/connectors/etherscan.py` targets the current
+    `https://api.etherscan.io/v2/api`, which requires an explicit
+    `chainid` parameter (`1` for Ethereum mainnet) to select among every
+    EVM chain Etherscan now serves from one base URL.
+  - **The rate limit has changed from the historically-cited figure**:
+    verified against Etherscan's own current documentation as 3
+    calls/second and 100,000 calls/day on the free tier, tighter than any
+    connector on this platform has had to respect so far.
+  - **Etherscan always returns HTTP 200, even for rate-limit and
+    authentication failures** — confirmed with two real, live calls
+    before writing any retry logic. Unlike Fear & Greed's or FRED's
+    partly status-code-driven dispatch, `EtherscanClient._execute` always
+    parses the JSON body and dispatches purely on the `result` field's
+    own text content. The retry/backoff _shape_ still mirrors the Delta
+    REST client's own conventions; only how a retryable failure is
+    detected differs.
+  - **Metric choice: Gas Oracle's `ProposeGasPrice`**, chosen after ruling
+    out two real alternatives — `ethsupply` (confirmed nearly flat
+    day-to-day, and confirmed to hard-fail with no API key) and the Pro
+    tier's `dailyavggasprice` (confirmed Standard-plan-and-above only via
+    Etherscan's own plan documentation, exactly the trap this task warned
+    about).
+  - **Zero lag, confirmed rather than assumed**: the real Gas Oracle
+    response carries no date field and no historical query capability at
+    all, so every point is timestamped `datetime.now(UTC)` at fetch time,
+    never a value read out of the response body.
+  - **No historical backfill is possible — a disclosed limitation, not a
+    bug**: `fetch()` always makes exactly one live request and returns it
+    only if "now" falls inside the requested range (plus a small grace
+    period — see the real bug below); `scripts
+/backfill_etherscan.py`'s own docstring says so explicitly. History
+    can only build up one point per periodic sync tick from here on.
+  - **A second real bug, found only once the real periodic scheduler ran
+    against the live API with real network latency — the mocked test
+    suite could not have caught it, the same pattern FRED's own
+    `realtime_start` bug followed.** `ExternalDataSyncScheduler` captures
+    one `now` up front and threads it down as `end` through an async
+    chain (a DB query, other sources' own real HTTP calls in the same
+    tick) before this connector's own request even starts; since the
+    returned point is timestamped _after_ its own ~940ms HTTP round trip,
+    a strict `point.timestamp <= end` check could never hold — confirmed
+    live with a real manual poll returning `received=0`, not the expected
+    point. Fixed with a 5-minute grace period on the upper bound only
+    (`_END_GRACE_PERIOD`), which absorbs this real timing gap while still
+    rejecting a genuinely historical `end`; re-verified against the real
+    API afterward — the same poll returned `received=1 inserted=1`, and
+    the already-running dev server's own periodic scheduler (which had
+    been silently failing every tick) began inserting real values the
+    moment the fix loaded.
+  - **A new feature, `eth_gas_price`**, and the connector appearing
+    automatically in `GET /connectors`/`/data-sources` and
+    `GET /features` with zero code change to either — confirmed by test,
+    not assumed, the same guarantee `fed_funds_rate` already proved once.
+  - Full design in `ARCHITECTURE.md` § "External Data Connectors" →
+    "Etherscan Connector"; API surface in `docs/api/API.md`; tests in
+    `services/api/TESTING.md`.
+
 - **Milestones 2 and 3 independently re-verified against real code and
   live test runs**, not re-asserted from their own prior "COMPLETE"
   status — all seven audited claims (async training execution,

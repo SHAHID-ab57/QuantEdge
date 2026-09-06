@@ -194,6 +194,17 @@ class Settings(BaseSettings):
     fred_base_url: str = "https://api.stlouisfed.org"
     fred_request_timeout: float = 10.0
 
+    #: Etherscan's V2 API (`app/connectors/etherscan.py`) — the second
+    #: connector requiring authentication. `etherscan_chain_id` defaults to
+    #: `1` (Ethereum mainnet); V2 folds every EVM chain Etherscan supports
+    #: behind one base URL, distinguished by this one query parameter.
+    #: Same "empty key is a valid not-configured-yet state" contract as
+    #: `fred_api_key`.
+    etherscan_api_key: str = ""
+    etherscan_base_url: str = "https://api.etherscan.io/v2/api"
+    etherscan_chain_id: int = 1
+    etherscan_request_timeout: float = 10.0
+
     #: Periodic external data sync (`app.services.external_data_sync
     #: .ExternalDataSyncScheduler`) — mirrors `candle_sync_enabled`/
     #: `candle_sync_interval_seconds` exactly: a lightweight in-process

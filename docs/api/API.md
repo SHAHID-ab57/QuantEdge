@@ -246,17 +246,23 @@ unchanged.
 
 Registered today: `ohlcv` (`category: "raw"`), `candle_shape`
 (`price_action`), `sma`/`ema`/`wma` (`trend`), `fear_greed` (`sentiment`),
-and `fed_funds_rate` (`macro`). The set is queried from `GET
-/api/v1/features` at runtime, never hardcoded by a client; see
-`ARCHITECTURE.md` § "Feature Engineering Engine" for how a new generator
-joins this list with no API change, and § "External Data Connectors" for
-`fear_greed`/`fed_funds_rate` specifically — both come from a registered
-connector (`app/connectors/fear_greed.py`, `app/connectors/fred.py`), not
-from candle math, but each is requested and returned exactly like every
-other feature. `fed_funds_rate` is timestamped by its real publication
-date (`external_sources: ["fed_funds_rate"]`), never the calendar month
-it describes — see `ARCHITECTURE.md` § "FRED Connector" for why that
-distinction matters.
+`fed_funds_rate` (`macro`), and `eth_gas_price` (`on-chain`). The set is
+queried from `GET /api/v1/features` at runtime, never hardcoded by a
+client; see `ARCHITECTURE.md` § "Feature Engineering Engine" for how a new
+generator joins this list with no API change, and § "External Data
+Connectors" for `fear_greed`/`fed_funds_rate`/`eth_gas_price` specifically
+— all three come from a registered connector
+(`app/connectors/fear_greed.py`, `app/connectors/fred.py`,
+`app/connectors/etherscan.py`), not from candle math, but each is
+requested and returned exactly like every other feature. `fed_funds_rate`
+is timestamped by its real publication date
+(`external_sources: ["fed_funds_rate"]`), never the calendar month it
+describes — see `ARCHITECTURE.md` § "FRED Connector" for why that
+distinction matters. `eth_gas_price` is timestamped by the moment its
+connector last polled the live Etherscan API — it has no historical query
+capability of its own, so a candle older than that first poll always
+reads `null`, never a fabricated value — see `ARCHITECTURE.md` §
+"Etherscan Connector" for the full "no backfill possible" account.
 
 **The catalogue is the contract**, exactly as for indicators — each entry
 publishes every parameter's type, bounds, choices, default, and
@@ -275,7 +281,9 @@ ratios on a flat candle); and one further additive field from the External
 Data Connectors work: `external_sources` — the connector source names (see
 `ARCHITECTURE.md` § "External Data Connectors") this generator reads instead
 of, or alongside, candle data — empty for every generator except
-`fear_greed` (`("fear_greed",)`). A feature declaring `external_sources` is
+`fear_greed` (`("fear_greed",)`), `fed_funds_rate`
+(`("fed_funds_rate",)`), and `eth_gas_price` (`("eth_gas_price",)`). A
+feature declaring `external_sources` is
 never served from the feature cache (`cache_status` reports `"disabled"`,
 not `"miss"`, for that column), because the cache key fingerprints candles
 and parameters only, never a connector's own freshness. A feature declaring
@@ -594,7 +602,12 @@ publishes this so a client can show that fact without knowing anything
 connector-specific; whether an API key is actually configured on the
 backend has no separate field, since a missing key surfaces the same way
 any other fetch failure would (internally, at ingestion time — never at
-this read-only endpoint, which only ever reports already-stored data).
+this read-only endpoint, which only ever reports already-stored data). A
+third, `eth_gas_price` (`app/connectors/etherscan.py`), is registered the
+same way, also with `"requires_auth": true` — its `latest_timestamp` is
+always the moment its own connector last polled the live API, never a
+value read out of the response body, since Etherscan's Gas Oracle carries
+no date field of its own (see `ARCHITECTURE.md` § "Etherscan Connector").
 
 **History uses the same inclusive-both-ends range this table already
 has**, unlike `/candles`'s half-open `[start, end)` — see

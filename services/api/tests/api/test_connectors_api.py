@@ -52,6 +52,12 @@ class TestConnectorCatalogueEndpoint:
         assert fed_funds["label"] == "Federal Funds Rate"
         assert fed_funds["requires_auth"] is True
 
+        # A third connector, added later still — same guarantee again.
+        assert "eth_gas_price" in sources
+        gas_price = next(e for e in body["connectors"] if e["source"] == "eth_gas_price")
+        assert gas_price["label"] == "Ethereum Gas Price"
+        assert gas_price["requires_auth"] is True
+
     async def test_reports_null_latest_value_before_anything_is_ingested(
         self, client: httpx.AsyncClient
     ) -> None:

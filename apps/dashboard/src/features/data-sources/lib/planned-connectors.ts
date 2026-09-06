@@ -29,10 +29,6 @@ export const PLANNED_CONNECTORS: PlannedConnector[] = [
     description: 'News and sentiment coverage for crypto and macro markets.',
   },
   {
-    name: 'Etherscan',
-    description: 'On-chain Ethereum metrics — gas fees, network activity, contract data.',
-  },
-  {
     name: 'DefiLlama',
     description: 'DeFi protocol metrics — total value locked, yields, and volumes.',
   },

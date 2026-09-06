@@ -4106,6 +4106,183 @@ confirms discoverability on the real, shared `default_registry`.
 feature's own lookup/no-look-ahead tests, plus `TestPublicationLagFixture`
 described above.
 
+#### Etherscan Connector (M4-E1-T4)
+
+The third concrete connector, and the first to require investigating not
+just _whether_ authentication is needed but _which_ endpoint among several
+narrower, more tightly rate-limited free-tier options actually gives a
+reliable, network-wide, daily-aggregable signal — the same kind of
+investigation FRED's own publication-lag check required, applied here to
+metric selection rather than timestamp semantics.
+
+**API version — discovered live, not from documentation.** A first,
+unauthenticated `curl` against the historically-documented endpoint
+(`https://api.etherscan.io/api?module=gastracker&action=gasoracle`)
+returned HTTP 200 with `{"status":"0","message":"NOTOK","result":"You are
+using a deprecated V1 endpoint, switch to Etherscan API V2 using
+https://docs.etherscan.io/v2-migration"}` — WebFetch's own summarization of
+Etherscan's docs had not surfaced this clearly enough to catch it without
+making the real call. `app/connectors/etherscan.py` targets the current
+`https://api.etherscan.io/v2/api`, which folds every EVM chain Etherscan
+now serves behind one base URL, disambiguated by an explicit `chainid`
+query parameter (`1` for Ethereum mainnet, `etherscan_chain_id` in
+`app/core/config.py`).
+
+**Rate limits — verified current, not assumed from the historically-cited
+figure.** The task itself flagged "5 requests/sec" as a number that may
+have gone stale; Etherscan's own dedicated rate-limits documentation page
+confirms the actual current free-tier limit is **3 calls/second, up to
+100,000 calls/day** — genuinely different from the historical figure, and
+tighter than any connector on this platform has had to respect before.
+
+**Error signaling — a genuine, verified architectural deviation from Fear
+& Greed and FRED.** Both prior connectors dispatch retry/error handling
+partly from HTTP status codes (`RETRYABLE_STATUS_CODES`). Etherscan does
+not give that option: two real, live, unauthenticated calls against the
+V2 API — one with no key, one with a deliberately malformed key —
+both returned HTTP 200, with the actual failure only visible in the JSON
+body's own `{"status": "0"|"1", "message": ..., "result": ...}` envelope.
+`EtherscanClient._execute` therefore always parses the body first and
+dispatches purely on `result`'s own text content (substring-matching
+`"rate limit"` -> `ConnectorRateLimitError`, `"api key"` ->
+`ConnectorAuthenticationError`, else -> generic `ConnectorAPIError`) —
+the retry/backoff _shape_ (exponential backoff with jitter, bounded
+retries, mirroring the Delta REST client's own conventions in
+`app/integrations/delta/client.py`) is unchanged, only _how_
+retry-eligibility is detected differs, and that difference is load-bearing:
+a status-code-only dispatch would never retry an Etherscan rate limit at
+all.
+
+**Metric choice — Gas Oracle's `ProposeGasPrice`, chosen after ruling out
+two real alternatives, not merely the first candidate considered.**
+
+- `stats`/`ethsupply` (ETH total supply): confirmed uninformative for a
+  daily signal — net issuance minus EIP-1559 burn moves it negligibly
+  day to day — and, checked live, hard-fails with no API key at all
+  (unlike `gasoracle`, which only degrades to a slower unauthenticated
+  rate). Ruled out on both grounds.
+- `stats`/`dailyavggasprice`: a genuine historical daily series, which
+  would have been the obvious first choice as the closest analogue to
+  Fear & Greed's own "one clean daily value" shape — but confirmed via
+  Etherscan's own plan documentation to be **Standard-plan-and-above
+  only**, not available on the free tier at all. This is exactly the
+  Pro-tier trap the task itself warned about; ruling it out required
+  actually checking, not assuming a plausible-sounding endpoint name is
+  free.
+- `gastracker`/`gasoracle` -> `ProposeGasPrice` (Etherscan's own
+  recommended "standard" tier, between `SafeGasPrice` and
+  `FastGasPrice`): available unauthenticated at a slower rate and
+  authenticated at the full free-tier rate, genuinely network-wide (not
+  a per-address lookup), and a real, moving, meaningful daily-scale
+  on-chain signal. Chosen on reliability and free-tier availability,
+  not because it was the first option checked.
+
+**Lag — confirmed zero by construction, not assumed by analogy to the
+other two connectors' own low-lag data.** Checked live: the Gas Oracle
+response carries no date or timestamp field of its own, and the endpoint
+has no historical query parameter at all — there is exactly one timestamp
+concept for this metric, "the moment the connector made the request."
+`EtherscanConnector._to_point` sets `RawDataPoint.timestamp` to
+`datetime.now(UTC)` captured at fetch time, never a value read out of the
+response body. This is the opposite failure mode from FRED's own
+publication lag (a value dated in the past, not yet truly knowable) — here
+there is no dating at all to get wrong, confirmed by inspecting the real
+response shape rather than assumed because "on-chain data is usually
+close to real-time."
+
+**No historical backfill is possible — the single most important way this
+connector differs from Fear & Greed and FRED, and a disclosed limitation,
+not a bug.** Both prior connectors fetch their entire available history in
+one call and filter locally; Gas Oracle has no history to fetch — it only
+ever answers "what is it right now." `EtherscanConnector.fetch(start, end)`
+therefore makes exactly one live request regardless of the requested
+range, timestamps the single resulting point "now," and returns it only if
+that "now" falls at or after `start` and no later than `end` plus a
+small grace period — an honest empty result for any genuinely past-only
+range, never a fabricated historical value.
+`scripts/backfill_etherscan.py`'s own module docstring says so explicitly:
+running it performs exactly one poll, not a historical backfill. History
+for this source can only ever be built up the way `ExternalDataSyncScheduler`
+already does for every connector — one point accumulated per periodic
+tick, starting from whenever ingestion first began, with no way to
+retroactively fill in a time before that.
+
+**A real bug this design caught, found only by running the actual
+periodic-sync path against the live API — the mocked test suite could
+not have caught it, the same pattern FRED's own `realtime_start` default
+bug followed.** `ExternalDataSyncScheduler.run_catch_up` captures one
+`now` up front and threads `end=now` through an async chain (a DB query
+in `_catch_up_window`, then whichever other sources sync first in the
+same tick, each with its own real HTTP call) before this connector's own
+request even starts. Since the returned point is necessarily timestamped
+_after_ its own HTTP round trip to Etherscan completes, a strict
+`point.timestamp <= end` check could never hold — real wall-clock time
+had always already moved past the caller's stale `end` snapshot by the
+time the point existed at all. Caught live: a real manual poll
+(`uv run python scripts/backfill_etherscan.py`), run immediately after
+this connector was first written, returned `received=0` — not the
+single point the design intended — with a ~940ms real HTTP round trip
+directly visible in the logs as the cause. Fixed with `_END_GRACE_PERIOD`
+(a 5-minute tolerance on the upper bound only, documented in full in
+`etherscan.py` itself): accepts a point observed shortly after a stale
+`end` (the caller asked about "now," but "now" moved on while this
+connector was fetching) while still correctly rejecting a genuinely
+historical `end` (every real caller's historical range, e.g. a
+backfill script's own `--end 2020-01-01`, is off by whole days at
+minimum — comfortably outside a 5-minute window). Re-verified against
+the real API after the fix: the same manual poll returned
+`received=1 inserted=1`, and the already-running dev server's own
+periodic scheduler (which had been silently failing every tick on the
+same bug) began successfully inserting real, distinct gas price values
+the moment the fix was loaded. Two new regression tests
+(`test_fetch_accepts_a_point_observed_shortly_after_a_stale_end`,
+`test_fetch_still_excludes_a_point_observed_well_beyond_the_grace_period`)
+model this exact timing gap deterministically, rather than relying on
+real network latency to reproduce it.
+
+**Registered exactly like Fear & Greed and FRED, with zero special-casing
+anywhere else.** `app/connectors/etherscan.py` is auto-discovered by
+`load_builtin_connectors()`; `app/features/builtin/eth_gas_price.py` is
+auto-discovered by `load_builtin_features()`; the periodic
+`ExternalDataSyncScheduler` picks it up automatically the same way.
+Confirmed, not assumed: `eth_gas_price` appears in `GET
+/api/v1/features` (`tests/api/test_features_api.py
+::test_publishes_external_sources_for_a_connector_backed_feature`,
+extended to check a third connector-backed feature alongside `fear_greed`
+and `fed_funds_rate`) and `eth_gas_price` (the source) appears in `GET
+/connectors` (`tests/api/test_connectors_api.py
+::test_a_newly_registered_connector_appears_with_zero_code_change`) —
+both with no change to either endpoint or to the Data Sources page.
+`lib/planned-connectors.ts`'s own static list had its Etherscan entry
+removed the same day this connector actually landed, per that file's own
+stated upkeep rule — an ordinary application of the rule, with no
+"wrongly reported as issued" history to record this time, unlike FRED's.
+
+**Testing.** `tests/connectors/test_etherscan.py` covers: a successful
+fetch with URL-parameter assertions (`chainid`, `module`, `action`,
+`apikey`); no API key configured raising `ConnectorAuthenticationError`
+with no network call; a bad key raising the same from the real
+`"Missing/Invalid API Key"` response text; an unrelated `status: "0"`
+correctly raising a generic `ConnectorAPIError`, proven distinct from both
+typed errors rather than lumped in by an over-eager substring match; three
+malformed-response shapes (non-JSON body, non-object envelope, non-object
+`result`); a network timeout; a connect error retried to exhaustion; a
+rate-limit response retried then succeeding; a rate limit retried to
+exhaustion raising `ConnectorRateLimitError`. `TestEtherscanConnector`
+proves the two properties unique to this connector: a fetch is always
+timestamped "now" (via a `FakeDatetime` monkeypatch, mirroring the same
+pattern already used in `tests/services/test_external_data_sync.py`), and
+a past-only requested range returns an honest empty tuple rather than a
+fabricated point — the load-bearing proof of the no-backfill-possible
+limitation. `tests/connectors/test_registry.py::TestEtherscanIsRegistered`
+confirms discoverability on the real, shared `default_registry`.
+`tests/features/test_eth_gas_price_feature.py` mirrors the other two
+features' own lookup/no-look-ahead tests, including the adversarial proof
+that a future point never changes a past candle's value — run here too,
+not skipped, even though the connector's own zero-lag guarantee makes it
+sound unnecessary; the generic lookup mechanism has no way to know that on
+its own.
+
 ### Feature Store
 
 > Not built. Features are computed on demand and exported; no persisted,

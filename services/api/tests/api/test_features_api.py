@@ -67,10 +67,14 @@ class TestCatalogueEndpoint:
         fear_greed = next(e for e in body["features"] if e["name"] == "fear_greed")
         assert fear_greed["external_sources"] == ["fear_greed"]
 
-        # A second, independently-added connector-backed feature — proves
-        # this isn't special-cased to fear_greed specifically.
+        # A second and third, independently-added connector-backed
+        # feature — proves this isn't special-cased to fear_greed
+        # specifically.
         fed_funds = next(e for e in body["features"] if e["name"] == "fed_funds_rate")
         assert fed_funds["external_sources"] == ["fed_funds_rate"]
+
+        gas_price = next(e for e in body["features"] if e["name"] == "eth_gas_price")
+        assert gas_price["external_sources"] == ["eth_gas_price"]
 
         ohlcv = next(e for e in body["features"] if e["name"] == "ohlcv")
         assert ohlcv["external_sources"] == []

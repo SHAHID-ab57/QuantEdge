@@ -22,4 +22,14 @@ def setup_logging() -> None:
         level=settings.log_level.upper(),
         format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
     )
+    # httpx's own request logger logs the full request URL at INFO level,
+    # including any query-string parameter — several connectors here
+    # (Etherscan, FRED, Marketaux) send their real API key as a query
+    # parameter (`apikey`/`api_key`/`api_token`), so at the root level
+    # this configures, that line would log the real secret in cleartext
+    # on every request. Each connector already logs its own safe
+    # method/endpoint/status/duration line; httpx's own duplicate is
+    # silenced rather than redacted, since httpx itself has no redaction
+    # hook to filter just the secret out of the URL it logs.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     _configured = True

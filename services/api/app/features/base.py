@@ -23,7 +23,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, ClassVar, Literal
+from typing import Any, Literal
 
 from app.indicators.base import OHLCVPoint
 from app.indicators.params import ParameterSpec
@@ -269,9 +269,18 @@ class FeatureGenerator(ABC):
     need no changes to support it — the identical extension guarantee
     ``app/indicators/`` makes, deliberately, so there is one extension
     workflow on this platform rather than two.
+
+    ``metadata`` is a plain instance attribute, not a ``ClassVar`` — every
+    ordinary generator still sets it once at class level (a class-level
+    assignment satisfies a plain instance attribute just as well), but
+    ``IndicatorFeature`` (``app/features/builtin/indicator_feature.py``)
+    is deliberately *constructed*, not subclassed, per indicator: distinct
+    instances of that one class carry genuinely different metadata, which
+    a real ``ClassVar`` (shared across every instance of a class) cannot
+    express.
     """
 
-    metadata: ClassVar[FeatureMetadata]
+    metadata: FeatureMetadata
 
     def warmup(self, params: Mapping[str, Any]) -> int:
         """Candles needed before the first fully-defined value.

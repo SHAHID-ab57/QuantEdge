@@ -1199,6 +1199,8 @@ two).
   "dataset_version": null, // optional — defaults from the experiment's own dataset_version
   "symbol": "ETHUSD", // required if the chosen adapter's requires_real_data is true
   "timeframe": "1h", // required alongside symbol
+  "start": null, // optional, must be given together with end — see below
+  "end": null,
   "target_column": null, // optional — defaults to the first target column the dataset build produces
   "hyperparameters": { "max_iter": 200, "C": 1.0, "random_seed": 42 },
 }
@@ -1210,6 +1212,18 @@ a citation, exactly as `Experiment.dataset_version` already is.
 `symbol`/`timeframe`/`target_column` are only meaningful for a
 `requires_real_data` adapter — the placeholder ignores them entirely.
 
+**`start`/`end` — added by FIX-TRAINING-DATE-RANGE, fixing a real bug: a
+job that omitted both used to silently train on a market's _oldest_
+candles, not its most recent ones (see `ARCHITECTURE.md` § "Machine
+Learning Training Framework" for the full account, including why every
+model trained before this fix needs retraining).** Both, or neither, must
+be given (`400` otherwise) — same paired-field contract
+`/markets/{symbol}/ml/dataset`'s own `start`/`end` already has. Omitting
+both now defaults to the most recent candles for `symbol`/`timeframe`,
+never the oldest. Naming an explicit range still works exactly as before,
+oldest-first within it — this is not a behavior change, only a new,
+optional way to pin one.
+
 **Response shape** — the full job record (shown here for a completed
 `logistic_regression` run):
 
@@ -1220,6 +1234,8 @@ a citation, exactly as `Experiment.dataset_version` already is.
   "dataset_version": "9c1e4a2c-3b8d-4c9a-9e2f-1a7c5d6b8e90",
   "symbol": "ETHUSD",
   "timeframe": "1h",
+  "dataset_start": null, // the explicit range this job trained on, if one was given
+  "dataset_end": null,
   "target_column": "next_direction_1",
   "model_type": "logistic_regression",
   "hyperparameters": { "max_iter": 200, "C": 1.0, "random_seed": 42 },

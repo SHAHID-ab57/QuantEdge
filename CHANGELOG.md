@@ -2509,6 +2509,44 @@ MA"]`).
 
 ### Fixed
 
+- **Critical (FIX-TRAINING-DATE-RANGE): every training job that omitted an
+  explicit candle range silently trained on a market's _oldest_ candles,
+  never its most recent ones — including the job that had been driving
+  live paper trading.** Found while investigating M4-E3-T1 (Feature Value
+  Assessment), not by design. Root cause: `TrainingJobService
+._make_load_dataset_hook` built its own dataset request with no
+  `start`/`end` at all, and the shared loader every real dataset build
+  goes through (`app/services/candle_points.py::load_candle_points`)
+  ran a bare `ORDER BY open_time ASC LIMIT <limit>` whenever both were
+  omitted — an unbounded ascending scan returns a market's earliest-ever
+  rows, not its latest. For `ETHUSD`/`1h` this meant training on a real,
+  confirmed (via direct SQL, not inference) dead-flat 100-hour stretch
+  from February 2024 with zero price movement — a trivially "100%
+  accurate," meaningless model. **Every model trained before this fix
+  needs retraining before its results can be trusted; the currently-live
+  paper-trading strategy was disabled (`strategy_enabled=false`) as an
+  immediate, separate action pending that retrain.** Fixed at the shared
+  loader (the one place Indicators, Feature Engineering, the ML Dataset
+  Builder, and Training all funnel through): no explicit range now
+  defaults to the _most recent_ candles, never the oldest; an explicit
+  `start`/`end` is completely unaffected. `TrainingJobCreateRequest`
+  gained optional `start`/`end` fields (validated together), forwarded
+  into the dataset build and persisted onto two new nullable columns,
+  `TrainingJob.dataset_start`/`dataset_end` (migration `01c81f537e54`), so
+  a job's own real training window is now a queryable fact rather than
+  something only reconstructible by reverse-engineering its recorded
+  price statistics — the same investigative path this bug was originally
+  found through. `dataset_version`'s own free-text-citation contract is
+  untouched — closing that separate gap (a real, persisted, bound dataset
+  reference) was considered and explicitly deferred as disproportionate
+  rework for this fix, not overlooked. New regression coverage:
+  `tests/services/test_candle_points.py` (no test exercised this shared
+  helper's own default behavior directly before — every existing caller's
+  tests always passed an explicit range, which is exactly why this went
+  unnoticed) and three new cases in `tests/training/test_service.py
+::TestRealDataTraining`. Full account in `ARCHITECTURE.md` § "Machine
+  Learning Training Framework"; API surface in `docs/api/API.md`.
+
 - **Critical**: the Live Market Dashboard never displayed any live data —
   current price, trade tape, and last-trade time stayed "Unavailable"
   indefinitely even on a healthy, connected stream. Root cause: the

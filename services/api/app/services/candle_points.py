@@ -69,6 +69,28 @@ async def load_candle_points(
     resolved_limit = default_limit if limit is None else limit
     validate_limit(resolved_limit, max_limit)
 
+    # No explicit range means "give me data to analyze right now," not
+    # "start from this market's very first ever candle" — but an
+    # ascending, unbounded query does exactly the latter: `ORDER BY
+    # open_time ASC LIMIT N` returns the *oldest* N candles a market has,
+    # however long ago that was. Every caller here (Indicators, Feature
+    # Engineering, the ML Dataset Builder, and — critically — every
+    # Training Job that omits a range, including the one that drove live
+    # trading) went through this exact path and got that oldest-N result
+    # silently. Real, confirmed impact (M4-E3-T1 / FIX-TRAINING-DATE-
+    # RANGE): a training job created with no explicit range trained on a
+    # market's oldest 100 candles — for ETHUSD/1h, a real but dead-flat
+    # February 2024 stretch with zero price movement — rather than
+    # anything resembling current conditions. Defaulting instead to the
+    # most recent `resolved_limit` candles (fetched descending, then
+    # restored to the ascending order every consumer here already
+    # requires) fixes this for every caller uniformly, with no schema or
+    # request-shape change. An explicit `start`/`end` is untouched —
+    # a caller who names a specific range still gets exactly that range,
+    # oldest-first within it, same as always.
+    no_explicit_range = start is None and end is None
+    direction = "desc" if no_explicit_range else "asc"
+
     db_started = perf_counter()
     candles = await candle_repository.get_candles(
         market.id,
@@ -78,12 +100,15 @@ async def load_candle_points(
         limit=resolved_limit,
         offset=0,
         sort="open_time",
-        direction="asc",
+        direction=direction,
     )
     database_time_ms = (perf_counter() - db_started) * 1000
 
     if not candles:
         raise CandleNotFoundError(symbol, timeframe)
+
+    if no_explicit_range:
+        candles = list(reversed(candles))
 
     return LoadedCandles(
         points=[to_point(candle) for candle in candles],

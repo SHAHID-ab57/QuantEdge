@@ -80,6 +80,21 @@ class TrainingJob(BaseModel, TimestampMixin):
         nullable=True,
         comment="Candle timeframe to load, e.g. '1h'; required by a requires_real_data adapter.",
     )
+    dataset_start: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment=(
+            "Explicit candle-range start this job trains on; NULL means the load_dataset "
+            "stage's own default (the most recent candles for symbol/timeframe, never the "
+            "oldest — see app/services/candle_points.py)."
+        ),
+    )
+    dataset_end: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="Explicit candle-range end this job trains on; must be set together with "
+        "dataset_start.",
+    )
     target_column: Mapped[str | None] = mapped_column(
         String(100),
         nullable=True,

@@ -1878,6 +1878,55 @@ excluded; encoding one is `app/features/ai_extensions.py`'s documented,
 not-yet-implemented `CategoricalEncoder` extension point), and reshape
 each split into a `SplitMatrix`.
 
+**A real, serious bug in this exact path — found while investigating
+M4-E3-T1, not by design, and fixed under FIX-TRAINING-DATE-RANGE: a
+training job that omitted an explicit candle range silently trained on a
+market's _oldest_ candles, never its most recent ones — including the
+job that had been driving live paper trading.** `TrainingJobService
+._make_load_dataset_hook` built its own `MLDatasetRequest` with no
+`start`/`end` at all, and the shared loader every real dataset build goes
+through (`app/services/candle_points.py::load_candle_points`) explicitly
+queried `ORDER BY open_time ASC LIMIT <limit>` whenever both were
+omitted — a bare ascending scan with no lower bound returns a market's
+earliest-ever rows, not its latest. For `ETHUSD`/`1h` this meant every
+untargeted training run — the currently-serving one included — trained
+on a real but dead-flat 100-hour stretch from February 2024 with zero
+price movement, a target (`next_direction`) that is 100% "flat" by
+construction, and a trivial, meaningless "100% accuracy." **Every model
+trained before this fix landed needs retraining before its results can
+be trusted — this is not implied by the fix, it needs saying: nothing
+about landing this code retroactively repairs a model already saved from
+a run before it existed.** Confirmed via direct SQL against `candles`
+(a window-function scan for the longest unchanging-close run in the
+table), not inferred from the model's own output. Fixed at the shared
+loader (the one place every consumer — Indicators, Feature Engineering,
+the ML Dataset Builder, and Training — funnels through): when no
+explicit range is given, it now fetches the _most recent_ `limit`
+candles (descending, restored to the ascending order every consumer
+already requires) instead of the oldest; an explicit `start`/`end` is
+completely unaffected, still honored oldest-first within it, exactly as
+before. `TrainingJobCreateRequest` also gained optional `start`/`end`
+fields (validated together, mirroring `FeatureDatasetRequest`'s own
+paired-field contract), forwarded verbatim into the internal
+`MLDatasetRequest` and persisted onto two new nullable `TrainingJob`
+columns, `dataset_start`/`dataset_end` (migration `01c81f537e54`) — so a
+job's own exact training window is now a real, queryable fact rather
+than something only reconstructible after the fact by reverse-engineering
+its recorded price statistics, the same investigative dead end this bug
+was originally found through. `dataset_version`'s own contract is
+completely untouched by this fix — still a free-text citation with no
+real binding to any persisted build (`ml_dataset_builds` exists, but
+`build_ml_dataset`, the method the training path actually calls, never
+writes to it — only `build_dataset`, the plain REST-endpoint path, does);
+closing that separate gap was considered and explicitly deferred as
+disproportionate rework for this fix (a real FK, a frontend change, and
+backward-compatibility handling for every already-existing job), not
+overlooked. No test exercised `load_candle_points`'s own default
+behavior directly before this fix — every existing caller's own tests
+always passed an explicit range — which is exactly why this was invisible
+for as long as it was; `tests/services/test_candle_points.py` is new,
+dedicated coverage for this shared helper specifically.
+
 **Feature normalization** (`app/training/normalization.py`) — corrects a
 real scale bias, not just a missing capability. `TrainingJobCreateRequest.
 normalize_features` (default `true`) drives `build_training_dataset` to fit

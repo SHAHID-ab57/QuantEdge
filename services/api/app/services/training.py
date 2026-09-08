@@ -129,6 +129,8 @@ class TrainingJobService:
             dataset_version=dataset_version,
             symbol=payload.symbol,
             timeframe=payload.timeframe,
+            dataset_start=payload.start,
+            dataset_end=payload.end,
             target_column=payload.target_column,
             model_type=payload.model_type,
             hyperparameters=payload.hyperparameters,
@@ -406,6 +408,17 @@ class TrainingJobService:
             the linked experiment's own recorded `feature_set`/
             `target_config`/`split_config` — never a second dataset-
             building path.
+
+            `job.dataset_start`/`dataset_end`, when set, are forwarded so
+            this job trains on exactly that range — never re-derived.
+            When neither is set (the common case, and every job before
+            FIX-TRAINING-DATE-RANGE), `MLDatasetService`'s own default
+            takes over, which now means the *most recent* candles for
+            `job.symbol`/`job.timeframe`, not a market's oldest ones (see
+            `app/services/candle_points.py`'s own docstring for the real
+            bug this fixed: every training job that omitted a range,
+            including the one that drove live paper trading, was silently
+            training on a market's earliest-ever candles).
             """
             adapter = self.pipeline.registry.get(job.model_type)
             if not adapter.metadata.requires_real_data:
@@ -421,6 +434,8 @@ class TrainingJobService:
             split = experiment.split_config
             request = MLDatasetRequest(
                 timeframe=job.timeframe,
+                start=job.dataset_start,
+                end=job.dataset_end,
                 features=[
                     FeatureRequestItem(feature=item.feature, params=item.params)
                     for item in experiment.feature_set

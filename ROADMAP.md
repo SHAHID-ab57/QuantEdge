@@ -48,6 +48,19 @@ real code, passing tests, and is wired into the running API and dashboard
 `docs/testing/TESTING.md`/`services/api/TESTING.md` for the full test
 inventory.
 
+**A real bug in this milestone's own Training Framework was found and
+fixed (FIX-TRAINING-DATE-RANGE, `TASKBOOK.md` `M1-E6-T3`), discovered
+while working a Milestone 4 task, not by design.** A training job that
+omitted an explicit candle range was silently training on a market's
+_oldest_ candles, not its most recent ones — including the job driving
+live paper trading — confirmed via direct SQL against a real, dead-flat
+February 2024 stretch, not inferred. Fixed at the one shared loader every
+dataset build funnels through; a job can now optionally pin an explicit
+range too. **Every model trained before this fix needs retraining before
+its results can be trusted** — the live strategy was disabled pending
+that. See `ARCHITECTURE.md` § "Machine Learning Training Framework" for
+the full account.
+
 **Milestone 2 — Prediction & Backtesting (COMPLETE).** The Live
 Prediction Service (`app/prediction/`, `/ml/predict`) is the first item:
 given a completed training job, reconstruct a live feature vector, run the
@@ -233,6 +246,30 @@ any API. The liquidation heatmap investigation is deferred, not
 started — a repo-wide search found zero existing code or documentation
 for it. See `TASKBOOK.md` `M4-E2-T1`/`M4-E2-T2` for the full task
 breakdown.
+
+**A third epic, M4-E3 (Feature Value Assessment), is now complete —
+its own real result is that the six connector features cannot currently
+be measured at all.** Real experiments and training jobs were built for
+the baseline plus each connector feature individually, plus all six
+together, matching the live baseline's own target/split/model/
+hyperparameters exactly. Four of the eight failed outright with an
+honest platform error (their own real data coverage in this environment,
+the last ~2 days, doesn't reach the training pipeline's default window);
+the other four completed but tied at a trivial 100% accuracy — the same
+dead-flat, February 2024 window the currently-live baseline itself
+already trains on. Two real, compounding platform bugs were found and
+disclosed rather than routed around: the Training Framework has no way
+to specify a training job's own date range, and its actual default (none
+given) loads a market's _earliest_ candles, not its most recent. A
+genuinely controlled, real 44-row comparison across all eight variants
+**was** proven possible at the Dataset Builder level alone — the blocker
+is specifically that the Training Framework cannot consume a pinned
+window. See `docs/research/CONNECTOR_FEATURE_VALUE_ASSESSMENT.md` for
+the full report and `TASKBOOK.md` `M4-E3-T1`. The earliest-not-recent
+default bug this exposed has since been fixed under Milestone 1's own
+Training Framework (`M1-E6-T3` above) — this assessment should be redone
+once a genuinely controlled comparison is also possible at the training
+level, not just at the Dataset Builder level as proven here.
 
 **Milestone 5 — Production Hardening.** Authentication/authorization (none
 exists on any route today), CI/CD (none exists — all quality gates are

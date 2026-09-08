@@ -4,6 +4,7 @@ import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Any
 
 import pytest
 
@@ -43,9 +44,9 @@ def build_service(session_factory: SessionFactory) -> TrainingJobService:
     )
 
 
-async def seed_experiment(session_factory: SessionFactory, **overrides: object) -> str:
+async def seed_experiment(session_factory: SessionFactory, **overrides: Any) -> str:
     service = ExperimentService(repository=ExperimentRepository(session_factory()))
-    payload = {"name": "training target experiment"}
+    payload: dict[str, Any] = {"name": "training target experiment"}
     payload.update(overrides)
     experiment = await service.create(ExperimentCreateRequest(**payload))
     return experiment.id
@@ -122,7 +123,9 @@ class TestCreate:
         service = build_service(session_factory)
 
         job = await service.create(
-            TrainingJobCreateRequest(experiment_id=experiment_id, model_type="placeholder")
+            TrainingJobCreateRequest(
+                experiment_id=uuid.UUID(experiment_id), model_type="placeholder"
+            )
         )
 
         assert job.status == "pending"
@@ -138,7 +141,9 @@ class TestCreate:
 
         job = await service.create(
             TrainingJobCreateRequest(
-                experiment_id=experiment_id, model_type="placeholder", dataset_version="ds-override"
+                experiment_id=uuid.UUID(experiment_id),
+                model_type="placeholder",
+                dataset_version="ds-override",
             )
         )
 
@@ -151,7 +156,9 @@ class TestCreate:
         service = build_service(session_factory)
 
         job = await service.create(
-            TrainingJobCreateRequest(experiment_id=experiment_id, model_type="placeholder")
+            TrainingJobCreateRequest(
+                experiment_id=uuid.UUID(experiment_id), model_type="placeholder"
+            )
         )
 
         assert job.normalize_features is True
@@ -164,7 +171,9 @@ class TestCreate:
 
         job = await service.create(
             TrainingJobCreateRequest(
-                experiment_id=experiment_id, model_type="placeholder", normalize_features=False
+                experiment_id=uuid.UUID(experiment_id),
+                model_type="placeholder",
+                normalize_features=False,
             )
         )
 
@@ -188,7 +197,9 @@ class TestGetAndSearch:
         experiment_id = await seed_experiment(session_factory)
         service = build_service(session_factory)
         created = await service.create(
-            TrainingJobCreateRequest(experiment_id=experiment_id, model_type="placeholder")
+            TrainingJobCreateRequest(
+                experiment_id=uuid.UUID(experiment_id), model_type="placeholder"
+            )
         )
 
         fetched = await service.get(uuid.UUID(created.id))
@@ -208,10 +219,10 @@ class TestGetAndSearch:
         exp_b = await seed_experiment(session_factory, name="b")
         service = build_service(session_factory)
         await service.create(
-            TrainingJobCreateRequest(experiment_id=exp_a, model_type="placeholder")
+            TrainingJobCreateRequest(experiment_id=uuid.UUID(exp_a), model_type="placeholder")
         )
         await service.create(
-            TrainingJobCreateRequest(experiment_id=exp_b, model_type="placeholder")
+            TrainingJobCreateRequest(experiment_id=uuid.UUID(exp_b), model_type="placeholder")
         )
 
         result = await service.search(
@@ -249,7 +260,9 @@ class TestDelete:
         experiment_id = await seed_experiment(session_factory)
         service = build_service(session_factory)
         job = await service.create(
-            TrainingJobCreateRequest(experiment_id=experiment_id, model_type="placeholder")
+            TrainingJobCreateRequest(
+                experiment_id=uuid.UUID(experiment_id), model_type="placeholder"
+            )
         )
 
         await service.delete(uuid.UUID(job.id))
@@ -261,7 +274,9 @@ class TestDelete:
         experiment_id = await seed_experiment(session_factory, dataset_version="ds-1")
         service = build_service(session_factory)
         job = await service.create(
-            TrainingJobCreateRequest(experiment_id=experiment_id, model_type="placeholder")
+            TrainingJobCreateRequest(
+                experiment_id=uuid.UUID(experiment_id), model_type="placeholder"
+            )
         )
         repo = TrainingJobRepository(session_factory())
         running_job = await repo.get_by_id(uuid.UUID(job.id))
@@ -278,7 +293,9 @@ class TestCancel:
         experiment_id = await seed_experiment(session_factory)
         service = build_service(session_factory)
         job = await service.create(
-            TrainingJobCreateRequest(experiment_id=experiment_id, model_type="placeholder")
+            TrainingJobCreateRequest(
+                experiment_id=uuid.UUID(experiment_id), model_type="placeholder"
+            )
         )
 
         cancelled = await service.cancel(uuid.UUID(job.id))
@@ -296,7 +313,7 @@ class TestRun:
         service = build_service(session_factory)
         job = await service.create(
             TrainingJobCreateRequest(
-                experiment_id=experiment_id,
+                experiment_id=uuid.UUID(experiment_id),
                 model_type="placeholder",
                 hyperparameters={"epochs": 3},
             )
@@ -325,7 +342,9 @@ class TestRun:
         experiment_id = await seed_experiment(session_factory)  # no dataset_version
         service = build_service(session_factory)
         job = await service.create(
-            TrainingJobCreateRequest(experiment_id=experiment_id, model_type="placeholder")
+            TrainingJobCreateRequest(
+                experiment_id=uuid.UUID(experiment_id), model_type="placeholder"
+            )
         )
 
         failed = await service.run(uuid.UUID(job.id))
@@ -348,7 +367,9 @@ class TestRun:
         experiment_id = await seed_experiment(session_factory, dataset_version="ds-1")
         service = build_service(session_factory)
         job = await service.create(
-            TrainingJobCreateRequest(experiment_id=experiment_id, model_type="does-not-exist")
+            TrainingJobCreateRequest(
+                experiment_id=uuid.UUID(experiment_id), model_type="does-not-exist"
+            )
         )
 
         failed = await service.run(uuid.UUID(job.id))
@@ -362,7 +383,9 @@ class TestRun:
         experiment_id = await seed_experiment(session_factory)  # no dataset_version -> fails
         service = build_service(session_factory)
         job = await service.create(
-            TrainingJobCreateRequest(experiment_id=experiment_id, model_type="placeholder")
+            TrainingJobCreateRequest(
+                experiment_id=uuid.UUID(experiment_id), model_type="placeholder"
+            )
         )
         exp_repo = ExperimentRepository(session_factory())
         experiment = await exp_repo.get_by_id(uuid.UUID(experiment_id))
@@ -377,7 +400,9 @@ class TestRun:
         experiment_id = await seed_experiment(session_factory, dataset_version="ds-1")
         service = build_service(session_factory)
         job = await service.create(
-            TrainingJobCreateRequest(experiment_id=experiment_id, model_type="placeholder")
+            TrainingJobCreateRequest(
+                experiment_id=uuid.UUID(experiment_id), model_type="placeholder"
+            )
         )
         await service.run(uuid.UUID(job.id))
 
@@ -399,7 +424,9 @@ class TestStartAndExecuteRun:
         experiment_id = await seed_experiment(session_factory, dataset_version="ds-start")
         service = build_service(session_factory)
         job = await service.create(
-            TrainingJobCreateRequest(experiment_id=experiment_id, model_type="placeholder")
+            TrainingJobCreateRequest(
+                experiment_id=uuid.UUID(experiment_id), model_type="placeholder"
+            )
         )
 
         started = await service.start(uuid.UUID(job.id))
@@ -418,7 +445,9 @@ class TestStartAndExecuteRun:
         experiment_id = await seed_experiment(session_factory, dataset_version="ds-dup")
         service = build_service(session_factory)
         job = await service.create(
-            TrainingJobCreateRequest(experiment_id=experiment_id, model_type="placeholder")
+            TrainingJobCreateRequest(
+                experiment_id=uuid.UUID(experiment_id), model_type="placeholder"
+            )
         )
         await service.start(uuid.UUID(job.id))
 
@@ -446,7 +475,9 @@ class TestStartAndExecuteRun:
         experiment_id = await seed_experiment(session_factory, dataset_version="ds-race")
         creator = build_service(session_factory)
         job = await creator.create(
-            TrainingJobCreateRequest(experiment_id=experiment_id, model_type="placeholder")
+            TrainingJobCreateRequest(
+                experiment_id=uuid.UUID(experiment_id), model_type="placeholder"
+            )
         )
         job_id = uuid.UUID(job.id)
 
@@ -476,7 +507,9 @@ class TestStartAndExecuteRun:
         service = build_service(session_factory)
         job = await service.create(
             TrainingJobCreateRequest(
-                experiment_id=experiment_id, model_type="placeholder", hyperparameters={"epochs": 2}
+                experiment_id=uuid.UUID(experiment_id),
+                model_type="placeholder",
+                hyperparameters={"epochs": 2},
             )
         )
         await service.start(uuid.UUID(job.id))
@@ -497,7 +530,9 @@ class TestStartAndExecuteRun:
         experiment_id = await seed_experiment(session_factory, dataset_version="ds-fresh")
         starter = build_service(session_factory)
         job = await starter.create(
-            TrainingJobCreateRequest(experiment_id=experiment_id, model_type="placeholder")
+            TrainingJobCreateRequest(
+                experiment_id=uuid.UUID(experiment_id), model_type="placeholder"
+            )
         )
         await starter.start(uuid.UUID(job.id))
 
@@ -512,7 +547,9 @@ class TestStartAndExecuteRun:
         experiment_id = await seed_experiment(session_factory)  # no dataset_version -> fails
         service = build_service(session_factory)
         job = await service.create(
-            TrainingJobCreateRequest(experiment_id=experiment_id, model_type="placeholder")
+            TrainingJobCreateRequest(
+                experiment_id=uuid.UUID(experiment_id), model_type="placeholder"
+            )
         )
         await service.start(uuid.UUID(job.id))
 
@@ -561,7 +598,9 @@ class TestSaveResultsSanitizesNonFiniteFloats:
         experiment_id = await seed_experiment(session_factory, dataset_version="ds-nan")
         service = build_service(session_factory)
         job = await service.create(
-            TrainingJobCreateRequest(experiment_id=experiment_id, model_type="placeholder")
+            TrainingJobCreateRequest(
+                experiment_id=uuid.UUID(experiment_id), model_type="placeholder"
+            )
         )
         save_results = service._make_save_results_hook(uuid.UUID(job.id))
 
@@ -618,7 +657,7 @@ class TestRealDataTraining:
         service = build_service(session_factory)
         job = await service.create(
             TrainingJobCreateRequest(
-                experiment_id=experiment_id,
+                experiment_id=uuid.UUID(experiment_id),
                 model_type="logistic_regression",
                 symbol="LOGUSD",
                 timeframe="1h",
@@ -674,7 +713,7 @@ class TestRealDataTraining:
         service = build_service(session_factory)
         job = await service.create(
             TrainingJobCreateRequest(
-                experiment_id=experiment_id,
+                experiment_id=uuid.UUID(experiment_id),
                 model_type="linear_regression",
                 symbol="LINUSD",
                 timeframe="1h",
@@ -684,14 +723,14 @@ class TestRealDataTraining:
         completed = await service.run(uuid.UUID(job.id))
 
         assert completed.status == "completed"
-        metrics = completed.result_summary["metrics"]
+        summary = completed.result_summary
+        assert summary is not None
+        metrics = summary["metrics"]
         assert "mae" in metrics
         assert "mse" in metrics
         assert "rmse" in metrics
         assert "r2" in metrics
-        assert "coefficients" in completed.result_summary
-
-        summary = completed.result_summary
+        assert "coefficients" in summary
         assert "train_metrics" in summary
         assert "overfitting" in summary
         assert "feature_importance" in summary
@@ -710,7 +749,9 @@ class TestRealDataTraining:
         experiment_id = await seed_experiment_with_real_config(session_factory)
         service = build_service(session_factory)
         job = await service.create(
-            TrainingJobCreateRequest(experiment_id=experiment_id, model_type="logistic_regression")
+            TrainingJobCreateRequest(
+                experiment_id=uuid.UUID(experiment_id), model_type="logistic_regression"
+            )
         )
 
         failed = await service.run(uuid.UUID(job.id))
@@ -727,7 +768,7 @@ class TestRealDataTraining:
         service = build_service(session_factory)
         job = await service.create(
             TrainingJobCreateRequest(
-                experiment_id=experiment_id,
+                experiment_id=uuid.UUID(experiment_id),
                 model_type="logistic_regression",
                 symbol="NOCFGUSD",
                 timeframe="1h",
@@ -750,7 +791,7 @@ class TestRealDataTraining:
         service = build_service(session_factory)
         job = await service.create(
             TrainingJobCreateRequest(
-                experiment_id=experiment_id,
+                experiment_id=uuid.UUID(experiment_id),
                 model_type="linear_regression",
                 symbol="BADTGTUSD",
                 timeframe="1h",
@@ -762,6 +803,117 @@ class TestRealDataTraining:
         assert failed.status == "failed"
         assert failed.error_message is not None
         assert "dtype" in failed.error_message
+
+    async def test_no_explicit_range_trains_on_the_most_recent_candles_not_the_oldest(
+        self, session_factory: SessionFactory
+    ) -> None:
+        """FIX-TRAINING-DATE-RANGE's own load-bearing proof, at the
+        training level (not just the shared loader unit test):
+        `default_limit=100`, 200 real candles seeded — a job created with
+        no explicit range must land on the *same* candles as a job
+        explicitly pinned to the most recent 100 hours, and must *differ*
+        from a job pinned to the oldest 100 hours. Before this fix, the
+        first two would have diverged (no-range silently used the oldest
+        100) and the last two would have been identical."""
+        await seed_real_candles(session_factory, symbol="RECENTUSD", count=200)
+        experiment_id = await seed_experiment_with_real_config(session_factory)
+        service = build_service(session_factory)
+        base = datetime(2026, 1, 1, tzinfo=UTC)
+
+        default_job = await service.create(
+            TrainingJobCreateRequest(
+                experiment_id=uuid.UUID(experiment_id),
+                model_type="logistic_regression",
+                symbol="RECENTUSD",
+                timeframe="1h",
+            )
+        )
+        recent_job = await service.create(
+            TrainingJobCreateRequest(
+                experiment_id=uuid.UUID(experiment_id),
+                model_type="logistic_regression",
+                symbol="RECENTUSD",
+                timeframe="1h",
+                # Matches the default path's own widened fetch exactly:
+                # `next_direction`'s horizon=1 widens the requested
+                # 100-row limit to 101 raw candles before the horizon
+                # drop trims the trailing one back off — hour 99 through
+                # 199 (101 candles), same as what "no explicit range"
+                # resolves to with 200 candles seeded.
+                start=base + timedelta(hours=99),
+                end=base + timedelta(hours=200),
+            )
+        )
+        oldest_job = await service.create(
+            TrainingJobCreateRequest(
+                experiment_id=uuid.UUID(experiment_id),
+                model_type="logistic_regression",
+                symbol="RECENTUSD",
+                timeframe="1h",
+                start=base,
+                end=base + timedelta(hours=100),
+            )
+        )
+
+        default_result = await service.run(uuid.UUID(default_job.id))
+        recent_result = await service.run(uuid.UUID(recent_job.id))
+        oldest_result = await service.run(uuid.UUID(oldest_job.id))
+
+        def close_stats(result: object) -> dict:
+            for entry in result.result_summary["normalization"]:  # type: ignore[union-attr]
+                if entry["column"] == "close":
+                    return entry
+            raise AssertionError("no 'close' column in normalization stats")
+
+        default_close = close_stats(default_result)
+        recent_close = close_stats(recent_result)
+        oldest_close = close_stats(oldest_result)
+
+        assert default_close == recent_close
+        assert default_close != oldest_close
+
+    async def test_an_explicit_start_and_end_actually_constrain_what_is_trained_on(
+        self, session_factory: SessionFactory
+    ) -> None:
+        await seed_real_candles(session_factory, symbol="PINNEDUSD", count=200)
+        experiment_id = await seed_experiment_with_real_config(session_factory)
+        service = build_service(session_factory)
+        base = datetime(2026, 1, 1, tzinfo=UTC)
+
+        job = await service.create(
+            TrainingJobCreateRequest(
+                experiment_id=uuid.UUID(experiment_id),
+                model_type="logistic_regression",
+                symbol="PINNEDUSD",
+                timeframe="1h",
+                start=base + timedelta(hours=50),
+                end=base + timedelta(hours=100),
+            )
+        )
+
+        completed = await service.run(uuid.UUID(job.id))
+
+        assert completed.status == "completed"
+        summary = completed.result_summary
+        assert summary is not None
+        total_rows = summary["n_train"] + summary["n_validation"] + summary["n_test"]
+        # The requested window is 50 candles wide; horizon=1 trims the
+        # last row (no future close to compare against yet) — well under
+        # the full 200-candle seed, proving the range genuinely narrowed
+        # what was loaded rather than being silently ignored.
+        assert total_rows == 49
+
+    async def test_a_half_specified_range_is_rejected_before_any_training_starts(
+        self, session_factory: SessionFactory
+    ) -> None:
+        with pytest.raises(ValueError, match="start and end must be provided together"):
+            TrainingJobCreateRequest(
+                experiment_id=uuid.uuid4(),
+                model_type="logistic_regression",
+                symbol="ETHUSD",
+                timeframe="1h",
+                start=datetime(2026, 1, 1, tzinfo=UTC),
+            )
 
 
 @pytest.mark.asyncio
@@ -776,23 +928,27 @@ class TestPredict:
         service = build_service(session_factory)
         job = await service.create(
             TrainingJobCreateRequest(
-                experiment_id=experiment_id,
+                experiment_id=uuid.UUID(experiment_id),
                 model_type="logistic_regression",
                 symbol="PREDUSD",
                 timeframe="1h",
             )
         )
         completed = await service.run(uuid.UUID(job.id))
-        feature_columns = completed.result_summary["feature_columns"]
+        summary = completed.result_summary
+        assert summary is not None
+        feature_columns = summary["feature_columns"]
         row = [1.0] * len(feature_columns)
 
         response = await service.predict(uuid.UUID(job.id), [row])
 
         assert len(response.predictions) == 1
         assert response.feature_columns == feature_columns
-        assert response.classes == completed.result_summary["classes"]
+        assert response.classes == summary["classes"]
         assert response.probabilities is not None
+        assert response.classes is not None
         assert len(response.probabilities[0]) == len(response.classes)
+        assert response.confidence_levels is not None
         assert response.confidence_levels[0] in {"high", "medium", "low"}
 
     async def test_predict_applies_the_same_normalization_transform_it_trained_with(
@@ -808,7 +964,7 @@ class TestPredict:
         service = build_service(session_factory)
         job = await service.create(
             TrainingJobCreateRequest(
-                experiment_id=experiment_id,
+                experiment_id=uuid.UUID(experiment_id),
                 model_type="logistic_regression",
                 symbol="NORMPREDUSD",
                 timeframe="1h",
@@ -847,7 +1003,7 @@ class TestPredict:
         service = build_service(session_factory)
         job = await service.create(
             TrainingJobCreateRequest(
-                experiment_id=experiment_id,
+                experiment_id=uuid.UUID(experiment_id),
                 model_type="logistic_regression",
                 symbol="NONORMPREDUSD",
                 timeframe="1h",
@@ -877,14 +1033,16 @@ class TestPredict:
         service = build_service(session_factory)
         job = await service.create(
             TrainingJobCreateRequest(
-                experiment_id=experiment_id,
+                experiment_id=uuid.UUID(experiment_id),
                 model_type="linear_regression",
                 symbol="PREDREGUSD",
                 timeframe="1h",
             )
         )
         completed = await service.run(uuid.UUID(job.id))
-        feature_columns = completed.result_summary["feature_columns"]
+        summary = completed.result_summary
+        assert summary is not None
+        feature_columns = summary["feature_columns"]
         row = [1.0] * len(feature_columns)
 
         response = await service.predict(uuid.UUID(job.id), [row])
@@ -900,7 +1058,9 @@ class TestPredict:
         experiment_id = await seed_experiment(session_factory)
         service = build_service(session_factory)
         job = await service.create(
-            TrainingJobCreateRequest(experiment_id=experiment_id, model_type="placeholder")
+            TrainingJobCreateRequest(
+                experiment_id=uuid.UUID(experiment_id), model_type="placeholder"
+            )
         )
 
         with pytest.raises(PredictionNotAvailableError):
@@ -914,7 +1074,7 @@ class TestPredict:
         service = build_service(session_factory)
         job = await service.create(
             TrainingJobCreateRequest(
-                experiment_id=experiment_id,
+                experiment_id=uuid.UUID(experiment_id),
                 model_type="logistic_regression",
                 symbol="MISMATCHUSD",
                 timeframe="1h",
@@ -937,13 +1097,15 @@ class TestPredict:
         service = build_service(session_factory)
         job = await service.create(
             TrainingJobCreateRequest(
-                experiment_id=experiment_id,
+                experiment_id=uuid.UUID(experiment_id),
                 model_type="logistic_regression",
                 symbol="BROKENARTIFACTUSD",
                 timeframe="1h",
             )
         )
         completed = await service.run(uuid.UUID(job.id))
+        summary = completed.result_summary
+        assert summary is not None
 
         # Corrupt the recorded artifact_uri so the adapter's own `joblib.load` fails —
         # the one path that exercises `predict()`'s own exception-wrapping branch.
@@ -955,9 +1117,7 @@ class TestPredict:
         await repo.update(stored, {"result_summary": broken_summary})
 
         with pytest.raises(PredictionExecutionError):
-            await service.predict(
-                uuid.UUID(job.id), [[1.0] * len(completed.result_summary["feature_columns"])]
-            )
+            await service.predict(uuid.UUID(job.id), [[1.0] * len(summary["feature_columns"])])
 
 
 @pytest.mark.asyncio
@@ -974,7 +1134,7 @@ class TestArtifacts:
         service = build_service(session_factory)
         job = await service.create(
             TrainingJobCreateRequest(
-                experiment_id=experiment_id,
+                experiment_id=uuid.UUID(experiment_id),
                 model_type="logistic_regression",
                 symbol="ARTIFACTLISTUSD",
                 timeframe="1h",
@@ -1009,7 +1169,9 @@ class TestArtifacts:
         experiment_id = await seed_experiment(session_factory)
         service = build_service(session_factory)
         job = await service.create(
-            TrainingJobCreateRequest(experiment_id=experiment_id, model_type="placeholder")
+            TrainingJobCreateRequest(
+                experiment_id=uuid.UUID(experiment_id), model_type="placeholder"
+            )
         )
 
         listing = await service.list_artifacts(uuid.UUID(job.id))
@@ -1024,7 +1186,7 @@ class TestArtifacts:
         service = build_service(session_factory)
         job = await service.create(
             TrainingJobCreateRequest(
-                experiment_id=experiment_id,
+                experiment_id=uuid.UUID(experiment_id),
                 model_type="linear_regression",
                 symbol="ARTIFACTGETUSD",
                 timeframe="1h",
@@ -1045,7 +1207,7 @@ class TestArtifacts:
         service = build_service(session_factory)
         job = await service.create(
             TrainingJobCreateRequest(
-                experiment_id=experiment_id,
+                experiment_id=uuid.UUID(experiment_id),
                 model_type="linear_regression",
                 symbol="ARTIFACT404USD",
                 timeframe="1h",
@@ -1066,7 +1228,7 @@ class TestArtifacts:
         service = build_service(session_factory)
         job = await service.create(
             TrainingJobCreateRequest(
-                experiment_id=experiment_id,
+                experiment_id=uuid.UUID(experiment_id),
                 model_type="linear_regression",
                 symbol="ARTIFACTGONEUSD",
                 timeframe="1h",
@@ -1093,7 +1255,9 @@ class TestArtifacts:
         experiment_id = await seed_experiment(session_factory)
         service = build_service(session_factory)
         job = await service.create(
-            TrainingJobCreateRequest(experiment_id=experiment_id, model_type="placeholder")
+            TrainingJobCreateRequest(
+                experiment_id=uuid.UUID(experiment_id), model_type="placeholder"
+            )
         )
 
         from app.training.errors import TrainingArtifactNotFoundError

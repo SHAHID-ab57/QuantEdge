@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import BaseModel, Field, field_serializer
+from pydantic import BaseModel, Field, field_serializer, model_validator
 
 from app.models.training import TRAINING_JOB_STAGES, TRAINING_JOB_STATUSES, TRAINING_LOG_LEVELS
 from app.training.base import ModelAdapterMetadata, ModelKind
@@ -65,6 +65,18 @@ class TrainingJobCreateRequest(BaseModel):
         max_length=20,
         description="Candle timeframe to load, e.g. '1h' — required alongside symbol",
     )
+    start: datetime | None = Field(
+        default=None,
+        description=(
+            "Explicit candle-range start; must be given together with `end`. Omitting "
+            "both defaults to the most recent candles for symbol/timeframe — never the "
+            "oldest — see `app/services/candle_points.py`."
+        ),
+    )
+    end: datetime | None = Field(
+        default=None,
+        description="Explicit candle-range end; must be given together with `start`.",
+    )
     target_column: str | None = Field(
         default=None,
         max_length=100,
@@ -81,6 +93,12 @@ class TrainingJobCreateRequest(BaseModel):
             "is false."
         ),
     )
+
+    @model_validator(mode="after")
+    def _require_start_and_end_together(self) -> "TrainingJobCreateRequest":
+        if (self.start is None) != (self.end is None):
+            raise ValueError("start and end must be provided together")
+        return self
 
 
 class TrainingJobLogDTO(BaseModel):
@@ -113,6 +131,14 @@ class TrainingJobResponse(BaseModel):
     dataset_version: str | None
     symbol: str | None
     timeframe: str | None
+    dataset_start: datetime | None = Field(
+        default=None,
+        description="The explicit candle-range start this job trained on, if one was given.",
+    )
+    dataset_end: datetime | None = Field(
+        default=None,
+        description="The explicit candle-range end this job trained on, if one was given.",
+    )
     target_column: str | None
     model_type: str
     hyperparameters: dict[str, Any]
@@ -134,7 +160,9 @@ class TrainingJobResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
 
-    @field_serializer("started_at", "completed_at", "created_at", "updated_at")
+    @field_serializer(
+        "dataset_start", "dataset_end", "started_at", "completed_at", "created_at", "updated_at"
+    )
     def _serialize_optional_timestamps(self, value: datetime | None) -> str | None:
         return None if value is None else _iso(value)
 
@@ -146,6 +174,8 @@ class TrainingJobResponse(BaseModel):
             dataset_version=job.dataset_version,
             symbol=job.symbol,
             timeframe=job.timeframe,
+            dataset_start=job.dataset_start,
+            dataset_end=job.dataset_end,
             target_column=job.target_column,
             model_type=job.model_type,
             hyperparameters=job.hyperparameters or {},

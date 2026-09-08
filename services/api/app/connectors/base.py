@@ -78,6 +78,18 @@ class ConnectorMetadata:
     #: .external_data_ingest._persist_points` never even loads existing
     #: values to compare, exactly as before this field existed.
     revisable: bool = False
+    #: Whether `app.services.external_data_sync.ExternalDataSyncScheduler`'s
+    #: own generic tick manages this source automatically (fetch a raw
+    #: point, persist it straight into `external_data_points`). `True`
+    #: (every connector before Marketaux) is unchanged, existing behavior.
+    #: `False` opts a source *out* of the generic tick entirely — for one
+    #: whose own `fetch()` doesn't return a single numeric point per call
+    #: at all (Marketaux: one point per *article*, meant for a dedicated
+    #: `news_articles` table, with only a *derived* daily aggregate ever
+    #: mirrored into `external_data_points` — see
+    #: `app.services.news_sync.NewsSyncScheduler`, a separate, dedicated
+    #: periodic pipeline for exactly this shape).
+    auto_synced: bool = True
 
 
 class Connector(Protocol):

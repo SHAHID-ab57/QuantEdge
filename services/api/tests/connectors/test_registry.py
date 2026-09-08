@@ -268,3 +268,32 @@ class TestCoinGeckoIsRegistered:
         connector = default_registry.get(COINGECKO_SOURCE)
         assert isinstance(connector, CoinGeckoConnector)
         await connector.aclose()
+
+
+class TestMarketauxIsRegistered:
+    """The real, application-wide registry — proves the Marketaux
+    connector is genuinely discoverable, not just the isolated-registry
+    mechanics above."""
+
+    def test_the_default_registry_lists_marketaux_after_loading_builtins(self) -> None:
+        from app.connectors import load_builtin_connectors
+        from app.connectors.marketaux import MARKETAUX_SOURCE
+        from app.connectors.registry import default_registry
+
+        load_builtin_connectors()
+
+        assert MARKETAUX_SOURCE in default_registry.names()
+        metadata = default_registry.describe(MARKETAUX_SOURCE)
+        assert metadata.label == "Marketaux News Sentiment"
+        assert metadata.requires_auth is True
+        assert metadata.auto_synced is False
+
+    async def test_get_builds_a_real_marketaux_connector(self) -> None:
+        from app.connectors import load_builtin_connectors
+        from app.connectors.marketaux import MARKETAUX_SOURCE, MarketauxConnector
+        from app.connectors.registry import default_registry
+
+        load_builtin_connectors()
+        connector = default_registry.get(MARKETAUX_SOURCE)
+        assert isinstance(connector, MarketauxConnector)
+        await connector.aclose()

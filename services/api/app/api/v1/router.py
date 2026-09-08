@@ -13,6 +13,7 @@ from app.api.v1.endpoints.indicators import router as indicators_router
 from app.api.v1.endpoints.market_data import router as market_data_router
 from app.api.v1.endpoints.market_stream import router as market_stream_router
 from app.api.v1.endpoints.ml_datasets import router as ml_datasets_router
+from app.api.v1.endpoints.news import router as news_router
 from app.api.v1.endpoints.paper_trading import router as paper_trading_router
 from app.api.v1.endpoints.prediction import router as prediction_router
 from app.api.v1.endpoints.system import router as system_router
@@ -22,6 +23,7 @@ router = APIRouter()
 router.include_router(health_router, tags=["health"])
 router.include_router(features_router)
 router.include_router(connectors_router)
+router.include_router(news_router)
 router.include_router(dataset_validation_router)
 router.include_router(ml_datasets_router)
 router.include_router(experiments_router)

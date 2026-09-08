@@ -170,6 +170,78 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
     "DefiLlama Connector"; API surface in `docs/api/API.md`; tests in
     `services/api/TESTING.md`.
 
+- **Marketaux news connector with a detailed news feed (`news_sentiment`,
+  M4-E1-T7): the sixth and last connector for this milestone's own epic,
+  and the first whose real data does not fit the generic
+  `RawDataPoint`/`external_data_points` shape at all.**
+  - **Step 1 of this task's own Definition of Done: is Marketaux's
+    built-in sentiment score actually usable? Confirmed usable, not
+    missing** — checked directly against the real, live API and current
+    docs, not assumed. Marketaux computes and returns a real sentiment
+    score **per entity** (`data[].entities[].sentiment_score`,
+    documented "above 0 = positive, below 0 = negative"), confirmed
+    against a real documented crypto/ETH example
+    (`{"symbol": "ETHUSD", ...}`, score `-0.4215`). This platform's own
+    per-article score is the mean across an article's own scored
+    entities — no from-scratch NLP pipeline was built, since none was
+    needed.
+  - **A key is hard-required, confirmed live** (real 401,
+    `invalid_api_token`); free tier is $0/mo, 100 requests/day, capped at
+    3 articles/request — this connector's own pagination and the
+    dedicated scheduler's own tick interval are sized to a worst case of
+    40 requests/day, comfortably inside budget.
+  - **A real bug pattern found and fixed**: `filter_entities` defaults to
+    `false` per Marketaux's own docs ("by default all entities for each
+    article are returned") — querying one symbol on a multi-entity
+    article would otherwise blend in unrelated sentiment. Always sends
+    `filter_entities=true` explicitly, proven by a dedicated URL
+    assertion test.
+  - **A new risk this milestone's prior five connectors never
+    surfaced: discovery latency, not value revision.** `published_at` has
+    no companion discovery timestamp, so an article indexed by Marketaux
+    after its own `published_at` could otherwise be permanently missed by
+    a periodic tick. `DISCOVERY_SAFETY_MARGIN` (six hours, matching the
+    scheduler's own tick interval) keeps the sync window's own start at
+    `min(last_published_at, now - margin)` — never narrower than the
+    margin — so a late-discovered article is always re-swept.
+  - **A new, dedicated `news_articles` table**, not a bolt-on to
+    `external_data_points` — full article detail (headline, snippet,
+    source, url, published time, per-article sentiment, symbols) needs a
+    real schema no generic single-numeric-value table can express. Only a
+    **derived daily mean sentiment** is mirrored into
+    `external_data_points` (`news_sentiment`), which is what lets the
+    existing feature-lookup pattern and the Data Sources page pick it up
+    with zero News-specific branching anywhere in the ML pipeline.
+  - **A new `ConnectorMetadata.auto_synced` flag** (default `true`,
+    unaffected for every prior connector) lets a source opt out of
+    `ExternalDataSyncScheduler`'s own generic tick — Marketaux is the
+    first, since it returns articles, not one point per call. A separate
+    `NewsSyncScheduler` drives its own periodic ingestion instead.
+  - **A real bug caught and fixed during testing**: the daily-aggregate
+    recompute's own `update_value` call does not commit by its own
+    documented contract, and nothing after it committed either — a
+    genuine revision to an already-mirrored day's mean was silently lost
+    once the session closed. Fixed with the same final `session.commit()`
+    every revisable connector's own `_persist_points` already performs.
+  - **A new, dedicated `/news` page** — required by this task's own
+    Definition of Done, explicitly not bolted onto `/data-sources` (which
+    stays fully generic; News auto-appears there as an ordinary registry
+    entry, proven by a new test). Real article feed: headline, source,
+    published time, a real sentiment score and label (never just a color
+    dot), a link to the original, filterable by symbol and date range.
+    Backed by a new paginated `GET /news/articles` endpoint.
+    `lib/planned-connectors.ts`'s static list is now empty — Marketaux
+    was its last remaining entry, closing out this milestone's connector
+    epic.
+  - **No live-API verification performed** — no real
+    `MARKETAUX_API_KEY` exists in this environment; every finding above
+    is confirmed against the real, live, unauthenticated error response
+    and current documentation, the same evidentiary standard FRED's own
+    task used before a real key was available.
+  - Full design in `ARCHITECTURE.md` § "External Data Connectors" →
+    "Marketaux Connector"; API surface in `docs/api/API.md` § "News
+    Articles"; tests in `services/api/TESTING.md`.
+
 - **CoinGecko market data connector (`btc_dominance`, M4-E1-T6): the
   fifth connector, and the first whose API key is genuinely optional.**
   Bitcoin dominance, chosen after confirming CoinGecko's current

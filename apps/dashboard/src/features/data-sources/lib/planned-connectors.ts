@@ -10,22 +10,18 @@
  * future connector task's own Definition of Done, per `ARCHITECTURE.md`
  * § "External Data Connectors" → "Data Sources Page".
  *
- * FRED (M4-E1-T2) was removed from this list once it actually landed in
- * the connector registry (`app/connectors/fred.py`) — it had previously
- * been reported elsewhere as issued while still absent from the repo, and
- * had stayed listed here on that basis; see `TASKBOOK.md` for that
- * history. Do not repeat that mistake for the remaining sources below:
- * confirm a source actually appears in `GET /connectors` before removing
- * it from here.
+ * FRED (M4-E1-T2) and Marketaux (M4-E1-T7) were both removed from this
+ * list once they actually landed in the connector registry
+ * (`app/connectors/fred.py`, `app/connectors/marketaux.py`) — FRED had
+ * previously been reported elsewhere as issued while still absent from
+ * the repo, and had stayed listed here on that basis; see `TASKBOOK.md`
+ * for that history. Do not repeat that mistake for the remaining sources
+ * below: confirm a source actually appears in `GET /connectors` before
+ * removing it from here.
  */
 export interface PlannedConnector {
   name: string;
   description: string;
 }
 
-export const PLANNED_CONNECTORS: PlannedConnector[] = [
-  {
-    name: 'Marketaux',
-    description: 'News and sentiment coverage for crypto and macro markets.',
-  },
-];
+export const PLANNED_CONNECTORS: PlannedConnector[] = [];

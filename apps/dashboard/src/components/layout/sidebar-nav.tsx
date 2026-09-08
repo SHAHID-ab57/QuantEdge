@@ -30,6 +30,7 @@ import SettingsIcon from '@mui/icons-material/Settings';
 import HealthAndSafetyIcon from '@mui/icons-material/HealthAndSafety';
 import AccountBalanceWalletIcon from '@mui/icons-material/AccountBalanceWallet';
 import HubIcon from '@mui/icons-material/Hub';
+import ArticleIcon from '@mui/icons-material/Article';
 
 interface NavItem {
   label: string;
@@ -47,6 +48,7 @@ const NAV_ITEMS: NavItem[] = [
   { label: 'Replay', href: '/replay', icon: ReplayIcon },
   { label: 'Paper Trading', href: '/paper-trading', icon: AccountBalanceWalletIcon },
   { label: 'Data Sources', href: '/data-sources', icon: HubIcon },
+  { label: 'News', href: '/news', icon: ArticleIcon },
   { label: 'Indicators', href: '/indicators', icon: FunctionsIcon },
   { label: 'Features', href: '/features', icon: DatasetIcon },
   { label: 'Validation', href: '/validation', icon: FactCheckIcon },

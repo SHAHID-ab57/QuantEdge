@@ -247,16 +247,18 @@ unchanged.
 Registered today: `ohlcv` (`category: "raw"`), `candle_shape`
 (`price_action`), `sma`/`ema`/`wma` (`trend`), `fear_greed` (`sentiment`),
 `fed_funds_rate` (`macro`), `eth_gas_price` (`on-chain`), `eth_tvl`
-(`on-chain`), and `btc_dominance` (`market`). The set is queried from
-`GET /api/v1/features` at runtime, never hardcoded by a client; see
-`ARCHITECTURE.md` § "Feature Engineering Engine" for how a new generator
-joins this list with no API change, and § "External Data Connectors" for
-`fear_greed`/`fed_funds_rate`/`eth_gas_price`/`eth_tvl`/`btc_dominance`
-specifically — all five come from a registered connector
+(`on-chain`), `btc_dominance` (`market`), and `news_sentiment`
+(`sentiment`). The set is queried from `GET /api/v1/features` at
+runtime, never hardcoded by a client; see `ARCHITECTURE.md` §
+"Feature Engineering Engine" for how a new generator joins this list
+with no API change, and § "External Data Connectors" for
+`fear_greed`/`fed_funds_rate`/`eth_gas_price`/`eth_tvl`/`btc_dominance`/
+`news_sentiment` specifically — all six come from a registered connector
 (`app/connectors/fear_greed.py`, `app/connectors/fred.py`,
 `app/connectors/etherscan.py`, `app/connectors/defillama.py`,
-`app/connectors/coingecko.py`), not from candle math, but each is
-requested and returned exactly like every other feature. `fed_funds_rate`
+`app/connectors/coingecko.py`, `app/connectors/marketaux.py`), not from
+candle math, but each is requested and returned exactly like every other
+feature. `fed_funds_rate`
 is timestamped by its real publication date
 (`external_sources: ["fed_funds_rate"]`), never the calendar month it
 describes — see `ARCHITECTURE.md` § "FRED Connector" for why that
@@ -274,7 +276,13 @@ investigation and decision. `btc_dominance` is timestamped by CoinGecko's
 own `updated_at`, never a value this platform computes itself, and — like
 `eth_gas_price` — has no historical query capability at all, so a candle
 older than this platform's first poll always reads `null` — see
-`ARCHITECTURE.md` § "CoinGecko Connector".
+`ARCHITECTURE.md` § "CoinGecko Connector". `news_sentiment` is not a raw
+per-article value at all but a _derived_ daily mean sentiment mirrored
+into `external_data_points` from `news_articles` (full article detail
+lives on the dedicated `/news/articles` endpoint below, not here) — see
+`ARCHITECTURE.md` § "Marketaux Connector" for the full investigation,
+including the confirmed-usable finding on Marketaux's own built-in
+sentiment scoring.
 
 **The catalogue is the contract**, exactly as for indicators — each entry
 publishes every parameter's type, bounds, choices, default, and
@@ -295,8 +303,9 @@ Data Connectors work: `external_sources` — the connector source names (see
 of, or alongside, candle data — empty for every generator except
 `fear_greed` (`("fear_greed",)`), `fed_funds_rate`
 (`("fed_funds_rate",)`), `eth_gas_price` (`("eth_gas_price",)`),
-`eth_tvl` (`("eth_tvl",)`), and `btc_dominance`
-(`("btc_dominance",)`). A feature declaring `external_sources` is
+`eth_tvl` (`("eth_tvl",)`), `btc_dominance`
+(`("btc_dominance",)`), and `news_sentiment`
+(`("news_sentiment",)`). A feature declaring `external_sources` is
 never served from the feature cache (`cache_status` reports `"disabled"`,
 not `"miss"`, for that column), because the cache key fingerprints candles
 and parameters only, never a connector's own freshness. A feature declaring
@@ -635,7 +644,18 @@ optional API key only raises the rate limit, never gating whether the
 request succeeds at all. Like `eth_gas_price`, its `latest_timestamp` is
 always CoinGecko's own reported refresh instant (`updated_at`), never a
 value this platform computes itself, since this endpoint has no
-historical query capability on the free tier.
+historical query capability on the free tier. A sixth, `news_sentiment`
+(`app/connectors/marketaux.py`), is registered with
+`"requires_auth": true` — its `latest_value`/`latest_timestamp` here are
+a **derived daily mean** sentiment, mirrored in from `news_articles`, not
+a raw per-article figure; real per-article detail (headline, source,
+link, per-article sentiment) is only ever available from the dedicated
+`/news/articles` endpoint below, never from this generic catalogue. This
+is also the only connector registered `"auto_synced": false` in the
+underlying `ConnectorMetadata` (not itself an API-surfaced field) — its
+own dedicated `NewsSyncScheduler` drives ingestion, not the generic
+scheduler every other connector shares — see `ARCHITECTURE.md` §
+"Marketaux Connector".
 
 **History uses the same inclusive-both-ends range this table already
 has**, unlike `/candles`'s half-open `[start, end)` — see
@@ -660,6 +680,49 @@ An unknown `source` 404s `connector_not_found` on the history endpoint —
 a distinct error from the internal, non-HTTP `ConnectorNotFoundError` a
 scheduler or backfill script raises, per `ARCHITECTURE.md`'s own note on
 why those two are kept apart.
+
+### News Articles
+
+| Method | Path                    | Purpose                                                 |
+| ------ | ----------------------- | ------------------------------------------------------- |
+| GET    | `/api/v1/news/articles` | Paginated, filterable real article detail, newest first |
+
+Full design in `ARCHITECTURE.md` § "Marketaux Connector". Deliberately a
+separate endpoint from `/connectors/news_sentiment/history`: that history
+endpoint only ever returns the derived daily aggregate this platform
+mirrors for the ML pipeline (one `{timestamp, value}` pair per day, like
+every other connector's history); this endpoint returns full,
+per-article detail — the reason `news_articles` exists as its own table
+in the first place, per this task's own Definition of Done.
+
+```jsonc
+// GET /news/articles?symbol=ETHUSD&limit=2
+{
+  "items": [
+    {
+      "id": "a1b2c3d4-...",
+      "headline": "Ethereum Crushed as Cryptocurrency Market is Overrun by Sellers",
+      "snippet": "The cryptocurrency market has been experiencing wild price swings.",
+      "source": "dailyfx.com",
+      "url": "https://www.dailyfx.com/example.html",
+      "published_at": "2026-01-01T12:00:00Z",
+      "sentiment_score": -0.4215,
+      "symbols": ["ETHUSD"],
+    },
+  ],
+  "pagination": { "total": 5, "returned": 2, "has_more": true, "limit": 2, "offset": 0 },
+}
+```
+
+`sentiment_score` is `null`, never a fabricated `0.0`, for an article
+with no entity Marketaux itself scored — the same "honest null over a
+fabricated value" convention every other nullable field in this API
+already follows. `symbol` filters on `primary_symbol` (a plain, indexed
+column — portably queryable across SQLite and Postgres, unlike the full
+`symbols` JSON list kept alongside for audit fidelity); `start`/`end`
+filter `published_at` inclusively, mirroring `/connectors/{source}
+/history`'s own range convention; `limit`/`offset` pagination mirrors
+every other list endpoint in this API.
 
 ### Dataset validation
 

@@ -163,7 +163,15 @@ class ExternalDataSyncScheduler:
         )
 
     def _target_sources(self) -> list[str]:
-        """Resolve which connector sources this scheduler keeps current."""
+        """Resolve which connector sources this scheduler keeps current.
+
+        Excludes any registered source whose own `ConnectorMetadata
+        .auto_synced` is `False` — even an explicit `sources=` override
+        can't force one through, since the exclusion means this generic
+        "fetch one point, persist it straight into external_data_points"
+        tick is structurally the wrong pipeline for that source's own
+        shape (see `auto_synced`'s own docstring).
+        """
         configured = self._sources
         if not configured:
             settings = get_settings()
@@ -177,7 +185,10 @@ class ExternalDataSyncScheduler:
         missing = [source for source in configured if source not in known]
         if missing:
             logger.warning("External data sync skipping unknown sources: %s", ", ".join(missing))
-        return sorted(known)
+        auto_synced = [
+            source for source in known if default_connector_registry.describe(source).auto_synced
+        ]
+        return sorted(auto_synced)
 
     async def _catch_up_window(
         self, source: str, now: datetime

@@ -47,6 +47,8 @@ All real pages live under the `(dashboard)` route group
 | `/ml/training`   | Implemented — Machine Learning Training Framework dashboard (see below)      |
 | `/ml/evaluation` | Implemented — Model Evaluation & Benchmarking comparison surface (see below) |
 | `/ml/predict`    | Implemented — Live Prediction Service (see below)                            |
+| `/data-sources`  | Implemented — External Data Connectors catalogue (see below)                 |
+| `/news`          | Implemented — real article feed for the Marketaux news connector (see below) |
 | `/dashboard`     | Placeholder                                                                  |
 | `/research`      | Placeholder                                                                  |
 | `/settings`      | Placeholder                                                                  |
@@ -3452,9 +3454,13 @@ src/features/data-sources/
 Engineering page's own `FeatureSelector`.** Neither `data-sources-page
 .tsx` nor `connector-card.tsx` names `fear_greed` (or any other source)
 anywhere — the section renders whatever `GET /connectors` returns, so a
-future connector (Marketaux) appears here the day it's registered on the
-backend, with no frontend change — `fed_funds_rate`, `eth_gas_price`,
-`eth_tvl`, and `btc_dominance` already proved this guarantee once each.
+new connector appears here the day it's registered on the backend, with
+no frontend change — `fed_funds_rate`, `eth_gas_price`, `eth_tvl`,
+`btc_dominance`, and, as of M4-E1-T7, `news_sentiment`
+(`app/connectors/marketaux.py`) have each proved this guarantee in turn.
+`news_sentiment` is a card like any other here — its own richer article
+detail lives on the dedicated `/news` page below, never on this one; see
+that section for why the two are deliberately kept apart.
 Each `ConnectorCard` fetches its own history independently via
 its own `useConnectorHistory` call, rather than the page prefetching
 every connector's history up front — a slow or failing history request
@@ -3474,24 +3480,69 @@ same "not enough data" flat-line fallback `Sparkline` already has built
 in; no page-specific handling was needed for that case.
 
 **"Planned Data Sources" is the one deliberate exception to
-"nothing hardcoded."** `lib/planned-connectors.ts` is a static array —
-Marketaux — rendered by `PlannedDataSources` with zero API call, since
-there is nothing in the registry for an unbuilt connector to read. This
-list is **not** automatically kept in sync: an entry must be removed the
-same day its connector actually ships (appears in `GET /connectors`),
-never before — otherwise a source briefly shows as both "planned" and
-"active" at once. This file's own module docstring states this is part
-of every future connector task's own Definition of Done, not a separate
-cleanup pass. FRED is the worked example of exactly this discipline gone
-wrong once: it was originally reported elsewhere as issued (tracked as
+"nothing hardcoded."** `lib/planned-connectors.ts` is a static array,
+rendered by `PlannedDataSources` with zero API call, since there is
+nothing in the registry for an unbuilt connector to read. This list is
+**not** automatically kept in sync: an entry must be removed the same
+day its connector actually ships (appears in `GET /connectors`), never
+before — otherwise a source briefly shows as both "planned" and "active"
+at once. This file's own module docstring states this is part of every
+future connector task's own Definition of Done, not a separate cleanup
+pass. FRED is the worked example of exactly this discipline gone wrong
+once: it was originally reported elsewhere as issued (tracked as
 M4-E1-T2) while still absent from the connector registry, and stayed on
 this list on that basis — `TASKBOOK.md` records that history — until it
 actually landed (`app/connectors/fred.py`), at which point it was removed
 from here in the same change that shipped it, not before and not after.
-Etherscan (M4-E1-T4), DefiLlama (M4-E1-T5), and CoinGecko (M4-E1-T6) are
-the more ordinary case: no prior "wrongly reported" history to record,
-just a plain removal from this array the same day each connector's own
-module actually landed.
+Etherscan (M4-E1-T4), DefiLlama (M4-E1-T5), CoinGecko (M4-E1-T6), and
+Marketaux (M4-E1-T7) are the more ordinary case: no prior "wrongly
+reported" history to record, just a plain removal from this array the
+same day each connector's own module actually landed. Marketaux was this
+array's last remaining entry — `PLANNED_CONNECTORS` is now empty,
+closing out Milestone 4's connector epic; the section still renders
+cleanly with nothing to show (proven by `data-sources-page.test.tsx`)
+rather than being removed, since a future milestone may add new entries.
+
+## News
+
+`/news` (`src/features/news/`) is a new, dedicated **top-level** page —
+required by M4-E1-T7's own Definition of Done, explicitly **not** bolted
+onto `/data-sources`, which stays fully generic (News auto-appears there
+as an ordinary registry entry, its mirrored daily aggregate only — see
+"Data Sources" above). This page is where real, per-article detail
+actually lives: headline, source, published time, a real sentiment score
+and label, and a link to the original article — backed by
+`GET /api/v1/news/articles`, documented in
+[`docs/api/API.md`](docs/api/API.md) § "News Articles". Backend design in
+[`ARCHITECTURE.md`](ARCHITECTURE.md) § "Marketaux Connector".
+
+```text
+src/features/news/
+├── hooks/use-news-articles.ts        useNewsArticles(params)
+├── lib/sentiment-label.ts             classifySentiment, formatSentiment — a real label AND score, never a color dot alone
+├── lib/format.ts                       formatPublishedAt
+├── components/
+│   ├── sentiment-chip.tsx             SentimentChip — colored chip carrying the real label+score text
+│   ├── article-card.tsx               headline, source, published time, sentiment, link
+│   └── news-filters.tsx               symbol + date-range filter controls
+└── news-page.tsx                       page composition root
+```
+
+**A real score and label are always shown together, never a bare color
+dot** — `classifySentiment` buckets a `sentiment_score` into
+`positive`/`negative`/`neutral` (a `±0.1` neutral band around zero) or
+`unknown` for a genuinely `null` score (an article with no entity
+Marketaux itself scored), and `formatSentiment` renders both the label
+and the real numeric score (e.g. `"Negative (-0.42)"`), or a plain "No
+sentiment data" string for `null` — never a fabricated `"Neutral (0.00)"`
+standing in for missing data.
+
+**Filterable by symbol and published date range**, mirroring the History
+page's own URL-driven filter pattern in spirit (`NewsFilters`); clearing
+filters is a single explicit action, not an implicit reset. Loading,
+empty (`"No articles found"` / "No news articles have been ingested
+yet."), and error (with retry) states follow the same conventions
+already established for the Data Sources and Markets pages.
 
 ## State management
 

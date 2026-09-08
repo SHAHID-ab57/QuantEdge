@@ -13,10 +13,21 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from app.connectors.base import ConnectorMetadata
 from app.models.external_data import ExternalDataPoint
 from app.services import external_data_sync
 from app.services.external_data_ingest import ExternalDataIngestReport
 from app.services.external_data_sync import ExternalDataSyncScheduler
+
+
+def _fake_describe(source: str) -> ConnectorMetadata:
+    """A stand-in for `ConnectorRegistry.describe` — every test fixture
+    source here is a plain, `auto_synced=True` connector (the default),
+    matching every one of these tests' own intent: proving the generic
+    scheduler's own fan-out/isolation logic, not `auto_synced` itself
+    (that has its own dedicated test)."""
+    return ConnectorMetadata(source=source, label=source, description="test double")
+
 
 FIXED_NOW = datetime(2026, 8, 20, 16, 33, 35, tzinfo=UTC)
 
@@ -143,6 +154,7 @@ async def test_run_catch_up_syncs_every_configured_source(
     monkeypatch.setattr(external_data_sync, "get_engine", lambda: engine)
     monkeypatch.setattr(external_data_sync, "load_builtin_connectors", lambda: None)
     monkeypatch.setattr(external_data_sync.default_connector_registry, "has", lambda source: True)
+    monkeypatch.setattr(external_data_sync.default_connector_registry, "describe", _fake_describe)
     ingest, calls = fake_ingest()
     monkeypatch.setattr(external_data_sync, "ingest_external_data", ingest)
 
@@ -176,6 +188,7 @@ async def test_run_catch_up_skips_unknown_sources(
         "has",
         lambda source: source == "fear_greed",
     )
+    monkeypatch.setattr(external_data_sync.default_connector_registry, "describe", _fake_describe)
     ingest, calls = fake_ingest()
     monkeypatch.setattr(external_data_sync, "ingest_external_data", ingest)
 
@@ -198,6 +211,7 @@ async def test_run_catch_up_isolates_failures(
     monkeypatch.setattr(external_data_sync, "get_engine", lambda: engine)
     monkeypatch.setattr(external_data_sync, "load_builtin_connectors", lambda: None)
     monkeypatch.setattr(external_data_sync.default_connector_registry, "has", lambda source: True)
+    monkeypatch.setattr(external_data_sync.default_connector_registry, "describe", _fake_describe)
     ingest, calls = fake_ingest(failure_source="fear_greed")
     monkeypatch.setattr(external_data_sync, "ingest_external_data", ingest)
 
@@ -223,6 +237,7 @@ async def test_run_catch_up_skips_already_current_sources(
     monkeypatch.setattr(external_data_sync, "get_engine", lambda: engine)
     monkeypatch.setattr(external_data_sync, "load_builtin_connectors", lambda: None)
     monkeypatch.setattr(external_data_sync.default_connector_registry, "has", lambda source: True)
+    monkeypatch.setattr(external_data_sync.default_connector_registry, "describe", _fake_describe)
     monkeypatch.setattr(external_data_sync, "datetime", FakeDatetime)
     ingest, calls = fake_ingest()
     monkeypatch.setattr(external_data_sync, "ingest_external_data", ingest)
@@ -244,6 +259,7 @@ async def test_loop_runs_ticks_until_stopped(
     monkeypatch.setattr(external_data_sync, "get_engine", lambda: engine)
     monkeypatch.setattr(external_data_sync, "load_builtin_connectors", lambda: None)
     monkeypatch.setattr(external_data_sync.default_connector_registry, "has", lambda source: True)
+    monkeypatch.setattr(external_data_sync.default_connector_registry, "describe", _fake_describe)
     monkeypatch.setattr(external_data_sync, "datetime", FakeDatetime)
     ingest, calls = fake_ingest()
     monkeypatch.setattr(external_data_sync, "ingest_external_data", ingest)
@@ -280,4 +296,40 @@ async def test_empty_source_list_is_a_clean_noop(
 
     assert summary.attempted == 0
     assert summary.synced == 0
+
+
+@pytest.mark.asyncio
+async def test_a_source_with_auto_synced_false_is_excluded_even_when_explicitly_configured(
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`ConnectorMetadata.auto_synced=False` (Marketaux's own reason for
+    existing — see that field's own docstring) is excluded from this
+    generic scheduler's own tick, even when explicitly named in
+    `sources=` — the flag means "the wrong pipeline for this source's own
+    shape," not merely "off by default"."""
+    monkeypatch.setattr(external_data_sync, "get_engine", lambda: engine)
+    monkeypatch.setattr(external_data_sync, "load_builtin_connectors", lambda: None)
+    monkeypatch.setattr(external_data_sync.default_connector_registry, "has", lambda source: True)
+    monkeypatch.setattr(
+        external_data_sync.default_connector_registry,
+        "describe",
+        lambda source: ConnectorMetadata(
+            source=source,
+            label=source,
+            description="test double",
+            auto_synced=(source != "news_sentiment"),
+        ),
+    )
+    ingest, calls = fake_ingest()
+    monkeypatch.setattr(external_data_sync, "ingest_external_data", ingest)
+
+    scheduler = ExternalDataSyncScheduler(sources=["fear_greed", "news_sentiment"])
+    monkeypatch.setattr(scheduler, "_catch_up_window", _fixed_window)
+    monkeypatch.setattr(external_data_sync, "datetime", FakeDatetime)
+
+    summary = await scheduler.run_catch_up()
+
+    assert summary.attempted == 1
+    assert [call[0] for call in calls] == ["fear_greed"]
     assert summary.failed == 0

@@ -50,6 +50,11 @@ def _settings(**overrides: object) -> SimpleNamespace:
         "external_data_sync_interval_seconds": 3600,
         "external_data_sync_sources": "",
         "external_data_sync_backfill_days": 3650,
+        # Read by `NewsSyncScheduler`'s own construction in `Runtime.start`
+        # — mirrors `app/core/config.py`'s real defaults.
+        "news_sync_enabled": False,
+        "news_sync_interval_seconds": 21600,
+        "news_sync_backfill_days": 3650,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -286,6 +291,35 @@ async def test_runtime_shutdown_stops_external_data_sync(
     await runtime.shutdown()
     assert stopped == [True]
     assert runtime.external_data_sync is None
+
+
+async def test_runtime_shutdown_stops_news_sync(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The news sync scheduler is stopped when configured — a genuinely
+    separate scheduler from `ExternalDataSyncScheduler` (see
+    `ConnectorMetadata.auto_synced`'s own docstring for why), but wired
+    into start/shutdown the identical way."""
+    stopped = []
+
+    class FakeNewsSync:
+        async def start(self) -> None:
+            pass
+
+        async def stop(self) -> None:
+            stopped.append(True)
+
+    monkeypatch.setattr(
+        runtime_module,
+        "get_settings",
+        lambda: _settings(news_sync_enabled=True),
+    )
+    monkeypatch.setattr(runtime_module, "NewsSyncScheduler", lambda **_: FakeNewsSync())
+
+    runtime = _runtime()
+    await runtime.start()
+    assert runtime.news_sync is not None
+    await runtime.shutdown()
+    assert stopped == [True]
+    assert runtime.news_sync is None
 
 
 async def test_delta_connection_none_when_not_running() -> None:

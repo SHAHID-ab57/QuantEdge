@@ -226,6 +226,51 @@ class Settings(BaseSettings):
     coingecko_api_key: str = ""
     coingecko_request_timeout: float = 10.0
 
+    #: Marketaux news (`app/connectors/marketaux.py`) — the sixth
+    #: connector, and genuinely different in shape from every one before
+    #: it: real articles land in their own `news_articles` table (not
+    #: `external_data_points`), with only a *derived* daily aggregate
+    #: sentiment ever mirrored there (source `news_sentiment`) — see
+    #: `ConnectorMetadata.auto_synced`. `marketaux_api_key` hard-requires a
+    #: key, the same "fail fast, no network call" contract as FRED/
+    #: Etherscan, confirmed live (a real unauthenticated request returns a
+    #: real HTTP 401). `marketaux_symbols` defaults to this platform's own
+    #: primary symbol, in Marketaux's own real entity-symbol convention
+    #: (confirmed live/via docs to already match this platform's own
+    #: `ETHUSD` — no translation needed). `marketaux_articles_per_page`
+    #: mirrors the *free* plan's own real, documented cap (3 articles per
+    #: request, verified against Marketaux's current pricing page) —
+    #: raise this only if a paid plan is actually in use.
+    #: `marketaux_max_pages_per_fetch` bounds how many of the free tier's
+    #: 100 requests/day a single `fetch()` call may spend paginating,
+    #: chosen so four ticks/day (`news_sync_interval_seconds`'s own
+    #: default) stays comfortably inside that budget (4 × 10 = 40
+    #: requests/day) with real margin left for a manual backfill run.
+    marketaux_base_url: str = "https://api.marketaux.com/v1"
+    marketaux_api_key: str = ""
+    marketaux_symbols: str = "ETHUSD"
+    marketaux_request_timeout: float = 10.0
+    marketaux_articles_per_page: int = 3
+    marketaux_max_pages_per_fetch: int = 10
+
+    #: Periodic news sync (`app.services.news_sync.NewsSyncScheduler`) —
+    #: a *separate*, dedicated scheduler from `ExternalDataSyncScheduler`
+    #: (which explicitly excludes `auto_synced=False` sources like this
+    #: one), since news ingestion's own shape (persist rich articles,
+    #: then recompute and mirror a derived daily aggregate) doesn't fit
+    #: the generic "fetch one point, persist it" tick at all. The default
+    #: interval (6 hours, 4 ticks/day) is chosen directly from the free
+    #: tier's own real 100-requests/day budget — see
+    #: `marketaux_max_pages_per_fetch`'s own comment for the arithmetic.
+    news_sync_enabled: bool = True
+    news_sync_interval_seconds: int = 21600
+    #: Window seeded for a first-ever sync with nothing stored yet. Wide
+    #: in principle (mirrors `external_data_sync_backfill_days`), but the
+    #: free tier's own low per-request article cap means a genuinely wide
+    #: historical backfill needs an explicit, patient manual run
+    #: (`scripts/backfill_marketaux.py`), not a single periodic tick.
+    news_sync_backfill_days: int = 3650
+
     #: Periodic external data sync (`app.services.external_data_sync
     #: .ExternalDataSyncScheduler`) — mirrors `candle_sync_enabled`/
     #: `candle_sync_interval_seconds` exactly: a lightweight in-process

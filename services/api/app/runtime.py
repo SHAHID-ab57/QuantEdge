@@ -37,6 +37,14 @@ Data Connectors — ``app/connectors/``) is wired in the same way as
 ``CandleSyncScheduler``: gated on ``external_data_sync_enabled``,
 database-optional, keeping every registered connector's own stored data
 current on its own interval.
+
+``app.services.news_sync.NewsSyncScheduler`` (Marketaux news,
+``app/connectors/marketaux.py``) is wired the same way but is a genuinely
+separate scheduler, not a use of ``ExternalDataSyncScheduler`` itself:
+news ingestion persists rich articles into their own table and mirrors
+only a derived daily aggregate, a shape the generic scheduler's own
+"fetch one point, persist it" tick can't express — see
+``ConnectorMetadata.auto_synced``'s own docstring.
 """
 
 import logging
@@ -60,6 +68,7 @@ from app.paper_trading.monitor import StopLossTakeProfitMonitor
 from app.services.candle_sync import CandleSyncScheduler
 from app.services.external_data_sync import ExternalDataSyncScheduler
 from app.services.grading_scheduler import PredictionGradingScheduler
+from app.services.news_sync import NewsSyncScheduler
 from app.services.paper_trading_strategy import PaperTradingStrategyScheduler
 from app.state import MarketStateManager
 from app.ws.models import WSEvent
@@ -138,6 +147,7 @@ class Runtime:
         self.prediction_grading: PredictionGradingScheduler | None = None
         self.paper_trading_strategy: PaperTradingStrategyScheduler | None = None
         self.external_data_sync: ExternalDataSyncScheduler | None = None
+        self.news_sync: NewsSyncScheduler | None = None
         self.last_ws_message_at: datetime | None = None
         self.last_rest_request_at: datetime | None = None
 
@@ -204,6 +214,12 @@ class Runtime:
                 backfill_days=settings.external_data_sync_backfill_days,
             )
             await self.external_data_sync.start()
+        if settings.news_sync_enabled:
+            self.news_sync = NewsSyncScheduler(
+                interval_seconds=settings.news_sync_interval_seconds,
+                backfill_days=settings.news_sync_backfill_days,
+            )
+            await self.news_sync.start()
 
     async def shutdown(self) -> None:
         """Stop the WebSocket client, the candle sync/grading loops, and drain handlers."""
@@ -223,6 +239,10 @@ class Runtime:
         if external_data_sync is not None:
             await external_data_sync.stop()
             self.external_data_sync = None
+        news_sync = self.news_sync
+        if news_sync is not None:
+            await news_sync.stop()
+            self.news_sync = None
         ws = self.delta_ws
         if ws is not None:
             await ws.close()

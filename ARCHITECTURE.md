@@ -3618,10 +3618,15 @@ external data source sits on top of (`docs/architecture
 Alternative.me, DefiLlama, CoinGecko), proven end to end with the
 lowest-risk possible first case: the Fear & Greed Index —
 no authentication, one value per day, against alternative.me's free,
-public API. **Five are implemented so far** — Fear & Greed, FRED
+public API. **All six are now implemented** — Fear & Greed, FRED
 (§ "FRED Connector"), Etherscan (§ "Etherscan Connector"), DefiLlama
-(§ "DefiLlama Connector"), and CoinGecko (§ "CoinGecko Connector") — with
-Marketaux remaining on top of the same abstraction, not yet built.
+(§ "DefiLlama Connector"), CoinGecko (§ "CoinGecko Connector"), and
+Marketaux (§ "Marketaux Connector") — closing out this milestone's own
+connector epic. Marketaux is also the one exception to "every source sits
+on the same abstraction" in one respect: its own richer article detail
+does not fit the generic `external_data_points` table at all — see its
+own section below for why, and for the new `ConnectorMetadata
+.auto_synced` flag it required.
 
 **The `Connector` protocol** (`app/connectors/base.py`) mirrors
 `app.marketdata.normalizer.Normalizer`'s own role exactly — a plain
@@ -3694,6 +3699,20 @@ reporting date — left unchanged); an unchanged re-fetch is still just a
 duplicate skip, never a wasted write. `ExternalDataIngestReport` gained a
 new `updated` count alongside `inserted`/`duplicates_skipped`/`rejected`
 to make this observable in every backfill script's own printed report.
+
+**A second, orthogonal opt-in flag: `ConnectorMetadata.auto_synced`**
+(added for Marketaux — see § "Marketaux Connector" below). Every
+connector before Marketaux reports one numeric `RawDataPoint` per
+`fetch()` call, the exact shape `ExternalDataSyncScheduler`'s own generic
+tick assumes when it persists straight into `external_data_points`.
+Marketaux's `fetch_articles` returns zero, one, or many real articles per
+call — a shape that scheduler's own "fetch a point, persist it" tick has
+no way to express. Rather than bend that generic tick to accommodate a
+fundamentally different shape, `auto_synced: bool = True` (default,
+unaffected for every existing connector) lets a source opt **out** of the
+generic tick entirely — `ExternalDataSyncScheduler._target_sources()`
+filters on it, and `NewsSyncScheduler` (a wholly separate scheduler, see
+§ "Marketaux Connector") drives Marketaux's own periodic tick instead.
 
 **`FearGreedClient`** (`app/connectors/fear_greed.py`) mirrors
 `DeltaClient`'s own error-typing and bounded-retry conventions
@@ -4601,6 +4620,206 @@ returns an honest empty tuple. `tests/connectors/test_registry.py
 ::TestCoinGeckoIsRegistered` confirms discoverability on the real, shared
 `default_registry`. `tests/features/test_btc_dominance_feature.py`
 mirrors the other four features' own lookup/no-look-ahead tests in full.
+
+#### Marketaux Connector (M4-E1-T7)
+
+The sixth and last connector for this milestone's own epic, and the
+first that does not fit `RawDataPoint`'s shape at all — real news
+articles carry a headline, source, link, and (usually) a sentiment
+score, none of which a bare `(timestamp, value, symbol, raw_payload)`
+tuple can hold without throwing most of it away.
+
+**Step 1 of this task's own Definition of Done: is Marketaux's built-in
+sentiment score actually usable, or does this need a from-scratch NLP
+pipeline (an unscoped, separate task)? Checked directly against
+Marketaux's real, live API and its own current documentation — genuinely
+usable, not missing.** Marketaux computes and returns a real sentiment
+score **per entity**, not per article: `data[].entities[].sentiment_score`,
+documented as "Average sentiment of all highlighted text throughout the
+article for this entity... above 0 = positive, below 0 = negative." A
+real documented example article carries a real score (`-0.4215`) for a
+real crypto entity (`{"symbol": "ETHUSD", "name": "Ethereum USD",
+"exchange": "CC", "exchange_long": "Cryptocurrency", "type":
+"cryptocurrency", ...}`), confirming both that crypto/ETH coverage is
+real and that the score itself is a genuine numeric feature, not a
+placeholder. This platform's own per-article `sentiment_score` is the
+mean across that article's own scored entities (see `_to_article` in
+`app/connectors/marketaux.py`) — no NLP model of this platform's own was
+built, matching this task's own instruction that a missing/unusable
+finding (not the case here) would itself have been the reportable
+outcome.
+
+**Investigation, checked directly against Marketaux's own current
+documentation and the real live API, not assumed:**
+
+- **A key is hard-required, confirmed live** — a real unauthenticated
+  request to `https://api.marketaux.com/v1/news/all?symbols=ETH&limit=3`
+  returned real HTTP 401, `{"error": {"code": "invalid_api_token",
+"message": "An invalid API token was supplied."}}`.
+- **Free tier: $0/mo, 100 requests/day, capped at 3 articles per
+  request** (`www.marketaux.com/pricing`) — sized this connector's own
+  pagination (`marketaux_max_pages_per_fetch=10`) and the dedicated
+  scheduler's own tick interval (`news_sync_interval_seconds=21600`, 4
+  ticks/day) to a worst case of 40 requests/day, comfortably inside
+  budget with real margin left for manual backfills.
+- **Bug pattern found for real: `filter_entities` defaults to `false`.**
+  Marketaux's own docs state "by default all entities for each article
+  are returned" — querying `symbols=ETHUSD` on an article that also
+  mentions, say, Tesla would return **both** entities, and naively
+  averaging every returned entity's score would blend in sentiment about
+  an asset nobody asked for. `MarketauxClient.fetch_page` always sends
+  `filter_entities=true` explicitly; a dedicated test asserts this
+  exact query parameter on every real request, not just that a request
+  was made.
+- **A new risk this milestone's prior five connectors never
+  surfaced: discovery latency, not value revision.** `published_at` has
+  no companion "indexed_at"/discovery timestamp (unlike FRED's
+  `realtime_start`) — an article can be indexed by Marketaux itself after
+  its own `published_at`, so a periodic tick whose window ends exactly at
+  "now" risks permanently missing a late-discovered article for an
+  already-passed window. `DISCOVERY_SAFETY_MARGIN = timedelta(hours=6)`
+  (`app/services/news_sync.py`, sized to match the scheduler's own tick
+  interval) fixes the sync window's own start at
+  `min(last_published_at, now - margin)` — never narrower than six hours
+  even when otherwise "caught up" — so a late-discovered article for a
+  recent day is always re-swept on the very next tick.
+
+**The three known bug patterns from this milestone's prior five
+connectors, checked explicitly:**
+
+- _An omitted parameter defaulting to something surprising_ (FRED): the
+  `filter_entities` finding above is exactly this pattern, found for
+  real this time, not ruled out.
+- _A timestamp computed at the wrong moment relative to a network call_
+  (Etherscan): does not apply the same way — every article is timestamped
+  by Marketaux's own `published_at`, never a value this connector
+  computes; the actual risk here is the differently-shaped discovery-
+  latency problem above, handled by the safety margin, not this pattern.
+- _A response field silently not captured_ (Fear & Greed): guarded the
+  same way every connector since has been — `_to_article` raises
+  `ConnectorAPIError` on a missing required field rather than silently
+  defaulting one.
+
+**Why a dedicated table, not `external_data_points` — required by this
+task's own Definition of Done, not a design preference.** A `NewsArticle`
+row (`app/models/news.py`, migration `156feb63e12d`) holds full article
+detail: `marketaux_uuid` (unique, the real dedup key), `headline`,
+`snippet`, `source`, `url`, `published_at`, `sentiment_score` (nullable —
+an article with no scored entity has none, and `RawDataPoint.value`
+cannot express `None` at all), `primary_symbol` (a plain indexed
+`String`, added so symbol filtering is portably queryable across both
+SQLite in tests and Postgres in production — the full `symbols` JSON
+list is kept alongside for audit fidelity, but is not itself portably
+queryable), and `raw_payload`. Only a **derived daily aggregate** — the
+mean `sentiment_score` across a calendar day's own scored articles — is
+mirrored into `external_data_points` under source name `news_sentiment`
+(`MARKETAUX_SOURCE`), which is what lets the existing feature-lookup
+pattern and the Data Sources page pick it up with zero News-specific
+branching anywhere in the ML pipeline.
+
+**`MarketauxConnector` exposes two methods, not one, to reconcile this
+with the existing `Connector` protocol.** `fetch_articles(start, end) ->
+tuple[MarketauxArticle, ...]` is the real, rich method the dedicated
+ingestion pipeline actually uses. `fetch(start, end) ->
+tuple[RawDataPoint, ...]`, the protocol method every other piece of
+generic connector-facing code expects, remains a thin adapter: it filters
+out any article with no computable sentiment (since `RawDataPoint.value`
+can't hold `None`) and maps the rest, one `RawDataPoint` per scored
+article. This keeps `MarketauxConnector` a real, registrable `Connector`
+without pretending its own richer detail fits the generic shape.
+
+**Ingestion is its own pipeline, deliberately not a rerouting of
+`external_data_ingest`.** `app/services/news_ingest.py`'s `ingest_news`
+persists real articles via `NewsRepository` (`marketaux_uuid` dedup, the
+same per-row savepoint + `IntegrityError` isolation every other
+connector's ingestion already uses) and then recomputes the daily
+aggregate for every calendar day this run's own articles touched — not
+just newly-inserted ones, since a duplicate-skipped article still
+confirms real data exists for that day, and a genuinely new article for
+an already-mirrored day is exactly the case that must trigger a
+recompute (the same "a dataset built after the fact reflects it"
+contract DefiLlama's own `revisable=True` already established, applied
+here directly rather than through that shared flag, since this path
+never goes through `_persist_points` at all). `ExternalDataRepository
+.update_value` does not commit by its own documented contract — the
+caller's transaction covers it — so `_mirror_daily_aggregates` commits
+once itself after its own update loop, mirroring `_persist_points`'s own
+final commit after its analogous `update_value` loop.
+
+**A second, dedicated scheduler, not a reuse of
+`ExternalDataSyncScheduler`.** `app/services/news_sync.py`'s
+`NewsSyncScheduler` mirrors that scheduler's own start/stop/loop shape
+exactly, but computes its own catch-up window using the discovery-safety
+margin described above rather than a bare "since the last stored point"
+check. `MarketauxConnector` is registered `auto_synced=False` — the only
+connector so far to opt out — so `ExternalDataSyncScheduler`'s own
+generic tick never touches it at all; `app/runtime.py` starts and stops
+`NewsSyncScheduler` independently, gated by its own
+`NEWS_SYNC_ENABLED` setting.
+
+**`news_sentiment` feature** (`app/features/builtin/news_sentiment.py`,
+category `"sentiment"`) reads the mirrored daily aggregate through the
+exact same `most_recent_value_at_or_before` pattern every other feature
+uses — no News-specific code exists anywhere in the Feature Engineering
+Engine or the ML pipeline; the feature layer cannot tell this source
+apart from Fear & Greed's own daily value.
+
+**A new, dedicated `/news` page — required by this task's own Definition
+of Done, explicitly not bolted onto `/data-sources`.** News still
+auto-appears on `/data-sources` as an ordinary registry entry (its
+mirrored daily aggregate, `ConnectorCard`, zero special-casing) — that
+page stays fully generic. `/news` (`apps/dashboard/src/features/news/`)
+is the detail view real article-level content actually needs: headline,
+source, published time, a real sentiment score and label (never just a
+color dot), a link to the original article, filterable by symbol and
+date range. Backed by a new paginated `GET /news/articles` endpoint
+(`?symbol=&start=&end=&limit=&offset=`), mirroring `/connectors/{source}
+/history`'s own pagination contract. `lib/planned-connectors.ts`'s
+static list is now empty — Marketaux was its last remaining entry.
+
+**No live-API verification has been performed** — no real
+`MARKETAUX_API_KEY` exists in this environment. Every finding above was
+confirmed against Marketaux's real, live, unauthenticated error response
+and its own current documentation, matching the same evidentiary
+standard FRED's own connector task used before a real key was available;
+full live verification (a real key, a real fetch, a real scheduler tick)
+remains pending a real key being supplied, the same disclosed gap FRED
+carried until one was.
+
+**Testing.** `tests/connectors/test_marketaux.py` (21 tests): a
+successful fetch with a `filter_entities=true` URL assertion (the
+load-bearing proof of the bug pattern found above); a real 401 for a bad
+key; no-key auth error raised locally with no network call; three
+malformed-response shapes; a network timeout; a connect error retried to
+exhaustion; a 429 retried then succeeding; a 429 exhausted; mean-
+sentiment-across-entities computation; multi-entity averaging; a
+null-sentiment result when no entity carries a score; pagination
+stopping on a partial page; `max_pages` enforced; range filtering; a
+malformed article rejected; naive-datetime/end-before-start rejected;
+`fetch()`'s own filtering to one `RawDataPoint` per scored article only.
+`tests/services/test_news_ingest.py` (10 tests): persistence, idempotent
+dedup via `marketaux_uuid`, the daily aggregate mirrored for a single
+article and for the mean of several on the same day, a day with no
+scored articles left unmirrored, a late-arriving article recomputing an
+already-mirrored day, and an unchanged mean left alone on a second tick —
+the last two are this connector's own load-bearing proof of the
+"revisable-like" recompute contract described above.
+`tests/services/test_news_sync.py` (7 tests) covers the discovery-safety
+window's own two boundary cases (resuming from a genuinely old last
+article vs. never narrowing below the margin) plus the scheduler's own
+start/loop/failure-isolation shape.
+`tests/features/test_news_sentiment_feature.py` (8 tests) mirrors the
+other five features' own lookup/no-look-ahead tests in full.
+`tests/api/test_news_api.py` (8 tests) covers the listing endpoint's own
+ordering, filtering, pagination, and unversioned mount.
+`tests/connectors/test_registry.py::TestMarketauxIsRegistered` confirms
+discoverability with `auto_synced=False` on the real, shared registry.
+On the frontend: `sentiment-label.test.ts` (6 tests) and
+`news-page.test.tsx` (7 tests) cover the `/news` page's own loading,
+real-article, null-sentiment, empty, error, and filter/clear states;
+`data-sources-page.test.tsx` gained a case proving a registered
+`news_sentiment` connector renders as an ordinary card with zero
+News-specific code, alongside Fear & Greed's own.
 
 ### Feature Store
 

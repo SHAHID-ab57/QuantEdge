@@ -29,6 +29,16 @@ const emptyHistory: ConnectorHistory = {
   pagination: { total: 0, returned: 0, has_more: false, limit: 90, offset: 0 },
 };
 
+const newsSentiment: Connector = {
+  source: 'news_sentiment',
+  label: 'Marketaux News Sentiment',
+  description: 'Daily mean article sentiment derived from ingested news.',
+  frequency: 'several times daily (see NewsSyncScheduler)',
+  requires_auth: true,
+  latest_value: -0.12,
+  latest_timestamp: '2026-01-02T00:00:00Z',
+};
+
 function renderPage() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
@@ -95,6 +105,22 @@ describe('DataSourcesPage — Active Data Sources', () => {
     expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument();
   });
 
+  it('renders a registered News connector as an ordinary card, with zero News-specific code', async () => {
+    mockedConnectorsApi.fetchConnectors.mockResolvedValue({
+      connectors: [fearGreed, newsSentiment],
+      total: 2,
+    });
+    renderPage();
+
+    expect(
+      await screen.findByRole('heading', { name: 'Marketaux News Sentiment' }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText('Daily mean article sentiment derived from ingested news.'),
+    ).toBeInTheDocument();
+    expect(screen.getByText('-0.12')).toBeInTheDocument();
+  });
+
   it('retries the catalogue request when Retry is pressed', async () => {
     mockedConnectorsApi.fetchConnectors.mockRejectedValueOnce(new Error('network down'));
     renderPage();
@@ -108,33 +134,34 @@ describe('DataSourcesPage — Active Data Sources', () => {
 });
 
 describe('DataSourcesPage — Planned Data Sources', () => {
-  it('renders its static list while the catalogue is still loading', () => {
+  // `PLANNED_CONNECTORS` is empty as of M4-E1-T7 (Marketaux, the last
+  // remaining entry, shipped) — these tests confirm the section still
+  // renders cleanly with nothing to show, in every catalogue-load state,
+  // rather than assert on specific static entries that may not exist
+  // from one milestone to the next. See `lib/planned-connectors.ts`.
+  it('renders with no planned connectors while the catalogue is still loading', () => {
+    expect(PLANNED_CONNECTORS).toHaveLength(0);
     mockedConnectorsApi.fetchConnectors.mockReturnValue(new Promise(() => undefined));
     renderPage();
 
-    for (const connector of PLANNED_CONNECTORS) {
-      expect(screen.getByText(connector.name)).toBeInTheDocument();
-    }
-    expect(screen.getAllByText('Planned')).toHaveLength(PLANNED_CONNECTORS.length);
+    expect(screen.getByText('Planned Data Sources')).toBeInTheDocument();
+    expect(screen.queryAllByText('Planned')).toHaveLength(0);
   });
 
-  it('renders its static list even when the catalogue request fails', async () => {
+  it('renders with no planned connectors even when the catalogue request fails', async () => {
     mockedConnectorsApi.fetchConnectors.mockRejectedValue(new Error('network down'));
     renderPage();
 
     await waitFor(() => screen.getByRole('alert'));
-    for (const connector of PLANNED_CONNECTORS) {
-      expect(screen.getByText(connector.name)).toBeInTheDocument();
-    }
+    expect(screen.getByText('Planned Data Sources')).toBeInTheDocument();
+    expect(screen.queryAllByText('Planned')).toHaveLength(0);
   });
 
-  it('renders its static list once real connector data has loaded too', async () => {
+  it('renders with no planned connectors once real connector data has loaded too', async () => {
     mockedConnectorsApi.fetchConnectors.mockResolvedValue({ connectors: [fearGreed], total: 1 });
     renderPage();
 
     await screen.findByRole('heading', { name: 'Fear & Greed Index' });
-    for (const connector of PLANNED_CONNECTORS) {
-      expect(screen.getByText(connector.name)).toBeInTheDocument();
-    }
+    expect(screen.queryAllByText('Planned')).toHaveLength(0);
   });
 });

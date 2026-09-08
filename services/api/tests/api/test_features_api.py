@@ -82,6 +82,9 @@ class TestCatalogueEndpoint:
         btc_dominance = next(e for e in body["features"] if e["name"] == "btc_dominance")
         assert btc_dominance["external_sources"] == ["btc_dominance"]
 
+        news_sentiment = next(e for e in body["features"] if e["name"] == "news_sentiment")
+        assert news_sentiment["external_sources"] == ["news_sentiment"]
+
         ohlcv = next(e for e in body["features"] if e["name"] == "ohlcv")
         assert ohlcv["external_sources"] == []
 

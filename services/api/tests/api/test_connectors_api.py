@@ -71,6 +71,14 @@ class TestConnectorCatalogueEndpoint:
         assert btc_dominance["label"] == "Bitcoin Dominance"
         assert btc_dominance["requires_auth"] is False
 
+        # A sixth connector — the first whose own ingestion is handled by
+        # a dedicated pipeline (auto_synced=False), not the generic
+        # scheduler; this catalogue endpoint doesn't know or care.
+        assert "news_sentiment" in sources
+        news_sentiment = next(e for e in body["connectors"] if e["source"] == "news_sentiment")
+        assert news_sentiment["label"] == "Marketaux News Sentiment"
+        assert news_sentiment["requires_auth"] is True
+
     async def test_reports_null_latest_value_before_anything_is_ingested(
         self, client: httpx.AsyncClient
     ) -> None:

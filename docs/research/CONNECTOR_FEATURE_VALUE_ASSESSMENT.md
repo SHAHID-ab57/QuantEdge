@@ -285,6 +285,98 @@ explicit instruction — both are reported here as real findings.
 
 ---
 
+## Update 2026-09-09 — both prerequisites resolved (PREP-RETRAIN-AND-BACKFILL)
+
+### Backfill depth: a genuine, unchanged free-tier limit — not extendable
+
+`eth_gas_price` (Etherscan) and `btc_dominance` (CoinGecko) real coverage was
+already correctly disclosed, at each connector's own original build time, as
+having **no historical query capability on the free tier at all** —
+`app/connectors/etherscan.py`'s own module docstring records that
+Etherscan's one real historical series, `dailyavggasprice`, is Pro-tier only;
+`app/connectors/coingecko.py`'s records the same for CoinGecko's historical
+global-market-cap chart endpoint. `scripts/backfill_etherscan.py` and
+`scripts/backfill_coingecko.py` both state plainly, in their own module
+docstrings, that they are single-poll scripts, not backfills — `--start`/
+`--end` only narrow which single live point is accepted, they cannot reach
+further into the past.
+
+Re-verified live, today, against both real APIs, rather than trusting the
+original investigation as still current:
+
+```text
+Etherscan dailyavggasprice (real request, real key):
+  {"status":"0","message":"NOTOK","result":"Sorry, it looks like you are
+  trying to access an API Pro endpoint. Contact us to upgrade to API Pro."}
+
+CoinGecko /global/market_cap_chart (real request):
+  {"status":{"error_code":10005,"error_message":"This request is limited
+  to PRO API subscribers. Please visit .../api/pricing ..."}}
+```
+
+**Conclusion: this is a genuine platform limit, not an under-extended
+backfill — there is nothing to run further back.** The only way either
+connector's own real coverage grows is real-time polling since the
+connector was first registered; as of this update that is
+`2026-09-06 13:22` (Etherscan) / `2026-09-06 17:45` (CoinGecko) → now,
+growing by one real day per calendar day, never retroactively. **Any future
+re-run of this assessment must design its common comparison window around
+this — bounded to "however long these two connectors have been polling as
+of the re-run date" — not against it**, exactly as this task's own methodology
+already did (§ "2a" above).
+
+### Live model retrained on real, recent data
+
+The exact experiment the live paper-trading account cites
+(`565ca966-1437-4f28-b7d9-1d58002e38af`, target/split/model/hyperparameters
+unchanged from Step 1 above) was retrained with no explicit date range,
+exercising FIX-TRAINING-DATE-RANGE's corrected default directly rather than
+pinning a window by hand:
+
+- **New training job**: `6e7fb4ed-7142-4c8b-953e-b95788a4014b`
+  (`dataset_version="retrain-2026-09-09-real-recent-data"`)
+- **Real, recent price data used** (`normalization` stats, `close`): mean
+  `2488.60`, range `2452.65`–`2513.45` — current ETHUSD levels, not the old
+  `2423.25` dead-flat window.
+- **Real, non-degenerate metrics**: overall accuracy `0.667`, precision
+  `0.722`, recall `0.667`, `roc_auc` `0.704`; **test-split** accuracy
+  `0.533`, `roc_auc` `0.679` — genuinely between random (`0.5`) and perfect
+  (`1.0`), consistent with a simple logistic-regression baseline on
+  OHLCV+SMA(20) alone. `confusion_matrix: [[5, 4], [1, 5]]` — real variety
+  in both actual and predicted labels, not one class predicted every time.
+  Train/test gap (`0.138`) explicitly checked and flagged
+  `overfitting.flagged: false`.
+- **Prediction samples independently inspected** (not just the summary
+  metrics): 15 real test-set predictions, probabilities ranging `0.53`–
+  `0.81` (the old degenerate model repeated the identical `0.993`
+  probability for every single prediction) — real, non-uniform confidence,
+  5 of 15 genuinely wrong, matching the reported 53.3% test accuracy exactly.
+
+This is a real, honestly-mediocre model, not a fabricated ceiling — exactly
+what "sane" looks like for a simple feature set on genuinely noisy financial
+data, and exactly the caveat the task's own Decision section asked to be
+checked for before trusting it with anything automated again.
+
+### Live account updated and re-enabled
+
+A real, concerning discrepancy was found and corrected before retraining:
+the live account's `strategy_enabled` had reverted to `true` (still citing
+the old degenerate job `8a948fba`) between the prior session's explicit
+disable and this one — `updated_at` showed this happened only minutes
+before this investigation began, concurrent with a fresh dev-server
+process starting. No new paper trades had executed in that window (account
+balance unchanged), but it was disabled again immediately as a precaution
+before proceeding, per this task's own "leaving it disabled costs nothing,
+but it isn't fixing itself either" framing — being _enabled_ on a broken
+model, even briefly, is the actual risk that framing was guarding against.
+
+`paper_accounts.strategy_training_job_id` now points to
+`6e7fb4ed-7142-4c8b-953e-b95788a4014b`; `strategy_enabled` is `true` —
+restored only after the metrics above were read and confirmed sane, not on
+the assumption that "retrained" alone meant "fine."
+
+---
+
 ## Real evidence trail
 
 - All 8 new experiments/training jobs listed above are real, persisted

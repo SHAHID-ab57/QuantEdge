@@ -1927,6 +1927,25 @@ always passed an explicit range — which is exactly why this was invisible
 for as long as it was; `tests/services/test_candle_points.py` is new,
 dedicated coverage for this shared helper specifically.
 
+**The live paper-trading strategy's own model has since been retrained on
+real, recent data (PREP-RETRAIN-AND-BACKFILL, 2026-09-09) and its metrics
+independently confirmed sane before re-enabling anything.** New training
+job `6e7fb4ed-7142-4c8b-953e-b95788a4014b`, same experiment
+(`565ca966-1437-4f28-b7d9-1d58002e38af`) and hyperparameters as before,
+retrained with no explicit range — exercising the corrected default
+directly. Real, current price data (`close` mean `2488.60`, range
+`2452.65`–`2513.45`); real, non-degenerate metrics (test accuracy
+`0.533`, `roc_auc` `0.679`, a real `[[5, 4], [1, 5]]` confusion matrix);
+15 real test predictions individually inspected, probabilities genuinely
+varying `0.53`–`0.81` (the old degenerate model repeated an identical
+`0.993` for every prediction). A real, separate discrepancy was caught
+before this: the live account's `strategy_enabled` had reverted to `true`
+between sessions, still citing the old degenerate job — disabled again
+immediately as a precaution, then only re-enabled, pointed at the new
+job, once the retrain's own metrics were read and confirmed sane. Full
+account in `docs/research/CONNECTOR_FEATURE_VALUE_ASSESSMENT.md` §
+"Update 2026-09-09".
+
 **Feature normalization** (`app/training/normalization.py`) — corrects a
 real scale bias, not just a missing capability. `TrainingJobCreateRequest.
 normalize_features` (default `true`) drives `build_training_dataset` to fit
@@ -4637,6 +4656,12 @@ is BTC dominance right now." `fetch(start, end)` makes exactly one live
 request regardless of the requested range, and returns that single point
 only if its own `updated_at` falls within `[start, end]` — an honest
 empty result for a genuinely past-only range, never a fabricated value.
+Re-confirmed live, not just re-cited (PREP-RETRAIN-AND-BACKFILL,
+2026-09-09): both this endpoint's own historical chart alternative and
+Etherscan's `dailyavggasprice` still return a real, current Pro-tier
+rejection today — see `docs/research/CONNECTOR_FEATURE_VALUE_ASSESSMENT
+.md` § "Update 2026-09-09" for the verbatim responses and what this
+bounds any future connector feature-value comparison to.
 
 **Registered exactly like the other four, with zero special-casing
 anywhere else.** `app/connectors/coingecko.py` is auto-discovered by

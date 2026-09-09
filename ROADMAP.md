@@ -61,6 +61,23 @@ its results can be trusted** — the live strategy was disabled pending
 that. See `ARCHITECTURE.md` § "Machine Learning Training Framework" for
 the full account.
 
+**Both prerequisites for redoing M4-E3-T1 are now resolved
+(PREP-RETRAIN-AND-BACKFILL, `TASKBOOK.md` `M1-E6-T4`).** Etherscan's and
+CoinGecko's own ~2-day real coverage is a genuine, unchanged free-tier
+limit, re-verified live today against both real APIs — nothing to
+extend; this bounds any future comparison's own window rather than being
+a bug to fix. The live strategy's own experiment was retrained with no
+explicit range (job `6e7fb4ed-7142-4c8b-953e-b95788a4014b`) — real,
+non-degenerate metrics (test accuracy `0.533`, a real confusion matrix,
+15 real predictions individually inspected with genuinely varying
+probabilities) read and confirmed sane before anything was re-enabled. A
+real, separate discrepancy was caught first: `strategy_enabled` had
+reverted to `true` between sessions on the old, degenerate job — disabled
+again immediately, then only restored once the retrain checked out.
+`strategy_enabled` is now `true`, pointed at the new job. Full account in
+`docs/research/CONNECTOR_FEATURE_VALUE_ASSESSMENT.md` § "Update
+2026-09-09".
+
 **Milestone 2 — Prediction & Backtesting (COMPLETE).** The Live
 Prediction Service (`app/prediction/`, `/ml/predict`) is the first item:
 given a completed training job, reconstruct a live feature vector, run the
@@ -267,9 +284,13 @@ is specifically that the Training Framework cannot consume a pinned
 window. See `docs/research/CONNECTOR_FEATURE_VALUE_ASSESSMENT.md` for
 the full report and `TASKBOOK.md` `M4-E3-T1`. The earliest-not-recent
 default bug this exposed has since been fixed under Milestone 1's own
-Training Framework (`M1-E6-T3` above) — this assessment should be redone
-once a genuinely controlled comparison is also possible at the training
-level, not just at the Dataset Builder level as proven here.
+Training Framework (`M1-E6-T3` above), and its own two prerequisites —
+resolving the Etherscan/CoinGecko backfill question and retraining the
+live model — are also both now resolved (`M1-E6-T4` above). This
+assessment should be redone once a genuinely controlled comparison is
+also possible at the training level, not just at the Dataset Builder
+level as proven here — the corrected default alone doesn't yet let a
+training job pin the same byte-identical window the Dataset Builder can.
 
 **Milestone 5 — Production Hardening.** Authentication/authorization (none
 exists on any route today), CI/CD (none exists — all quality gates are

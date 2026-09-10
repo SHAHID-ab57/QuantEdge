@@ -15,12 +15,13 @@ database while verifying this milestone's own outstanding items (see
 """
 
 import asyncio
+import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
-from pydantic import ValidationError as PydanticValidationError
+from pydantic import ValidationError
 from sqlalchemy.exc import IntegrityError
 
 from app.events.bus import EventBus
@@ -149,6 +150,53 @@ async def publish_ticker(bus: EventBus, symbol: str, price: str) -> None:
         )
     )
     await bus.drain()
+
+
+def assert_decimal_approx(value: Decimal | None, expected: float) -> None:
+    """`float(value) == pytest.approx(expected)`, narrowing `value` first.
+
+    `stop_loss_price`/`take_profit_price` are genuinely `Decimal | None`
+    on both `PaperPositionDTO` and `PaperAccountResponse` — a position
+    can legitimately have neither set. Every call site here asserts a
+    threshold a preceding step in the same test just set, so `None`
+    would itself be a real test failure, not a case worth tolerating
+    silently — `float(None)` raising `TypeError` mid-assertion is a
+    worse failure mode than a clear `assert value is not None` first.
+    """
+    assert value is not None
+    assert float(value) == pytest.approx(expected)
+
+
+@pytest.mark.asyncio
+class TestCreateAccountLogging:
+    """LOG-ACCOUNT-CONFIG-CHANGES: `create_account` is the first of four
+    account/strategy-configuration-mutating methods that logged nothing
+    at all before this task — found by an exhaustive sweep of every
+    `account_repository.update`/`create` call site, the same rigor
+    already used to confirm `strategy_enabled`'s single write path
+    during the incident that motivated this task (see `ARCHITECTURE.md`
+    § "Paper Trading" for the full account)."""
+
+    async def test_creating_an_account_logs_its_initial_configuration(
+        self, session_factory: SessionFactory, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        state_manager = MarketStateManager()
+        service = build_service(session_factory, state_manager)
+        with caplog.at_level(logging.INFO, logger="app.services.paper_trading"):
+            account = await service.create_account(
+                PaperAccountCreateRequest(
+                    name="Logging Test Account",
+                    starting_balance=Decimal("100000"),
+                    max_position_size_pct=Decimal("10"),
+                    max_exposure_pct=Decimal("50"),
+                    max_drawdown_pct=Decimal("20"),
+                )
+            )
+        assert "Paper account created" in caplog.text
+        assert account.id in caplog.text
+        assert "Logging Test Account" in caplog.text
+        assert "100000" in caplog.text
+        assert "strategy_enabled=False" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -783,6 +831,41 @@ class TestResumeTrading:
         final_account = await service.get_account(account_id)
         assert final_account.trading_halted is False
 
+    async def test_resuming_logs_the_halt_clear_and_peak_balance_reset(
+        self, session_factory: SessionFactory, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """LOG-ACCOUNT-CONFIG-CHANGES: previously silent — a manual
+        override of a safety halt is exactly the kind of event that
+        should be visible by default, not just this task's own flagged
+        `strategy_enabled`."""
+        await seed_market(session_factory, symbol="PTRESUMELOGUSD")
+        bus = EventBus()
+        state_manager = MarketStateManager().attach(bus)
+        await publish_ticker(bus, "PTRESUMELOGUSD", "1000")
+        service = build_service(session_factory, state_manager)
+        account = await service.create_account(
+            PaperAccountCreateRequest(
+                starting_balance=Decimal("10000"),
+                max_position_size_pct=GENEROUS_MAX_PCT,
+                max_exposure_pct=GENEROUS_MAX_PCT,
+                max_drawdown_pct=Decimal("20"),
+            )
+        )
+        account_id = uuid.UUID(account.id)
+        await service.place_order(
+            account_id,
+            PaperOrderRequest(symbol="PTRESUMELOGUSD", side="buy", quantity=Decimal("2")),
+        )
+        halted_account = await service.get_account(account_id)
+        assert halted_account.trading_halted is True
+
+        with caplog.at_level(logging.INFO, logger="app.services.paper_trading"):
+            await service.resume_trading(account_id)
+
+        assert "Paper trading resumed" in caplog.text
+        assert str(account_id) in caplog.text
+        assert "trading_halted=True->False" in caplog.text
+
 
 @pytest.mark.asyncio
 class TestConcurrentExposureRace:
@@ -1062,8 +1145,8 @@ class TestStopLossTakeProfitValidation:
         positions = await service.list_positions(account_id)
         assert len(positions.positions) == 1
         position = positions.positions[0]
-        assert float(position.stop_loss_price) == pytest.approx(900.0)
-        assert float(position.take_profit_price) == pytest.approx(1100.0)
+        assert_decimal_approx(position.stop_loss_price, 900.0)
+        assert_decimal_approx(position.take_profit_price, 1100.0)
 
     async def test_a_later_buy_that_omits_thresholds_never_clears_an_existing_one(
         self, session_factory: SessionFactory
@@ -1100,7 +1183,7 @@ class TestStopLossTakeProfitValidation:
 
         positions = await service.list_positions(account_id)
         assert len(positions.positions) == 1
-        assert float(positions.positions[0].stop_loss_price) == pytest.approx(900.0)
+        assert_decimal_approx(positions.positions[0].stop_loss_price, 900.0)
 
     async def test_stop_loss_and_take_profit_set_at_two_different_prices_are_cross_validated(
         self, session_factory: SessionFactory
@@ -1152,7 +1235,7 @@ class TestStopLossTakeProfitValidation:
 
         # The existing, valid take-profit is untouched by the rejected attempt.
         positions = await service.list_positions(account_id)
-        assert float(positions.positions[0].take_profit_price) == pytest.approx(1100.0)
+        assert_decimal_approx(positions.positions[0].take_profit_price, 1100.0)
         assert positions.positions[0].stop_loss_price is None
 
 
@@ -1185,8 +1268,8 @@ class TestUpdatePositionThresholds:
                 stop_loss_price=Decimal("900"), take_profit_price=Decimal("1100")
             ),
         )
-        assert float(updated.stop_loss_price) == pytest.approx(900.0)
-        assert float(updated.take_profit_price) == pytest.approx(1100.0)
+        assert_decimal_approx(updated.stop_loss_price, 900.0)
+        assert_decimal_approx(updated.take_profit_price, 1100.0)
 
     async def test_omitting_a_field_leaves_it_unchanged(
         self, session_factory: SessionFactory
@@ -1218,8 +1301,8 @@ class TestUpdatePositionThresholds:
             "PTUPDATEKEEPUSD",
             PositionThresholdsUpdateRequest(stop_loss_price=Decimal("950")),
         )
-        assert float(updated.stop_loss_price) == pytest.approx(950.0)
-        assert float(updated.take_profit_price) == pytest.approx(1100.0)
+        assert_decimal_approx(updated.stop_loss_price, 950.0)
+        assert_decimal_approx(updated.take_profit_price, 1100.0)
 
     async def test_an_explicit_null_clears_a_threshold(
         self, session_factory: SessionFactory
@@ -1252,7 +1335,7 @@ class TestUpdatePositionThresholds:
             PositionThresholdsUpdateRequest(stop_loss_price=None),
         )
         assert updated.stop_loss_price is None
-        assert float(updated.take_profit_price) == pytest.approx(1100.0)
+        assert_decimal_approx(updated.take_profit_price, 1100.0)
 
     async def test_raises_for_an_account_with_no_open_position_in_this_symbol(
         self, session_factory: SessionFactory
@@ -1271,6 +1354,48 @@ class TestUpdatePositionThresholds:
                 "PTUPDATENOPOSUSD",
                 PositionThresholdsUpdateRequest(stop_loss_price=Decimal("900")),
             )
+
+    async def test_updating_thresholds_logs_old_and_new_values(
+        self, session_factory: SessionFactory, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """LOG-ACCOUNT-CONFIG-CHANGES: previously silent."""
+        await seed_market(session_factory, symbol="PTUPDATELOGUSD")
+        bus = EventBus()
+        state_manager = MarketStateManager().attach(bus)
+        await publish_ticker(bus, "PTUPDATELOGUSD", "1000")
+        service = build_service(session_factory, state_manager)
+        account = await service.create_account(
+            PaperAccountCreateRequest(starting_balance=Decimal("100000"))
+        )
+        account_id = uuid.UUID(account.id)
+        await service.place_order(
+            account_id,
+            PaperOrderRequest(
+                symbol="PTUPDATELOGUSD",
+                side="buy",
+                quantity=Decimal("1"),
+                stop_loss_price=Decimal("900"),
+            ),
+        )
+
+        with caplog.at_level(logging.INFO, logger="app.services.paper_trading"):
+            await service.update_position_thresholds(
+                account_id,
+                "PTUPDATELOGUSD",
+                PositionThresholdsUpdateRequest(
+                    stop_loss_price=Decimal("950"), take_profit_price=Decimal("1100")
+                ),
+            )
+
+        assert "Position thresholds updated" in caplog.text
+        assert str(account_id) in caplog.text
+        assert "PTUPDATELOGUSD" in caplog.text
+        # old stop_loss_price (900) -> new (950); old take_profit_price
+        # (None, never set) -> new (1100) — both directions of the change
+        # visible, not just the resulting value.
+        assert "900" in caplog.text
+        assert "950" in caplog.text
+        assert "None->1100" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -1317,6 +1442,84 @@ class TestUpdateStrategyConfig:
         assert updated.strategy_training_job_id == job_id
         assert float(updated.strategy_confidence_threshold_pct) == pytest.approx(70.0)
         assert float(updated.strategy_default_stop_loss_pct) == pytest.approx(8.0)
+
+    async def test_enabling_logs_which_training_job_it_is_pointed_at(
+        self, session_factory: SessionFactory, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """LOG-ACCOUNT-CONFIG-CHANGES's own load-bearing proof: the exact
+        incident this task exists because of was a bare `strategy_enabled`
+        flip with no way to tell "enabled, pointed at training job X" from
+        a content-free toggle after the fact. The log line must name the
+        real job id, not just report that the flag changed."""
+        job_id, _ = await train_completed_job(
+            session_factory, symbol="PTSTRATLOGUSD", model_type="logistic_regression"
+        )
+        state_manager = MarketStateManager()
+        service = build_service(session_factory, state_manager)
+        account = await service.create_account(
+            PaperAccountCreateRequest(starting_balance=Decimal("100000"))
+        )
+
+        with caplog.at_level(logging.INFO, logger="app.services.paper_trading"):
+            await service.update_strategy_config(
+                uuid.UUID(account.id),
+                PaperStrategyConfigUpdateRequest(enabled=True, training_job_id=uuid.UUID(job_id)),
+            )
+
+        assert "ENABLED" in caplog.text
+        assert account.id in caplog.text
+        assert job_id in caplog.text
+        assert "False->True" in caplog.text
+
+    async def test_disabling_logs_a_distinct_disabled_line(
+        self, session_factory: SessionFactory, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        job_id, _ = await train_completed_job(
+            session_factory, symbol="PTSTRATDISUSD", model_type="logistic_regression"
+        )
+        state_manager = MarketStateManager()
+        service = build_service(session_factory, state_manager)
+        account = await service.create_account(
+            PaperAccountCreateRequest(starting_balance=Decimal("100000"))
+        )
+        await service.update_strategy_config(
+            uuid.UUID(account.id),
+            PaperStrategyConfigUpdateRequest(enabled=True, training_job_id=uuid.UUID(job_id)),
+        )
+
+        with caplog.at_level(logging.INFO, logger="app.services.paper_trading"):
+            caplog.clear()
+            await service.update_strategy_config(
+                uuid.UUID(account.id), PaperStrategyConfigUpdateRequest(enabled=False)
+            )
+
+        assert "DISABLED" in caplog.text
+        assert "ENABLED" not in caplog.text
+        assert "True->False" in caplog.text
+
+    async def test_a_no_op_update_still_logs_the_full_config_summary_without_the_dedicated_line(
+        self, session_factory: SessionFactory, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Changing only `confidence_threshold_pct` (never touching
+        `enabled`) must still produce the general config-updated summary
+        line — but not the dedicated ENABLED/DISABLED line, which is only
+        for an actual flip."""
+        state_manager = MarketStateManager()
+        service = build_service(session_factory, state_manager)
+        account = await service.create_account(
+            PaperAccountCreateRequest(starting_balance=Decimal("100000"))
+        )
+
+        with caplog.at_level(logging.INFO, logger="app.services.paper_trading"):
+            await service.update_strategy_config(
+                uuid.UUID(account.id),
+                PaperStrategyConfigUpdateRequest(confidence_threshold_pct=Decimal("80")),
+            )
+
+        assert "Paper trading strategy config updated" in caplog.text
+        assert "65->80" in caplog.text or "65.000000000000000000->80" in caplog.text
+        assert "ENABLED" not in caplog.text
+        assert "DISABLED" not in caplog.text
 
     async def test_enabling_without_ever_naming_a_training_job_is_rejected(
         self, session_factory: SessionFactory
@@ -1429,7 +1632,7 @@ class TestUpdateStrategyConfig:
         assert float(updated.strategy_default_stop_loss_pct) == pytest.approx(9.0)
 
     async def test_a_stop_loss_of_zero_is_rejected_at_the_schema_layer(self) -> None:
-        with pytest.raises(PydanticValidationError):
+        with pytest.raises(ValidationError):
             PaperStrategyConfigUpdateRequest(default_stop_loss_pct=Decimal("0"))
 
     async def test_an_explicit_null_stop_loss_is_rejected_not_silently_ignored(self) -> None:
@@ -1440,9 +1643,9 @@ class TestUpdateStrategyConfig:
         `Optional` field) and would have reached `update_strategy_config`'s
         own `Decimal(fields.get(...))` call, raising an unhandled
         `TypeError` there instead of failing cleanly here."""
-        with pytest.raises(PydanticValidationError):
+        with pytest.raises(ValidationError):
             PaperStrategyConfigUpdateRequest(default_stop_loss_pct=None)
-        with pytest.raises(PydanticValidationError):
+        with pytest.raises(ValidationError):
             PaperStrategyConfigUpdateRequest(confidence_threshold_pct=None)
 
     async def test_the_database_itself_rejects_a_zero_stop_loss_even_bypassing_the_service(

@@ -90,6 +90,7 @@ dishonest simulation this feature's realistic-execution guarantee exists
 to avoid.
 """
 
+import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -142,6 +143,8 @@ from app.schemas.paper_trading import (
 from app.services.market_query import MarketNotFoundError
 from app.state.manager import MarketStateManager
 from app.training.errors import TrainingJobNotFoundError
+
+logger = logging.getLogger("app.services.paper_trading")
 
 #: A nonzero exposure/position value against an exactly-zero balance (a
 #: fully cash-out account, legitimately reachable without ever going
@@ -223,6 +226,18 @@ class PaperTradingService:
             strategy_default_stop_loss_pct=self.default_strategy_default_stop_loss_pct,
         )
         created = await self.account_repository.create(account)
+        logger.info(
+            "Paper account created (account_id=%s name=%s starting_balance=%s "
+            "max_position_size_pct=%s max_exposure_pct=%s max_drawdown_pct=%s "
+            "strategy_enabled=%s)",
+            created.id,
+            created.name,
+            created.starting_balance,
+            created.max_position_size_pct,
+            created.max_exposure_pct,
+            created.max_drawdown_pct,
+            created.strategy_enabled,
+        )
         return PaperAccountResponse.from_model(created)
 
     async def get_account(self, account_id: uuid.UUID) -> PaperAccountResponse:
@@ -424,6 +439,14 @@ class PaperTradingService:
                     ),
                 )
             else:
+                # A real invariant, not a defensive check: the sell branch
+                # above (`if position is None or request.quantity > held:
+                # raise`) already guarantees `position is not None` on
+                # this exact `else request.side != "buy"` path — restated
+                # here because that narrowing doesn't survive the
+                # intervening risk-check code to this second, separate
+                # `if request.side == "buy"` block.
+                assert position is not None
                 await self.position_repository.apply_sell(position, request.quantity)
 
             order = PaperOrder(
@@ -589,9 +612,21 @@ class PaperTradingService:
             check_take_profit_against_current_price="take_profit_price" in fields,
         )
 
+        old_stop_loss_price = position.stop_loss_price
+        old_take_profit_price = position.take_profit_price
         updated = await self.position_repository.update(
             position,
             {"stop_loss_price": new_stop_loss_price, "take_profit_price": new_take_profit_price},
+        )
+        logger.info(
+            "Position thresholds updated (account_id=%s symbol=%s "
+            "stop_loss_price=%s->%s take_profit_price=%s->%s)",
+            account_id,
+            symbol,
+            old_stop_loss_price,
+            new_stop_loss_price,
+            old_take_profit_price,
+            new_take_profit_price,
         )
         return PaperPositionDTO.from_model(
             updated, current_price=quote.price, price_source=quote.source
@@ -638,6 +673,11 @@ class PaperTradingService:
             if not job.symbol:
                 raise StrategyTrainingJobMissingSymbolError(new_training_job_id)
 
+        old_enabled = account.strategy_enabled
+        old_training_job_id = account.strategy_training_job_id
+        old_confidence_threshold_pct = account.strategy_confidence_threshold_pct
+        old_default_stop_loss_pct = account.strategy_default_stop_loss_pct
+
         updated = await self.account_repository.update(
             account,
             {
@@ -646,6 +686,38 @@ class PaperTradingService:
                 "strategy_confidence_threshold_pct": new_confidence_threshold_pct,
                 "strategy_default_stop_loss_pct": new_default_stop_loss_pct,
             },
+        )
+        # `strategy_enabled` gets its own line, not just a field in the
+        # generic summary below — this is the exact field a live account
+        # can start (or stop) placing real automated orders from, and a
+        # bare "enabled: false -> true" with no further context is what
+        # left an earlier incident untraceable (no way to tell "enabled,
+        # pointed at training job X" from a content-free toggle after the
+        # fact). Always names the training job it's pointed at, not just
+        # whether the flag flipped.
+        if new_enabled != old_enabled:
+            logger.info(
+                "Paper trading strategy %s (account_id=%s training_job_id=%s "
+                "confidence_threshold_pct=%s default_stop_loss_pct=%s)",
+                "ENABLED" if new_enabled else "DISABLED",
+                account_id,
+                new_training_job_id,
+                new_confidence_threshold_pct,
+                new_default_stop_loss_pct,
+            )
+        logger.info(
+            "Paper trading strategy config updated (account_id=%s "
+            "enabled=%s->%s training_job_id=%s->%s "
+            "confidence_threshold_pct=%s->%s default_stop_loss_pct=%s->%s)",
+            account_id,
+            old_enabled,
+            new_enabled,
+            old_training_job_id,
+            new_training_job_id,
+            old_confidence_threshold_pct,
+            new_confidence_threshold_pct,
+            old_default_stop_loss_pct,
+            new_default_stop_loss_pct,
         )
         return PaperAccountResponse.from_model(updated)
 
@@ -685,8 +757,17 @@ class PaperTradingService:
         vouched for it, not from a peak that trade already lost.
         """
         account = await self._get_account_or_404(account_id)
+        old_trading_halted = account.trading_halted
+        old_peak_balance = account.peak_balance
         updated = await self.account_repository.update(
             account, {"trading_halted": False, "peak_balance": account.balance}
+        )
+        logger.info(
+            "Paper trading resumed (account_id=%s trading_halted=%s->False peak_balance=%s->%s)",
+            account_id,
+            old_trading_halted,
+            old_peak_balance,
+            account.balance,
         )
         return PaperAccountResponse.from_model(updated)
 

@@ -3678,6 +3678,48 @@ updates leaving untouched fields alone, a stop-loss of `0` or an explicit
 constraint as the last-resort backstop against a `0` stop-loss even
 bypassing the service.
 
+**Account-configuration changes are now logged (LOG-ACCOUNT-CONFIG-
+CHANGES) — what changed, old value, new value, and when; not who.** The
+motivating incident (see the retrain account above): `strategy_enabled`
+was found reverted to `true` on the live account minutes before an
+unrelated investigation caught it, still pointed at a demonstrably
+broken model, with no way to trace how or when — `update_strategy_config`
+logged nothing at all, and no audit trail existed anywhere for account
+configuration on this platform. Full authentication and a real audit
+trail are Milestone 5's own project, not something to improvise here;
+this is the cheap, immediate version — visibility, not attribution.
+
+An exhaustive sweep (every `account_repository`/`position_repository
+.update`/`.create` call site across every service, not assumed to be
+just `PaperTradingService`, and confirmed no other service bypasses it —
+`paper_trading_strategy.py`'s scheduler and `app.paper_trading.monitor`
+both only ever read accounts or construct a `PaperTradingService` to act
+through, never write `PaperAccount`/`PaperPosition` directly) found four
+methods mutating persisted account/strategy configuration, all silently:
+`create_account`, `update_position_thresholds`, `update_strategy_config`,
+and `resume_trading`. Each now logs at `INFO` (`app.services
+.paper_trading`, visible by default, not `DEBUG`-only) — old value, new
+value, and the identifying context (`account_id`, `symbol` where
+relevant). `strategy_enabled` gets its own dedicated line beyond the
+generic summary, only emitted on an actual flip, always naming the
+`training_job_id` it's pointed at — closing the exact gap the incident
+exposed: a bare "enabled: false -> true" with no further context is what
+made that change untraceable in the first place.
+
+No new audit table, UI, or authentication was added — deliberately out
+of scope; a hypothetical audit log still couldn't attribute a change to
+a person on a platform with no authentication anywhere, which remains
+true after this task. Verified live against the real running server, not
+just by unit test: a real account creation, a real strategy enable
+(naming the real retrained job `6e7fb4ed-...`), a real threshold update,
+and a real trading-resume each produced the expected real log line with
+real old/new values. `tests/paper_trading/test_service.py` gained one
+`caplog`-based test per method (`TestCreateAccountLogging`, plus new
+cases in `TestUpdatePositionThresholds`/`TestUpdateStrategyConfig`/
+`TestResumeTrading`), including a case proving a no-op field change still
+logs the general summary line without the dedicated `ENABLED`/`DISABLED`
+one, which is reserved for an actual flip.
+
 ### External Data Connectors
 
 Milestone 4 (Data Breadth) begins here — a reusable abstraction every

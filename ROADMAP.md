@@ -76,7 +76,9 @@ reverted to `true` between sessions on the old, degenerate job — disabled
 again immediately, then only restored once the retrain checked out.
 `strategy_enabled` is now `true`, pointed at the new job. Full account in
 `docs/research/CONNECTOR_FEATURE_VALUE_ASSESSMENT.md` § "Update
-2026-09-09".
+2026-09-09". **M4-E3-T2 has since consumed both prerequisites and redone
+the assessment** — see the Milestone 4 section below and that document's
+§ "M4-E3-T2".
 
 **Milestone 2 — Prediction & Backtesting (COMPLETE).** The Live
 Prediction Service (`app/prediction/`, `/ml/predict`) is the first item:
@@ -264,9 +266,12 @@ started — a repo-wide search found zero existing code or documentation
 for it. See `TASKBOOK.md` `M4-E2-T1`/`M4-E2-T2` for the full task
 breakdown.
 
-**A third epic, M4-E3 (Feature Value Assessment), is now complete —
-its own real result is that the six connector features cannot currently
-be measured at all.** Real experiments and training jobs were built for
+**A third epic, M4-E3 (Feature Value Assessment), is now complete.** Its
+first pass (M4-E3-T1) found the six connector features could not be
+measured at all through the platform as it then stood; its second pass
+(M4-E3-T2, after the pipeline fix) measured the three deep connectors for
+real and found none of them help. Taking the first pass first: real
+experiments and training jobs were built for
 the baseline plus each connector feature individually, plus all six
 together, matching the live baseline's own target/split/model/
 hyperparameters exactly. Four of the eight failed outright with an
@@ -286,11 +291,29 @@ the full report and `TASKBOOK.md` `M4-E3-T1`. The earliest-not-recent
 default bug this exposed has since been fixed under Milestone 1's own
 Training Framework (`M1-E6-T3` above), and its own two prerequisites —
 resolving the Etherscan/CoinGecko backfill question and retraining the
-live model — are also both now resolved (`M1-E6-T4` above). This
-assessment should be redone once a genuinely controlled comparison is
-also possible at the training level, not just at the Dataset Builder
-level as proven here — the corrected default alone doesn't yet let a
-training job pin the same byte-identical window the Dataset Builder can.
+live model — are also both now resolved (`M1-E6-T4` above).
+
+**M4-E3-T2 then redid the assessment on that corrected pipeline, and this
+time it produced a real answer.** The training path now respects a pinned
+`start`/`end` end to end, so the primary comparison (baseline + Fear &
+Greed + FRED + DefiLlama TVL) ran over the **full 22,711-row ETHUSD/1h
+history** — the longest common window all three deep connectors support —
+with byte-identical windows across all four variants and 3,408 held-out
+test rows. **No deep connector feature adds measurable predictive value:**
+every held-out accuracy/ROC-AUC delta is under one percentage point (inside
+the noise band for that test size), and DefiLlama TVL slightly _hurts_
+held-out performance. The secondary comparison (Etherscan gas price,
+CoinGecko BTC dominance, Marketaux news sentiment, all-six) is bounded to
+those connectors' real ~4-day backfill depth — 69 rows — and is
+**explicitly reported as insufficient statistical power, not equivalent
+evidence**: all five variants produce byte-identical held-out predictions.
+News landed in the secondary group by the task's own depth criterion (34
+days of real data, an order of magnitude closer to the 4-day shallow end
+than the multi-year deep end), checked rather than assumed. T2 supersedes
+T1's "UNDETERMINED" verdict for the three deep connectors; the three
+shallow ones remain unmeasurable until their real-time polling accrues
+months of depth. See `docs/research/CONNECTOR_FEATURE_VALUE_ASSESSMENT.md`
+§ "M4-E3-T2" and `TASKBOOK.md` `M4-E3-T2`. **Epic M4-E3 is now complete.**
 
 **Milestone 5 — Production Hardening.** Authentication/authorization (none
 exists on any route today), CI/CD (none exists — all quality gates are

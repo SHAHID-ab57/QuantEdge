@@ -1,4 +1,250 @@
-# Connector Feature Value Assessment (M4-E3-T1)
+# Connector Feature Value Assessment
+
+Two passes exist:
+
+- **M4-E3-T2 (2026-09-10)** — the current, authoritative assessment. Redone
+  on the corrected training pipeline (`start`/`end` now respected end to
+  end), with the results split into a statistically-powered **primary**
+  comparison and an explicitly under-powered **secondary** one. **Read this
+  first.**
+- **M4-E3-T1** — the original attempt, kept below as the historical record.
+  Its verdict for all six features was **UNDETERMINED, blocked by a
+  platform limitation**; that blocker (`FIX-TRAINING-DATE-RANGE`, commits
+  `8634694` + `39d4389`) has since been fixed, which is what made T2
+  possible.
+
+---
+
+## M4-E3-T2 — Redone on the corrected training pipeline
+
+### TL;DR verdict (T2)
+
+**With real statistical power, no connector feature produces a robust,
+material improvement over the OHLCV + SMA(20) baseline.** On the primary
+comparison (full ETHUSD/1h history, 22,711 samples, 3,408 held-out test
+rows) every single-feature variant moves held-out accuracy and ROC-AUC by
+**less than one percentage point** versus baseline — inside the ~±1.7 pp
+95% noise band for a test set that size — except DefiLlama TVL, which
+_slightly hurts_ held-out performance (−2.1 pp accuracy, −1.8 pp ROC-AUC).
+The one eye-catching number, Fear & Greed's +4.9 pp validation F1, is a
+class-balance shift in the decision threshold, not better discrimination:
+its ROC-AUC barely moves.
+
+The secondary comparison (Etherscan / CoinGecko / Marketaux, bounded to
+those connectors' real 4-day backfill depth, 69 samples, 11 test rows) is
+**too small to detect anything** — all five variants produce byte-identical
+held-out predictions and all are overfitting-flagged. It is reported as
+_insufficient statistical power_, not as evidence that those three features
+have no value.
+
+So the honest verdict is a clean split: **primary features (Fear & Greed,
+FRED, DefiLlama) — measured, and no meaningful help; secondary features
+(Etherscan, CoinGecko, Marketaux/News) — still not measurable, this time
+purely for lack of data depth, not a pipeline bug.**
+
+### Step 1 — Baseline and connector depth, confirmed against the live system
+
+**Live baseline.** The experiment driving the one live automated
+paper-trading strategy (account `2cff34d9-…-f8ba2c180164`) is still
+`565ca966-1437-4f28-b7d9-1d58002e38af`; its current training job is
+`6e7fb4ed-7142-4c8b-953e-b95788a4014b`
+(`dataset_version="retrain-2026-09-09-real-recent-data"`, from
+`PREP-RETRAIN-AND-BACKFILL`). Its `dataset_start`/`dataset_end` are both
+**NULL** — it uses the corrected "most recent N candles" default, so it
+currently trains on roughly the last 100 ETHUSD/1h candles
+(`close` mean `2488.60`, range `2452.65`–`2513.45` — recent levels).
+`feature_set` = OHLCV + SMA(20), `target_config` = `next_direction` h=1,
+`split_config` = 0.7 / 0.15 / 0.15, `model_type` = `logistic_regression`,
+hyperparameters `{epochs 10, learning_rate 0.001, batch_size 32,
+random_seed 42, validation_frequency 1, max_iter 200}`. Every T2 variant
+matches all of these exactly, varying only the feature set.
+
+**Connector backfill depth**, re-checked directly against
+`external_data_points` / `news_articles`:
+
+| Source                        | Real coverage (first → last)        | Depth        | Group         |
+| ----------------------------- | ----------------------------------- | ------------ | ------------- |
+| `eth_tvl` (DefiLlama)         | 2017-09-27 → 2026-09-10 (daily)     | ~9 years     | Primary       |
+| `fear_greed` (Alternative.me) | 2018-02-01 → 2026-09-10 (daily)     | ~8.6 years   | Primary       |
+| `fed_funds_rate` (FRED)       | 1996-12-03 → 2026-09-01 (monthly)   | ~30 years    | Primary       |
+| `news_sentiment` (Marketaux)  | 2026-08-06 → 2026-09-09 (daily)     | **~34 days** | **Secondary** |
+| `eth_gas_price` (Etherscan)   | 2026-09-06 13:22 → 2026-09-10 12:47 | ~4 days      | Secondary     |
+| `btc_dominance` (CoinGecko)   | 2026-09-06 17:45 → 2026-09-10 12:42 | ~4 days      | Secondary     |
+
+**News placement — checked, not assumed.** The task called this out
+explicitly: News belongs in the primary group _only_ if its depth is
+closer to the deep connectors' than to Etherscan/CoinGecko's shallow end.
+It is not. Marketaux has **34 days** of real backfill; the deep connectors
+have **8–30 years**; Etherscan/CoinGecko have **4 days**. 34 days is ~30
+days from the shallow end and ~3,000+ days from the deep end — an order of
+magnitude closer to shallow. The Marketaux connector runs and stores real
+data (34 `news_articles`, 25 `news_sentiment` points; connector committed
+in `c4d892f`, feature at `app/features/builtin/news_sentiment.py`), but its
+history is far too shallow for the primary window. **News is tested in the
+secondary comparison.**
+
+### Step 2 — Primary comparison (statistically meaningful)
+
+**Window selection.** The deep connectors (Fear & Greed, FRED, DefiLlama)
+all cover the _entire_ ETHUSD/1h candle history. The longest common window
+they support is therefore bounded by the candle data itself:
+**2024-02-06 08:00 → 2026-09-10 11:00 UTC, the full 22,732-candle
+history** (22,711 usable rows after SMA-20 warmup + 1-bar horizon). This is
+the literal longest supportable window, not a convenient recent slice.
+Server run with `CANDLES_DEFAULT_LIMIT=CANDLES_MAX_LIMIT=25000` so the
+training path's dataset rebuild loads the whole window (it passes no
+explicit `limit`; only the config default and the pinned date range bound
+it). All four variants report an **identical `close` normalization**
+(mean `3095.367661`, std `727.567269`, min `1418.55`, max `4933.85`) —
+byte-identical windows, a genuinely controlled comparison isolating exactly
+one feature change each.
+
+Split sizes (every variant): **n_train 15,897 / n_val 3,406 / n_test
+3,408.** Headline `metrics` below = the **validation** split (what
+`POST /evaluation/benchmark` ranks on); `test_*` = the held-out test split;
+both reported because they disagree in informative ways.
+
+| Variant             | VAL acc | VAL f1 | VAL roc | TEST acc | TEST f1 | TEST roc | TRAIN acc | overfit gap |
+| ------------------- | ------- | ------ | ------- | -------- | ------- | -------- | --------- | ----------- |
+| **baseline**        | 0.5059  | 0.4492 | 0.5136  | 0.5035   | 0.3699  | 0.5306   | 0.5269    | 0.023       |
+| **+ Fear & Greed**  | 0.5070  | 0.4986 | 0.5142  | 0.5038   | 0.3734  | 0.5377   | 0.5276    | 0.024       |
+| **+ FRED**          | 0.5094  | 0.4590 | 0.5135  | 0.5056   | 0.3761  | 0.5359   | 0.5265    | 0.021       |
+| **+ DefiLlama TVL** | 0.5091  | 0.4590 | 0.5134  | 0.4827   | 0.3511  | 0.5122   | 0.5326    | 0.050       |
+
+Deltas vs baseline, in **percentage points**:
+
+| Variant         | VAL acc | VAL f1    | VAL roc | TEST acc  | TEST f1   | TEST roc  | TRAIN acc |
+| --------------- | ------- | --------- | ------- | --------- | --------- | --------- | --------- |
+| + Fear & Greed  | +0.12   | **+4.94** | +0.06   | +0.03     | +0.35     | +0.71     | +0.07     |
+| + FRED          | +0.35   | +0.99     | −0.01   | +0.21     | +0.62     | +0.53     | −0.04     |
+| + DefiLlama TVL | +0.32   | +0.99     | −0.02   | **−2.08** | **−1.88** | **−1.84** | +0.57     |
+
+For a test set of 3,408 rows with accuracy near 0.5, the 95% confidence
+half-width is `1.96 · sqrt(0.25 / 3408) ≈ 1.68 pp`. Read against that band:
+
+- **Fear & Greed** — held-out accuracy and ROC-AUC move sub-1 pp. The
+  +4.9 pp validation F1 comes entirely from a decision-threshold shift:
+  baseline predicts "up" for 81% of validation rows, Fear & Greed for 62%
+  (confusion matrix `[[649,0,1058],[0,0,4],[617,0,1078]]` vs baseline
+  `[[319,0,1388],…]`). ROC-AUC — the threshold-independent measure — moves
+  +0.06 pp on validation, +0.71 pp on test. **No real discrimination gain.**
+- **FRED (Fed Funds Rate)** — uniformly tiny positive (+0.2 to +0.8 pp
+  across held-out metrics), all inside the noise band. Note this is _not_
+  byte-identical to baseline the way it was in the T1 degenerate run and
+  the 41-day cross-check below: over 2.6 years the monthly rate actually
+  varies, so it contributes a real but negligible slow-moving signal.
+- **DefiLlama TVL** — the only variant that clearly moves outside the
+  band, and in the **wrong direction**: −2.1 pp test accuracy, −1.8 pp
+  test ROC-AUC, while train accuracy _rises_ +0.6 pp and the overfit gap
+  roughly doubles (0.023 → 0.050). Signature of a feature the model fits
+  in-sample and that then fails to generalize.
+
+`POST /evaluation/benchmark` over the four (ranked on validation `metrics`)
+puts them all within a 0.35 pp accuracy spread and a 0.08 pp ROC-AUC
+spread; its `best_by_metric` pick is a meaningless tie-break at that
+separation.
+
+**Primary verdict: none of Fear & Greed, FRED, or DefiLlama TVL adds
+measurable predictive value to the baseline on real, full-history data.
+DefiLlama TVL marginally hurts held-out performance.**
+
+#### Step 2 cross-check — recent-regime window (weaker, for robustness only)
+
+The same three primary variants + baseline were also run on a **recent
+41-day window** (`2026-07-30 00:00 → 2026-09-10 11:00`, 999 rows, n_train
+699 / n_val 149 / n_test 151; server at `CANDLES_DEFAULT_LIMIT=1000`).
+Byte-identical windows again (all `close` norm mean `2061.355222`).
+`roc_auc` is not reported by the platform for this window's splits (no
+"flat" outcomes present in val/test). Deltas vs baseline (pp):
+
+| Variant         | VAL acc   | VAL f1     | TEST acc  | TEST f1   |
+| --------------- | --------- | ---------- | --------- | --------- |
+| + Fear & Greed  | **−2.68** | **−10.15** | **+3.31** | **+5.05** |
+| + FRED          | +0.00     | +0.00      | +0.00     | +0.00     |
+| + DefiLlama TVL | +6.04     | +8.28      | +1.32     | −0.03     |
+
+This _reinforces_ the primary verdict rather than complicating it: Fear &
+Greed's validation and test deltas have **opposite signs** (a feature with
+real signal does not help one split by 3 pp while hurting the other by
+3–10 pp — that is split-placement luck on ~150 rows); FRED is exactly inert
+(over 41 days the monthly rate is a single forward-filled constant → a
+zero-variance column after normalization → identical model); DefiLlama TVL
+helps validation but not test F1. On the smaller window the noise is just
+louder. Nothing robust survives across both windows.
+
+### Step 3 — Secondary comparison (explicitly lower statistical power)
+
+**Window selection.** Bounded by the shallowest connectors: `eth_gas_price`
+(Etherscan) from `2026-09-06 13:22` and `btc_dominance` (CoinGecko) from
+`2026-09-06 17:45`. The longest window all secondary connectors support is
+**2026-09-06 18:00 → 2026-09-10 11:00 UTC** — 69 usable rows after warmup.
+Split: **n_train 48 / n_val 10 / n_test 11.** All variants share an
+identical `close` normalization (mean `2488.457292`) — controlled, just
+tiny.
+
+| Variant                    | VAL acc | VAL f1 | VAL roc | TEST acc | TEST f1 | TEST roc | overfit?    | gap   |
+| -------------------------- | ------- | ------ | ------- | -------- | ------- | -------- | ----------- | ----- |
+| **baseline (re-windowed)** | 0.600   | 0.617  | 0.762   | 0.3636   | 0.1939  | 0.464    | **flagged** | 0.282 |
+| **+ Etherscan gas price**  | 0.600   | 0.617  | 0.762   | 0.3636   | 0.1939  | 0.500    | **flagged** | 0.261 |
+| **+ CoinGecko BTC dom.**   | 0.500   | 0.475  | 0.762   | 0.3636   | 0.1939  | 0.607    | **flagged** | 0.366 |
+| **+ Marketaux news**       | 0.700   | 0.710  | 0.762   | 0.3636   | 0.1939  | 0.393    | **flagged** | 0.303 |
+| **+ all six**              | 0.600   | 0.600  | 0.762   | 0.3636   | 0.1939  | 0.536    | **flagged** | 0.407 |
+
+**Every variant produces the identical held-out result** — test accuracy
+`0.3636`, F1 `0.1939`, precision `0.1322` — i.e. the same predictions on
+all 11 test rows regardless of which features are present, including the
+all-six variant. Validation numbers wander (news +10 pp accuracy, BTC
+dominance −10 pp) but a 10-row validation set moves 10 pp per _single_
+reclassified sample. Test ROC-AUC swings ±14 pp on 11 rows. Every model is
+overfitting-flagged (train/held-out gap 0.26–0.41).
+
+**Secondary verdict: not measurable — insufficient data depth, not a
+pipeline defect.** 69 training-and-eval rows split three ways cannot
+support a feature-value judgement for Etherscan gas price, CoinGecko BTC
+dominance, or Marketaux news sentiment. This is a genuine, documented
+free-tier limit (Etherscan `dailyavggasprice` and CoinGecko historical
+market-cap chart are both Pro-only — see the T1 "Update 2026-09-09"
+section); the only fix is real-time polling accruing depth by one calendar
+day per day. **Re-run this secondary comparison once these connectors have
+several months of coverage — not before.** Reported here as lower
+statistical power due to sample size, explicitly _not_ as equivalent
+evidence to the primary comparison.
+
+### Per-feature verdict (T2)
+
+| Feature                       | Group     | Verdict                                                                                                                                                                                               |
+| ----------------------------- | --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Fear & Greed (Alternative.me) | Primary   | **No measurable value.** Sub-1 pp held-out movement over 3,408 test rows; the large validation-F1 delta is a threshold shift, not discrimination. Signs flip between full-history and 41-day windows. |
+| FRED (Federal Funds Rate)     | Primary   | **No measurable value.** Uniformly negligible (+0.2–0.8 pp held-out, inside noise); exactly inert on any window short enough that the monthly rate doesn't move.                                      |
+| DefiLlama (ETH TVL)           | Primary   | **Marginally negative.** Only variant outside the noise band: −2.1 pp test accuracy, −1.8 pp test ROC-AUC, with a widening overfit gap. Does not generalize.                                          |
+| Etherscan (gas price)         | Secondary | **Undetermined — insufficient depth.** ~4 days of real data; 69-row comparison shows byte-identical held-out predictions.                                                                             |
+| CoinGecko (BTC dominance)     | Secondary | **Undetermined — insufficient depth.** Same as Etherscan.                                                                                                                                             |
+| Marketaux (news sentiment)    | Secondary | **Undetermined — insufficient depth.** ~34 days of real data — checked against the task's own placement criterion and confirmed far closer to the shallow end. Same byte-identical held-out result.   |
+| All six together              | Secondary | **Undetermined — insufficient depth.** Inherits the 4-day bound; identical held-out predictions to baseline.                                                                                          |
+
+**Bottom line:** the corrected pipeline turns T1's blanket "UNDETERMINED"
+into a real answer _for the three deep connectors_ — and that answer is
+that they don't help a simple logistic-regression model on OHLCV+SMA(20).
+The three shallow connectors remain unmeasurable, now for the honest
+reason that their real backfill is only days deep.
+
+### Evidence trail (T2)
+
+- 13 real experiments/training jobs (4 primary full-history, 4 primary
+  41-day, 5 secondary) — all real persisted DB rows, tagged `m4-e3-t2`,
+  kept as the record. Primary full-history experiment ids:
+  `8ae7e6b8-…` (baseline), `8083874a-…` (Fear & Greed), `5c051c43-…`
+  (FRED), `bf6edcb6-…` (DefiLlama TVL).
+- Byte-identical windows verified by comparing each variant's reported
+  `close` normalization stats (mean/std/min/max), not just row counts.
+- All numbers above are read directly from each job's
+  `result_summary` (`metrics`, `test_metrics`, `train_metrics`,
+  `confusion_matrix`, `overfitting`) and from the
+  `POST /evaluation/benchmark` responses — not paraphrased.
+
+---
+
+## M4-E3-T1 — Original assessment (superseded by T2 above, kept as record)
 
 ## Purpose
 

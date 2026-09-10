@@ -20,13 +20,14 @@ import asyncio
 import time
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Any
 
 import httpx
 import pytest
 
 from app.dependencies.training import wait_for_in_flight_training_jobs
 from app.models import Candle, Exchange, Market
-from app.training.pipeline import TrainingPipeline
+from app.training.pipeline import TrainingPipeline, TrainingRunOutcome
 from tests.conftest import SessionFactory
 
 # `_training_background_uses_the_test_engine` (autouse) lives in
@@ -134,6 +135,9 @@ class TestListModelAdapters:
         assert by_name["logistic_regression"]["requires_real_data"] is True
         assert by_name["linear_regression"]["model_kind"] == "regression"
         assert by_name["linear_regression"]["requires_real_data"] is True
+        assert by_name["random_forest"]["model_kind"] == "classification"
+        assert by_name["random_forest"]["requires_real_data"] is True
+        assert "n_estimators" in by_name["random_forest"]["hyperparameter_hints"]
         assert by_name["placeholder"]["model_kind"] == "placeholder"
         assert by_name["placeholder"]["requires_real_data"] is False
 
@@ -246,7 +250,7 @@ class TestRunTrainingJob:
         delay_seconds = 0.5
         original_run = TrainingPipeline.run
 
-        async def slow_run(self: TrainingPipeline, **kwargs: object):
+        async def slow_run(self: TrainingPipeline, **kwargs: Any) -> TrainingRunOutcome:
             await asyncio.sleep(delay_seconds)
             return await original_run(self, **kwargs)
 
@@ -438,6 +442,38 @@ class TestRealBaselineModels:
         assert any(m["name"] == "accuracy" for m in experiment_after["metrics"])
         assert any(a["artifact_type"] == "report" for a in experiment_after["artifacts"])
         assert any(a["artifact_type"] == "plot" for a in experiment_after["artifacts"])
+
+    async def test_random_forest_trains_on_real_candles(
+        self, client: httpx.AsyncClient, session_factory: SessionFactory
+    ) -> None:
+        await seed_real_candles(session_factory, symbol="APIRFUSD")
+        experiment = await create_experiment_with_real_config(client, target="next_direction")
+        created = (
+            await client.post(
+                "/api/v1/training-jobs",
+                json=job_body(
+                    experiment["id"],
+                    model_type="random_forest",
+                    symbol="APIRFUSD",
+                    timeframe="1h",
+                ),
+            )
+        ).json()
+
+        body = await run_and_wait(client, created["id"])
+
+        assert body["status"] == "completed"
+        summary = body["result_summary"]
+        assert {"accuracy", "precision", "recall", "f1"} <= summary["metrics"].keys()
+        assert "confusion_matrix" in summary
+        assert "roc_pr_curves" in summary
+        assert "test_metrics" in summary
+        assert "overfitting" in summary
+        # The forest's own impurity importances: one unsigned row per feature.
+        importance = summary["feature_importance"]
+        assert len(importance) == len(summary["feature_columns"])
+        assert all(row["sign"] == "neutral" for row in importance)
+        assert summary["hyperparameters"]["n_estimators"] == 200
 
     async def test_linear_regression_trains_on_real_candles(
         self, client: httpx.AsyncClient, session_factory: SessionFactory

@@ -41,8 +41,10 @@ a versioned dataset citation, a recorded experiment) — it is now complete.
 ingestion/validation, the Feature Engineering Engine, Dataset Validation &
 Quality Engine, ML Dataset Builder, Experiment Management System, ML
 Training Framework (with per-column feature normalization) and Baseline
-Model Framework (real scikit-learn logistic/linear regression adapters),
-and the Model Evaluation & Benchmarking Engine. Every capability here has
+Model Framework (real scikit-learn logistic/linear regression adapters,
+plus a non-linear `random_forest` adapter added under
+ADD-RANDOM-FOREST-RETEST, `TASKBOOK.md` `M1-E6-T5`), and the Model
+Evaluation & Benchmarking Engine. Every capability here has
 real code, passing tests, and is wired into the running API and dashboard
 — see `ARCHITECTURE.md` for the full per-capability design and
 `docs/testing/TESTING.md`/`services/api/TESTING.md` for the full test
@@ -314,6 +316,28 @@ T1's "UNDETERMINED" verdict for the three deep connectors; the three
 shallow ones remain unmeasurable until their real-time polling accrues
 months of depth. See `docs/research/CONNECTOR_FEATURE_VALUE_ASSESSMENT.md`
 § "M4-E3-T2" and `TASKBOOK.md` `M4-E3-T2`. **Epic M4-E3 is now complete.**
+
+**One caveat on the T2 result was then closed (ADD-RANDOM-FOREST-RETEST,
+`TASKBOOK.md` `M1-E6-T5`).** T2's baseline logistic-regression model had a
+ROC-AUC of 0.53 — barely above a coin flip, a weak instrument for
+detecting whether a weak connector signal helps. So a non-linear
+`random_forest` adapter was added and the identical primary comparison
+(same four variants, same windows/splits, same noise band, cross-check
+window, and threshold-artifact diagnostic) was re-run under it. **The
+negative finding survives:** no connector feature adds held-out value
+outside the noise band; DefiLlama TVL is negative under the forest too
+(−7 pp held-out F1). Two further objections were then checked directly: a
+**regularization sweep** that closes the overfit gap from ~0.16 to ~0.04
+leaves the result unchanged (baseline held-out accuracy/ROC do not move —
+the model was memorizing noise, not overfitting away a signal), and a
+**held-out permutation-importance cross-check** collapses DefiLlama TVL's
+impurity importance of 0.225 to ~zero, confirming impurity importance's
+known bias toward continuous features — the whole feature set's permutation
+importances sit within noise of zero. Two model classes, multiple
+robustness checks, same conclusion — the honest next move is Epic 4.2 /
+Milestone 5, not more model classes. Full numbers in
+`docs/research/CONNECTOR_FEATURE_VALUE_ASSESSMENT.md` § "Random Forest
+re-test".
 
 **Milestone 5 — Production Hardening.** Authentication/authorization (none
 exists on any route today), CI/CD (none exists — all quality gates are

@@ -1149,11 +1149,12 @@ omit it to leave tags untouched.
 
 The orchestration layer BC4 adds on top of Experiment Management — see
 `ARCHITECTURE.md` § "Machine Learning Training Framework" and § "Baseline
-Model Framework" for the full design. Three model adapters are registered:
+Model Framework" for the full design. Four model adapters are registered:
 `placeholder` (fabricates deterministic metrics, trains nothing real),
-`logistic_regression` and `linear_regression` (real scikit-learn baseline
-models — `POST .../run` performs a real `fit` and evaluation for these
-two).
+`logistic_regression`, `linear_regression`, and `random_forest` (real
+scikit-learn models — `POST .../run` performs a real `fit` and evaluation
+for these three; `random_forest` is the first non-linear model, an
+ensemble of decision trees).
 
 **Model adapter catalogue** (`GET /training-jobs/models`):
 
@@ -1184,6 +1185,20 @@ two).
       "model_kind": "regression",
       "requires_real_data": true,
       "hyperparameter_hints": ["fit_intercept"],
+      "...": "...",
+    },
+    {
+      "name": "random_forest",
+      "label": "Random Forest (Classification)",
+      "model_kind": "classification",
+      "requires_real_data": true,
+      "hyperparameter_hints": [
+        "n_estimators",
+        "max_depth",
+        "min_samples_leaf",
+        "max_features",
+        "random_seed",
+      ],
       "...": "...",
     },
   ],

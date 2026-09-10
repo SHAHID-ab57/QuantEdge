@@ -203,6 +203,45 @@ def compute_feature_importance(
     return rows
 
 
+def compute_impurity_feature_importance(
+    feature_columns: Sequence[str],
+    importances: Sequence[float],
+    *,
+    normalized: bool = False,
+) -> list[dict[str, Any]]:
+    """Rank features by a tree ensemble's built-in impurity importances.
+
+    `importances` is one non-negative value per feature — `sklearn`'s
+    `RandomForestClassifier.feature_importances_` (mean decrease in impurity,
+    normalized to sum to 1 across features). Unlike a linear model's
+    coefficients there is no direction: a split on a feature reduces impurity
+    regardless of which way the target moves, so `sign` is always `"neutral"`
+    and `coefficient` carries the raw importance purely so the shared
+    `feature_importance.csv` writer and `FeatureImportancePanel` render it
+    unchanged. `abs_importance` (the ranking key, matching
+    `compute_feature_importance`) is the importance itself.
+
+    `normalized` is recorded per row exactly as in `compute_feature_importance`,
+    though it matters far less here: impurity importance is invariant to any
+    monotonic per-feature rescaling, so a z-scored and a raw run of the same
+    forest rank features identically. It is still tagged so a reader can tell
+    which dataset the run used without cross-referencing.
+    """
+    paired = list(zip(feature_columns, importances, strict=False))
+    rows = [
+        {
+            "feature": name,
+            "coefficient": float(importance),
+            "abs_importance": float(importance),
+            "sign": "neutral",
+            "normalized": normalized,
+        }
+        for name, importance in paired
+    ]
+    rows.sort(key=lambda row: row["abs_importance"], reverse=True)
+    return rows
+
+
 def compute_confusion_details(
     y_true: Sequence[Any], y_pred: Sequence[Any], labels: Sequence[Any]
 ) -> list[dict[str, Any]]:

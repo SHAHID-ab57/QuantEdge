@@ -1600,9 +1600,10 @@ its outcome back onto that experiment." The framework's own machinery
 (pipeline, lifecycle, registry, service, API) is model-agnostic by
 design, so a future TensorFlow or PyTorch integration can be added
 without touching any of it — see § "Baseline Model Framework" below for
-the two real scikit-learn adapters now registered alongside the
-placeholder, and how the pipeline was extended to load real training data
-for them without changing its own six-stage shape.
+the three real scikit-learn adapters now registered alongside the
+placeholder (`logistic_regression`, `linear_regression`, and the
+non-linear `random_forest`), and how the pipeline was extended to load
+real training data for them without changing its own six-stage shape.
 
 **Entities**, matching `docs/database/DATABASE.md` § "Machine Learning
 Training Framework schema" exactly:
@@ -1834,12 +1835,12 @@ list[Any]`, no numpy import — this module stays framework-free, matching
 `FeatureGenerator`'s own "framework-free inputs" discipline) — `None` for
 the placeholder, populated for a `requires_real_data` adapter.
 
-**Model registry** (`app/training/registry.py`) — unchanged. The two new
-adapters register into the exact same `ModelAdapterRegistry` the
+**Model registry** (`app/training/registry.py`) — unchanged. Every real
+adapter registers into the exact same `ModelAdapterRegistry` the
 placeholder already uses, via the same `@register` decorator and the same
 `load_builtin_model_adapters()` discovery loader
 (`app/training/adapters/__init__.py`), so `GET /training-jobs/models`
-lists all three with no endpoint change.
+lists all four with no endpoint change.
 
 **Logistic Regression plugin** (`app/training/adapters/
 logistic_regression.py`) — `sklearn.linear_model.LogisticRegression`,
@@ -1857,6 +1858,30 @@ reporting MAE/MSE/RMSE/R² and recording learned coefficients/intercept in
 `summary`. Hyperparameter: `fit_intercept` (default `true`). Requires a
 numeric target such as `next_close`/`next_return` —
 `IncompatibleTargetDtypeError` if given a categorical one instead.
+
+**Random Forest plugin** (`app/training/adapters/random_forest.py`) —
+`sklearn.ensemble.RandomForestClassifier`, `model_kind="classification"`.
+The first non-linear model on the platform: an ensemble of decision trees
+that can represent feature thresholds and interactions a linear model
+structurally cannot. Produces the identical result-summary shape as the
+logistic adapter (confusion matrix, per-class TP/FP/TN/FN, ROC/PR curves,
+prediction samples, the same downloadable artifacts) — the one difference
+is feature importance, which comes from the forest's own
+mean-decrease-in-impurity `feature_importances_` (unsigned, non-negative,
+sums to 1) via `compute_impurity_feature_importance`
+(`app/training/interpretability.py`) rather than from ranked coefficients.
+Impurity importance is invariant to monotonic per-feature rescaling, so a
+z-scored and a raw run of the same forest rank features identically; each
+row is still tagged `normalized` for report-reader clarity. Hyperparameters
+(deliberately modest, documented, un-tuned — on noisy hourly financial data
+an unconstrained forest memorizes the training rows): `n_estimators`
+(default 200), `max_depth` (default 8, accepts `None`), `min_samples_leaf`
+(default 2), `max_features` (default `"sqrt"`), `random_seed` (default 42).
+Pairs with a categorical target such as `next_direction`. Added under
+ADD-RANDOM-FOREST-RETEST to test whether the Milestone 4 connector features
+that showed no value under logistic regression show value under a more
+expressive model — they do not; see `docs/research/
+CONNECTOR_FEATURE_VALUE_ASSESSMENT.md` § "Random Forest re-test".
 
 **Training integration** (`app/training/dataset_loader.py`,
 `app/services/training.py`). `TrainingJob` gained three new nullable
@@ -2035,14 +2060,17 @@ covers `ColumnNormalizer`/`apply_normalization` directly: fit-uses-only-
 its-own-dataset, z-score/min-max transform correctness, and the
 zero-variance-returns-0.0-not-NaN degenerate case. `tests/training/
 test_serialization.py` covers the local-disk save/load round trip.
-`tests/training/test_logistic_regression.py`/`test_linear_regression.py`
-cover each adapter's `initialize`/`train`/`predict` in isolation
-(deterministic, perfectly-fittable synthetic data, so metrics are exact)
-plus scikit-learn failure wrapping — the former's
+`tests/training/test_logistic_regression.py`/`test_linear_regression.py`/
+`test_random_forest.py` cover each adapter's `initialize`/`train`/`predict`
+in isolation (deterministic, perfectly-fittable synthetic data, so metrics
+are exact) plus scikit-learn failure wrapping — the logistic file's
 `TestFeatureImportanceScaleBias` is the concrete, real-sklearn proof of the
 scale-bias fix: two independent, equally-informative, differently-scaled
 features rank hugely disparately (>150x) by raw |coefficient| and land at
-near-parity once normalized. `tests/training/test_service.py` and
+near-parity once normalized; the random-forest file's
+`test_feature_importances_are_unsigned_and_rank_signal_above_noise` proves
+the forest's impurity importances rank a real signal feature above a pure
+noise column, carry no direction, and sum to 1. `tests/training/test_service.py` and
 `tests/api/test_training_api.py` each add a full real-data path end to
 end — real candles seeded into the database, a real feature/target build,
 a real `fit`, real recorded metrics/confusion-matrix, and a real

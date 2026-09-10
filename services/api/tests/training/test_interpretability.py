@@ -13,10 +13,48 @@ from app.training.interpretability import (
     build_prediction_samples,
     compute_confusion_details,
     compute_feature_importance,
+    compute_impurity_feature_importance,
     compute_overfitting_flag,
     compute_roc_pr_curves,
     confidence_level,
+    to_float_list,
+    to_int_list,
 )
+
+
+class _FakeArray:
+    """Stands in for the numpy array a scikit-learn call would return, but with a
+    `tolist()` that yields whatever a test needs — including deliberately
+    wrong-shaped output, to exercise the narrowing helpers' guard clauses."""
+
+    def __init__(self, payload: object) -> None:
+        self._payload = payload
+
+    def tolist(self) -> object:
+        return self._payload
+
+
+class TestNarrowingHelperGuards:
+    """The defensive `raise TypeError` branches in the private `_ensure_array` /
+    `_as_list` / `_as_float` / `_as_int` narrowing helpers, reached through the
+    public `to_*` functions — see the module's `NumpyArrayLike` docstring for why
+    these guards exist rather than trusting scikit-learn's (absent) type info."""
+
+    def test_ensure_array_rejects_a_value_without_tolist(self) -> None:
+        with pytest.raises(TypeError, match="array-like"):
+            to_float_list(object())
+
+    def test_as_list_rejects_tolist_output_that_is_not_a_list(self) -> None:
+        with pytest.raises(TypeError, match="array-like"):
+            to_float_list(_FakeArray(5))
+
+    def test_as_float_rejects_a_non_numeric_element(self) -> None:
+        with pytest.raises(TypeError, match="numeric array element"):
+            to_float_list(_FakeArray(["not a number"]))
+
+    def test_as_int_rejects_a_non_numeric_element(self) -> None:
+        with pytest.raises(TypeError, match="numeric array element"):
+            to_int_list(_FakeArray(["not a number"]))
 
 
 class TestConfidenceLevel:
@@ -116,6 +154,31 @@ class TestComputeFeatureImportance:
         assert raw_ranking != normalized_ranking
         assert all(row["normalized"] is False for row in raw_rows)
         assert all(row["normalized"] is True for row in normalized_rows)
+
+
+class TestComputeImpurityFeatureImportance:
+    def test_ranks_by_importance_descending_with_neutral_signs(self) -> None:
+        rows = compute_impurity_feature_importance(["a", "b", "c"], [0.1, 0.7, 0.2])
+
+        assert [row["feature"] for row in rows] == ["b", "c", "a"]
+        assert all(row["sign"] == "neutral" for row in rows)
+        assert rows[0]["abs_importance"] == pytest.approx(0.7)
+        assert rows[0]["coefficient"] == pytest.approx(0.7)
+
+    def test_defaults_to_not_normalized_and_tags_when_requested(self) -> None:
+        assert compute_impurity_feature_importance(["a"], [1.0])[0]["normalized"] is False
+        tagged = compute_impurity_feature_importance(["a", "b"], [0.4, 0.6], normalized=True)
+        assert all(row["normalized"] is True for row in tagged)
+
+    def test_pairs_only_up_to_the_shorter_of_columns_and_importances(self) -> None:
+        # Defensive: a caller passing mismatched lengths gets the safe intersection,
+        # never an IndexError.
+        rows = compute_impurity_feature_importance(["a", "b", "c"], [0.5, 0.5])
+
+        assert {row["feature"] for row in rows} == {"a", "b"}
+
+    def test_empty_inputs_produce_no_rows(self) -> None:
+        assert compute_impurity_feature_importance([], []) == []
 
 
 class TestComputeConfusionDetails:

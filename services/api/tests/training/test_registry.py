@@ -6,6 +6,7 @@ from app.training.adapters import load_builtin_model_adapters
 from app.training.adapters.linear_regression import LinearRegressionAdapter
 from app.training.adapters.logistic_regression import LogisticRegressionAdapter
 from app.training.adapters.placeholder import PlaceholderModelAdapter
+from app.training.adapters.random_forest import RandomForestAdapter
 from app.training.base import ModelAdapter, ModelAdapterMetadata
 from app.training.errors import DuplicateModelAdapterError, ModelAdapterNotFoundError
 from app.training.registry import ModelAdapterRegistry, default_registry
@@ -113,6 +114,14 @@ class TestBuiltinAdapters:
         adapter = default_registry.get("linear_regression")
         assert isinstance(adapter, LinearRegressionAdapter)
         assert adapter.metadata.model_kind == "regression"
+        assert adapter.metadata.requires_real_data is True
+
+    def test_load_builtin_model_adapters_registers_random_forest(self) -> None:
+        load_builtin_model_adapters()
+        assert default_registry.has("random_forest") is True
+        adapter = default_registry.get("random_forest")
+        assert isinstance(adapter, RandomForestAdapter)
+        assert adapter.metadata.model_kind == "classification"
         assert adapter.metadata.requires_real_data is True
 
     def test_is_idempotent(self) -> None:

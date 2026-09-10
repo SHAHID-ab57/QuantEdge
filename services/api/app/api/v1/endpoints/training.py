@@ -4,8 +4,8 @@ CRUD over training jobs, lifecycle actions (`run`, `cancel`), prediction,
 and a model adapter catalogue — the orchestration surface described in
 `ARCHITECTURE.md` § "Machine Learning Training Framework". The
 `placeholder` adapter performs no real training
-(`app/training/adapters/placeholder.py`); `logistic_regression` and
-`linear_regression` are real scikit-learn baseline models.
+(`app/training/adapters/placeholder.py`); `logistic_regression`,
+`linear_regression`, and `random_forest` are real scikit-learn models.
 """
 
 import uuid
@@ -74,8 +74,9 @@ TrainingJobIdPath = Annotated[uuid.UUID, Path(description="Training job id")]
     summary="List registered model adapters",
     description=(
         "The pluggable model adapter catalogue — the framework's one extension point for a "
-        "future TensorFlow, PyTorch, or scikit-learn integration. Only 'placeholder' is "
-        "registered today; it performs no real training."
+        "future TensorFlow, PyTorch, or scikit-learn integration. Registered today: "
+        "'placeholder' (no real training), 'logistic_regression', 'linear_regression', and "
+        "'random_forest' (all real scikit-learn models)."
     ),
 )
 async def list_model_adapters(service: TrainingJobServiceDep) -> ModelAdapterCatalogResponse:

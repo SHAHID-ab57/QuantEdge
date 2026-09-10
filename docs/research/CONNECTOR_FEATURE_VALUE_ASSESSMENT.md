@@ -244,6 +244,281 @@ reason that their real backfill is only days deep.
 
 ---
 
+## Random Forest re-test (ADD-RANDOM-FOREST-RETEST, 2026-09-10)
+
+### Why this exists
+
+The T2 primary finding — no deep connector feature adds measurable value —
+carried one visible caveat: the baseline logistic-regression model's own
+ROC-AUC was **0.53**, barely above a coin flip. A model with almost no
+discriminative skill is a weak instrument for detecting whether a weak
+_additional_ signal combines into something better. "These features don't
+help" and "this specific weak linear model can't detect whatever signal
+exists" are different claims. This re-test removes the confound by running
+the identical primary comparison — same four variants, same windows, same
+0.7/0.15/0.15 split, same rigor — against a `RandomForestClassifier`
+(`app/training/adapters/random_forest.py`), the first model on the platform
+able to represent the non-linear feature interactions a linear model
+structurally cannot.
+
+Modest, documented, un-tuned hyperparameters: `n_estimators=200`,
+`max_depth=8`, `min_samples_leaf=2`, `max_features="sqrt"`,
+`random_seed=42`. The question is whether _any_ signal exists that the
+linear baseline missed, not maximum performance.
+
+### Primary comparison under Random Forest — full history
+
+Same window as T2 (`2024-02-06 08:00 → 2026-09-10 11:00 UTC`, 22,711 usable
+rows, **n_train 15,897 / n_val 3,406 / n_test 3,408**), same byte-identical
+windows (all four variants report `close` norm mean `3095.367661`).
+Headline `metrics` = validation split; `test_*` = held-out test.
+
+| Variant             | VAL acc | VAL f1 | VAL roc | TEST acc | TEST f1 | TEST roc | TRAIN acc | overfit?    | gap   |
+| ------------------- | ------- | ------ | ------- | -------- | ------- | -------- | --------- | ----------- | ----- |
+| **baseline**        | 0.5003  | 0.4165 | 0.5020  | 0.4918   | 0.4172  | 0.5095   | 0.6511    | **flagged** | 0.159 |
+| **+ Fear & Greed**  | 0.5112  | 0.4502 | 0.5021  | 0.4944   | 0.4321  | 0.5027   | 0.6705    | **flagged** | 0.176 |
+| **+ FRED**          | 0.4985  | 0.3955 | 0.5019  | 0.4988   | 0.4193  | 0.5110   | 0.6570    | **flagged** | 0.158 |
+| **+ DefiLlama TVL** | 0.4974  | 0.3872 | 0.4996  | 0.4736   | 0.3465  | 0.4974   | 0.6489    | **flagged** | 0.175 |
+
+Deltas vs baseline, in **percentage points**:
+
+| Variant         | VAL acc | VAL f1 | VAL roc | TEST acc  | TEST f1   | TEST roc  | TRAIN acc |
+| --------------- | ------- | ------ | ------- | --------- | --------- | --------- | --------- |
+| + Fear & Greed  | +1.09   | +3.37  | +0.00   | +0.26     | +1.49     | **−0.69** | +1.94     |
+| + FRED          | −0.18   | −2.11  | −0.02   | +0.70     | +0.21     | +0.15     | +0.59     |
+| + DefiLlama TVL | −0.29   | −2.94  | −0.25   | **−1.82** | **−7.07** | **−1.22** | −0.22     |
+
+95% noise half-width for n_test = 3,408 at acc ≈ 0.5 is still `±1.68 pp`.
+Read against that band:
+
+- **Baseline Random Forest generalizes _worse_ than baseline logistic
+  regression** — TEST acc `0.4918` / ROC `0.5095` vs logistic's `0.5035` /
+  `0.5306` — and **every full-history RF run is overfitting-flagged**
+  (train acc ~0.65 vs held-out ~0.49, gap ~0.16 > the 0.15 threshold). The
+  extra model capacity is spent memorizing training-set noise in hourly
+  price data, not finding real structure. **This is the key result: giving
+  the problem a more expressive model did not surface hidden signal — it
+  produced a model that overfits.** The weak-instrument caveat is answered
+  by "the signal genuinely isn't there," not by "use a stronger model."
+- **Fear & Greed** — VAL F1 +3.37 pp, but VAL ROC-AUC `+0.00` and TEST
+  ROC-AUC **−0.69**. Applying the T2 threshold-artifact diagnostic: an F1
+  change with no corresponding ROC change is a decision-boundary shift, not
+  a discrimination gain (confusion matrix moves from `[[210,0,1497],…]` to
+  `[[307,0,1400],…]` — it just predicts "down" more often). **Same
+  artifact, same verdict as under logistic regression.**
+- **FRED** — every held-out delta inside the noise band (+0.2 to +0.7 pp).
+  No effect.
+- **DefiLlama TVL** — clearly outside the band and **negative**: −1.8 pp
+  test accuracy, **−7.1 pp test F1**, −1.2 pp test ROC-AUC — worse than it
+  was under logistic regression (−2.1 / −1.9 / −1.8). The forest's own
+  impurity importance assigns `eth_tvl` **0.225** (22.5% of total — second
+  only to `volume`), but see the follow-up section below: a
+  permutation-importance cross-check shows that number is inflated by
+  impurity importance's known bias toward continuous features, and
+  `eth_tvl`'s _actual_ contribution on held-out data is ~zero (very
+  slightly negative). Adding the feature to the set still makes the model
+  ~2 pp worse on test accuracy; it just doesn't carry the ~22% of real
+  signal the impurity number implied.
+
+`POST /evaluation/benchmark` over the four (validation `metrics`): all
+within a 1.1 pp accuracy / 0.25 pp ROC-AUC spread; `best_by_metric` is a
+meaningless tie-break.
+
+### Feature importances (Random Forest impurity, sums to 1)
+
+The forest's own `feature_importances_`, a more direct signal than the
+benchmark comparison — reported per variant, full-history window:
+
+| Variant         | Top features by impurity importance                                                                        |
+| --------------- | ---------------------------------------------------------------------------------------------------------- |
+| baseline        | volume 0.474 · close 0.112 · open 0.110 · high 0.103 · low 0.103 · sma_20 0.099                            |
+| + Fear & Greed  | volume 0.412 · close 0.115 · low 0.113 · open 0.112 · high 0.099 · sma_20 0.095 · **fear_greed 0.054**     |
+| + FRED          | volume 0.431 · close 0.120 · low 0.119 · open 0.114 · high 0.106 · sma_20 0.097 · **fed_funds_rate 0.015** |
+| + DefiLlama TVL | volume 0.328 · **eth_tvl 0.225** · close 0.101 · low 0.091 · open 0.087 · sma_20 0.084 · high 0.084        |
+
+A feature being _split on_ by the forest (non-zero impurity importance) is
+not the same as it _helping_: `eth_tvl` at 0.225 impurity importance still
+degrades held-out F1 by 7 pp, and `fear_greed` at 0.054 still moves
+held-out ROC-AUC by less than 1 pp. Impurity importance measures how often
+a feature was split on to reduce _training_ impurity — it says nothing
+about generalization, and it is specifically biased toward continuous /
+high-cardinality features (Strobl et al. 2007), which is exactly the shape
+of `eth_tvl` (a smooth multi-year series with thousands of distinct split
+points) versus `fed_funds_rate` (a near-constant monthly step function).
+**The follow-up section below replaces these impurity numbers with
+permutation importance measured on the held-out test set**, which is not
+subject to that bias — and it collapses `eth_tvl`'s apparent 0.225 down to
+essentially zero.
+
+### Cross-check — recent 41-day window (weaker, for robustness)
+
+Same window as T2's cross-check (`2026-07-30 → 2026-09-10`, 999 rows,
+n_test 151; `roc_auc` not emitted — no "flat" outcomes in val/test).
+**n_test = 151 → 95% noise half-width ±7.98 pp.** Deltas vs baseline (pp):
+
+| Variant         | VAL acc | VAL f1 | TEST acc | TEST f1 |
+| --------------- | ------- | ------ | -------- | ------- |
+| + Fear & Greed  | −2.68   | −2.44  | +1.99    | +2.47   |
+| + FRED          | +0.00   | +0.00  | +1.32    | +1.88   |
+| + DefiLlama TVL | +0.00   | −0.90  | +3.97    | +4.56   |
+
+Every held-out delta is far inside the ±8 pp band — nothing here is
+distinguishable from noise. FRED is byte-identical on validation and has
+impurity importance **0.000** (a single forward-filled constant over 41
+days → the forest never splits on it). Every recent-window RF run is
+overfitting-flagged with a _much_ larger gap than the full-window runs
+(train acc ~0.87 vs test ~0.55, gap ~0.31) — 699 training rows and 300
+trees is pure memorization.
+
+### Verdict (Random Forest re-test)
+
+| Feature       | Under logistic regression (T2)                            | Under Random Forest                                                                                                                  | Change                  |
+| ------------- | --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ | ----------------------- |
+| Fear & Greed  | No measurable value; VAL-F1 delta is a threshold artifact | No measurable value; **same** threshold artifact (F1 moves, ROC does not)                                                            | None                    |
+| FRED          | No measurable value; inert on short windows               | No measurable value; inert on short windows (importance 0.000)                                                                       | None                    |
+| DefiLlama TVL | Marginally negative on held-out (−2.1 pp test acc)        | **Still negative** (−1.8 pp acc, −7.1 pp F1), robust to regularization; permutation importance ~zero (impurity's 0.225 was inflated) | Same, better understood |
+
+**Bottom line: the negative finding survives a strictly more expressive
+model — two model classes, same windows, same rigor, same conclusion.** The
+follow-up work below (a regularization sweep that closes the overfit gap,
+and a permutation-importance cross-check) does not change it: with a Random
+Forest that generalizes consistently rather than overfitting, the connector
+features still add no held-out value, and `eth_tvl`'s real (permutation)
+contribution is ~zero despite a large impurity number. The 0.53-ROC-AUC
+caveat on the T2 result is resolved in the direction of "the connector
+features don't carry next-hour directional signal for this target," not
+"the baseline model was too weak to tell."
+
+Per this task's "After This" framing: Random Forest also showing nothing is
+the materially-stronger-negative outcome, and the honest move is to stop
+testing model classes and shift to Epic 4.2 / Milestone 5 — not to keep
+searching for a model that rescues the connectors.
+
+### Evidence trail (Random Forest re-test)
+
+- 8 real experiments/training jobs (4 full-history, 4 recent-window),
+  tagged `add-rf-retest`, kept as DB rows. Full-history experiment ids:
+  `553c9976-…` (baseline), `5553c6f1-…` (Fear & Greed), `63b643e6-…`
+  (FRED), `d6bc87c7-…` (DefiLlama TVL).
+- Same byte-identical windows as T2 (verified via `close` normalization
+  stats).
+- All numbers read directly from each job's `result_summary` and the
+  `POST /evaluation/benchmark` response.
+- `random_forest` adapter: `model_kind="classification"`,
+  `requires_real_data=True`, registered via the same zero-touch
+  `@register` discovery as the two baseline adapters; unit + real-data
+  end-to-end tests at `tests/training/test_random_forest.py`,
+  `tests/training/test_registry.py`, `tests/api/test_training_api.py`;
+  100% line coverage on `app/training/`.
+
+### Follow-up (2026-09-10) — regularization sweep + permutation importance
+
+Two objections to the re-test above were raised and checked directly. Both
+are answered in favour of the same conclusion, with real numbers below.
+
+The analysis was run in-process against the exact dataset-build path
+`TrainingJobService` uses (`MLDatasetService.build_ml_dataset` →
+`build_training_dataset`, `normalize=True`) — the modest-config numbers
+reproduce the API runs above to four decimals (baseline full-history
+validation `0.5003`, test `0.4918`, test ROC `0.5095`; DefiLlama TVL test
+`0.4736`), so the splits are byte-identical and an in-process fit
+reproduces the API model.
+
+#### Objection 1 — "every RF run is overfitting-flagged, so it's a noisy instrument"
+
+True of the modest config (`n_estimators=200, max_depth=8,
+min_samples_leaf=2`): full-history train/held-out gap ~0.16–0.18, all four
+variants flagged. So three progressively more-regularized configs were run,
+aimed squarely at closing that gap. Full-history window (n_test 3,408,
+95% noise half-width ±1.68 pp), held-out **test** accuracy:
+
+| Config (`n_est / max_depth / min_samples_leaf`) | baseline test acc | overfit gap          | + Fear & Greed (Δ) | + FRED (Δ) | + DefiLlama TVL (Δ) |
+| ----------------------------------------------- | ----------------- | -------------------- | ------------------ | ---------- | ------------------- |
+| `200 / 8 / 2` (modest, as above)                | 0.492             | **+0.159 (flagged)** | +0.26 pp           | +0.70 pp   | **−1.82 pp**        |
+| `300 / 5 / 10`                                  | 0.495             | +0.068               | +0.18 pp           | −0.09 pp   | **−2.32 pp**        |
+| `400 / 4 / 25`                                  | 0.494             | +0.054               | −0.03 pp           | +0.12 pp   | **−2.08 pp**        |
+| `400 / 3 / 50`                                  | 0.495             | +0.043               | +0.09 pp           | +0.06 pp   | **−2.02 pp**        |
+
+Regularization closes the gap from 0.16 to ~0.04 — **none of the regularized
+configs is overfitting-flagged.** And the conclusion is unchanged, in fact
+cleaner:
+
+- **Baseline test accuracy barely moves** (0.492 → 0.495) and test ROC-AUC
+  stays 0.507–0.510 across every config. The modest RF was not overfitting
+  _away_ a real signal — there is no signal at this horizon for a
+  better-generalizing model to find. It just stops memorizing noise.
+- **Fear & Greed and FRED held-out deltas shrink** from the noisier modest
+  run (±0.3–0.7 pp) to well inside ±0.2 pp and straddling zero — no effect,
+  measured more precisely.
+- **DefiLlama TVL stays ~2 pp negative on test accuracy at every
+  regularization level** (−1.8 to −2.3 pp). The harm is real and robust to
+  model capacity, not an artifact of the deep unregularized trees.
+
+Recent 41-day cross-check (n_test 151, ±7.98 pp band): every regularized
+delta is inside the band; `fed_funds_rate` has impurity importance exactly
+`0.000` at every config (constant over 41 days). Nothing distinguishable
+from noise, same as before.
+
+#### Objection 2 — "the DefiLlama 'spurious feature' claim leans on impurity importance, which is biased toward continuous features"
+
+Correct, and worth checking properly (Strobl et al. 2007). Permutation
+importance was computed on the held-out **test** split (20 shuffles per
+feature, same seed): the drop in test accuracy / ROC-AUC when that one
+feature's column is randomly permuted. This measure is not subject to the
+impurity bias. Full-history window:
+
+| Config     | Feature          | Impurity importance | Permutation Δ test acc | Permutation Δ test ROC-AUC |
+| ---------- | ---------------- | ------------------- | ---------------------- | -------------------------- |
+| modest     | `fear_greed`     | 0.054               | −0.24 ± 0.25 pp        | −0.57 ± 0.32 pp            |
+| modest     | `fed_funds_rate` | 0.015               | **0.000 ± 0.000 pp**   | **0.000 ± 0.000 pp**       |
+| modest     | `eth_tvl`        | **0.225**           | **−0.50 ± 0.44 pp**    | −0.09 ± 0.74 pp            |
+| modest     | `volume` (ref)   | 0.328               | +0.09 pp               | −0.07 pp                   |
+| `400/4/25` | `fear_greed`     | 0.034               | −0.18 ± 0.08 pp        | +0.11 ± 0.27 pp            |
+| `400/4/25` | `fed_funds_rate` | 0.019               | **0.000 ± 0.000 pp**   | **0.000 ± 0.000 pp**       |
+| `400/4/25` | `eth_tvl`        | **0.323**           | **−0.57 ± 0.21 pp**    | −0.44 ± 0.78 pp            |
+| `400/4/25` | `volume` (ref)   | 0.445               | −0.09 pp               | −0.02 pp                   |
+
+(A _negative_ permutation Δ means shuffling the feature _improved_ held-out
+accuracy — the feature was net unhelpful.)
+
+**This confirms the bias explanation and strengthens the conclusion:**
+
+- `eth_tvl` — impurity importance **0.225–0.32** (and _rising_ as the trees
+  are regularized), but permutation importance **≈ 0, very slightly
+  negative** (−0.5 pp, inside the ±1.68 pp noise band). Impurity importance
+  was inflating a continuous multi-year series with thousands of split
+  points; its actual recoverable signal on held-out data is nil. The
+  earlier "the forest spends 22.5% of its capacity on TVL" framing
+  overstated it — the correct statement is: the feature carries no signal,
+  and adding it to the set still makes the model ~2 pp worse (the model
+  wastes splits on noise).
+- `fed_funds_rate` — impurity `0.015–0.019`, permutation **exactly
+  `0.000`**. A low-cardinality step function gets no impurity inflation, so
+  the two measures agree perfectly: inert.
+- `fear_greed` — impurity `0.03–0.05`, permutation −0.2 pp (inside noise,
+  straddles zero across configs). Small impurity, ~zero real contribution.
+- Even **`volume`** — the feature impurity importance calls the model's
+  most-used, at 0.33–0.44 — has permutation importance ≈ 0. The _entire_
+  feature set's permutation importances are within noise of zero, which is
+  the cleanest possible statement of the overall finding: **at a 1-hour
+  horizon, none of these features (connector or OHLCV) carries recoverable
+  directional signal for this target.**
+
+Permutation importance is a natural candidate to add to the
+`random_forest` adapter's own result summary (it currently reports only
+impurity importance) — deferred as its own scoped change, since it adds
+real compute cost to every training run.
+
+#### Evidence trail (follow-up)
+
+- `scratchpad/rf_followups.py` — the analysis driver (in-process, no new
+  application code). 2 windows × 4 variants × 4 RF configs = 32 fits, each
+  with impurity + held-out permutation importance.
+- Modest-config numbers verified against the API runs above (4-decimal
+  match) before trusting the regularized/permutation results.
+
+---
+
 ## M4-E3-T1 — Original assessment (superseded by T2 above, kept as record)
 
 ## Purpose

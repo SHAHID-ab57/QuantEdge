@@ -258,17 +258,29 @@ conditional — "re-run the six-connector comparison at that horizon" — is
 
 ## After this
 
+**Follow-on (M4-E3-T4):** one more cheap check before the fork —
+[`REGIME_WALKFORWARD_ASSESSMENT.md`](./REGIME_WALKFORWARD_ASSESSMENT.md).
+Every result here still rests on one chronological split against one
+test-period regime. A baseline model trained on an early 2024 window was
+walked forward, via the existing Backtesting engine, over three genuinely
+distinct out-of-sample regimes — a +100 % uptrend, a −28 % downtrend, a
+flat choppy range. ROC-AUC was 0.50–0.51 in all three (every 95% CI
+includes 0.5); the model predicts a near-constant "down" regardless of
+regime. The negative finding is regime-invariant, not a single-window
+artifact.
+
 The A/B fork from the Random Forest re-test can now be made against a
 fully exhausted set of cheap hypotheses rather than a single result:
 
 - **No OHLCV-derived feature carries recoverable next-1h-to-48h
   directional signal**, under logistic regression or Random Forest, on the
-  full history or a recent window, once overlapping-window dependence is
-  handled. Two model classes, five horizons, two windows, block-bootstrap
-  CIs — the finding this thread has circled, in its strongest form.
+  full history or a recent window, across an uptrend / downtrend / choppy
+  regime, once overlapping-window dependence is handled. Two model classes,
+  five horizons, two windows, three regimes, bootstrap CIs — the finding
+  this thread has circled, in its strongest form.
 - **Option A** (Epic 4.2 / Milestone 5) is now backed by an actually
   exhausted set of cheap tests.
 - **Option B** (build historical order-flow / microstructure persistence
   and test _that_) remains the only untested hypothesis with real
-  theoretical grounding — but it carries the infrastructure cost this
-  sweep was the prerequisite for deciding to pay.
+  theoretical grounding — but it carries the infrastructure cost these
+  research tasks were the prerequisite for deciding to pay.

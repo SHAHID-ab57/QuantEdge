@@ -360,6 +360,23 @@ historical order-flow / microstructure persistence, which carries an
 infrastructure cost this sweep was the prerequisite for deciding to pay.
 `docs/research/HORIZON_SWEEP_ASSESSMENT.md`.
 
+**And a regime walk-forward closed the very last one (REGIME-WALKFORWARD,
+`TASKBOOK.md` `M4-E3-T4`).** Every prior result rested on one chronological
+split against one test-period regime. A baseline model trained on an early
+2024 window was walked forward — via the existing, no-look-ahead-verified
+Backtesting engine, unmodified — over three genuinely distinct
+out-of-sample regimes: a +100% uptrend (2025-05..07), a −28% downtrend
+(2025-10..12), and a flat choppy range (2026-03..05), each ~1,700–1,920
+hourly steps. Held-out ROC-AUC was 0.512 / 0.507 / 0.495 — **every 95% CI
+includes 0.5.** The model predicts a near-constant "down" in all three
+(99.8%+ of its calls), so its accuracy just tracks each regime's base
+rate. The one regime-varying metric (precision 0.62 / 0.25 / 0.46) is an
+artifact of that fixed lean meeting different outcome distributions, not
+skill. **The negative finding is regime-invariant.** A regime-aware
+modelling redirect is not indicated (no regime signal to exploit); the
+A/B fork is now Epic 4.2 / Milestone 5 vs the order-flow / microstructure
+infrastructure bet. `docs/research/REGIME_WALKFORWARD_ASSESSMENT.md`.
+
 **Milestone 5 — Production Hardening.** Authentication/authorization (none
 exists on any route today), CI/CD (none exists — all quality gates are
 local git hooks today), structured logging/tracing/metrics/error tracking

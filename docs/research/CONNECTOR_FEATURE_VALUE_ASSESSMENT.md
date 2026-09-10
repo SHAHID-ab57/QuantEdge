@@ -1,11 +1,14 @@
 # Connector Feature Value Assessment
 
-**Follow-on:** [`HORIZON_SWEEP_ASSESSMENT.md`](./HORIZON_SWEEP_ASSESSMENT.md)
-(M4-E3-T3) takes the baseline feature set alone across prediction horizons
-1 h – 48 h, applying this report's diagnostic suite plus a block bootstrap
-for overlapping targets. Result: no horizon shows recoverable directional
-skill either — the apparent long-horizon ROC-AUC bump is a
-pseudo-replication artifact. The cheap hypotheses are exhausted.
+**Follow-ons:**
+[`HORIZON_SWEEP_ASSESSMENT.md`](./HORIZON_SWEEP_ASSESSMENT.md) (M4-E3-T3)
+takes the baseline feature set alone across prediction horizons 1 h – 48 h;
+[`REGIME_WALKFORWARD_ASSESSMENT.md`](./REGIME_WALKFORWARD_ASSESSMENT.md)
+(M4-E3-T4) walks the baseline model forward, via the existing Backtesting
+engine, over three distinct out-of-sample market regimes (a +100 %
+uptrend, a −28 % downtrend, a flat choppy range). Neither finds
+recoverable directional skill — no horizon, no regime, ROC-AUC ~0.5
+throughout. The cheap hypotheses are exhausted.
 
 Two passes exist:
 

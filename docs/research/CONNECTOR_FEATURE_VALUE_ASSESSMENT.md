@@ -1,5 +1,12 @@
 # Connector Feature Value Assessment
 
+**Follow-on:** [`HORIZON_SWEEP_ASSESSMENT.md`](./HORIZON_SWEEP_ASSESSMENT.md)
+(M4-E3-T3) takes the baseline feature set alone across prediction horizons
+1 h – 48 h, applying this report's diagnostic suite plus a block bootstrap
+for overlapping targets. Result: no horizon shows recoverable directional
+skill either — the apparent long-horizon ROC-AUC bump is a
+pseudo-replication artifact. The cheap hypotheses are exhausted.
+
 Two passes exist:
 
 - **M4-E3-T2 (2026-09-10)** — the current, authoritative assessment. Redone
@@ -393,6 +400,18 @@ Per this task's "After This" framing: Random Forest also showing nothing is
 the materially-stronger-negative outcome, and the honest move is to stop
 testing model classes and shift to Epic 4.2 / Milestone 5 — not to keep
 searching for a model that rescues the connectors.
+
+**Follow-on (M4-E3-T3):** before making that call, the one remaining cheap
+hypothesis — "wrong horizon, not wrong features" — was tested in
+[`HORIZON_SWEEP_ASSESSMENT.md`](./HORIZON_SWEEP_ASSESSMENT.md): baseline
+feature set alone at horizons 1 h / 4 h / 12 h / 24 h / 48 h, both model
+classes, both windows, this suite's diagnostics plus a block bootstrap for
+the overlapping-target problem that only appears at h > 1. No horizon shows
+recoverable skill. The apparent rise in ROC-AUC at h24/h48 is a
+constant-prediction model (permutation importance exactly 0) ranking one
+trending test block, with a per-row bootstrap CI made spuriously narrow by
+counting overlapping windows as independent. That closes the cheap
+hypotheses.
 
 ### Evidence trail (Random Forest re-test)
 

@@ -315,7 +315,9 @@ than the multi-year deep end), checked rather than assumed. T2 supersedes
 T1's "UNDETERMINED" verdict for the three deep connectors; the three
 shallow ones remain unmeasurable until their real-time polling accrues
 months of depth. See `docs/research/CONNECTOR_FEATURE_VALUE_ASSESSMENT.md`
-§ "M4-E3-T2" and `TASKBOOK.md` `M4-E3-T2`. **Epic M4-E3 is now complete.**
+§ "M4-E3-T2" and `TASKBOOK.md` `M4-E3-T2`. **Epic M4-E3's core comparison
+is complete** (T3, the horizon sweep, is a cheap research follow-on — see
+below).
 
 **One caveat on the T2 result was then closed (ADD-RANDOM-FOREST-RETEST,
 `TASKBOOK.md` `M1-E6-T5`).** T2's baseline logistic-regression model had a
@@ -334,10 +336,29 @@ the model was memorizing noise, not overfitting away a signal), and a
 impurity importance of 0.225 to ~zero, confirming impurity importance's
 known bias toward continuous features — the whole feature set's permutation
 importances sit within noise of zero. Two model classes, multiple
-robustness checks, same conclusion — the honest next move is Epic 4.2 /
-Milestone 5, not more model classes. Full numbers in
+robustness checks, same conclusion. Full numbers in
 `docs/research/CONNECTOR_FEATURE_VALUE_ASSESSMENT.md` § "Random Forest
 re-test".
+
+**The last cheap hypothesis was then tested and also came back negative
+(HORIZON-SWEEP, `TASKBOOK.md` `M4-E3-T3`).** Every feature had been tested
+at exactly one horizon — next hour. So the baseline feature set alone was
+swept across horizons 1 h / 4 h / 12 h / 24 h / 48 h, both model classes,
+both windows, with this thread's diagnostic suite plus a **block
+bootstrap** for a problem that only appears at h > 1: consecutive
+h-candle-ahead targets overlap by h−1 candles, so the ~3,400 test rows are
+~n/h independent outcomes and a per-row bootstrap CI is spuriously narrow.
+The naive CI makes ROC-AUC look like it rises to 0.55–0.58 at h24/h48; the
+block-corrected CI includes 0.5 at every horizon ≥ 4, and the generalizing
+models there predict a constant class (permutation importance exactly
+0.000 for every feature). The recent cross-check window (~150 rows)
+replicates nothing. **No prediction horizon from 1 h to 48 h carries
+recoverable directional signal in OHLCV-derived features.** The cheap
+hypotheses are exhausted; the honest next move is Epic 4.2 / Milestone 5,
+or — the one untested hypothesis with real theoretical grounding —
+historical order-flow / microstructure persistence, which carries an
+infrastructure cost this sweep was the prerequisite for deciding to pay.
+`docs/research/HORIZON_SWEEP_ASSESSMENT.md`.
 
 **Milestone 5 — Production Hardening.** Authentication/authorization (none
 exists on any route today), CI/CD (none exists — all quality gates are

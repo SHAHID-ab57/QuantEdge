@@ -171,11 +171,12 @@ they read low if candle sync has fallen behind.
   endpoint; the pagination logic already scales to it.
 - **No React re-renders for data pushes**: `CandlestickChart` is
   `React.memo`-wrapped and talks to lightweight-charts imperatively via
-  `useEffect`s keyed on `[candlesticks, volume]`/`[theme]`/
-  `[fitContentToken]` — a parent re-render that doesn't change those
-  values never touches the chart. `ChartContainer` memoizes the adapter
-  output (`useMemo` on `[candles, theme colors]`) so array identity is
-  stable across unrelated re-renders.
+  `useEffect`s keyed on `[candlesticks, volume, initialVisibleBars,
+viewResetKey]`/`[theme]`/`[fitContentToken]`/`[liveCandle, liveVolume]`
+  — a parent re-render that doesn't change those values never touches the
+  chart. `ChartContainer` memoizes the adapter output (`useMemo` on
+  `[candles, theme colors]`) so array identity is stable across unrelated
+  re-renders.
 - **Rendering, not fetching, is what needs to stay smooth at 10,000+
   candles** — lightweight-charts virtualizes its own canvas rendering, so
   the practical ceiling is network/JSON-parse cost for the paginated
@@ -370,11 +371,33 @@ The forming bar is **seeded from the last historical candle** so history
 loads first and the live bar continues it rather than restarting: a trade
 inside the seed's own bucket extends that bar (instead of a fresh
 one-trade bar replacing it at the same timestamp), and a trade in a later
-bucket opens at the seed's close rather than gapping. Once candle sync
-produces a _newer_ historical bar, it supersedes the locally-synthesized
-one. The seed is read through a ref, so a historical refetch — which
-produces a new object every time — never re-runs the fold and
-double-counts a trade.
+bucket opens at the seed's close rather than gapping. The seed is read
+through a ref, so a historical refetch — which produces a new object every
+time — never re-runs the fold and double-counts a trade.
+
+**The synthesized bar is an approximation** (only trades seen since the
+page loaded; a reconnect gap loses ticks). The Live Market page passes
+`liveRefetchMs` (60 s) to `ChartContainer`, threaded into
+`useChartCandles` as `refetchInterval`, so once candle sync writes the
+authoritative bar for a bucket that has closed, the next refetch pulls it
+in and it supersedes the synthesized one — the "eventually consistent"
+half of this design that a fetch-once chart never actually got. The
+History page omits `liveRefetchMs` and still fetches once.
+
+**The Live Market chart opens on a recent window, not the full history.**
+It still _loads_ the same `MAX_CHART_CANDLES` the History page does (pan
+left, or the "Fit Content" button, still reaches everything), but a live
+view fitted to a multi-month range makes the forming bar a sub-pixel
+sliver. `CandlestickChart.initialVisibleBars` (Live Market passes 180)
+opens the time scale on the last N bars with a few bar-widths of empty
+space on the right for the forming bar to grow into; new closed bars keep
+the right edge in view via lightweight-charts' default
+`shiftVisibleRangeOnNewBar`. `viewResetKey` (ChartContainer derives it
+from symbol/timeframe/range whenever `liveRefetchMs` is set) makes that
+initial framing apply once per market rather than snapping back on every
+60 s refetch — `setData()` on its own never moves the time scale, so an
+unchanged key just updates the bars and leaves the viewer's pan/zoom
+alone.
 
 `CandlestickChart` also refuses any `update()` whose time precedes the
 newest point already in the series. That is reachable in normal operation

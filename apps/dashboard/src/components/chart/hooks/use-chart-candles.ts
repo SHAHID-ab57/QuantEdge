@@ -24,6 +24,17 @@ export interface ChartCandlesQuery {
   timeframe: string | null;
   start?: string | null;
   end?: string | null;
+  /**
+   * When set, the historical candles are refetched on this interval (ms) so
+   * bars that closed since the page loaded pick up their authoritative
+   * backend values, rather than being left as the client-synthesized
+   * approximation the forming-bar logic produced. The Live Market Dashboard
+   * passes this; a manually-refreshed research chart (History) omits it and
+   * fetches once. Not part of the query key — a caller that shares this
+   * symbol/timeframe/range without an interval still benefits from the
+   * refetched data via the shared cache entry.
+   */
+  refetchIntervalMs?: number;
 }
 
 export interface ChartCandlesResult {
@@ -80,10 +91,11 @@ async function fetchChartCandles(
  * ones are kept (`truncated: true` is reported so the UI can say so).
  */
 export function useChartCandles(query: ChartCandlesQuery) {
-  const { symbol, timeframe, start, end } = query;
+  const { symbol, timeframe, start, end, refetchIntervalMs } = query;
   return useQuery({
     queryKey: ['chart', 'candles', symbol, timeframe, start, end],
     queryFn: () => fetchChartCandles(symbol!, timeframe!, start ?? undefined, end ?? undefined),
     enabled: Boolean(symbol && timeframe),
+    refetchInterval: refetchIntervalMs ?? false,
   });
 }

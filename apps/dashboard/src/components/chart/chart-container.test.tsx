@@ -24,7 +24,7 @@ const fakeChart = vi.hoisted(() => ({
   addSeries: vi.fn(),
   applyOptions: vi.fn(),
   remove: vi.fn(),
-  timeScale: vi.fn(() => ({ fitContent: vi.fn() })),
+  timeScale: vi.fn(() => ({ fitContent: vi.fn(), setVisibleLogicalRange: vi.fn() })),
   subscribeCrosshairMove: vi.fn(),
   unsubscribeCrosshairMove: vi.fn(),
 }));
@@ -208,6 +208,34 @@ describe('ChartContainer', () => {
     expect(volumeSeries.update).toHaveBeenCalledWith(liveVolume);
     // The live bar is also what the legend falls back to without a hover.
     expect(screen.getByLabelText('Candle details at crosshair')).toHaveTextContent('110.00');
+  });
+
+  it('polls historical candles on liveRefetchMs and passes initialVisibleBars to the chart', async () => {
+    vi.useFakeTimers();
+    try {
+      mocked.fetchCandlePage.mockResolvedValue(candlePage([candle('2026-08-01T00:00:00Z')], 1));
+      renderContainer({ liveRefetchMs: 60_000, initialVisibleBars: 180 });
+
+      await vi.waitFor(() => expect(mocked.fetchCandlePage).toHaveBeenCalledTimes(1));
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(mocked.fetchCandlePage).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not poll historical candles without liveRefetchMs (the History default)', async () => {
+    vi.useFakeTimers();
+    try {
+      mocked.fetchCandlePage.mockResolvedValue(candlePage([candle('2026-08-01T00:00:00Z')], 1));
+      renderContainer();
+
+      await vi.waitFor(() => expect(mocked.fetchCandlePage).toHaveBeenCalledTimes(1));
+      await vi.advanceTimersByTimeAsync(300_000);
+      expect(mocked.fetchCandlePage).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('renders the chart when there is no historical data yet but a live candle exists', async () => {

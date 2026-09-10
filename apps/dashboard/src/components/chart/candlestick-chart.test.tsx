@@ -1,3 +1,4 @@
+import { StrictMode } from 'react';
 import { render, cleanup } from '@testing-library/react';
 import type { UTCTimestamp } from 'lightweight-charts';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -26,14 +27,22 @@ const fakeChart = vi.hoisted(() => ({
 
 const createChartMock = vi.hoisted(() => vi.fn(() => fakeChart));
 
+const seriesKinds = vi.hoisted(() => ({
+  candlestick: undefined as unknown,
+  histogram: undefined as unknown,
+}));
+
 vi.mock('lightweight-charts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('lightweight-charts')>();
+  seriesKinds.candlestick = actual.CandlestickSeries;
+  seriesKinds.histogram = actual.HistogramSeries;
   return { ...actual, createChart: createChartMock };
 });
 
 let candleSeries: ReturnType<typeof fakeSeries>;
 let volumeSeries: ReturnType<typeof fakeSeries>;
 let fitContent: ReturnType<typeof vi.fn>;
+let setVisibleLogicalRange: ReturnType<typeof vi.fn>;
 
 let overlaySeriesInstances: ReturnType<typeof fakeSeries>[];
 
@@ -43,14 +52,15 @@ beforeEach(() => {
   volumeSeries = fakeSeries();
   overlaySeriesInstances = [];
   fitContent = vi.fn();
-  fakeChart.timeScale.mockReturnValue({ fitContent });
-  // The component always adds the candlestick series first, then volume;
-  // any series requested after that is an overlay line, one per call.
-  let call = 0;
-  fakeChart.addSeries.mockImplementation(() => {
-    call += 1;
-    if (call === 1) return candleSeries;
-    if (call === 2) return volumeSeries;
+  setVisibleLogicalRange = vi.fn();
+  fakeChart.timeScale.mockReturnValue({ fitContent, setVisibleLogicalRange });
+  // Dispatch by series kind so a chart recreated mid-test (React
+  // StrictMode's mount/unmount/remount) still hands back the same
+  // candle/volume mocks; anything that isn't candlestick/histogram is an
+  // overlay line.
+  fakeChart.addSeries.mockImplementation((kind: unknown) => {
+    if (kind === seriesKinds.candlestick) return candleSeries;
+    if (kind === seriesKinds.histogram) return volumeSeries;
     const overlay = fakeSeries();
     overlaySeriesInstances.push(overlay);
     return overlay;
@@ -104,6 +114,104 @@ describe('CandlestickChart', () => {
     rerender(<CandlestickChart candlesticks={candlesticks} volume={volume} fitContentToken={1} />);
 
     expect(fitContent.mock.calls.length).toBeGreaterThan(callsAfterMount);
+  });
+
+  describe('initialVisibleBars', () => {
+    const manyBars = Array.from({ length: 300 }, (_, i) => ({
+      time: utc(1_785_888_000 + i * 3600),
+      open: 100,
+      high: 110,
+      low: 90,
+      close: 105,
+    }));
+    const manyVolume = manyBars.map((bar) => ({ time: bar.time, value: 5, color: '#22c55e' }));
+
+    it('opens on a recent window instead of fitting all content when set', () => {
+      render(
+        <CandlestickChart candlesticks={manyBars} volume={manyVolume} initialVisibleBars={180} />,
+      );
+
+      expect(fitContent).not.toHaveBeenCalled();
+      expect(setVisibleLogicalRange).toHaveBeenCalledTimes(1);
+      const range = setVisibleLogicalRange.mock.calls[0]![0] as { from: number; to: number };
+      expect(range.from).toBe(300 - 180);
+      // A few bar-widths of empty space on the right for the forming bar.
+      expect(range.to).toBeGreaterThan(299);
+    });
+
+    it('still fits all content when the dataset is smaller than the window', () => {
+      render(
+        <CandlestickChart candlesticks={candlesticks} volume={volume} initialVisibleBars={180} />,
+      );
+
+      expect(setVisibleLogicalRange).not.toHaveBeenCalled();
+      expect(fitContent).toHaveBeenCalled();
+    });
+
+    it('does not immediately undo the recent window with a mount-time fit', () => {
+      render(
+        <CandlestickChart
+          candlesticks={manyBars}
+          volume={manyVolume}
+          initialVisibleBars={180}
+          fitContentToken={0}
+        />,
+      );
+
+      // The fitContentToken effect's mount pass is skipped, so the recent
+      // window set by the data effect survives.
+      expect(fitContent).not.toHaveBeenCalled();
+    });
+
+    it('fits all content when omitted (the History page default)', () => {
+      render(<CandlestickChart candlesticks={manyBars} volume={manyVolume} />);
+
+      expect(setVisibleLogicalRange).not.toHaveBeenCalled();
+      expect(fitContent).toHaveBeenCalled();
+    });
+
+    it('keeps the recent window under React StrictMode (mount/unmount/remount)', () => {
+      render(
+        <StrictMode>
+          <CandlestickChart
+            candlesticks={manyBars}
+            volume={manyVolume}
+            initialVisibleBars={180}
+            viewResetKey="ETHUSD:1h"
+          />
+        </StrictMode>,
+      );
+
+      // StrictMode recreates the chart; the data effect must re-frame the
+      // new one, and the fit-on-demand effect must not fire its mount pass.
+      expect(setVisibleLogicalRange).toHaveBeenCalled();
+      const lastRange = setVisibleLogicalRange.mock.calls.at(-1)![0] as { from: number };
+      expect(lastRange.from).toBe(300 - 180);
+      expect(fitContent).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('viewResetKey', () => {
+    it('re-applies the initial view only when the key changes, not on every data change', () => {
+      const { rerender } = render(
+        <CandlestickChart candlesticks={candlesticks} volume={volume} viewResetKey="ETHUSD:1h" />,
+      );
+      expect(fitContent).toHaveBeenCalledTimes(1);
+
+      // A refetch: new data array, same key — the viewer's pan/zoom is left alone.
+      const refetched = candlesticks.map((bar) => ({ ...bar }));
+      rerender(
+        <CandlestickChart candlesticks={refetched} volume={volume} viewResetKey="ETHUSD:1h" />,
+      );
+      expect(candleSeries.setData).toHaveBeenLastCalledWith(refetched);
+      expect(fitContent).toHaveBeenCalledTimes(1);
+
+      // A symbol/timeframe switch: the key changes, so the view resets.
+      rerender(
+        <CandlestickChart candlesticks={refetched} volume={volume} viewResetKey="BTCUSD:4h" />,
+      );
+      expect(fitContent).toHaveBeenCalledTimes(2);
+    });
   });
 
   it('subscribes to crosshair moves and reports OHLCV at the hovered time', () => {

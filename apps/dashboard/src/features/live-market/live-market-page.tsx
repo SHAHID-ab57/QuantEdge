@@ -29,6 +29,25 @@ import { resolveTimeframe } from './lib/timeframe-preference';
 const MAX_TRADES = 100;
 
 /**
+ * How many of the most recent bars the chart opens focused on. The Live
+ * Market chart still loads the full history the History page does (so
+ * panning left works and the "Fit Content" button shows everything), but a
+ * live view is useless zoomed out to a multi-month range where the forming
+ * candle is a sub-pixel sliver — it needs to open on the recent action so
+ * each trade's effect on the last bar is actually visible.
+ */
+const LIVE_VISIBLE_BARS = 180;
+
+/**
+ * How often the chart's historical candles are refetched. The forming bar is
+ * synthesized client-side from the trade stream; this is what reconciles a
+ * bar *after* it closes with the authoritative value the backend's
+ * candle-sync job writes, so a long-running Live Market session doesn't drift
+ * onto a chart made entirely of client-side approximations.
+ */
+const LIVE_CANDLE_REFETCH_MS = 60_000;
+
+/**
  * The Live Market Dashboard: real-time price, chart, and trade tape for one
  * symbol, driven entirely by the backend's `/api/v1/ws/market` gateway —
  * never by a direct connection to Delta Exchange.
@@ -101,8 +120,14 @@ export function LiveMarketPage() {
   const priceStats = usePriceStats(symbol);
 
   // Shares a cache entry with the chart's own query (identical key), so
-  // reading the last historical candle here costs no extra request.
-  const chartCandles = useChartCandles({ symbol, timeframe });
+  // reading the last historical candle here costs no extra request. The
+  // matching refetch interval keeps the forming-bar seed as fresh as the
+  // chart's own data.
+  const chartCandles = useChartCandles({
+    symbol,
+    timeframe,
+    refetchIntervalMs: LIVE_CANDLE_REFETCH_MS,
+  });
   const seed = useMemo(
     () => toLiveCandlePoint(chartCandles.data?.candles.at(-1)),
     [chartCandles.data],
@@ -243,6 +268,8 @@ export function LiveMarketPage() {
         onTimeframeChange={setSelectedTimeframe}
         liveCandle={liveCandle}
         liveVolume={liveVolume}
+        initialVisibleBars={LIVE_VISIBLE_BARS}
+        liveRefetchMs={LIVE_CANDLE_REFETCH_MS}
       />
       <TradeTape
         trades={stream.trades}

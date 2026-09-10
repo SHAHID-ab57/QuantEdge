@@ -169,4 +169,37 @@ describe('useChartCandles', () => {
     // 10 requests of 1000 candles each cover MAX_CHART_CANDLES.
     expect(mocked.fetchCandlePage).toHaveBeenCalledTimes(MAX_CHART_CANDLES / 1000);
   });
+
+  it('does not poll by default, but refetches on the interval when one is given', async () => {
+    vi.useFakeTimers();
+    try {
+      mocked.fetchCandlePage.mockResolvedValue(page([candle('2026-08-01T00:00:00Z')], 1, 0));
+
+      const { result, rerender } = renderHook(
+        (props: { intervalMs?: number }) =>
+          useChartCandles({
+            symbol: 'ETHUSD',
+            timeframe: '1h',
+            refetchIntervalMs: props.intervalMs,
+          }),
+        { wrapper, initialProps: {} as { intervalMs?: number } },
+      );
+
+      await vi.waitFor(() => expect(result.current.isSuccess).toBe(true));
+      expect(mocked.fetchCandlePage).toHaveBeenCalledTimes(1);
+
+      // No interval → advancing the clock triggers no further fetch.
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(mocked.fetchCandlePage).toHaveBeenCalledTimes(1);
+
+      // With an interval → the query refetches each period.
+      rerender({ intervalMs: 60_000 });
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(mocked.fetchCandlePage).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(mocked.fetchCandlePage).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

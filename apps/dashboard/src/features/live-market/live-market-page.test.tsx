@@ -110,7 +110,7 @@ const fakeChart = vi.hoisted(() => ({
   })),
   applyOptions: vi.fn(),
   remove: vi.fn(),
-  timeScale: vi.fn(() => ({ fitContent: vi.fn() })),
+  timeScale: vi.fn(() => ({ fitContent: vi.fn(), setVisibleLogicalRange: vi.fn() })),
   subscribeCrosshairMove: vi.fn(),
   unsubscribeCrosshairMove: vi.fn(),
 }));

@@ -72,8 +72,32 @@ export interface CandlestickChartProps {
    * than rebuilding the whole chart; omit for a chart with no overlays.
    */
   overlays?: OverlaySeriesInput[];
+  /**
+   * When set, the chart opens focused on the most recent `initialVisibleBars`
+   * bars (with a little empty space on the right for the forming bar to grow
+   * into) instead of fitting the whole dataset. The Live Market Dashboard
+   * passes this so a live-updating last candle is actually visible rather
+   * than a sub-pixel sliver of a fully zoomed-out multi-month history; the
+   * "Fit Content" toolbar button still shows everything on demand. Omit for
+   * a research chart that should open showing its full range (the History
+   * page). No effect when the dataset has fewer bars than this.
+   */
+  initialVisibleBars?: number;
+  /**
+   * When provided, the initial view (a full fit, or the `initialVisibleBars`
+   * recent window) is applied on mount and re-applied only when this key
+   * changes — a data change that arrives without a key change (a periodic
+   * historical refetch on a live chart) then just updates the bars and
+   * leaves the viewer's current pan/zoom untouched. Omit for a
+   * manually-refreshed research chart, where every data change re-applies
+   * the fit.
+   */
+  viewResetKey?: string | number;
   height?: number;
 }
+
+/** Sentinel for `appliedViewKeyRef` — "the initial view has not been applied to this chart yet". */
+const VIEW_NOT_APPLIED = Symbol('view-not-applied');
 
 /**
  * This chart only ever plots numeric UTC-second candles (never business-day
@@ -124,6 +148,8 @@ function CandlestickChartInner({
   liveCandle = null,
   liveVolume = null,
   overlays = [],
+  initialVisibleBars,
+  viewResetKey,
   height = 480,
 }: CandlestickChartProps) {
   const theme = useTheme();
@@ -133,6 +159,22 @@ function CandlestickChartInner({
   const volumeSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null);
   /** Newest time pushed into the series, guarding out-of-order live updates. */
   const lastPushedTimeRef = useRef<number>(Number.NEGATIVE_INFINITY);
+  /**
+   * The `fitContentToken` value the fit-on-demand effect last acted on, so
+   * that effect fits only on a genuine change (a toolbar click) and never on
+   * its mount pass — which, once `initialVisibleBars` is in play, would
+   * immediately undo the recent-window view the data effect just set.
+   */
+  const actedFitTokenRef = useRef(fitContentToken);
+  /**
+   * The `viewResetKey` the initial view was last applied for (see that
+   * prop). Starts at the `VIEW_NOT_APPLIED` sentinel — distinct from a
+   * caller's `viewResetKey={undefined}` — and is reset back to it when the
+   * chart is recreated, so a fresh chart re-applies its initial view.
+   */
+  const appliedViewKeyRef = useRef<string | number | undefined | typeof VIEW_NOT_APPLIED>(
+    VIEW_NOT_APPLIED,
+  );
   /** One `LineSeries` per overlay `id`, created once and updated in place. */
   const overlaySeriesRef = useRef<Map<string, ISeriesApi<'Line'>>>(new Map());
   /** The `data` reference last pushed per overlay `id`, so an unchanged overlay is never re-pushed. */
@@ -170,6 +212,11 @@ function CandlestickChartInner({
       overlaySeriesById.clear();
       overlayDataById.clear();
       overlayOrderRef.current = [];
+      lastPushedTimeRef.current = Number.NEGATIVE_INFINITY;
+      // A recreated chart (React StrictMode's mount/unmount/remount) has no
+      // view set — let the data effect re-apply the initial framing on the
+      // new chart instead of treating it as "already done".
+      appliedViewKeyRef.current = VIEW_NOT_APPLIED;
     };
     // Intentionally created once; the theme-sync effect below keeps colors
     // current without recreating the chart on every theme/palette change.
@@ -195,10 +242,32 @@ function CandlestickChartInner({
     candleSeries.setData(candlesticks);
     volumeSeries.setData(volume);
     lastPushedTimeRef.current = Number(candlesticks.at(-1)?.time ?? Number.NEGATIVE_INFINITY);
-    if (candlesticks.length > 0) {
-      chartRef.current?.timeScale().fitContent();
+    const timeScale = chartRef.current?.timeScale();
+    if (!timeScale || candlesticks.length === 0) {
+      return;
     }
-  }, [candlesticks, volume]);
+    // With a `viewResetKey`, apply the initial view once per key — a periodic
+    // refetch (same key, fresh bars) then leaves the viewer's pan/zoom alone,
+    // since `setData` on its own never resets the time scale. Without one,
+    // every data change re-fits (a manually-refreshed research chart).
+    if (viewResetKey !== undefined && appliedViewKeyRef.current === viewResetKey) {
+      return;
+    }
+    appliedViewKeyRef.current = viewResetKey;
+    if (initialVisibleBars && candlesticks.length > initialVisibleBars) {
+      // Open on the most recent window, leaving a few bar-widths of empty
+      // space on the right so the live forming bar has somewhere to grow.
+      // New bars appended later via `series.update()` keep the right edge in
+      // view (lightweight-charts' `shiftVisibleRangeOnNewBar`, on by default).
+      const rightMargin = Math.max(2, Math.round(initialVisibleBars * 0.06));
+      timeScale.setVisibleLogicalRange({
+        from: candlesticks.length - initialVisibleBars,
+        to: candlesticks.length - 1 + rightMargin,
+      });
+    } else {
+      timeScale.fitContent();
+    }
+  }, [candlesticks, volume, initialVisibleBars, viewResetKey]);
 
   // The Overlay Engine: reconciles `overlays` against the series already on
   // the chart by `id` — create a `LineSeries` the first time an id appears,
@@ -278,8 +347,16 @@ function CandlestickChartInner({
   }, [overlays]);
 
   // Lets a parent (e.g. a toolbar "Fit Content" button) re-fit on demand
-  // without re-pushing data. Runs on mount too, which is harmless.
+  // without re-pushing data. Fits only when the token actually changed —
+  // never on the mount pass (or React StrictMode's second one), which the
+  // `setData` effect above has already framed (a full fit, or — with
+  // `initialVisibleBars` — a recent window a stray `fitContent()` would
+  // immediately undo).
   useEffect(() => {
+    if (actedFitTokenRef.current === fitContentToken) {
+      return;
+    }
+    actedFitTokenRef.current = fitContentToken;
     chartRef.current?.timeScale().fitContent();
   }, [fitContentToken]);
 

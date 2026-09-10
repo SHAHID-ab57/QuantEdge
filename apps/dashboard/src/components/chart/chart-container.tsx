@@ -35,6 +35,10 @@ export interface ChartContainerProps {
   liveVolume?: HistogramData | null;
   /** See `CandlestickChartProps.overlays` — passed straight through. */
   overlays?: OverlaySeriesInput[];
+  /** See `CandlestickChartProps.initialVisibleBars` — passed straight through. */
+  initialVisibleBars?: number;
+  /** See `ChartCandlesQuery.refetchIntervalMs` — keeps closed bars authoritative on a live view. */
+  liveRefetchMs?: number;
 }
 
 function ChartSkeleton({ height }: { height: number }) {
@@ -67,10 +71,26 @@ export function ChartContainer({
   liveCandle = null,
   liveVolume = null,
   overlays = [],
+  initialVisibleBars,
+  liveRefetchMs,
 }: ChartContainerProps) {
   const theme = useTheme();
   const [crosshair, setCrosshair] = useState<CrosshairPoint | null>(null);
-  const query = useChartCandles({ symbol, timeframe, start, end });
+  const query = useChartCandles({
+    symbol,
+    timeframe,
+    start,
+    end,
+    refetchIntervalMs: liveRefetchMs,
+  });
+
+  // On a live (auto-refetching) chart, the initial view is applied once per
+  // symbol/timeframe/range and then left alone across refetches — see
+  // `CandlestickChartProps.viewResetKey`. A static research chart omits it.
+  const viewResetKey =
+    liveRefetchMs !== undefined && symbol && timeframe
+      ? `${symbol}:${timeframe}:${start ?? ''}:${end ?? ''}`
+      : undefined;
 
   const series = useMemo(
     () =>
@@ -167,6 +187,8 @@ export function ChartContainer({
         liveCandle={liveCandle}
         liveVolume={liveVolume}
         overlays={overlays}
+        initialVisibleBars={initialVisibleBars}
+        viewResetKey={viewResetKey}
         height={height}
       />
       <ChartLegend point={legendPoint} />

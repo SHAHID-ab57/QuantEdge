@@ -43,9 +43,15 @@ from pydantic import ValidationError
 from app.events.bus import EventBus
 from app.events.event import Event
 from app.integrations.delta.websocket.parser import DeltaMessageParser
-from app.marketdata.bus_events import OrderBookUpdated, TickerUpdated, TradeEventReceived
+from app.marketdata.bus_events import (
+    FundingRateUpdated,
+    OrderBookUpdated,
+    TickerUpdated,
+    TradeEventReceived,
+)
 from app.marketdata.metrics import ProcessingMetrics
 from app.marketdata.models import (
+    FundingRateEvent,
     MarketDataEvent,
     OrderBookEvent,
     TickerEvent,
@@ -134,6 +140,8 @@ class MarketDataPipeline:
             return TickerUpdated(source=self._source, ticker=event)
         if isinstance(event, OrderBookEvent):
             return OrderBookUpdated(source=self._source, order_book=event)
+        if isinstance(event, FundingRateEvent):
+            return FundingRateUpdated(source=self._source, funding_rate=event)
         raise TypeError(f"Unsupported domain event: {type(event).__name__}")
 
 

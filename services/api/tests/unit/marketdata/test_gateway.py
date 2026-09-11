@@ -3,15 +3,43 @@
 import asyncio
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import cast
 
 import pytest
 
 from app.events.bus import EventBus
-from app.marketdata.bus_events import OrderBookUpdated, TickerUpdated, TradeEventReceived
-from app.marketdata.gateway import MarketStreamGateway, _ticker_payload, _trade_payload
-from app.marketdata.models import OrderBookEvent, OrderBookLevel, TickerEvent, TradeEvent
+from app.marketdata.bus_events import (
+    FundingRateUpdated,
+    OrderBookUpdated,
+    TickerUpdated,
+    TradeEventReceived,
+)
+from app.marketdata.gateway import (
+    MarketStreamGateway,
+    _funding_payload,
+    _ticker_payload,
+    _trade_payload,
+)
+from app.marketdata.models import (
+    FundingRateEvent,
+    OrderBookEvent,
+    OrderBookLevel,
+    TickerEvent,
+    TradeEvent,
+)
 from app.marketdata.orderbook import OrderBookAggregator
 from app.state.manager import MarketStateManager
+
+
+def _nested(value: object) -> dict[str, object]:
+    """Narrow one `Message` field for further indexing in assertions.
+
+    `ConnectionHandle.queue` is typed `Message = dict[str, object]` — a
+    nested payload (``message["trade"]``, ``message["data"]``, ...) is a
+    plain dict at runtime, but that's not something the type checker can
+    prove from ``object`` alone.
+    """
+    return cast("dict[str, object]", value)
 
 
 def make_trade(symbol: str = "ETHUSD", price: str = "1900") -> TradeEvent:
@@ -32,6 +60,18 @@ def make_ticker(symbol: str = "ETHUSD") -> TickerEvent:
         event_time=datetime.now(UTC),
         last_price=Decimal("1901"),
         price_change_24h=Decimal("12.5"),
+        open_interest=Decimal("17934.2"),
+    )
+
+
+def make_funding(symbol: str = "ETHUSD") -> FundingRateEvent:
+    return FundingRateEvent(
+        exchange="delta",
+        symbol=symbol,
+        event_time=datetime.now(UTC),
+        funding_rate=Decimal("-0.00011560"),
+        funding_interval_seconds=28800,
+        next_funding_time=datetime.now(UTC) + timedelta(hours=4),
     )
 
 
@@ -120,6 +160,7 @@ class TestSubscribe:
             "symbol": "ETHUSD",
             "trade": None,
             "ticker": None,
+            "funding": None,
             "orderbook": None,
         }
 
@@ -141,7 +182,7 @@ class TestSubscribe:
             "price": "1950",
             "size": "1",
             "side": "unknown",
-            "event_time": message["trade"]["event_time"],
+            "event_time": _nested(message["trade"])["event_time"],
         }
         assert message["ticker"] is None
 
@@ -175,7 +216,7 @@ class TestFanout:
         message = subscribed.queue.get_nowait()
         assert message["type"] == "trade"
         assert message["symbol"] == "ETHUSD"
-        assert message["data"]["price"] == "1900"
+        assert _nested(message["data"])["price"] == "1900"
         assert other_symbol.queue.empty()
 
     def test_ticker_event_reaches_subscribers(self, gateway: MarketStreamGateway) -> None:
@@ -187,8 +228,8 @@ class TestFanout:
 
         message = handle.queue.get_nowait()
         assert message["type"] == "ticker"
-        assert message["data"]["last_price"] == "1901"
-        assert message["data"]["price_change_24h"] == "12.5"
+        assert _nested(message["data"])["last_price"] == "1901"
+        assert _nested(message["data"])["price_change_24h"] == "12.5"
 
     def test_unrelated_bus_events_are_ignored(self, gateway: MarketStreamGateway) -> None:
         handle = gateway.register()
@@ -224,6 +265,55 @@ class TestMetrics:
             "messages_sent",
             "messages_dropped",
         }
+
+
+class TestFundingAndOpenInterest:
+    """Funding rate is its own message type and snapshot field; open
+    interest rides on the ticker payload (it arrives on the ticker
+    channel, unlike funding)."""
+
+    def test_ticker_payload_carries_open_interest(self) -> None:
+        payload = _ticker_payload(make_ticker())
+        assert payload["open_interest"] == "17934.2"
+
+    def test_ticker_payload_open_interest_is_null_when_absent(self) -> None:
+        ticker = make_ticker()
+        ticker.open_interest = None
+        assert _ticker_payload(ticker)["open_interest"] is None
+
+    def test_funding_payload_shape(self) -> None:
+        payload = _funding_payload(make_funding())
+        assert payload["funding_rate"] == "-0.00011560"
+        assert payload["funding_interval_seconds"] == 28800
+        assert payload["next_funding_time"].endswith("Z")  # type: ignore[union-attr]
+        assert payload["event_time"].endswith("Z")  # type: ignore[union-attr]
+
+    def test_subscribe_snapshot_includes_funding_when_state_has_it(
+        self, gateway: MarketStreamGateway, state_manager: MarketStateManager, bus: EventBus
+    ) -> None:
+        state_manager.attach(bus)
+        asyncio.run(bus.publish(FundingRateUpdated(source="test", funding_rate=make_funding())))
+        asyncio.run(bus.drain())
+
+        handle = gateway.register()
+        gateway.subscribe(handle, ["ETHUSD"])
+        message = handle.queue.get_nowait()
+        assert _nested(message["funding"])["funding_rate"] == "-0.00011560"
+
+    def test_a_funding_update_is_fanned_out_to_subscribers(
+        self, gateway: MarketStreamGateway
+    ) -> None:
+        handle = gateway.register()
+        gateway.subscribe(handle, ["ETHUSD"])
+        handle.queue.get_nowait()  # drain the snapshot
+
+        asyncio.run(
+            gateway._on_funding(FundingRateUpdated(source="test", funding_rate=make_funding()))
+        )
+        message = handle.queue.get_nowait()
+        assert message["type"] == "funding"
+        assert message["symbol"] == "ETHUSD"
+        assert _nested(message["data"])["funding_interval_seconds"] == 28800
 
 
 class TestWireTimestampFormat:
@@ -298,8 +388,8 @@ class TestOrderBookRelay:
         handle = gateway.register()
         gateway.subscribe(handle, ["ETHUSD"])
         message = handle.queue.get_nowait()
-        assert message["orderbook"]["bids"] == [{"price": "100", "size": "1"}]
-        assert message["orderbook"]["asks"] == [{"price": "101", "size": "2"}]
+        assert _nested(message["orderbook"])["bids"] == [{"price": "100", "size": "1"}]
+        assert _nested(message["orderbook"])["asks"] == [{"price": "101", "size": "2"}]
 
     def test_an_order_book_update_is_fanned_out_as_the_reconstructed_book(
         self, gateway: MarketStreamGateway, order_book: OrderBookAggregator
@@ -323,7 +413,7 @@ class TestOrderBookRelay:
         message = handle.queue.get_nowait()
         assert message["type"] == "orderbook"
         assert message["symbol"] == "ETHUSD"
-        assert message["data"]["bids"] == [{"price": "100", "size": "1"}]
+        assert _nested(message["data"])["bids"] == [{"price": "100", "size": "1"}]
 
     def test_only_subscribers_of_the_affected_symbol_receive_the_update(
         self, gateway: MarketStreamGateway, order_book: OrderBookAggregator

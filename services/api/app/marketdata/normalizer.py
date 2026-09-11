@@ -9,8 +9,9 @@ exchange-independent models in :mod:`app.marketdata.models`.
 Control and system messages (heartbeat, subscriptions, system status,
 product updates) are recognized but produce no domain events
 (``ignored``). Well-formed messages of types the normalizer does not map
-(e.g. ``mark_price``, ``candlestick_*``, private account channels) are
-reported as ``unsupported`` so the pipeline can count them.
+(e.g. ``mark_price`` — the ticker channel already carries it —
+``candlestick_*``, private account channels) are reported as
+``unsupported`` so the pipeline can count them.
 """
 
 from collections.abc import Sequence
@@ -19,6 +20,9 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Literal, Protocol
 
+from app.integrations.delta.websocket.models import (
+    FundingRateEvent as DeltaFundingRateEvent,
+)
 from app.integrations.delta.websocket.models import (
     HeartbeatEvent,
     KeyAuthEvent,
@@ -37,6 +41,7 @@ from app.integrations.delta.websocket.models import (
     TickerEvent as DeltaTickerEvent,
 )
 from app.marketdata.models import (
+    FundingRateEvent,
     MarketDataEvent,
     OrderBookEvent,
     OrderBookLevel,
@@ -115,6 +120,8 @@ class DeltaNormalizer:
             return NormalizationResult(
                 events=(self._order_book_updates(message),), status="normalized"
             )
+        if isinstance(message, DeltaFundingRateEvent):
+            return NormalizationResult(events=(self._funding_rate(message),), status="normalized")
         if isinstance(message, _IGNORED_TYPES):
             return NormalizationResult()
         return NormalizationResult(status="unsupported")
@@ -166,6 +173,21 @@ class DeltaNormalizer:
             open_interest=_at(oi, 0),
             price_change_24h=data.m24hc,
             turnover=_at(turnover, 0),
+        )
+
+    def _funding_rate(self, message: DeltaFundingRateEvent) -> FundingRateEvent:
+        # Delta's `funding_rate` frame: `fr` the signed rate, `fi` the funding
+        # interval in seconds (28800 = 8h), `nfr` the next funding instant in
+        # microseconds (same units as `ts`). Verified against real live frames.
+        return FundingRateEvent(
+            exchange=self._exchange,
+            symbol=message.sy,
+            event_time=utc_from_micros(message.ts),
+            funding_rate=message.fr,
+            funding_interval_seconds=message.fi if message.fi and message.fi > 0 else None,
+            next_funding_time=(
+                utc_from_micros(message.nfr) if message.nfr and message.nfr > 0 else None
+            ),
         )
 
     def _order_book_l1(self, message: OrderBookL1Event) -> OrderBookEvent:

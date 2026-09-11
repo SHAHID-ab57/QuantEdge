@@ -55,6 +55,15 @@ def _settings(**overrides: object) -> SimpleNamespace:
         "news_sync_enabled": False,
         "news_sync_interval_seconds": 21600,
         "news_sync_backfill_days": 3650,
+        # Read by `OrderFlowCapture`'s construction in `Runtime.__init__`
+        # — mirrors `app/core/config.py`'s real defaults.
+        "orderflow_capture_enabled": True,
+        "orderflow_snapshot_interval_seconds": 15,
+        "orderflow_snapshot_depth": 25,
+        "orderflow_trade_flush_seconds": 5,
+        "orderflow_trade_buffer_max": 500,
+        "orderflow_retention_days": 60,
+        "orderflow_prune_interval_seconds": 3600,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -166,7 +175,7 @@ async def test_start_live_wires_pipeline_and_ws(
     assert runtime.delta_ws is fake_ws
     assert fake_ws.started is True
     channels = [channel for channel, _ in fake_ws.subscriptions]
-    assert channels == ["trades", "ticker", "ob_l1", "ob_updates"]
+    assert channels == ["trades", "ticker", "ob_l1", "ob_updates", "funding_rate"]
 
     await shutdown_runtime()
     assert fake_ws.closed is True

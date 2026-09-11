@@ -4,6 +4,9 @@ from decimal import Decimal
 from typing import cast
 
 from app.integrations.delta.websocket.models import (
+    FundingRateEvent as DeltaFundingRateEvent,
+)
+from app.integrations.delta.websocket.models import (
     HeartbeatEvent,
     MarkPriceEvent,
     OrderBookL1Event,
@@ -17,7 +20,7 @@ from app.integrations.delta.websocket.models import (
 from app.integrations.delta.websocket.models import (
     TickerEvent as DeltaTickerEvent,
 )
-from app.marketdata.models import OrderBookEvent, TickerEvent, TradeEvent
+from app.marketdata.models import FundingRateEvent, OrderBookEvent, TickerEvent, TradeEvent
 from app.marketdata.normalizer import DeltaNormalizer
 from app.ws.models import UnknownWSEvent
 
@@ -202,6 +205,35 @@ def test_order_book_updates_update_is_not_snapshot() -> None:
     book = cast(OrderBookEvent, result.events[0])
     assert book.is_snapshot is False
     assert book.sequence == 6200
+
+
+def test_funding_rate_normalizes() -> None:
+    message = DeltaFundingRateEvent(
+        type="funding_rate",
+        fi=28800,
+        fr=Decimal("-0.001156061121670854"),
+        nfr=1789099877000000,
+        sy="ETHUSD",
+        ts=1789071077271941,
+    )
+    result = DeltaNormalizer().normalize(message)
+    assert result.status == "normalized"
+    funding = cast(FundingRateEvent, result.events[0])
+    assert funding.exchange == "delta"
+    assert funding.symbol == "ETHUSD"
+    assert funding.funding_rate == Decimal("-0.001156061121670854")
+    assert funding.funding_interval_seconds == 28800
+    assert funding.event_time == utc_from_micros(1789071077271941)
+    assert funding.next_funding_time == utc_from_micros(1789099877000000)
+
+
+def test_funding_rate_drops_a_nonpositive_interval_and_next_time() -> None:
+    message = DeltaFundingRateEvent(
+        type="funding_rate", fi=0, fr=Decimal("0.0001"), nfr=0, sy="ETHUSD", ts=1789071077271941
+    )
+    funding = cast(FundingRateEvent, DeltaNormalizer().normalize(message).events[0])
+    assert funding.funding_interval_seconds is None
+    assert funding.next_funding_time is None
 
 
 def test_heartbeat_is_ignored() -> None:

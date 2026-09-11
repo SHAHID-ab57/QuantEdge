@@ -21,11 +21,28 @@ export const LiveTickerDataSchema = z.object({
   bid: z.string().nullable(),
   ask: z.string().nullable(),
   mark_price: z.string().nullable(),
+  open_interest: z.string().nullable(),
   price_change_24h: z.string().nullable(),
   event_time: z.string().datetime(),
 });
 
 export type LiveTickerData = z.infer<typeof LiveTickerDataSchema>;
+
+/**
+ * The `funding_rate` frame — its own channel on the Delta feed (not the
+ * ticker), so its own message type here. `funding_rate` is a signed
+ * fraction per funding interval; frames are infrequent (roughly one per
+ * interval plus one on each rate change), so `funding` can stay `null` on
+ * the snapshot for a while after a fresh connection.
+ */
+export const LiveFundingDataSchema = z.object({
+  funding_rate: z.string(),
+  funding_interval_seconds: z.number().int().nullable(),
+  next_funding_time: z.string().datetime().nullable(),
+  event_time: z.string().datetime(),
+});
+
+export type LiveFundingData = z.infer<typeof LiveFundingDataSchema>;
 
 export const OrderBookLevelSchema = z.object({
   price: z.string(),
@@ -55,6 +72,7 @@ export const MarketStreamSnapshotSchema = z.object({
   symbol: z.string(),
   trade: LiveTradeDataSchema.nullable(),
   ticker: LiveTickerDataSchema.nullable(),
+  funding: LiveFundingDataSchema.nullable(),
   orderbook: LiveOrderBookDataSchema.nullable(),
 });
 
@@ -76,6 +94,12 @@ export const MarketStreamOrderBookSchema = z.object({
   data: LiveOrderBookDataSchema,
 });
 
+export const MarketStreamFundingSchema = z.object({
+  type: z.literal('funding'),
+  symbol: z.string(),
+  data: LiveFundingDataSchema,
+});
+
 export const MarketStreamPongSchema = z.object({
   type: z.literal('pong'),
 });
@@ -90,6 +114,7 @@ export const MarketStreamMessageSchema = z.discriminatedUnion('type', [
   MarketStreamTradeSchema,
   MarketStreamTickerSchema,
   MarketStreamOrderBookSchema,
+  MarketStreamFundingSchema,
   MarketStreamPongSchema,
   MarketStreamErrorSchema,
 ]);

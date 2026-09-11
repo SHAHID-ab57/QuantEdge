@@ -76,6 +76,7 @@ const baseMetrics = {
   state_order_books_cached: 2,
   state_trades_cached: 2,
   state_tickers_cached: 2,
+  state_funding_rates_cached: 1,
   state_candles_cached: 5,
   state_latest_prices: { BTCUSD: '65000.5', ETHUSD: '3200.25' },
   event_bus_pending: 0,
@@ -151,5 +152,12 @@ describe('SystemMetricsSchema', () => {
   it('rejects a non-string price value', () => {
     const bad = { ...baseMetrics, state_latest_prices: { BTCUSD: 65000.5 } };
     expect(() => SystemMetricsSchema.parse(bad)).toThrow();
+  });
+
+  it('defaults state_funding_rates_cached to 0 when the backend omits it', () => {
+    const withoutFunding: Record<string, unknown> = { ...baseMetrics };
+    delete withoutFunding.state_funding_rates_cached;
+    const parsed = SystemMetricsSchema.parse(withoutFunding);
+    expect(parsed.state_funding_rates_cached).toBe(0);
   });
 });

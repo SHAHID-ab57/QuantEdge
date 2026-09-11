@@ -45,6 +45,39 @@ The API exposes historical market data and operational monitoring:
 | GET    | `/api/v1/markets/{symbol}/candles`       | Paginated candle history (limit/offset)                                                                                  |
 | GET    | `/api/v1/markets/{symbol}/candles/stats` | Aggregate stats for a timeframe/range (count, min/max price, avg volume, first/last candle); 404 when the range is empty |
 | GET    | `/api/v1/markets/{symbol}/latest`        | Newest candle for a market/timeframe                                                                                     |
+| GET    | `/api/v1/markets/{symbol}/ticker`        | Latest live ticker + perpetual funding rate (in-memory, with a Delta REST fill-in for funding rate / open interest)      |
+
+**`GET /api/v1/markets/{symbol}/ticker`** returns the latest values held in
+the in-memory market state manager (fed by the Delta WebSocket), not stored
+candles:
+
+```jsonc
+{
+  "symbol": "ETHUSD",
+  "as_of": "2026-09-10T20:41:14.693982Z", // state-manager update time, or null
+  "source": "ws", // "ws" | "rest" | "none" — where funding rate / OI came from
+  "last_price": "2462.25",
+  "bid": "2462.5",
+  "ask": "2462.55",
+  "mark_price": "2462.61600744",
+  "spot_price": null,
+  "open_interest": "1793422",
+  "price_change_24h": "-0.2466",
+  "turnover_24h": "702460936.06",
+  "funding_rate": "0.000757002682453864", // signed fraction per interval
+  "funding_interval_seconds": 28800,
+  "next_funding_time": "2026-09-11T00:00:00Z",
+}
+```
+
+Funding frames on the Delta feed are infrequent (roughly one per funding
+interval plus one on each rate change), so on a freshly (re)connected
+server the funding rate can briefly be missing from memory. When
+`funding_rate` or `open_interest` is not yet in memory the endpoint makes
+one Delta REST call (`GET /v2/tickers/{symbol}`) to fill just those two in;
+`source` is then `"rest"`. A symbol with no live data at all returns every
+value `null` with `source: "none"`. Decimals are JSON strings; timestamps
+are ISO-8601 UTC with a `Z` suffix.
 
 ### Technical indicators
 
@@ -1967,20 +2000,26 @@ subscriptions, message counts, reconnects, heartbeats, and uptime in
 
 ### WebSocket (live market stream)
 
-| Method | Path                | Purpose                                                           |
-| ------ | ------------------- | ----------------------------------------------------------------- |
-| WS     | `/api/v1/ws/market` | Live trade, ticker, and order-book updates for subscribed symbols |
+| Method | Path                | Purpose                                                                         |
+| ------ | ------------------- | ------------------------------------------------------------------------------- |
+| WS     | `/api/v1/ws/market` | Live trade, ticker, funding-rate, and order-book updates for subscribed symbols |
 
 The platform's one server-to-browser push channel — the frontend never
 connects to Delta Exchange directly. A client sends
 `{"action": "subscribe", "symbols": [...]}` to receive anything (no symbol
 is implicit); the server replies with an immediate `snapshot` and then
-`trade`/`ticker`/`orderbook` messages as they occur, plus `pong` for a
-client `ping`. Order-book messages carry an already-sorted (bids
-descending, asks ascending), depth-limited (100 levels/side) _reconstructed_
-book — snapshot merged with incremental diffs, not a single raw exchange
-message — built by `app/marketdata/orderbook.py`'s `OrderBookAggregator`.
-Full wire format is documented at the top of
+`trade`/`ticker`/`funding`/`orderbook` messages as they occur, plus `pong`
+for a client `ping`. The `snapshot` message carries `trade`, `ticker`,
+`funding` and `orderbook` fields (each `null` until first seen). The
+`ticker` payload now includes `open_interest`; the `funding` message /
+snapshot field carries `funding_rate` (signed fraction per interval),
+`funding_interval_seconds`, `next_funding_time` and `event_time` — funding
+frames are infrequent, so `funding` stays `null` for a while after a fresh
+connection. Order-book messages carry an already-sorted (bids descending,
+asks ascending), depth-limited (100 levels/side) _reconstructed_ book —
+snapshot merged with incremental diffs, not a single raw exchange message —
+built by `app/marketdata/orderbook.py`'s `OrderBookAggregator`. Full wire
+format is documented at the top of
 `app/api/v1/endpoints/market_stream.py`; see `FRONTEND.md` § "Live Market
 Dashboard" and § "Live Order Book Viewer" for how the two implemented pages
 consume it.

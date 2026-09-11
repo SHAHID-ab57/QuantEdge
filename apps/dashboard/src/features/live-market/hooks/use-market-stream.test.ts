@@ -151,6 +151,7 @@ describe('useMarketStream', () => {
         bid: '1899',
         ask: '1901',
         mark_price: '1900.5',
+        open_interest: '5000',
         price_change_24h: '3.2',
         event_time: '2026-01-01T00:00:00Z',
       },
@@ -170,6 +171,7 @@ describe('useMarketStream', () => {
       symbol: 'ETHUSD',
       trade: { price: '100', size: '1', side: 'unknown', event_time: '2026-01-01T00:00:00Z' },
       ticker: null,
+      funding: null,
       orderbook: null,
     });
 
@@ -432,6 +434,50 @@ describe('useMarketStream', () => {
     expect(result.current.latestOrderBook?.sequence).toBe(42);
   });
 
+  it('exposes the latest funding rate from a funding message', () => {
+    const { result } = renderHook(() =>
+      useMarketStream('ETHUSD', { streamUrl: 'ws://test/ws/market' }),
+    );
+    act(() => latestSocket().triggerOpen());
+
+    deliver({
+      type: 'funding',
+      symbol: 'ETHUSD',
+      data: {
+        funding_rate: '-0.001156',
+        funding_interval_seconds: 28800,
+        next_funding_time: '2026-01-01T08:00:00Z',
+        event_time: '2026-01-01T00:00:00Z',
+      },
+    });
+
+    expect(result.current.latestFunding?.funding_rate).toBe('-0.001156');
+    expect(result.current.latestFunding?.funding_interval_seconds).toBe(28800);
+  });
+
+  it('takes funding from a snapshot when no funding frame has streamed yet', () => {
+    const { result } = renderHook(() =>
+      useMarketStream('ETHUSD', { streamUrl: 'ws://test/ws/market' }),
+    );
+    act(() => latestSocket().triggerOpen());
+
+    deliver({
+      type: 'snapshot',
+      symbol: 'ETHUSD',
+      trade: null,
+      ticker: null,
+      funding: {
+        funding_rate: '0.00005',
+        funding_interval_seconds: 28800,
+        next_funding_time: null,
+        event_time: '2026-01-01T00:00:00Z',
+      },
+      orderbook: null,
+    });
+
+    expect(result.current.latestFunding?.funding_rate).toBe('0.00005');
+  });
+
   it('takes the order book from a snapshot when no update has streamed yet', () => {
     const { result } = renderHook(() =>
       useMarketStream('ETHUSD', { streamUrl: 'ws://test/ws/market' }),
@@ -443,6 +489,7 @@ describe('useMarketStream', () => {
       symbol: 'ETHUSD',
       trade: null,
       ticker: null,
+      funding: null,
       orderbook: {
         bids: [{ price: '100', size: '1' }],
         asks: [],
@@ -588,6 +635,7 @@ describe('useMarketStream channels option', () => {
         bid: '1899',
         ask: '1901',
         mark_price: '1900.5',
+        open_interest: '5000',
         price_change_24h: '3.2',
         event_time: '2026-01-01T00:00:00Z',
       },
@@ -623,7 +671,7 @@ describe('useMarketStream channels option', () => {
     const { result } = renderHook(() =>
       useMarketStream('ETHUSD', {
         streamUrl: 'ws://test/ws/market',
-        channels: { trades: false, ticker: false, orderBook: true },
+        channels: { trades: false, ticker: false, funding: false, orderBook: true },
       }),
     );
     act(() => latestSocket().triggerOpen());
@@ -636,7 +684,14 @@ describe('useMarketStream channels option', () => {
         bid: '1899',
         ask: '1901',
         mark_price: '1900.5',
+        open_interest: '5000',
         price_change_24h: '3.2',
+        event_time: '2026-01-01T00:00:00Z',
+      },
+      funding: {
+        funding_rate: '-0.0001',
+        funding_interval_seconds: 28800,
+        next_funding_time: null,
         event_time: '2026-01-01T00:00:00Z',
       },
       orderbook: {
@@ -649,6 +704,7 @@ describe('useMarketStream channels option', () => {
 
     expect(result.current.latestTrade).toBeNull();
     expect(result.current.latestTicker).toBeNull();
+    expect(result.current.latestFunding).toBeNull();
     expect(result.current.latestOrderBook?.bids).toEqual([{ price: '99', size: '2' }]);
   });
 
@@ -709,6 +765,7 @@ describe('useMarketStream onTrade callback', () => {
       symbol: 'ETHUSD',
       trade: { price: '100', size: '1', side: 'buy', event_time: '2026-01-01T00:00:00Z' },
       ticker: null,
+      funding: null,
       orderbook: null,
     });
 

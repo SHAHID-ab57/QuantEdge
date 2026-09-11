@@ -281,6 +281,7 @@ async def system_metrics(
         state_order_books_cached=_int_metric(state_snapshot, "order_books_cached"),
         state_trades_cached=_int_metric(state_snapshot, "trades_cached"),
         state_tickers_cached=_int_metric(state_snapshot, "tickers_cached"),
+        state_funding_rates_cached=_int_metric(state_snapshot, "funding_rates_cached"),
         state_candles_cached=_int_metric(state_snapshot, "candles_cached"),
         state_latest_prices=cast(dict[str, str], latest_prices),
         event_bus_pending=runtime.bus.pending_count,

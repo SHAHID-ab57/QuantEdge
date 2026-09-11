@@ -1,6 +1,6 @@
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
-import type { LiveTickerData, LiveTradeData } from '@/types/api/market-stream';
+import type { LiveFundingData, LiveTickerData, LiveTradeData } from '@/types/api/market-stream';
 import { PriceCard, UNAVAILABLE, type PriceStats24h } from './price-card';
 
 afterEach(() => {
@@ -21,7 +21,15 @@ const ticker: LiveTickerData = {
   bid: '1904',
   ask: '1906',
   mark_price: '1905.2',
+  open_interest: '17934.2',
   price_change_24h: '3.25',
+  event_time: '2026-01-01T00:00:05Z',
+};
+
+const funding: LiveFundingData = {
+  funding_rate: '-0.001156',
+  funding_interval_seconds: 28800,
+  next_funding_time: '2026-01-01T08:00:00Z',
   event_time: '2026-01-01T00:00:05Z',
 };
 
@@ -39,6 +47,7 @@ function renderCard(props: Partial<React.ComponentProps<typeof PriceCard>> = {})
       symbol="ETHUSD"
       latestTrade={null}
       latestTicker={null}
+      latestFunding={null}
       stats={undefined}
       statsLoading={false}
       statsError={false}
@@ -81,8 +90,9 @@ describe('PriceCard', () => {
 
   it('says "Unavailable" rather than a placeholder when nothing has arrived', () => {
     renderCard();
-    // Current price, 24h change, high, low, volume, last trade, last candle.
-    expect(screen.getAllByText(UNAVAILABLE)).toHaveLength(7);
+    // Current price, 24h change, high, low, volume, open interest, funding
+    // rate, last trade, last candle.
+    expect(screen.getAllByText(UNAVAILABLE)).toHaveLength(9);
   });
 
   it('says "Unavailable" for a non-numeric 24h change instead of rendering NaN', () => {
@@ -97,7 +107,26 @@ describe('PriceCard', () => {
 
   it('marks the stored-candle figures unavailable when stats fail to load', () => {
     renderCard({ statsError: true, latestTicker: ticker, latestTrade: trade });
-    // 24h high, 24h low, 24h volume and last candle time all come from stats.
-    expect(screen.getAllByText(UNAVAILABLE)).toHaveLength(4);
+    // 24h high, 24h low, 24h volume and last candle time all come from stats;
+    // funding rate is unavailable too (no funding frame passed here).
+    expect(screen.getAllByText(UNAVAILABLE)).toHaveLength(5);
+  });
+
+  it('shows open interest from the ticker', () => {
+    renderCard({ latestTicker: ticker });
+    expect(screen.getByText('Open Interest')).toBeInTheDocument();
+    expect(screen.getByText('17,934.20')).toBeInTheDocument();
+  });
+
+  it('renders the funding rate as a signed percentage', () => {
+    renderCard({ latestFunding: funding });
+    expect(screen.getByText('Funding Rate')).toBeInTheDocument();
+    expect(screen.getByText('-0.1156%')).toBeInTheDocument();
+  });
+
+  it('says "Unavailable" for the funding rate until a funding frame arrives', () => {
+    renderCard({ latestTicker: ticker });
+    const fundingLabel = screen.getByText('Funding Rate');
+    expect(fundingLabel.parentElement).toHaveTextContent(UNAVAILABLE);
   });
 });

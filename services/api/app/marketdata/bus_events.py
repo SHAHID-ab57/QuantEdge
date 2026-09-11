@@ -7,9 +7,9 @@ Subscribe with the wrapper's ``event_type`` (its class name):
 """
 
 from app.events.event import Event
-from app.marketdata.models import OrderBookEvent, TickerEvent, TradeEvent
+from app.marketdata.models import FundingRateEvent, OrderBookEvent, TickerEvent, TradeEvent
 
-__all__ = ["OrderBookUpdated", "TickerUpdated", "TradeEventReceived"]
+__all__ = ["FundingRateUpdated", "OrderBookUpdated", "TickerUpdated", "TradeEventReceived"]
 
 
 class TradeEventReceived(Event):
@@ -28,3 +28,9 @@ class OrderBookUpdated(Event):
     """A normalized order book snapshot/update published on the event bus."""
 
     order_book: OrderBookEvent
+
+
+class FundingRateUpdated(Event):
+    """A normalized perpetual funding rate update published on the event bus."""
+
+    funding_rate: FundingRateEvent

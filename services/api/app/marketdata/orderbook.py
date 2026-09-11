@@ -82,6 +82,10 @@ class OrderBookAggregator:
         """True once at least one snapshot has been reconstructed for ``symbol``."""
         return symbol in self._event_time
 
+    def symbols(self) -> tuple[str, ...]:
+        """Every symbol with a reconstructed book, in first-seen order."""
+        return tuple(self._event_time)
+
     def get_book(self, symbol: str, depth: int | None = None) -> OrderBookSnapshot | None:
         """The current book for ``symbol``, sorted and optionally depth-limited.
 

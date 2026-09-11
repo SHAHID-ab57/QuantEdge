@@ -7,6 +7,7 @@ these tests only verify the route's protocol handling and its wiring to
 a fresh, per-test ``Runtime`` (never the process-wide singleton).
 """
 
+from collections.abc import Generator
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -26,7 +27,7 @@ def runtime() -> Runtime:
 
 
 @pytest.fixture(autouse=True)
-def override_runtime(app: FastAPI, runtime: Runtime) -> None:
+def override_runtime(app: FastAPI, runtime: Runtime) -> Generator[None]:
     app.dependency_overrides[get_runtime] = lambda: runtime
     yield
     app.dependency_overrides.clear()
@@ -46,6 +47,7 @@ def test_subscribe_with_no_prior_state_returns_an_empty_snapshot(app: FastAPI) -
             "symbol": "ETHUSD",
             "trade": None,
             "ticker": None,
+            "funding": None,
             "orderbook": None,
         }
 

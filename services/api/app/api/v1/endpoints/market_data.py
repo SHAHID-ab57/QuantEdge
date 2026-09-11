@@ -10,15 +10,18 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Path, Query, status
 
 from app.core.config import get_settings
+from app.dependencies.live_market import get_live_market_service
 from app.dependencies.market_data import get_market_data_service
 from app.schemas.market_data import (
     CandlePageResponse,
     CandleStatsResponse,
     LatestCandleResponse,
+    LiveTickerResponse,
     MarketListResponse,
     MarketResearchResponse,
     TimeframesResponse,
 )
+from app.services.live_market import LiveMarketService
 from app.services.market_data import MarketDataService
 
 router = APIRouter(prefix="/markets", tags=["markets"])
@@ -80,6 +83,7 @@ _ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
 }
 
 MarketDataServiceDep = Annotated[MarketDataService, Depends(get_market_data_service)]
+LiveMarketServiceDep = Annotated[LiveMarketService, Depends(get_live_market_service)]
 SymbolPath = Annotated[str, Path(examples=["ETHUSD"], description="Market symbol")]
 TimeframeQuery = Annotated[
     str,
@@ -223,6 +227,29 @@ async def get_latest_candle(
 ) -> LatestCandleResponse:
     """Return the most recent candle for a market/timeframe."""
     return await service.get_latest_candle(symbol, timeframe)
+
+
+@router.get(
+    "/{symbol}/ticker",
+    response_model=LiveTickerResponse,
+    summary="Latest live ticker and funding rate",
+    description=(
+        "Return the latest in-memory ticker for a market (last/bid/ask/mark/"
+        "spot price, open interest, 24h turnover and change) together with "
+        "its perpetual funding rate. Data comes from the live Delta "
+        "WebSocket feed held in the market state manager; when the funding "
+        "rate or open interest is not yet in memory (funding frames are "
+        "infrequent), a single Delta REST call fills those two in. A symbol "
+        "with no live data yet returns all-null fields with source=none."
+    ),
+    responses=_ERROR_RESPONSES,
+)
+async def get_live_ticker(
+    symbol: SymbolPath,
+    service: LiveMarketServiceDep,
+) -> LiveTickerResponse:
+    """Return the latest live ticker + funding snapshot for a market."""
+    return await service.get_ticker(symbol)
 
 
 @router.get(

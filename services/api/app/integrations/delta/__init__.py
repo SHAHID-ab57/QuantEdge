@@ -17,6 +17,8 @@ from app.integrations.delta.models import (
     CandleResponse,
     DeltaErrorBody,
     DeltaResponse,
+    DeltaTicker,
+    DeltaTickerQuotes,
     Product,
     ProductAsset,
 )
@@ -30,6 +32,8 @@ __all__ = [
     "DeltaError",
     "DeltaErrorBody",
     "DeltaResponse",
+    "DeltaTicker",
+    "DeltaTickerQuotes",
     "NetworkError",
     "Product",
     "ProductAsset",

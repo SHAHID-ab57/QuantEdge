@@ -1,9 +1,9 @@
 """Live market data WebSocket gateway for browser clients.
 
 This is the only real-time channel the dashboard uses: it relays trade,
-ticker, and reconstructed order-book events already flowing through the
-in-process event bus (published by the Delta WebSocket client +
-processing pipeline, see ``app.runtime``) to subscribed browser
+ticker, funding-rate, and reconstructed order-book events already flowing
+through the in-process event bus (published by the Delta WebSocket client
++ processing pipeline, see ``app.runtime``) to subscribed browser
 connections. The frontend never opens a connection to the exchange
 itself.
 
@@ -15,14 +15,20 @@ Client -> server:
     ``{"action": "ping"}``
 
 Server -> client:
-    ``{"type": "snapshot", "symbol": "ETHUSD",
-    "trade": {...}|null, "ticker": {...}|null, "orderbook": {...}|null}``
+    ``{"type": "snapshot", "symbol": "ETHUSD", "trade": {...}|null,
+    "ticker": {...}|null, "funding": {...}|null, "orderbook": {...}|null}``
     ``{"type": "trade", "symbol": "ETHUSD", "data": {...}}``
-    ``{"type": "ticker", "symbol": "ETHUSD", "data": {...}}``
+    ``{"type": "ticker", "symbol": "ETHUSD", "data": {...}}``  (includes ``open_interest``)
+    ``{"type": "funding", "symbol": "ETHUSD", "data":
+    {"funding_rate", "funding_interval_seconds", "next_funding_time", "event_time"}}``
     ``{"type": "orderbook", "symbol": "ETHUSD",
     "data": {"bids": [...], "asks": [...], "event_time", "sequence"}}``
     ``{"type": "pong"}``
     ``{"type": "error", "detail": "..."}``
+
+``funding`` messages are infrequent (roughly one per funding interval plus
+one on each rate change), so the ``snapshot``'s ``funding`` field can be
+``null`` for a while after a fresh connection even on a busy market.
 
 ``orderbook.bids``/``asks`` are already sorted (bids descending, asks
 ascending) and depth-limited by the gateway — see

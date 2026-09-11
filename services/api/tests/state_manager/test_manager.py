@@ -14,7 +14,8 @@ from app.marketdata import (
     TickerUpdated,
     TradeEventReceived,
 )
-from app.marketdata.models import OrderBookEvent, TickerEvent, TradeEvent
+from app.marketdata.bus_events import FundingRateUpdated
+from app.marketdata.models import FundingRateEvent, OrderBookEvent, TickerEvent, TradeEvent
 from app.marketdata.normalizer import DeltaNormalizer
 from app.state import MarketState, MarketStateManager
 
@@ -41,6 +42,20 @@ def make_ticker_event(symbol: str = "BTCUSD", bid: str = "72141.0") -> TickerUpd
             symbol=symbol,
             event_time=datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC),
             bid=Decimal(bid),
+        ),
+    )
+
+
+def make_funding_event(symbol: str = "BTCUSD", rate: str = "0.0001") -> FundingRateUpdated:
+    return FundingRateUpdated(
+        source="delta.ws",
+        funding_rate=FundingRateEvent(
+            exchange="delta",
+            symbol=symbol,
+            event_time=datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC),
+            funding_rate=Decimal(rate),
+            funding_interval_seconds=28800,
+            next_funding_time=datetime(2026, 1, 2, 8, 0, 0, tzinfo=UTC),
         ),
     )
 
@@ -126,6 +141,22 @@ async def test_updates_and_queries_round_trip() -> None:
     assert latest_candle(manager, "BTCUSD", "1h").resolution == "1h"
     assert latest_book(manager, "BTCUSD").kind == "l1"
     assert manager.symbols() == frozenset({"BTCUSD"})
+
+
+@pytest.mark.asyncio
+async def test_funding_rate_round_trips_to_query_and_market_state() -> None:
+    bus = EventBus()
+    manager = MarketStateManager().attach(bus)
+
+    await publish_all(bus, [make_funding_event("BTCUSD", "-0.00025")])
+
+    funding = manager.get_latest_funding_rate("BTCUSD")
+    assert funding is not None
+    assert funding.funding_rate == Decimal("-0.00025")
+    assert funding.funding_interval_seconds == 28800
+    assert market_state(manager, "BTCUSD").funding_rate is funding
+    assert manager.snapshot()["funding_rates_cached"] == 1
+    assert manager.get_latest_funding_rate("ETHUSD") is None
 
 
 @pytest.mark.asyncio

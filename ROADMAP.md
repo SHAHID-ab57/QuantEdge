@@ -253,20 +253,26 @@ prior connector's own task already followed. See `ARCHITECTURE.md` §
 "External Data Connectors". This closes M4-E1 (External Data
 Connectors), this milestone's first epic — but not the milestone itself.
 **A second epic, M4-E2 (Delta REST/WS Completion & Liquidation Heatmap
-Investigation), is not started.** Confirmed directly against the real
-Delta client/parser code, not assumed: of the four items originally
-named, ticker and mark price are already fully wired end to end
-(subscribed, parsed, published, and reaching the frontend); open interest
-is parsed and held in `MarketStateManager` but silently dropped when the
-WebSocket gateway builds its outbound ticker payload — a real but narrow
-wiring gap; funding rate is the one genuinely unbuilt item — a
-`FundingRateEvent` model and its channel-dispatch registration exist at
-the low WebSocket-parser level, but nothing subscribes to that channel,
-so no funding rate value ever reaches the event bus, state manager, or
-any API. The liquidation heatmap investigation is deferred, not
-started — a repo-wide search found zero existing code or documentation
-for it. See `TASKBOOK.md` `M4-E2-T1`/`M4-E2-T2` for the full task
-breakdown.
+Investigation), has its first task done.** M4-E2-T1: confirmed directly
+against the real Delta client/parser code and Delta's live API — ticker
+and mark price were already fully wired; open interest was parsed and
+held in `MarketStateManager` but silently dropped when the WebSocket
+gateway built its outbound ticker payload; funding rate was parsed by the
+low-level parser and then went nowhere (`LIVE_CHANNELS` never subscribed
+it, the normalizer returned `unsupported`, no domain model or bus event).
+Now funding rate runs end to end (domain `FundingRateEvent` +
+`FundingRateUpdated` bus event + normalizer + state manager + a new
+`funding` WebSocket message), open interest reaches the ticker payload
+and frontend, and `DeltaClient.get_ticker` backs a new
+`GET /markets/{symbol}/ticker` endpoint (with a Delta REST fill-in for
+funding rate / open interest). The same task also **started order-flow
+data capture** (`OrderFlowCapture`, `trade_flow` / `orderbook_snapshots`
+tables): a capture mechanism only — no backfill, nothing reads it yet, no
+analysis — kept deliberately minimal so a future microstructure research
+task has real historical depth to work from. The liquidation heatmap
+investigation (M4-E2-T2) is still deferred — a repo-wide search found
+zero existing code or documentation for it. See `TASKBOOK.md`
+`M4-E2-T1`/`M4-E2-T2` for the full task breakdown.
 
 **A third epic, M4-E3 (Feature Value Assessment), is now complete.** Its
 first pass (M4-E3-T1) found the six connector features could not be
@@ -358,7 +364,10 @@ hypotheses are exhausted; the honest next move is Epic 4.2 / Milestone 5,
 or — the one untested hypothesis with real theoretical grounding —
 historical order-flow / microstructure persistence, which carries an
 infrastructure cost this sweep was the prerequisite for deciding to pay.
-`docs/research/HORIZON_SWEEP_ASSESSMENT.md`.
+`docs/research/HORIZON_SWEEP_ASSESSMENT.md`. **(Update: M4-E2-T1 has since
+started the capture side of that bet — `trade_flow` / `orderbook_snapshots`
+now accumulate in real time. It is a capture mechanism only; the research
+pipeline on top of it is still unbuilt.)**
 
 **And a regime walk-forward closed the very last one (REGIME-WALKFORWARD,
 `TASKBOOK.md` `M4-E3-T4`).** Every prior result rested on one chronological
@@ -375,7 +384,8 @@ artifact of that fixed lean meeting different outcome distributions, not
 skill. **The negative finding is regime-invariant.** A regime-aware
 modelling redirect is not indicated (no regime signal to exploit); the
 A/B fork is now Epic 4.2 / Milestone 5 vs the order-flow / microstructure
-infrastructure bet. `docs/research/REGIME_WALKFORWARD_ASSESSMENT.md`.
+infrastructure bet — whose capture half M4-E2-T1 has now started.
+`docs/research/REGIME_WALKFORWARD_ASSESSMENT.md`.
 
 **Milestone 5 — Production Hardening.** Authentication/authorization (none
 exists on any route today), CI/CD (none exists — all quality gates are

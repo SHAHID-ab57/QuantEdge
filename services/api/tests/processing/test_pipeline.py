@@ -63,6 +63,18 @@ VALID_ORDER_BOOK = json.dumps(
 )
 
 
+VALID_FUNDING_RATE = json.dumps(
+    {
+        "type": "funding_rate",
+        "fi": 28800,
+        "fr": "-0.001156061121670854",
+        "nfr": 1789099877000000,
+        "sy": "ETHUSD",
+        "ts": 1789071077271941,
+    }
+)
+
+
 class Collector:
     """Async handler that records every received event."""
 
@@ -147,6 +159,30 @@ async def test_valid_order_book_reaches_bus() -> None:
     assert book.sequence == 6199
     assert len(book.asks) == 2
     assert len(book.bids) == 1
+
+
+@pytest.mark.asyncio
+async def test_valid_funding_rate_reaches_bus() -> None:
+    bus = EventBus()
+    collector = Collector()
+    bus.subscribe("FundingRateUpdated", collector)
+
+    pipeline = make_pipeline(bus)
+    await pipeline.process_raw(VALID_FUNDING_RATE)
+    await bus.drain()
+
+    assert len(collector.events) == 1
+    event = collector.events[0]
+    assert event.event_type == "FundingRateUpdated"
+    assert event.source == "delta.ws"
+    funding = event.funding_rate
+    assert funding.exchange == "delta"
+    assert funding.symbol == "ETHUSD"
+    assert funding.funding_rate == Decimal("-0.001156061121670854")
+    assert funding.funding_interval_seconds == 28800
+    metrics = pipeline.metrics.snapshot()
+    assert metrics["events_published"] == 1
+    assert metrics["validation_failures"] == 0
 
 
 @pytest.mark.asyncio

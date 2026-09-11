@@ -81,6 +81,7 @@ export const SystemMetricsSchema = z.object({
   state_order_books_cached: z.number().int().nonnegative(),
   state_trades_cached: z.number().int().nonnegative(),
   state_tickers_cached: z.number().int().nonnegative(),
+  state_funding_rates_cached: z.number().int().nonnegative().default(0),
   state_candles_cached: z.number().int().nonnegative(),
   state_latest_prices: z.record(z.string(), z.string()),
   event_bus_pending: z.number().int().nonnegative(),

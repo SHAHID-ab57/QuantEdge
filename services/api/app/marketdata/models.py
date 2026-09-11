@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field, model_validator
 SYMBOL_PATTERN = r"^[A-Z0-9_.:\-+]+$"
 
 __all__ = [
+    "FundingRateEvent",
     "MarketDataEvent",
     "OrderBookEvent",
     "OrderBookLevel",
@@ -76,6 +77,27 @@ class TickerEvent(MarketDataEvent):
     open_interest: Decimal | None = Field(default=None, ge=0)
     price_change_24h: Decimal | None = None
     turnover: Decimal | None = Field(default=None, ge=0)
+
+
+class FundingRateEvent(MarketDataEvent):
+    """A perpetual-contract funding rate update.
+
+    Arrives on its own channel, not the ticker — hence a separate domain
+    event rather than a field on :class:`TickerEvent`. ``funding_rate`` is
+    a signed fraction per funding interval (e.g. ``-0.0002`` = the shorts
+    pay the longs 0.02% this interval); it is deliberately unconstrained in
+    sign.
+    """
+
+    funding_rate: Decimal
+    funding_interval_seconds: int | None = Field(default=None, gt=0)
+    next_funding_time: datetime | None = None
+
+    @model_validator(mode="after")
+    def _next_funding_time_must_be_utc(self) -> "FundingRateEvent":
+        if self.next_funding_time is not None and self.next_funding_time.tzinfo is None:
+            raise ValueError("next_funding_time must be timezone-aware (UTC)")
+        return self
 
 
 class OrderBookLevel(BaseModel):

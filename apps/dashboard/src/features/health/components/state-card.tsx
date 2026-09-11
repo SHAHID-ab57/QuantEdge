@@ -98,6 +98,10 @@ export function StateCard({
         />
         <MetricRow label="Trades cached" value={formatNumber(metrics.state_trades_cached)} />
         <MetricRow label="Tickers cached" value={formatNumber(metrics.state_tickers_cached)} />
+        <MetricRow
+          label="Funding rates cached"
+          value={formatNumber(metrics.state_funding_rates_cached)}
+        />
         <MetricRow label="Candles cached" value={formatNumber(metrics.state_candles_cached)} />
         <MetricRow
           label="Cache hit ratio"

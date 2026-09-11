@@ -8,6 +8,7 @@ datetimes as ISO-8601 UTC.
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
 
@@ -318,6 +319,67 @@ class CandleStatsResponse(BaseModel):
         return text
 
     @field_serializer("start", "end")
+    def _serialize_utc(self, value: datetime | None) -> str | None:
+        """Serialize datetimes as ISO-8601 UTC (or ``null`` when unset)."""
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC).isoformat().replace("+00:00", "Z")
+        return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+class LiveTickerResponse(BaseModel):
+    """Latest live ticker + funding snapshot for one market.
+
+    Built from the in-memory :class:`~app.state.manager.MarketStateManager`
+    (fed by the Delta WebSocket), with an optional one-shot Delta REST
+    fill-in for the funding rate and open interest: funding frames are
+    infrequent, so a freshly (re)connected server can hold ticker/trade
+    data while ``funding_rate`` is still ``None``.
+
+    ``source`` reports where the funding/OI values came from: ``ws`` from a
+    streamed funding frame, ``rest`` from the REST fill-in, ``none`` when
+    neither was available.
+    """
+
+    symbol: str
+    as_of: datetime | None = Field(
+        default=None, description="State-manager update time for this symbol, ISO-8601 UTC"
+    )
+    source: Literal["ws", "rest", "none"] = "none"
+    last_price: Decimal | None = None
+    bid: Decimal | None = None
+    ask: Decimal | None = None
+    mark_price: Decimal | None = None
+    spot_price: Decimal | None = None
+    open_interest: Decimal | None = None
+    price_change_24h: Decimal | None = None
+    turnover_24h: Decimal | None = None
+    funding_rate: Decimal | None = None
+    funding_interval_seconds: int | None = None
+    next_funding_time: datetime | None = None
+
+    @field_serializer(
+        "last_price",
+        "bid",
+        "ask",
+        "mark_price",
+        "spot_price",
+        "open_interest",
+        "price_change_24h",
+        "turnover_24h",
+        "funding_rate",
+    )
+    def _serialize_decimal(self, value: Decimal | None) -> str | None:
+        """Serialize decimals as plain strings without trailing zeros."""
+        if value is None:
+            return None
+        text = format(value, "f")
+        if "." in text:
+            text = text.rstrip("0").rstrip(".")
+        return text
+
+    @field_serializer("as_of", "next_funding_time")
     def _serialize_utc(self, value: datetime | None) -> str | None:
         """Serialize datetimes as ISO-8601 UTC (or ``null`` when unset)."""
         if value is None:

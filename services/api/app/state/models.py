@@ -5,7 +5,12 @@ from datetime import datetime
 from decimal import Decimal
 
 from app.events.example_events import CandleClosed
-from app.marketdata.models import OrderBookEvent, TickerEvent, TradeEvent
+from app.marketdata.models import (
+    FundingRateEvent,
+    OrderBookEvent,
+    TickerEvent,
+    TradeEvent,
+)
 
 __all__ = ["MarketState"]
 
@@ -25,6 +30,7 @@ class MarketState:
     ticker: TickerEvent | None = None
     candle: CandleClosed | None = None
     order_book: OrderBookEvent | None = None
+    funding_rate: FundingRateEvent | None = None
 
     @property
     def last_price(self) -> Decimal | None:

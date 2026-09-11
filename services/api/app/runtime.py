@@ -69,6 +69,7 @@ from app.services.candle_sync import CandleSyncScheduler
 from app.services.external_data_sync import ExternalDataSyncScheduler
 from app.services.grading_scheduler import PredictionGradingScheduler
 from app.services.news_sync import NewsSyncScheduler
+from app.services.order_flow_capture import OrderFlowCapture
 from app.services.paper_trading_strategy import PaperTradingStrategyScheduler
 from app.state import MarketStateManager
 from app.ws.models import WSEvent
@@ -84,7 +85,7 @@ __all__ = [
 
 logger = logging.getLogger("app.runtime")
 
-LIVE_CHANNELS = ("trades", "ticker", "ob_l1", "ob_updates")
+LIVE_CHANNELS = ("trades", "ticker", "ob_l1", "ob_updates", "funding_rate")
 
 REST_PROBE_PATH = "/v2/products"
 REST_PROBE_TIMEOUT = 5.0
@@ -141,6 +142,21 @@ class Runtime:
                 settings.paper_trading_strategy_default_stop_loss_pct
             ),
         ).attach(self.bus)
+        # Order-flow capture only makes sense with the live pipeline publishing
+        # bus events; attaching (and thus buffering trades) is pointless
+        # otherwise, so it is constructed conditionally, not started-and-idle.
+        self.order_flow_capture: OrderFlowCapture | None = None
+        if settings.orderflow_capture_enabled and market_data_live:
+            self.order_flow_capture = OrderFlowCapture(
+                aggregator=self.order_book,
+                symbols=self._symbols,
+                snapshot_interval_seconds=settings.orderflow_snapshot_interval_seconds,
+                snapshot_depth=settings.orderflow_snapshot_depth,
+                trade_flush_seconds=settings.orderflow_trade_flush_seconds,
+                trade_buffer_max=settings.orderflow_trade_buffer_max,
+                retention_days=settings.orderflow_retention_days,
+                prune_interval_seconds=settings.orderflow_prune_interval_seconds,
+            ).attach(self.bus)
         self.pipeline: MarketDataPipeline | None = None
         self.delta_ws: DeltaWebSocketClient | None = None
         self.candle_sync: CandleSyncScheduler | None = None
@@ -181,6 +197,8 @@ class Runtime:
                 ",".join(self._symbols) or "*",
                 ",".join(LIVE_CHANNELS),
             )
+            if self.order_flow_capture is not None:
+                await self.order_flow_capture.start()
         else:
             logger.info("Live market data disabled; WebSocket components report as not running")
 
@@ -243,6 +261,9 @@ class Runtime:
         if news_sync is not None:
             await news_sync.stop()
             self.news_sync = None
+        order_flow_capture = self.order_flow_capture
+        if order_flow_capture is not None:
+            await order_flow_capture.stop()
         ws = self.delta_ws
         if ws is not None:
             await ws.close()

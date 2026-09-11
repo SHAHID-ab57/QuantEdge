@@ -321,6 +321,80 @@ async def test_credentials_bad_signature_maps_to_authentication_error() -> None:
     assert excinfo.value.status_code == 401
 
 
+_TICKER_RESULT = {
+    "symbol": "ETHUSD",
+    "contract_type": "perpetual_futures",
+    "mark_price": "2465.66449278",
+    "spot_price": "2466.72",
+    "close": 2465.7,
+    "funding_rate": "-0.001156061121670854",
+    "oi": "17934.2000",
+    "oi_contracts": "1793420",
+    "oi_value_usd": "44238291.1400",
+    "turnover_usd": 710726972.592006,
+    "volume": 289992.97,
+    "timestamp": 1789071077271941,
+    "quotes": {"best_bid": "2465.65", "best_ask": "2465.7", "bid_size": "2061", "ask_size": "6877"},
+}
+
+
+@pytest.mark.asyncio
+async def test_get_ticker_returns_validated_snapshot() -> None:
+    captured: dict[str, object] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        return httpx.Response(200, json={"success": True, "result": _TICKER_RESULT})
+
+    client = client_for(handler)
+    async with client:
+        ticker = await client.get_ticker("ETHUSD")
+
+    assert captured["url"] == "https://api.india.delta.exchange/v2/tickers/ETHUSD"
+    assert ticker.symbol == "ETHUSD"
+    assert str(ticker.funding_rate) == "-0.001156061121670854"
+    assert str(ticker.oi) == "17934.2000"
+    assert str(ticker.oi_contracts) == "1793420"
+    assert ticker.quotes is not None
+    assert str(ticker.quotes.best_bid) == "2465.65"
+
+
+@pytest.mark.asyncio
+async def test_get_ticker_non_object_result_raises_api_error() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"success": True, "result": ["not", "an", "object"]})
+
+    client = client_for(handler)
+    async with client:
+        with pytest.raises(APIError):
+            await client.get_ticker("ETHUSD")
+
+
+@pytest.mark.asyncio
+async def test_get_ticker_malformed_record_raises_api_error() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"success": True, "result": {"symbol": "ETHUSD", "mark_price": "not-a-number"}},
+        )
+
+    client = client_for(handler)
+    async with client:
+        with pytest.raises(APIError):
+            await client.get_ticker("ETHUSD")
+
+
+@pytest.mark.asyncio
+async def test_get_ticker_network_failure_maps_to_network_error() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused")
+
+    client = client_for(handler, max_retries=0)
+    async with client:
+        with pytest.raises(NetworkError):
+            await client.get_ticker("ETHUSD")
+
+
 @pytest.mark.asyncio
 async def test_logs_do_not_expose_secrets(caplog: pytest.LogCaptureFixture) -> None:
     """Request logs must never contain API credentials or signatures."""

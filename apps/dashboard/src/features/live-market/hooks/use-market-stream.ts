@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { env } from '@/config/env';
 import {
   MarketStreamMessageSchema,
+  type LiveFundingData,
   type LiveOrderBookData,
   type LiveTickerData,
   type LiveTradeData,
@@ -21,12 +22,14 @@ export interface StreamChannels {
   trades?: boolean;
   ticker?: boolean;
   orderBook?: boolean;
+  funding?: boolean;
 }
 
 const DEFAULT_CHANNELS: Required<StreamChannels> = {
   trades: true,
   ticker: true,
   orderBook: true,
+  funding: true,
 };
 
 export interface UseMarketStreamOptions {
@@ -80,6 +83,14 @@ export interface UseMarketStreamResult {
   latencyMs: number | null;
   latestTrade: LiveTradeData | null;
   latestTicker: LiveTickerData | null;
+  /**
+   * Latest funding rate, or `null` until the first `funding` frame — those
+   * are infrequent (roughly one per funding interval plus one on each rate
+   * change), so a fresh connection can hold `null` here for a while even on
+   * a busy market. `GET /api/v1/markets/{symbol}/ticker` has a REST
+   * fill-in for that gap when a value is needed on demand.
+   */
+  latestFunding: LiveFundingData | null;
   /** Newest first, capped at `maxTrades`. */
   trades: LiveTradeData[];
   /** Already sorted and depth-limited by the gateway — see `market-stream.ts`. */
@@ -89,6 +100,7 @@ export interface UseMarketStreamResult {
 interface StreamData {
   latestTrade: LiveTradeData | null;
   latestTicker: LiveTickerData | null;
+  latestFunding: LiveFundingData | null;
   trades: LiveTradeData[];
   latestOrderBook: LiveOrderBookData | null;
   lastMessageAt: number | null;
@@ -99,6 +111,7 @@ interface StreamData {
 const EMPTY_DATA: StreamData = {
   latestTrade: null,
   latestTicker: null,
+  latestFunding: null,
   trades: [],
   latestOrderBook: null,
   lastMessageAt: null,
@@ -110,6 +123,7 @@ const EMPTY_DATA: StreamData = {
 interface PendingUpdate {
   trades: LiveTradeData[];
   ticker: LiveTickerData | null;
+  funding: LiveFundingData | null;
   snapshotTrade: LiveTradeData | null;
   orderBook: LiveOrderBookData | null;
   lastMessageAt: number | null;
@@ -121,6 +135,7 @@ function emptyPending(): PendingUpdate {
   return {
     trades: [],
     ticker: null,
+    funding: null,
     snapshotTrade: null,
     orderBook: null,
     lastMessageAt: null,
@@ -212,6 +227,7 @@ export function useMarketStream(
           // snapshot only fills in when nothing has streamed yet.
           latestTrade: update.trades.at(-1) ?? update.snapshotTrade ?? previous.latestTrade,
           latestTicker: update.ticker ?? previous.latestTicker,
+          latestFunding: update.funding ?? previous.latestFunding,
           trades: nextTrades,
           latestOrderBook: update.orderBook ?? previous.latestOrderBook,
           lastMessageAt: update.lastMessageAt ?? previous.lastMessageAt,
@@ -303,6 +319,11 @@ export function useMarketStream(
           return;
         }
         pending.orderBook = message.data;
+      } else if (message.type === 'funding') {
+        if (!active.funding) {
+          return;
+        }
+        pending.funding = message.data;
       } else {
         let sawTrackedField = false;
         if (message.trade && active.trades) {
@@ -311,6 +332,10 @@ export function useMarketStream(
         }
         if (message.ticker && active.ticker) {
           pending.ticker = message.ticker;
+          sawTrackedField = true;
+        }
+        if (message.funding && active.funding) {
+          pending.funding = message.funding;
           sawTrackedField = true;
         }
         if (message.orderbook && active.orderBook) {
@@ -387,6 +412,7 @@ export function useMarketStream(
     latencyMs: data.latencyMs,
     latestTrade: data.latestTrade,
     latestTicker: data.latestTicker,
+    latestFunding: data.latestFunding,
     trades: data.trades,
     latestOrderBook: data.latestOrderBook,
   };

@@ -8,6 +8,71 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Funding rate + open interest completion, and the start of order-flow
+  data capture (M4-E2-T1).** Milestone 4's second epic — Delta REST/WS
+  completion — closing the gap between what Delta's own feed already
+  carries and what the platform surfaces. No new data source.
+  - **The gap, re-confirmed directly against Delta's live API and the
+    repo** (not an earlier passing note): ticker + mark price were already
+    fully wired; **open interest** was parsed into `TickerEvent` and held
+    in the state manager but silently dropped from the WebSocket ticker
+    payload; **funding rate** was parsed by `DeltaMessageParser` and then
+    stopped dead — normalizer returned `unsupported`, no domain model, no
+    bus event, `funding_rate` never subscribed.
+  - **Funding rate, end to end**, following the existing
+    one-channel-one-event pattern: `FundingRateEvent` domain model +
+    `FundingRateUpdated` bus event, `DeltaNormalizer._funding_rate`
+    (Delta's `fr`/`fi` seconds/`nfr` micros → domain units, verified
+    against real live frames), pipeline dispatch, `MarketStateManager`
+    (`get_latest_funding_rate`, `MarketState.funding_rate`, snapshot
+    `funding_rates_cached`), and `funding_rate` added to `LIVE_CHANNELS`.
+    Funding frames are infrequent, so `get_latest_funding_rate` can
+    legitimately be `None` for a while after a fresh (re)connect.
+  - **Open interest** added to the WebSocket `ticker` payload and the
+    frontend schema — the one-line wiring gap.
+  - **New `funding` WebSocket message type** + snapshot field on
+    `/api/v1/ws/market`; the frontend `use-market-stream` hook and
+    `PriceCard` now render open interest and the funding rate (as a signed
+    percentage, with the interval and next-funding countdown).
+  - **`DeltaClient.get_ticker(symbol)`** — first REST domain method
+    besides `get_candles`; `GET /v2/tickers/{symbol}` → `DeltaTicker`,
+    same typed-error / retry conventions. Backs the new
+    **`GET /api/v1/markets/{symbol}/ticker`** endpoint (`LiveMarketService`),
+    which reads in-memory ticker + funding and fills the funding rate /
+    open interest from one REST call when they are not yet in memory
+    (`source: ws|rest|none`).
+  - **Order-flow data capture — a capture mechanism only, not a research
+    pipeline.** New `OrderFlowCapture` service + `trade_flow` /
+    `orderbook_snapshots` tables (migration `252f1e39f532`). Subscribes to
+    the `TradeEventReceived` bus events and reads the same
+    `OrderBookAggregator` the gateway uses; persists every streamed trade
+    (batch-flushed) and the top-N reconstructed book levels on a fixed
+    cadence. Constructed only when `orderflow_capture_enabled` **and**
+    `MARKET_DATA_LIVE=true`, no-ops without a database, swallows every
+    persistence error. **No historical backfill** (real-time accumulation
+    only), and **nothing downstream reads these tables yet** — no feature
+    generator, no connector-abstraction integration, no analysis. Those
+    are a future microstructure research task.
+  - **Bounded, not unbounded**: measured growth is ~84k trades + ~11.5k
+    snapshots/day combined across both symbols (~31 MB/day) with no cap
+    otherwise, so the same background loop now runs a periodic retention
+    sweep (`orderflow_retention_days`, default 60; `prune_trades_older_than`
+    / `prune_snapshots_older_than`) on its own, coarser cadence
+    (`orderflow_prune_interval_seconds`, default hourly). Confirmed
+    decoupled from the platform's own live consumers: `EventBus.publish`
+    schedules one independent `asyncio.Task` per handler, so
+    `OrderFlowCapture`'s writes never share a call stack with
+    `MarketStateManager`/`OrderBookAggregator`/`MarketStreamGateway`'s own
+    handling of the same events. A restart or WebSocket reconnect is a
+    real, disclosed gap in this data — there is no backfill to close it.
+  - Verified live against the running server: funding rate + open interest
+    genuinely populate the state manager and the new endpoint from real
+    Delta frames on both tracked symbols; `trade_flow` /
+    `orderbook_snapshots` accumulate real, coherent rows on the configured
+    cadence.
+  - Full design in `ARCHITECTURE.md` § "Funding Rate, Open Interest &
+    Order-Flow Capture"; API surface in `docs/api/API.md`.
+
 - **FRED macroeconomic connector (`fed_funds_rate`, M4-E1-T2): the second
   concrete connector, and the first requiring authentication.** Re-issued
   and built here after this same task was previously reported as issued

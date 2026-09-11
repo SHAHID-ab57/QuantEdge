@@ -58,11 +58,12 @@ primitive (mirroring the backend's own broker-free `EventBus`) that
 broadcasts one synchronized "current candle/timestamp/phase/speed" tick so
 the chart, and any future replay-synchronized module, read the identical
 position rather than each deriving it separately. No backend change was
-needed for any of this; only OHLCV candles are replayed, since
-`services/api/app/models/` persists no historical tick-level trade log or
-order-book snapshot store to replay instead (documented extension points
-exist for both, in `src/features/replay/extension-points.ts`, for whenever
-that becomes a real backend feature). It talks to
+needed for any of this; only OHLCV candles are replayed. The backend now
+does persist a live order-book / trade-flow capture store (§ "Funding
+Rate, Open Interest & Order-Flow Capture") but it is a capture mechanism
+only — it holds no historical backfill and nothing reads it yet, so it is
+not a replay source; the documented extension points for one remain in
+`src/features/replay/extension-points.ts`. It talks to
 `services/api` over the read-only REST surface described
 in [`docs/api/API.md`](docs/api/API.md) for historical data, and over a
 single WebSocket gateway (below) for live data — never directly to Delta
@@ -80,12 +81,12 @@ architecture. Two API surfaces exist:
 - **WebSocket gateway** (`app/api/v1/endpoints/market_stream.py`, backed by
   `app/marketdata/gateway.py`'s `MarketStreamGateway`): the platform's
   first server-to-browser push channel, added for the Live Market
-  Dashboard. It relays `TradeEventReceived`/`TickerUpdated` events already
-  flowing through the in-process event bus (published by the Delta
-  WebSocket client + processing pipeline — see `app/runtime.py`) to
-  browser clients subscribed to a symbol, plus a reconstructed order-book
-  view for the Order Book viewer (below). It does not add a new data
-  source; it exposes data the runtime already collects.
+  Dashboard. It relays `TradeEventReceived`/`TickerUpdated`/
+  `FundingRateUpdated` events already flowing through the in-process event
+  bus (published by the Delta WebSocket client + processing pipeline — see
+  `app/runtime.py`) to browser clients subscribed to a symbol, plus a
+  reconstructed order-book view for the Order Book viewer (below). It does
+  not add a new data source; it exposes data the runtime already collects.
 - **Order book reconstruction** (`app/marketdata/orderbook.py`'s
   `OrderBookAggregator`): `MarketStateManager` deliberately does not
   reconstruct a coherent order book from Delta's snapshot + incremental-diff
@@ -4964,6 +4965,156 @@ real-article, null-sentiment, empty, error, and filter/clear states;
 `data-sources-page.test.tsx` gained a case proving a registered
 `news_sentiment` connector renders as an ordinary card with zero
 News-specific code, alongside Fear & Greed's own.
+
+### Funding Rate, Open Interest & Order-Flow Capture (M4-E2-T1)
+
+Milestone 4's second epic — **Delta REST/WS completion** — is a different
+thing from the connector epic above: no new external source, no
+`Connector` abstraction, just closing the gaps between what Delta's own
+feed already carries and what the platform actually surfaces.
+
+**Step 1 — the gap, re-confirmed directly against Delta's live API and the
+repo, not an earlier passing note.** Ticker and mark price were already
+fully wired (WS `ticker` channel → `DeltaNormalizer._ticker_from_data` →
+`TickerEvent` → `MarketStateManager`). Two real gaps remained:
+
+- **Open interest** was parsed and stored — `TickerEvent.open_interest` is
+  set from the ticker frame's `oi[0]` and held in `MarketStateManager` —
+  but silently dropped from `MarketStreamGateway._ticker_payload`, so it
+  reached no WebSocket consumer or the frontend. A narrow wiring gap: one
+  field added to the payload, plus its frontend schema.
+- **Funding rate** was entirely unbuilt past the parser.
+  `DeltaMessageParser` registered the `funding_rate` wire type
+  (`parser.py`), but `DeltaNormalizer.normalize` returned `unsupported`
+  for it, there was no domain model or bus event, and `LIVE_CHANNELS`
+  never subscribed the channel. Verified against real live frames: Delta's
+  `funding_rate` frame carries `fr` (signed rate), `fi` (funding interval
+  in **seconds**, `28800` = 8h) and `nfr` (next funding instant, **micros**
+  like `ts`). The WS `ticker` frame carries **no** funding rate; the REST
+  `GET /v2/tickers/{symbol}` carries both `funding_rate` and open interest
+  in one call.
+
+**Step 2 — funding rate, following the existing one-channel-one-event
+pattern** (not folded onto `TickerEvent`, since it is a distinct channel):
+
+```text
+WS funding_rate frame
+  → DeltaNormalizer._funding_rate  (fr/fi/nfr → domain units)
+  → FundingRateEvent               (app/marketdata/models.py: signed rate,
+                                     interval seconds, next funding time UTC)
+  → FundingRateUpdated             (app/marketdata/bus_events.py)
+  → MarketStateManager._funding_rates[symbol]   (get_latest_funding_rate,
+                                                  MarketState.funding_rate,
+                                                  snapshot funding_rates_cached)
+  → MarketStreamGateway            (new `funding` message type + snapshot
+                                     field; `open_interest` added to the
+                                     ticker payload)
+```
+
+`LIVE_CHANNELS` now includes `funding_rate`. Funding frames are
+**infrequent** — roughly one per funding interval plus one on each rate
+change — so `get_latest_funding_rate` legitimately returns `None` for a
+while after a fresh (re)connect even while ticker and trade data flow.
+
+**`DeltaClient.get_ticker(symbol)`** is the first domain method on the REST
+client besides `get_candles` — `GET /v2/tickers/{symbol}` → `DeltaTicker`
+(`app/integrations/delta/models.py`), following the established typed-error
+/ `response_model` conventions, retries and backoff inherited unchanged.
+It backs **`GET /api/v1/markets/{symbol}/ticker`** (`LiveMarketService`,
+`app/services/live_market.py`): the endpoint reads the in-memory ticker +
+funding for the symbol and, when funding rate or open interest is not yet
+in memory, fills those two fields from one REST call — `source` on the
+response reports `ws`, `rest`, or `none`. This is also the clean
+live-verification surface (no REST ticker existed before). The REST
+fill-in prefers `oi_contracts` because the WS `ticker` channel's `oi` is
+also in contracts, keeping the field's units stable whichever path set it.
+
+**Step 0 — order-flow capture (`app/services/order_flow_capture.py`,
+`app/models/order_flow.py`, `app/repositories/order_flow.py`).** A
+**capture mechanism only — not a research pipeline.** It subscribes to the
+same `TradeEventReceived` bus events the Trade Analytics dashboard already
+consumes and reads the same `OrderBookAggregator` the gateway already
+uses; it adds **no new data source**. It persists two tables:
+
+- **`trade_flow`** — every streamed trade (exchange, symbol, side, price,
+  size, event/trade time, capture time), buffered in memory and
+  batch-flushed every `orderflow_trade_flush_seconds` (or early at
+  `orderflow_trade_buffer_max`).
+- **`orderbook_snapshots`** — the top `orderflow_snapshot_depth` (default 25) levels of each tracked symbol's _reconstructed_ book, on a fixed
+  `orderflow_snapshot_interval_seconds` (default 15) cadence, with
+  sequence and event time. Bids/asks are stored as JSON `[["price",
+"size"], …]` pairs.
+
+Enough to reconstruct order-flow imbalance and depth-at-price later, not a
+full tick-by-tick replay archive. The service is constructed only when
+`orderflow_capture_enabled` **and** `MARKET_DATA_LIVE=true` (idle
+buffering otherwise serves nothing), no-ops cleanly with no database, and
+swallows every persistence error (log, never re-raise, never lose the
+loop). Unlike every connector on the platform, this data has **no
+historical backfill** — it only accumulates in real time, so every day it
+is off is a day permanently lost. **Nothing downstream reads these tables
+yet**: there is deliberately no feature generator, no connector-abstraction
+integration, and no analysis — those are a future microstructure research
+task.
+
+Migration `252f1e39f532` creates both tables. Verified live against the
+running server: `funding_rate` and `oi` genuinely populate
+`MarketStateManager` and the new endpoint from real Delta frames on both
+tracked symbols, and `trade_flow` / `orderbook_snapshots` accumulate real
+rows (top-of-book coherent, bid < ask, 25 levels/side) on the configured
+cadence.
+
+**Storage growth is real and was measured, not assumed — and is now
+bounded by a retention sweep, not left open.** A clean, continuous 10-minute
+run against the live server captured 582 trades and 100 snapshots across
+the two tracked symbols; the snapshot side is also fully deterministic
+from config (2 symbols × one snapshot every 15s = 11,520 rows/day). Using
+Postgres's own measured per-row footprint (table + indexes) — `trade_flow`
+≈185 bytes/row, `orderbook_snapshots` ≈1.4 KB/row at depth 25 — this
+projects to roughly **84,000 trades/day and 11,500 snapshots/day combined
+across both symbols** (not per symbol), or **~15 MB/day for `trade_flow`
+and ~16 MB/day for `orderbook_snapshots`, ~31 MB/day combined** — about
+930 MB/month, 2.8 GB/quarter, with zero cap otherwise. That is why
+`OrderFlowCapture`'s own background loop also runs a periodic **retention
+sweep**: every `orderflow_prune_interval_seconds` (default 3600s — a
+`DELETE … WHERE captured_at < cutoff` is cheap regardless of how often
+it's checked, so this doesn't need the 5–15s capture cadence) it deletes
+rows from both tables older than `orderflow_retention_days` (default 60),
+keyed on each row's own `captured_at` — not the exchange's `event_time` —
+via `OrderFlowRepository.prune_trades_older_than` /
+`prune_snapshots_older_than`. 60 days of history is enough for a first
+microstructure research pass without the tables growing forever
+unattended; both are configurable and the sweep is on by construction
+whenever the capture itself is.
+
+**Execution path — confirmed from the actual code, not asserted.**
+`EventBus.publish` (`app/events/bus.py`) schedules **one independent
+`asyncio.Task` per subscribed handler** for every event
+(`self._pending.add(asyncio.create_task(self._invoke(handler, event)))`).
+`OrderFlowCapture._on_trade` is one more subscriber to the same
+`TradeEventReceived` event `MarketStateManager`, `OrderBookAggregator`, and
+`MarketStreamGateway` already subscribe to — it runs as its **own task**,
+never inline with theirs, so a slow write here cannot delay or block
+delivery to the live consumers the running platform actually depends on
+today. Snapshotting and the retention sweep run on a third, fully separate
+background task (`asyncio.create_task` in `OrderFlowCapture.start()`)
+outside the event bus entirely — they never share a call stack with any
+bus handler at all. The one thing all of these genuinely share is the
+process's single-threaded event loop and the app's one database connection
+pool (`get_engine()`); every capture write is a real, non-blocking
+`asyncpg` call awaited inside `async with session_factory() as session:`,
+so it yields the loop while waiting on the network rather than stalling
+it, and holds a pool connection only for the duration of one
+insert/delete, not the whole 5–15s cycle.
+
+**A real, disclosed gap: this capture has no continuity guarantee across a
+restart or reconnect.** Every WebSocket disconnect/reconnect (`delta_ws`
+dropping and resubscribing) and every process restart is a real gap in
+`trade_flow` / `orderbook_snapshots` — nothing backfills what was missed,
+because, as stated above, this data has no historical backfill by design.
+A future microstructure research task consuming these tables must check
+for gaps (e.g. via `sequence`/`event_time` continuity) rather than assume
+uninterrupted coverage.
 
 ### Feature Store
 

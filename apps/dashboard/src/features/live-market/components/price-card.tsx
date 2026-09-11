@@ -12,7 +12,7 @@ import {
   formatPrice,
   formatRelative,
 } from '@/features/markets/lib/format';
-import type { LiveTickerData, LiveTradeData } from '@/types/api/market-stream';
+import type { LiveFundingData, LiveTickerData, LiveTradeData } from '@/types/api/market-stream';
 import { total24hVolume } from '../hooks/use-price-stats';
 
 /**
@@ -34,6 +34,7 @@ export interface PriceCardProps {
   symbol: string;
   latestTrade: LiveTradeData | null;
   latestTicker: LiveTickerData | null;
+  latestFunding: LiveFundingData | null;
   stats: PriceStats24h | undefined;
   statsLoading: boolean;
   statsError: boolean;
@@ -61,6 +62,30 @@ function formatChange(changeValue: number | null): string {
 /** `formatPrice`/`formatNumber` render a dash for missing values; say so explicitly instead. */
 function orUnavailable(formatted: string): string {
   return formatted === '—' ? UNAVAILABLE : formatted;
+}
+
+/**
+ * `funding_rate` is a signed fraction per funding interval (e.g. `-0.000116`
+ * = shorts pay longs 0.0116% this interval); render it as a percentage with
+ * enough precision to be meaningful at that scale.
+ */
+function formatFundingRate(rate: string | null | undefined): string {
+  if (rate === null || rate === undefined) {
+    return UNAVAILABLE;
+  }
+  const value = Number(rate);
+  if (!Number.isFinite(value)) {
+    return UNAVAILABLE;
+  }
+  return `${value >= 0 ? '+' : ''}${(value * 100).toFixed(4)}%`;
+}
+
+function fundingIntervalLabel(seconds: number | null | undefined): string | undefined {
+  if (!seconds || seconds <= 0) {
+    return undefined;
+  }
+  const hours = seconds / 3600;
+  return Number.isInteger(hours) ? `every ${hours}h` : `every ${Math.round(seconds / 60)}m`;
 }
 
 interface StatProps {
@@ -111,6 +136,7 @@ function PriceCardInner({
   symbol,
   latestTrade,
   latestTicker,
+  latestFunding,
   stats,
   statsLoading,
   statsError,
@@ -163,6 +189,29 @@ function PriceCardInner({
             />
           </>
         )}
+        <Stat
+          label="Open Interest"
+          value={orUnavailable(formatPrice(latestTicker?.open_interest ?? null))}
+          hint="Open interest reported by the exchange ticker."
+        />
+        <Stat
+          label="Funding Rate"
+          value={formatFundingRate(latestFunding?.funding_rate)}
+          color={latestFunding ? changeColor(Number(latestFunding.funding_rate)) : undefined}
+          caption={
+            latestFunding
+              ? [
+                  fundingIntervalLabel(latestFunding.funding_interval_seconds),
+                  latestFunding.next_funding_time
+                    ? `next ${formatRelative(latestFunding.next_funding_time, now)}`
+                    : undefined,
+                ]
+                  .filter(Boolean)
+                  .join(' · ') || undefined
+              : undefined
+          }
+          hint="Perpetual funding rate for the current interval (positive: longs pay shorts). Funding frames are infrequent, so this can lag a fresh connection."
+        />
         <Stat
           label="Last Trade Time"
           value={latestTrade ? formatDateTime(latestTrade.event_time) : UNAVAILABLE}

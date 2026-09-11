@@ -325,6 +325,7 @@ function systemMetrics(latestPrices: Record<string, string> = LIVE_PRICES) {
     state_order_books_cached: 0,
     state_trades_cached: 0,
     state_tickers_cached: 0,
+    state_funding_rates_cached: 0,
     state_candles_cached: 0,
     state_latest_prices: latestPrices,
     event_bus_pending: 0,

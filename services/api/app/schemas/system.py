@@ -100,6 +100,7 @@ class SystemMetricsResponse(BaseModel):
     state_order_books_cached: int = 0
     state_trades_cached: int = 0
     state_tickers_cached: int = 0
+    state_funding_rates_cached: int = 0
     state_candles_cached: int = 0
     state_latest_prices: dict[str, str] = {}
     event_bus_pending: int = 0

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  LiveFundingDataSchema,
   LiveOrderBookDataSchema,
   LiveTickerDataSchema,
   LiveTradeDataSchema,
@@ -25,7 +26,15 @@ const ticker = {
   bid: '2405.6',
   ask: '2405.7',
   mark_price: '2405.59478316',
+  open_interest: '17934.2',
   price_change_24h: '0.2067',
+  event_time: '2026-08-22T15:26:05.149014Z',
+};
+
+const funding = {
+  funding_rate: '-0.001156061121670854',
+  funding_interval_seconds: 28800,
+  next_funding_time: '2026-08-22T16:00:00Z',
   event_time: '2026-08-22T15:26:05.149014Z',
 };
 
@@ -36,6 +45,20 @@ describe('LiveTradeDataSchema / LiveTickerDataSchema', () => {
 
   it('accepts a real gateway ticker payload', () => {
     expect(LiveTickerDataSchema.safeParse(ticker).success).toBe(true);
+  });
+
+  it('accepts a real gateway funding payload', () => {
+    expect(LiveFundingDataSchema.safeParse(funding).success).toBe(true);
+  });
+
+  it('accepts a funding payload with a null interval and next time', () => {
+    expect(
+      LiveFundingDataSchema.safeParse({
+        ...funding,
+        funding_interval_seconds: null,
+        next_funding_time: null,
+      }).success,
+    ).toBe(true);
   });
 
   /**
@@ -79,23 +102,34 @@ describe('MarketStreamMessageSchema', () => {
     expect(result.success).toBe(true);
   });
 
-  it('accepts a real snapshot frame with trade, ticker, and order book', () => {
+  it('accepts a real funding frame', () => {
+    const result = MarketStreamMessageSchema.safeParse({
+      type: 'funding',
+      symbol: 'ETHUSD',
+      data: funding,
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it('accepts a real snapshot frame with trade, ticker, funding, and order book', () => {
     const result = MarketStreamMessageSchema.safeParse({
       type: 'snapshot',
       symbol: 'ETHUSD',
       trade,
       ticker,
+      funding,
       orderbook,
     });
     expect(result.success).toBe(true);
   });
 
-  it('accepts a snapshot with null trade/ticker/orderbook (fresh state)', () => {
+  it('accepts a snapshot with null trade/ticker/funding/orderbook (fresh state)', () => {
     const result = MarketStreamMessageSchema.safeParse({
       type: 'snapshot',
       symbol: 'ETHUSD',
       trade: null,
       ticker: null,
+      funding: null,
       orderbook: null,
     });
     expect(result.success).toBe(true);

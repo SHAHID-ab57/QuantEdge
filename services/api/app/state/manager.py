@@ -2,8 +2,8 @@
 
 Centralized in-memory source of truth for live market data. Consumes
 normalized bus events (``TradeEventReceived``, ``TickerUpdated``,
-``OrderBookUpdated``, ``CandleClosed``) and maintains the latest state
-per symbol, keyed independently by event type.
+``OrderBookUpdated``, ``FundingRateUpdated``, ``CandleClosed``) and
+maintains the latest state per symbol, keyed independently by event type.
 
 Thread safety: handlers mutate state synchronously with no ``await``
 between the read-modify-write steps, so concurrent handler tasks on the
@@ -22,8 +22,13 @@ from typing import TypeVar
 from app.events.bus import EventBus
 from app.events.event import Event
 from app.events.example_events import CandleClosed
-from app.marketdata.bus_events import OrderBookUpdated, TickerUpdated, TradeEventReceived
-from app.marketdata.models import OrderBookEvent, TickerEvent, TradeEvent
+from app.marketdata.bus_events import (
+    FundingRateUpdated,
+    OrderBookUpdated,
+    TickerUpdated,
+    TradeEventReceived,
+)
+from app.marketdata.models import FundingRateEvent, OrderBookEvent, TickerEvent, TradeEvent
 from app.state.metrics import StateMetrics
 from app.state.models import MarketState
 
@@ -41,6 +46,7 @@ class MarketStateManager:
         self._metrics = metrics if metrics is not None else StateMetrics()
         self._trades: dict[str, TradeEvent] = {}
         self._tickers: dict[str, TickerEvent] = {}
+        self._funding_rates: dict[str, FundingRateEvent] = {}
         self._candles: dict[tuple[str, str], CandleClosed] = {}
         self._books: dict[str, OrderBookEvent] = {}
         self._latest_candle: dict[str, tuple[str, str]] = {}
@@ -56,6 +62,7 @@ class MarketStateManager:
         bus.subscribe("TradeEventReceived", self._on_trade_received)
         bus.subscribe("TickerUpdated", self._on_ticker_updated)
         bus.subscribe("OrderBookUpdated", self._on_order_book_updated)
+        bus.subscribe("FundingRateUpdated", self._on_funding_rate_updated)
         bus.subscribe("CandleClosed", self._on_candle_closed)
         return self
 
@@ -87,6 +94,7 @@ class MarketStateManager:
             "latest_prices": prices,
             "trades_cached": len(self._trades),
             "tickers_cached": len(self._tickers),
+            "funding_rates_cached": len(self._funding_rates),
             "order_books_cached": len(self._books),
             "candles_cached": len(self._candles),
         }
@@ -98,6 +106,16 @@ class MarketStateManager:
     def get_latest_ticker(self, symbol: str) -> TickerEvent | None:
         """Latest normalized ticker for ``symbol``, or ``None``."""
         return self._count(self._tickers.get(symbol))
+
+    def get_latest_funding_rate(self, symbol: str) -> FundingRateEvent | None:
+        """Latest normalized funding rate for ``symbol``, or ``None``.
+
+        Funding frames are infrequent (roughly one per funding interval, plus
+        one whenever the rate itself moves), so this can legitimately be
+        ``None`` for a while after a fresh (re)connect even while ticker and
+        trade data flow normally.
+        """
+        return self._count(self._funding_rates.get(symbol))
 
     def get_latest_candle(self, symbol: str, resolution: str | None = None) -> CandleClosed | None:
         """Latest closed candle for ``symbol``.
@@ -132,6 +150,7 @@ class MarketStateManager:
             ticker=self._tickers.get(symbol),
             candle=self._candles.get(key) if key is not None else None,
             order_book=self._books.get(symbol),
+            funding_rate=self._funding_rates.get(symbol),
         )
 
     async def _on_trade_received(self, event: Event) -> None:
@@ -162,6 +181,16 @@ class MarketStateManager:
         book = event.order_book
         self._books[book.symbol] = book
         self._touch(book.symbol)
+        self._record(started)
+
+    async def _on_funding_rate_updated(self, event: Event) -> None:
+        if not isinstance(event, FundingRateUpdated):
+            self._reject(event, "FundingRateUpdated")
+            return
+        started = time.perf_counter()
+        funding = event.funding_rate
+        self._funding_rates[funding.symbol] = funding
+        self._touch(funding.symbol)
         self._record(started)
 
     async def _on_candle_closed(self, event: Event) -> None:

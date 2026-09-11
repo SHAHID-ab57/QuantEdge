@@ -30,8 +30,13 @@ from datetime import UTC, datetime
 
 from app.events.bus import EventBus
 from app.events.event import Event
-from app.marketdata.bus_events import OrderBookUpdated, TickerUpdated, TradeEventReceived
-from app.marketdata.models import OrderBookLevel, TickerEvent, TradeEvent
+from app.marketdata.bus_events import (
+    FundingRateUpdated,
+    OrderBookUpdated,
+    TickerUpdated,
+    TradeEventReceived,
+)
+from app.marketdata.models import FundingRateEvent, OrderBookLevel, TickerEvent, TradeEvent
 from app.marketdata.orderbook import OrderBookAggregator, OrderBookSnapshot
 from app.state.manager import MarketStateManager
 
@@ -100,6 +105,7 @@ class MarketStreamGateway:
         bus.subscribe("TradeEventReceived", self._on_trade)
         bus.subscribe("TickerUpdated", self._on_ticker)
         bus.subscribe("OrderBookUpdated", self._on_order_book)
+        bus.subscribe("FundingRateUpdated", self._on_funding)
         return self
 
     def connection_count(self) -> int:
@@ -127,10 +133,10 @@ class MarketStreamGateway:
     def subscribe(self, handle: ConnectionHandle, symbols: list[str]) -> None:
         """Subscribe ``handle`` to ``symbols`` and queue an immediate snapshot.
 
-        The snapshot (current known trade/ticker, possibly both ``None``
-        for a symbol with no data yet) lets a client render something
-        before the next live event arrives, rather than showing a blank
-        card indefinitely on a quiet market.
+        The snapshot (current known trade/ticker/funding, possibly all
+        ``None`` for a symbol with no data yet) lets a client render
+        something before the next live event arrives, rather than showing
+        a blank card indefinitely on a quiet market.
         """
         for raw_symbol in symbols:
             symbol = raw_symbol.strip().upper()
@@ -159,6 +165,7 @@ class MarketStreamGateway:
         state = self._state_manager.get_market_state(symbol)
         trade = state.trade if state is not None else None
         ticker = state.ticker if state is not None else None
+        funding = state.funding_rate if state is not None else None
         book = (
             self._order_book.get_book(symbol, depth=_ORDERBOOK_DEPTH) if self._order_book else None
         )
@@ -167,6 +174,7 @@ class MarketStreamGateway:
             "symbol": symbol,
             "trade": _trade_payload(trade) if trade is not None else None,
             "ticker": _ticker_payload(ticker) if ticker is not None else None,
+            "funding": _funding_payload(funding) if funding is not None else None,
             "orderbook": _orderbook_payload(book) if book is not None else None,
         }
 
@@ -186,6 +194,15 @@ class MarketStreamGateway:
         await self._fanout(
             ticker.symbol,
             {"type": "ticker", "symbol": ticker.symbol, "data": _ticker_payload(ticker)},
+        )
+
+    async def _on_funding(self, event: Event) -> None:
+        if not isinstance(event, FundingRateUpdated):
+            return
+        funding = event.funding_rate
+        await self._fanout(
+            funding.symbol,
+            {"type": "funding", "symbol": funding.symbol, "data": _funding_payload(funding)},
         )
 
     async def _on_order_book(self, event: Event) -> None:
@@ -240,8 +257,22 @@ def _ticker_payload(ticker: TickerEvent) -> dict[str, object]:
         "bid": _decimal_str(ticker.bid),
         "ask": _decimal_str(ticker.ask),
         "mark_price": _decimal_str(ticker.mark_price),
+        "open_interest": _decimal_str(ticker.open_interest),
         "price_change_24h": _decimal_str(ticker.price_change_24h),
         "event_time": _isoformat_utc(ticker.event_time),
+    }
+
+
+def _funding_payload(funding: FundingRateEvent) -> dict[str, object]:
+    return {
+        "funding_rate": str(funding.funding_rate),
+        "funding_interval_seconds": funding.funding_interval_seconds,
+        "next_funding_time": (
+            _isoformat_utc(funding.next_funding_time)
+            if funding.next_funding_time is not None
+            else None
+        ),
+        "event_time": _isoformat_utc(funding.event_time),
     }
 
 

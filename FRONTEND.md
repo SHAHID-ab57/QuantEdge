@@ -273,8 +273,8 @@ LiveMarketPage                 resolves symbol/timeframe; owns nothing else
 │                              state, last message, reconnects, heartbeat latency
 ├── (fallback alert)           shown when resolution moved off a requested market
 ├── MarketDataNotice           why data is missing, and a retry — only when it is
-├── PriceCard                  price/24h change (WS) + 24h high/low/volume,
-│                              last trade time, last candle time (REST poll)
+├── PriceCard                  price/24h change/open interest/funding rate (WS)
+│                              + 24h high/low/volume, last trade/candle time (REST poll)
 ├── ChartContainer             reused from the chart module, in "standalone" mode
 │   └── (MarketSelector / TimeframeSelector render inside its ChartToolbar)
 └── TradeTape                  newest-first, capped, coloured by aggressor side
@@ -407,9 +407,14 @@ dropped rather than crashing the page.
 
 ### Why 24h high/low/volume are polled, not pushed
 
-`PriceCard`'s current price and 24h change come from the live ticker
-(`price_change_24h` was already on the domain `TickerEvent` model — no
-backend change needed for that field). 24h high/low/volume reuse the
+`PriceCard`'s current price, 24h change and open interest come from the
+live ticker (`price_change_24h` and `open_interest` are both on the domain
+`TickerEvent` — as of M4-E2-T1 the gateway serializes `open_interest` into
+the WS ticker payload; `price_change_24h` was always there). The funding
+rate comes from the separate `funding` WebSocket message (its own channel,
+not the ticker) and renders as a signed percentage with the interval and a
+next-funding countdown; funding frames are infrequent, so the field shows
+"Unavailable" until the first one arrives. 24h high/low/volume reuse the
 _existing_ `/markets/{symbol}/candles/stats` REST endpoint instead
 (`use-price-stats.ts`, polled every 60s — the same polling pattern the
 Health page already uses at 10s), because: (a) it needed no new backend

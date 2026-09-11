@@ -99,6 +99,39 @@ class Settings(BaseSettings):
     market_data_live: bool = False
     delta_market_symbols: str = "BTCUSD,ETHUSD"
 
+    #: Order-flow / microstructure capture (`app.services.order_flow_capture
+    #: .OrderFlowCapture`) — a **capture mechanism only**: it persists the live
+    #: order book and trade stream into `trade_flow`/`orderbook_snapshots` so a
+    #: future research task has real depth to work with. Nothing reads those
+    #: tables yet. Only runs when `market_data_live` is on (it captures bus
+    #: events the WebSocket pipeline publishes) and a database is configured.
+    #: Defaults on, mirroring `candle_sync_enabled` — order-flow data has no
+    #: historical backfill, so every day it is off is a day permanently lost.
+    orderflow_capture_enabled: bool = True
+    #: How often the reconstructed top-N book is snapshotted per symbol (not per
+    #: exchange tick — see `OrderFlowCapture`).
+    orderflow_snapshot_interval_seconds: int = 15
+    #: Levels per side stored in each order book snapshot.
+    orderflow_snapshot_depth: int = 25
+    #: How often the buffered trade stream is flushed to `trade_flow`.
+    orderflow_trade_flush_seconds: int = 5
+    #: Flush early once this many trades are buffered, regardless of the timer.
+    orderflow_trade_buffer_max: int = 500
+    #: Retention window for both capture tables, measured from each row's own
+    #: `captured_at` (not the exchange `event_time`). This capture has no
+    #: backfill and no cap otherwise: at the default cadence above and two
+    #: tracked symbols, `trade_flow` grows on the order of tens of MB/day and
+    #: `orderbook_snapshots` a similar amount (measured live — see
+    #: `ARCHITECTURE.md` § "Funding Rate, Open Interest & Order-Flow Capture"
+    #: for the actual numbers), so this is deliberately finite. 60 days is
+    #: long enough for a first microstructure research pass without letting
+    #: the tables grow forever unattended.
+    orderflow_retention_days: int = 60
+    #: How often the retention sweep runs — independent of, and far less
+    #: frequent than, the snapshot/flush cadence above, since a DELETE over
+    #: a day-old cutoff is cheap regardless of how often it's checked.
+    orderflow_prune_interval_seconds: int = 3600
+
     candle_sync_enabled: bool = True
     candle_sync_interval_seconds: int = 300
     candle_sync_timeframes: str = "1m,5m,15m,30m,1h,4h,1d"

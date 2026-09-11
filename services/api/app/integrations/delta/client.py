@@ -28,7 +28,7 @@ from app.integrations.delta.exceptions import (
     NetworkError,
     RateLimitError,
 )
-from app.integrations.delta.models import CandleResponse, DeltaResponse
+from app.integrations.delta.models import CandleResponse, DeltaResponse, DeltaTicker
 
 logger = logging.getLogger("app.integrations.delta")
 
@@ -40,6 +40,7 @@ _MAX_RETRY_DELAY = 30.0
 _USER_AGENT = "eth-ai-platform/0.1.0"
 
 CANDLES_PATH = "/v2/history/candles"
+TICKER_PATH = "/v2/tickers/{symbol}"
 
 T = TypeVar("T")
 
@@ -193,6 +194,40 @@ class DeltaClient:
         except ValidationError as exc:
             raise APIError(
                 f"Delta candles response for {symbol} does not match CandleResponse",
+                detail=exc.errors(include_url=False),
+            ) from exc
+
+    async def get_ticker(self, symbol: str) -> DeltaTicker:
+        """Fetch the current ticker snapshot for one market.
+
+        This is the only Delta REST call that returns the live
+        ``funding_rate`` and open interest together, so it backs both the
+        REST fallback for the market-state manager (funding frames are
+        infrequent — see :class:`~app.state.manager.MarketStateManager`)
+        and the ``GET /markets/{symbol}/ticker`` endpoint.
+
+        Args:
+            symbol: The market symbol, e.g. ``ETHUSD``.
+
+        Returns:
+            The validated ticker snapshot.
+
+        Raises:
+            APIError: When the response envelope or ticker record is
+                malformed.
+            NetworkError: On transport failure or timeout.
+        """
+        result = await self.get(TICKER_PATH.format(symbol=symbol))
+        if not isinstance(result, dict):
+            raise APIError(
+                f"Delta ticker response for {symbol} is not an object",
+                detail=result,
+            )
+        try:
+            return DeltaTicker.model_validate(result)
+        except ValidationError as exc:
+            raise APIError(
+                f"Delta ticker response for {symbol} does not match DeltaTicker",
                 detail=exc.errors(include_url=False),
             ) from exc
 

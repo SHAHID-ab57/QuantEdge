@@ -75,6 +75,7 @@ const validMetrics: SystemMetrics = {
   state_order_books_cached: 2,
   state_trades_cached: 2,
   state_tickers_cached: 2,
+  state_funding_rates_cached: 1,
   state_candles_cached: 5,
   state_latest_prices: { BTCUSD: '65000.5', ETHUSD: '3200.25' },
   event_bus_pending: 0,

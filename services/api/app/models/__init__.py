@@ -19,6 +19,7 @@ from app.models.external_data import ExternalDataPoint
 from app.models.market import Market
 from app.models.ml_dataset_build import MLDatasetBuild
 from app.models.news import NewsArticle
+from app.models.order_flow import OrderBookSnapshotRow, TradeFlowRow
 from app.models.paper_trading import (
     PaperAccount,
     PaperOrder,
@@ -43,6 +44,8 @@ __all__ = [
     "Market",
     "MLDatasetBuild",
     "NewsArticle",
+    "OrderBookSnapshotRow",
+    "TradeFlowRow",
     "PaperAccount",
     "PaperOrder",
     "PaperPosition",

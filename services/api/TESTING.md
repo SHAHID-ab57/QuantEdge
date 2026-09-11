@@ -852,6 +852,37 @@ available. A real key, a real fetch, and a real scheduler tick all
 remain open verification items — see `ARCHITECTURE.md` § "Marketaux
 Connector".
 
+## Testing Funding Rate, Open Interest & Order-Flow Capture (M4-E2-T1)
+
+Covers `ARCHITECTURE.md` § "Funding Rate, Open Interest & Order-Flow
+Capture". No new external source — these tests exercise the wiring between
+Delta's existing feed and the platform's own surfaces.
+
+| Test file                                   | What it proves                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tests/unit/marketdata/test_normalizer.py`  | `funding_rate` wire frame → domain `FundingRateEvent` (`fr` → signed rate, `fi` seconds → `funding_interval_seconds`, `nfr` micros → `next_funding_time` UTC); a non-positive `fi`/`nfr` drops both fields rather than storing a bogus value.                                                                                                                                                                                                                                                                             |
+| `tests/processing/test_pipeline.py`         | A raw `funding_rate` JSON frame passes parse → normalize → publish and lands on the bus as `FundingRateUpdated`, counted in the pipeline metrics.                                                                                                                                                                                                                                                                                                                                                                         |
+| `tests/state_manager/test_manager.py`       | `FundingRateUpdated` → `get_latest_funding_rate`, `MarketState.funding_rate`, and the snapshot's `funding_rates_cached` counter; an unseen symbol returns `None`.                                                                                                                                                                                                                                                                                                                                                         |
+| `tests/unit/marketdata/test_gateway.py`     | `_ticker_payload` now carries `open_interest` (null when absent); the `_funding_payload` shape; the `funding` snapshot field populates from state; a `FundingRateUpdated` fans out as a `funding` message.                                                                                                                                                                                                                                                                                                                |
+| `tests/unit/delta/test_client.py`           | `DeltaClient.get_ticker` — a successful fetch against the real `GET /v2/tickers` response shape (incl. `oi_contracts`); a non-object result and a malformed record each raise `APIError`; a transport failure raises `NetworkError`. Uses the same `httpx.MockTransport` conventions as the rest of the file.                                                                                                                                                                                                             |
+| `tests/services/test_live_market.py`        | `LiveMarketService.get_ticker` — empty state yields all-null / `source="none"`; WS ticker + funding merge (`source="ws"`); the REST fill-in supplies a missing funding rate / open interest (`source="rest"`, preferring `oi_contracts`); a Delta failure is swallowed; no REST call when WS already has both.                                                                                                                                                                                                            |
+| `tests/api/test_live_ticker_api.py`         | `GET /api/v1/markets/{symbol}/ticker` serializes the snapshot (decimals as strings, timestamps `Z`-suffixed) and reports all-null with `source="none"` for an unknown symbol.                                                                                                                                                                                                                                                                                                                                             |
+| `tests/services/test_order_flow_capture.py` | `OrderFlowCapture` — `start()` no-ops without a database; a bus trade is buffered and flushed to `trade_flow`; `trade_buffer_max` forces an early flush; snapshots persist the _reconstructed_ book (not a raw frame); a symbol with no reconstructed book is skipped; a persistence failure is swallowed and the loop survives; the retention sweep deletes rows past `retention_days` (keyed on `captured_at`) while keeping recent ones, across both tables; a prune failure is swallowed and does not crash the loop. |
+| `tests/unit/runtime/test_runtime.py`        | `LIVE_CHANNELS` now subscribes `funding_rate`; the runtime constructs `OrderFlowCapture` under `orderflow_capture_enabled` + live mode.                                                                                                                                                                                                                                                                                                                                                                                   |
+
+**Frontend.** `market-stream.test.ts` gains the `LiveFundingDataSchema` /
+`funding` message / `open_interest` cases; `use-market-stream.test.ts`
+covers the `funding` channel (live message + snapshot fallback);
+`price-card.test.tsx` covers open interest from the ticker and the funding
+rate rendered as a signed percentage.
+
+**Live verification performed.** Unlike the Marketaux connector, this was
+verified end to end against a running server (`MARKET_DATA_LIVE=true`):
+funding rate and open interest genuinely populate `MarketStateManager` and
+`GET /markets/{symbol}/ticker` from real Delta frames on both tracked
+symbols, and `trade_flow` / `orderbook_snapshots` accumulate real,
+top-of-book-coherent rows on the configured cadence.
+
 ## Gates
 
 Before pushing, run:

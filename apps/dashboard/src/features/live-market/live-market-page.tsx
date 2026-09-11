@@ -254,6 +254,7 @@ export function LiveMarketPage() {
         symbol={symbol}
         latestTrade={stream.latestTrade}
         latestTicker={stream.latestTicker}
+        latestFunding={stream.latestFunding}
         stats={stats}
         statsLoading={priceStats.isLoading}
         statsError={priceStats.isError}

@@ -33,7 +33,7 @@ a versioned dataset citation, a recorded experiment) — it is now complete.
 | 1         | Research & Training Platform                 | COMPLETE    |
 | 2         | Prediction & Backtesting                     | COMPLETE    |
 | 3         | Paper Trading & Risk                         | COMPLETE    |
-| 4         | Data Breadth                                 | IN PROGRESS |
+| 4         | Data Breadth                                 | COMPLETE    |
 | 5         | Production Hardening                         | NOT STARTED |
 | 6         | Live Trading (gated on extensive validation) | NOT STARTED |
 
@@ -159,7 +159,7 @@ intended bounded contexts. **Independently re-verified 2026-09-06**, the
 same way as Milestone 2 — see
 `docs/audits/MILESTONE_2_3_VERIFICATION.md`.
 
-**Milestone 4 — Data Breadth (IN PROGRESS).** The additional external data
+**Milestone 4 — Data Breadth (COMPLETE).** The additional external data
 connectors this platform has designed for but never implemented —
 Marketaux (news/sentiment), Etherscan (on-chain), FRED (macro),
 Alternative.me (Fear & Greed), DefiLlama (DeFi metrics), CoinGecko (market
@@ -252,9 +252,10 @@ static "Planned" section, now empty — every source it once named has
 shipped, most recently Marketaux, the same per-connector upkeep every
 prior connector's own task already followed. See `ARCHITECTURE.md` §
 "External Data Connectors". This closes M4-E1 (External Data
-Connectors), this milestone's first epic — but not the milestone itself.
+Connectors), this milestone's first epic.
 **A second epic, M4-E2 (Delta REST/WS Completion & Liquidation Heatmap
-Investigation), has its first task done.** M4-E2-T1: confirmed directly
+Investigation), is now also complete — closing Milestone 4 itself.**
+M4-E2-T1: confirmed directly
 against the real Delta client/parser code and Delta's live API — ticker
 and mark price were already fully wired; open interest was parsed and
 held in `MarketStateManager` but silently dropped when the WebSocket
@@ -270,10 +271,46 @@ funding rate / open interest). The same task also **started order-flow
 data capture** (`OrderFlowCapture`, `trade_flow` / `orderbook_snapshots`
 tables): a capture mechanism only — no backfill, nothing reads it yet, no
 analysis — kept deliberately minimal so a future microstructure research
-task has real historical depth to work from. The liquidation heatmap
-investigation (M4-E2-T2) is still deferred — a repo-wide search found
-zero existing code or documentation for it. See `TASKBOOK.md`
+task has real historical depth to work from.
+
+**M4-E2-T2, the liquidation heatmap investigation, is done — a research
+spike, not application code, and Milestone 4's last open item.**
+"Liquidation heatmap" turned out to mean two genuinely different
+products under one name — (a) actual historical liquidation events, and
+(b) an estimated heatmap of likely liquidation clusters modeled from open
+interest and an assumed leverage distribution (the meaning most industry
+sources actually mean by the term) — both researched and presented, not
+picked unilaterally. Delta Exchange India's current REST/WS API was
+checked directly for liquidation data specifically (not assumed from the
+funding/OI work above): it exposes **zero liquidation data of either
+kind** — no endpoint, no channel, only a private per-account
+`stop_order_type: "liquidation_order"` enum value. Third parties
+checked: Coinglass (real events require its $299/mo Standard tier; the
+modeled heatmap requires its $699/mo Professional tier — no free tier
+includes either) and Binance's free public `forceOrder` stream (the one
+zero-cost option, but real-events-only, an explicit proxy for Binance's
+own market rather than Delta's, and self-limited to the largest
+liquidation per symbol per second). **Recommendation: do not build this
+now** — no free or native path exists for either definition, and open
+interest (definition (b)'s own raw material) has already been shown, in
+this same research thread, to carry no measurable predictive value
+across three model classes, five horizons, and three regimes. Full
+findings and a fallback build path (for if this decision is revisited) in
+`docs/research/LIQUIDATION_HEATMAP_INVESTIGATION.md`. See `TASKBOOK.md`
 `M4-E2-T1`/`M4-E2-T2` for the full task breakdown.
+
+**A note on what "complete" means for this specific task, since this
+document's own Definition of Done (real code, tested, wired in) is
+written for capabilities, not investigations.** M4-E2-T2 was scoped from
+the start as a research spike whose stated deliverable was the
+investigation document itself, not a shipped feature — its own task
+instructions explicitly forbade application code. "Done" here means
+that document exists, is well-sourced, and reaches a stated
+recommendation, exactly as scoped; it does not mean a liquidation heatmap
+now runs anywhere in this platform. No capability was skipped to call
+this complete — the recommendation reached (do not build it now) is
+itself the substantive outcome the investigation was commissioned to
+produce. **Milestone 4 — Data Breadth is now complete.**
 
 **A third epic, M4-E3 (Feature Value Assessment), is now complete.** Its
 first pass (M4-E3-T1) found the six connector features could not be

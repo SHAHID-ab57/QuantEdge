@@ -8,7 +8,11 @@ takes the baseline feature set alone across prediction horizons 1 h – 48 h;
 engine, over three distinct out-of-sample market regimes (a +100 %
 uptrend, a −28 % downtrend, a flat choppy range). Neither finds
 recoverable directional skill — no horizon, no regime, ROC-AUC ~0.5
-throughout. The cheap hypotheses are exhausted.
+throughout. The cheap hypotheses are exhausted. § "Gradient Boosting
+spot-check" (ADD-GRADIENT-BOOSTING) below adds a third, structurally
+different model class as a standing platform capability and spot-checks
+the one connector (DefiLlama TVL) that showed a directional effect under
+the first two — it agrees: no measurable value.
 
 Two passes exist:
 
@@ -538,6 +542,177 @@ real compute cost to every training run.
   with impurity + held-out permutation importance.
 - Modest-config numbers verified against the API runs above (4-decimal
   match) before trusting the regularized/permutation results.
+
+---
+
+## Gradient Boosting spot-check (ADD-GRADIENT-BOOSTING, 2026-09-11)
+
+A **model-repertoire addition**, not a re-run of this thread's own
+research. `GradientBoostingAdapter`
+(`app/training/adapters/gradient_boosting.py`,
+`sklearn.ensemble.HistGradientBoostingClassifier`) is now a standing,
+registered model adapter — sequential, error-correcting boosting, a
+genuinely different inductive bias from Random Forest's bagging. Unlike
+Random Forest and Logistic Regression, it has **no native
+`feature_importances_`/`coef_`**, so it is also the first adapter to ship
+**permutation importance**, computed on the held-out validation split, as
+a first-class part of every training run's own result summary
+(`feature_importance_method: "permutation"`) — the RF follow-up above
+noted this was "a natural candidate to add... deferred as its own scoped
+change"; it is no longer ad-hoc-script-only.
+
+**Exactly one comparison was run under it: baseline vs. baseline +
+DefiLlama TVL.** Fear & Greed, FRED, and the six-connector/all-features
+comparison were **deliberately not re-tested**. Reasoning: those have
+already shown nothing under two model classes (logistic regression,
+Random Forest), five horizons (`HORIZON_SWEEP_ASSESSMENT.md`, 1h–48h), and
+three market regimes (`REGIME_WALKFORWARD_ASSESSMENT.md`, uptrend/
+downtrend/chop) — re-running them under a third model class with no new
+reason to expect a different outcome would be re-litigating a closed
+question, not new evidence. DefiLlama TVL is the one variant worth
+checking once more specifically _because_ it was the one feature that
+showed a directional (negative) effect under both prior model classes —
+if a third, structurally different model disagreed, that would be the
+signal worth chasing; agreement closes the question with maximum
+available confidence.
+
+### Window verification — byte-identical boundaries, revised underlying data
+
+Same window as every prior comparison in this thread:
+**`2024-02-06 08:00 → 2026-09-10 11:00 UTC`**, pinned explicitly (not
+"now" — 30+ more hourly candles have landed since T2/the RF re-test, and
+including them would silently widen the comparison window beyond what
+every published number in this document is anchored to). Verified,
+independently, three ways:
+
+1. Both variants (baseline, baseline + `eth_tvl`) build to the identical
+   **22,711 usable rows** (n_train 15,897 / n_val 3,406 / n_test 3,408) —
+   matching T2/the RF re-test exactly.
+2. Both variants report an identical `close` **min `1418.55`, max
+   `4933.85`** — matching T2/the RF re-test exactly, and confirming both
+   variants really do share one byte-identical candle window (the one
+   controlled-comparison property this whole thread depends on).
+3. **`close` mean/std do _not_ match**: `2846.868839` / `762.842332` here,
+   vs. `3095.367661` / `727.567269` in T2/the RF re-test. Cross-checked
+   independently with a raw SQL aggregate over the identical
+   `[start, end)` range, bypassing the dataset-build pipeline entirely:
+   mean `2846.43`, std `762.65`, min/max identical — confirming this is
+   real, not a pipeline bug in this check. Same row count, same
+   extremes, different distribution means the **window boundaries are
+   byte-identical; the candle _values_ inside them are not** — some
+   historical closes in this exact range have been revised since T2 was
+   published, consistent with the real backfill/retrain work landed since
+   (`fix(training): retrain live strategy on real data; resolve connector
+backfill depth`, `fix(training): default to a market's most recent
+candles`).
+
+**What this means for the comparison.** The baseline-vs-+TVL delta below
+is computed from two variants built from the _identical_ current data —
+that comparison is exactly as controlled as every prior one in this
+thread, and is the one the Definition of Done actually requires. What is
+**not** safe is comparing this run's _absolute_ numbers against T2's or
+the RF re-test's absolute numbers as if apples-to-apples — the underlying
+candle history itself has shifted since. Any such comparison below is
+called out explicitly as directional/weaker evidence, not a controlled
+comparison.
+
+### Results — baseline vs. baseline + DefiLlama TVL, under Gradient Boosting
+
+Default hyperparameters (reasonable, documented, un-tuned, `max_iter=200
+max_depth=6 learning_rate=0.1 min_samples_leaf=20 random_seed=42` — the
+same "detect whether any signal exists, not maximum performance" posture
+Random Forest's own defaults take).
+
+| Variant             | n_test | TRAIN acc | VAL acc | VAL roc | TEST acc | TEST roc | TEST f1 | overfit gap |
+| ------------------- | ------ | --------- | ------- | ------- | -------- | -------- | ------- | ----------- |
+| **baseline**        | 3408   | 0.7428    | 0.5000  | 0.5086  | 0.4891   | 0.4915   | 0.4832  | **+0.254**  |
+| **+ DefiLlama TVL** | 3408   | 0.7561    | 0.5023  | 0.4997  | 0.4918   | 0.4976   | 0.4787  | **+0.264**  |
+
+Deltas, **+ DefiLlama TVL vs. baseline**, in percentage points, against the
+same `±1.96·√(0.25/n_test)` noise band this thread has used throughout
+(n_test = 3,408 → **±1.68 pp**):
+
+| Metric        | Delta     | Inside ±1.68 pp band? |
+| ------------- | --------- | --------------------- |
+| TEST accuracy | **+0.26** | Yes                   |
+| TEST ROC-AUC  | **+0.60** | Yes                   |
+
+**Both deltas sit well inside the noise band — DefiLlama TVL adds no
+measurable value under Gradient Boosting either, agreeing with logistic
+regression (T2: −2.1 pp acc, −1.8 pp ROC-AUC — negative) and Random Forest
+(the re-test: −1.8 pp acc, −1.2 pp ROC-AUC, −7.1 pp F1 — negative) on the
+directional question, even though the sign of this run's tiny delta
+happens to be positive rather than negative.** A feature moving a few
+tenths of a percentage point in either direction, inside a ±1.68 pp band,
+under a third structurally different model, is exactly the null result
+the first two models already reported — not a contradiction, a
+replication.
+
+**Permutation importance for `eth_tvl`** (the adapter's own headline
+attribution, computed on the held-out validation split,
+`n_repeats=10`): **`−0.00100`** (**−0.10 pp** of held-out accuracy) — the
+_smallest-magnitude_ feature in the run, ranked dead last of seven,
+negative (shuffling it very slightly _improved_ held-out accuracy — no
+evidence of contribution, consistent with noise). Full ranking:
+
+| Feature   | Permutation importance |
+| --------- | ---------------------- |
+| `low`     | +0.00749               |
+| `sma_20`  | +0.00672               |
+| `close`   | +0.00505               |
+| `high`    | +0.00346               |
+| `volume`  | +0.00126               |
+| `open`    | +0.00082               |
+| `eth_tvl` | **−0.00100**           |
+
+This closely agrees with the RF follow-up's own permutation-importance
+finding for the same feature (`−0.57 ± 0.21 pp` at the modest RF config) —
+a third, structurally different model, measured with the same
+model-agnostic method, lands on the same "no real held-out contribution"
+conclusion.
+
+**One honest caveat, unrelated to DefiLlama TVL specifically**: this run's
+own overfit gap (train accuracy 0.74–0.76 vs. held-out ~0.49, gap
+0.25–0.26) is **larger** than Random Forest's own already-flagged gap on
+the same-shaped comparison (0.16–0.18) — the untuned Gradient Boosting
+defaults overfit hourly OHLCV+SMA data at least as readily as Random
+Forest's untuned defaults do, arguably more so here (though not on
+byte-identical underlying data — see the window note above, so this
+specific magnitude comparison is the weaker, non-controlled kind). This
+does not change the DefiLlama TVL verdict (both variants overfit by
+almost exactly the same amount, so the _comparison between them_ is still
+clean), but it is a genuine data point for anyone considering
+`gradient_boosting`'s default hyperparameters for a real run: like Random
+Forest's own defaults, they are reasonable and documented, not
+anti-overfit-tuned.
+
+### Verdict
+
+**DefiLlama TVL adds no measurable value under a third, structurally
+different model class — the connector-value question is now closed with
+maximum available confidence: two prior model classes (agreeing,
+negative) plus this one (agreeing, null-to-negative), five horizons, and
+three regimes all report the same thing.** No further re-testing of Fear
+& Greed, FRED, or the remaining four connectors is planned; nothing in
+this spot-check gives a reason to revisit them. `GradientBoostingAdapter`
+itself remains a standing platform capability — available for a future
+target/feature set this thread hasn't tried yet, not retired after one
+use.
+
+#### Evidence trail
+
+- `app/training/adapters/gradient_boosting.py`,
+  `app/training/interpretability.py`'s `compute_permutation_importance` —
+  the new, permanent platform capability.
+- `tests/training/test_gradient_boosting.py`,
+  `tests/training/test_interpretability.py`'s
+  `TestComputePermutationImportance` — unit coverage.
+- The one-off comparison driver (in-process, reusing
+  `MLDatasetService.build_ml_dataset` → `build_training_dataset`, the
+  exact same seam every prior comparison in this thread used) is not
+  committed application code — a research script, matching this thread's
+  own established pattern (`scratchpad/rf_followups.py`,
+  `scratchpad/horizon_sweep.py` were likewise research-only).
 
 ---
 

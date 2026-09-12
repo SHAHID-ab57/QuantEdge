@@ -242,6 +242,79 @@ def compute_impurity_feature_importance(
     return rows
 
 
+def compute_permutation_importance(
+    feature_columns: Sequence[str],
+    model: Any,
+    X: Any,  # noqa: N803 - matches SplitMatrix.X's own naming convention
+    y: Sequence[Any],
+    *,
+    scoring: str = "accuracy",
+    n_repeats: int = 10,
+    random_state: int = 42,
+    normalized: bool = False,
+) -> list[dict[str, Any]]:
+    """Rank features by permutation importance — the mean drop in `scoring`
+    when one feature's column is independently shuffled, holding every
+    other column fixed.
+
+    The attribution method for a model with no native importance of its
+    own — `HistGradientBoostingClassifier` exposes neither
+    `feature_importances_` (that convention belongs to `RandomForestClassifier`
+    and other bagged-tree ensembles, not boosting) nor `coef_` (linear models
+    only). Permutation importance answers the same underlying question —
+    "how much does this feature actually matter to a held-out prediction?" —
+    by directly measuring it against a real, already-fitted model, rather
+    than reading it off internal model structure that doesn't exist here.
+
+    `X`/`y` must be a **held-out** split — `GradientBoostingAdapter.train()`
+    calls this against `dataset.validation`, never `dataset.train`.
+    Permutation importance computed on the training split would conflate
+    "the model memorized this feature" with "this feature generalizes,"
+    the exact distinction `compute_overfitting_flag` exists to catch
+    elsewhere in this module.
+
+    Like impurity importance (and unlike a linear coefficient), a permuted
+    feature can only ever hurt held-out performance or leave it unchanged
+    in expectation — there is no meaningful direction to report, so `sign`
+    is always `"neutral"`, matching `compute_impurity_feature_importance`'s
+    own convention. A *negative* mean importance (shuffling a feature
+    happened to improve the score on this particular split — sampling
+    noise, not signal) is reported as-is, never clamped to zero: it sorts
+    to the bottom under the same descending-by-`abs_importance` order
+    every other importance table uses, which is the correct place for "no
+    evidence this feature contributes; possibly actively unhelpful" to
+    land — clamping it to zero would make a mildly harmful feature
+    indistinguishable from a genuinely irrelevant one.
+    """
+    from sklearn.inspection import permutation_importance
+    from sklearn.utils import Bunch
+
+    result = permutation_importance(
+        model, X, list(y), scoring=scoring, n_repeats=n_repeats, random_state=random_state
+    )
+    # A single `scoring` string always yields one `Bunch` at runtime; the
+    # stub's overload also covers a list-of-metrics call (-> dict[str,
+    # Bunch]) and can't narrow on `scoring: str` alone, so this asserts the
+    # real invariant explicitly rather than trusting the inferred type —
+    # the same `assert isinstance(result, CursorResult)` narrowing
+    # `app/repositories/backtest_runs.py`/`training.py` already use for an
+    # analogous stub gap.
+    assert isinstance(result, Bunch)
+    means = to_float_list(result.importances_mean)
+    rows = [
+        {
+            "feature": name,
+            "coefficient": mean,
+            "abs_importance": mean,
+            "sign": "neutral",
+            "normalized": normalized,
+        }
+        for name, mean in zip(feature_columns, means, strict=True)
+    ]
+    rows.sort(key=lambda row: row["abs_importance"], reverse=True)
+    return rows
+
+
 def compute_confusion_details(
     y_true: Sequence[Any], y_pred: Sequence[Any], labels: Sequence[Any]
 ) -> list[dict[str, Any]]:

@@ -3,6 +3,7 @@
 import pytest
 
 from app.training.adapters import load_builtin_model_adapters
+from app.training.adapters.gradient_boosting import GradientBoostingAdapter
 from app.training.adapters.linear_regression import LinearRegressionAdapter
 from app.training.adapters.logistic_regression import LogisticRegressionAdapter
 from app.training.adapters.placeholder import PlaceholderModelAdapter
@@ -121,6 +122,14 @@ class TestBuiltinAdapters:
         assert default_registry.has("random_forest") is True
         adapter = default_registry.get("random_forest")
         assert isinstance(adapter, RandomForestAdapter)
+        assert adapter.metadata.model_kind == "classification"
+        assert adapter.metadata.requires_real_data is True
+
+    def test_load_builtin_model_adapters_registers_gradient_boosting(self) -> None:
+        load_builtin_model_adapters()
+        assert default_registry.has("gradient_boosting") is True
+        adapter = default_registry.get("gradient_boosting")
+        assert isinstance(adapter, GradientBoostingAdapter)
         assert adapter.metadata.model_kind == "classification"
         assert adapter.metadata.requires_real_data is True
 

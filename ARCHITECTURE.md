@@ -1601,10 +1601,11 @@ its outcome back onto that experiment." The framework's own machinery
 (pipeline, lifecycle, registry, service, API) is model-agnostic by
 design, so a future TensorFlow or PyTorch integration can be added
 without touching any of it — see § "Baseline Model Framework" below for
-the three real scikit-learn adapters now registered alongside the
-placeholder (`logistic_regression`, `linear_regression`, and the
-non-linear `random_forest`), and how the pipeline was extended to load
-real training data for them without changing its own six-stage shape.
+the four real scikit-learn adapters now registered alongside the
+placeholder (`logistic_regression`, `linear_regression`, the non-linear
+`random_forest`, and the sequential-boosting `gradient_boosting`), and
+how the pipeline was extended to load real training data for them
+without changing its own six-stage shape.
 
 **Entities**, matching `docs/database/DATABASE.md` § "Machine Learning
 Training Framework schema" exactly:
@@ -1841,7 +1842,7 @@ adapter registers into the exact same `ModelAdapterRegistry` the
 placeholder already uses, via the same `@register` decorator and the same
 `load_builtin_model_adapters()` discovery loader
 (`app/training/adapters/__init__.py`), so `GET /training-jobs/models`
-lists all four with no endpoint change.
+lists all five with no endpoint change.
 
 **Logistic Regression plugin** (`app/training/adapters/
 logistic_regression.py`) — `sklearn.linear_model.LogisticRegression`,
@@ -1883,6 +1884,51 @@ ADD-RANDOM-FOREST-RETEST to test whether the Milestone 4 connector features
 that showed no value under logistic regression show value under a more
 expressive model — they do not; see `docs/research/
 CONNECTOR_FEATURE_VALUE_ASSESSMENT.md` § "Random Forest re-test".
+
+**Gradient Boosting plugin** (`app/training/adapters/gradient_boosting.py`)
+— `sklearn.ensemble.HistGradientBoostingClassifier`,
+`model_kind="classification"`. A second non-linear model, genuinely
+different in kind from Random Forest's bagging: a sequential,
+error-correcting ensemble of shallow trees, each one fit against the
+previous ensemble's residual error, rather than many independent trees
+averaged together. Already available from the pinned `scikit-learn`
+dependency — no new package. Its own built-in early stopping is
+explicitly disabled (`early_stopping=False`): left on, it would carve a
+_random_ validation subset out of `dataset.train` internally, which would
+both violate this platform's chronological-only splitting policy
+(`app/ml_datasets/split.py`) and quietly compete with `dataset.validation`
+— the one held-out split this framework actually evaluates every adapter
+against — so training always runs the full `max_iter` rounds against
+`dataset.train` alone.
+
+Produces the identical result-summary shape as the other two real
+classifiers, with one adapter-specific piece: this model has **no native
+`feature_importances_` or `coef_`** (that's a bagged-tree-ensemble
+convention and a linear-model convention respectively; boosting has
+neither), so feature attribution uses **permutation importance** instead
+— `compute_permutation_importance` (`app/training/interpretability.py`),
+measured against the held-out **validation** split, never train (train
+would conflate "the model memorized this" with "this generalizes," the
+same distinction `compute_overfitting_flag` exists to catch). Like
+impurity importance there is no direction (`sign` is always `"neutral"`);
+unlike impurity importance a permuted feature's mean score-drop _can_ be
+negative (shuffling happened to help on this split — noise, not signal),
+and it is reported as-is rather than clamped to zero, so it sorts to the
+bottom rather than being visually indistinguishable from a truly
+zero-importance feature. `result_summary.feature_importance_method`
+records `"permutation"` (the other three real adapters carry no such
+field — their method is implicit in which helper produced the table — so
+a client can tell which attribution method backs a given run without
+inferring it from `model_type`). Hyperparameters (reasonable, documented,
+un-tuned, the same posture Random Forest's own defaults take): `max_iter`
+(default 200, boosting rounds), `max_depth` (default 6, accepts `None`),
+`learning_rate` (default 0.1), `min_samples_leaf` (default 20),
+`random_seed` (default 42). Pairs with a categorical target such as
+`next_direction`. Added under
+ADD-GRADIENT-BOOSTING to extend the model repertoire with a genuinely
+different inductive bias before treating "no connector adds value" as
+fully settled — see `docs/research/CONNECTOR_FEATURE_VALUE_ASSESSMENT.md`
+§ "Gradient Boosting spot-check" for the one comparison run under it.
 
 **Training integration** (`app/training/dataset_loader.py`,
 `app/services/training.py`). `TrainingJob` gained three new nullable

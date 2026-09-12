@@ -1182,12 +1182,19 @@ omit it to leave tags untouched.
 
 The orchestration layer BC4 adds on top of Experiment Management — see
 `ARCHITECTURE.md` § "Machine Learning Training Framework" and § "Baseline
-Model Framework" for the full design. Four model adapters are registered:
+Model Framework" for the full design. Five model adapters are registered:
 `placeholder` (fabricates deterministic metrics, trains nothing real),
-`logistic_regression`, `linear_regression`, and `random_forest` (real
-scikit-learn models — `POST .../run` performs a real `fit` and evaluation
-for these three; `random_forest` is the first non-linear model, an
-ensemble of decision trees).
+`logistic_regression`, `linear_regression`, `random_forest`, and
+`gradient_boosting` (real scikit-learn models — `POST .../run` performs a
+real `fit` and evaluation for these four; `random_forest` is the first
+non-linear model, a bagged ensemble of decision trees; `gradient_boosting`
+(`HistGradientBoostingClassifier`) is a sequential, error-correcting
+ensemble — a different inductive bias from bagging, not just "more
+trees" — and, having no native `feature_importances_`/`coef_`, is the
+first adapter attributed via permutation importance instead of impurity
+importance or coefficients; its own `result_summary.feature_importance_method`
+field reports `"permutation"` so a client can tell which attribution
+method produced a given run's table).
 
 **Model adapter catalogue** (`GET /training-jobs/models`):
 
@@ -1230,6 +1237,20 @@ ensemble of decision trees).
         "max_depth",
         "min_samples_leaf",
         "max_features",
+        "random_seed",
+      ],
+      "...": "...",
+    },
+    {
+      "name": "gradient_boosting",
+      "label": "Gradient Boosting (Classification)",
+      "model_kind": "classification",
+      "requires_real_data": true,
+      "hyperparameter_hints": [
+        "max_iter",
+        "max_depth",
+        "learning_rate",
+        "min_samples_leaf",
         "random_seed",
       ],
       "...": "...",

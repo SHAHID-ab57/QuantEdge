@@ -7,7 +7,9 @@ edge cases (a "low" confidence probability, a not-flagged overfitting gap, a neu
 sign) real training runs don't happen to produce.
 """
 
+import numpy as np
 import pytest
+from numpy.typing import NDArray
 
 from app.training.interpretability import (
     build_prediction_samples,
@@ -15,6 +17,7 @@ from app.training.interpretability import (
     compute_feature_importance,
     compute_impurity_feature_importance,
     compute_overfitting_flag,
+    compute_permutation_importance,
     compute_roc_pr_curves,
     confidence_level,
     to_float_list,
@@ -179,6 +182,78 @@ class TestComputeImpurityFeatureImportance:
 
     def test_empty_inputs_produce_no_rows(self) -> None:
         assert compute_impurity_feature_importance([], []) == []
+
+
+class TestComputePermutationImportance:
+    """Exercised against a real, cheaply-fitted scikit-learn model (a decision
+    tree) rather than a mock — `sklearn.inspection.permutation_importance`
+    itself calls `model.predict`/`model.score`, so a fake with the right
+    shape would only prove this function calls *something*, not that it
+    calls a real scikit-learn estimator correctly."""
+
+    def _fit_signal_vs_noise(self) -> tuple[object, NDArray[np.float64], list[str]]:
+        from sklearn.tree import DecisionTreeClassifier
+
+        # Same "signal vs. noise" fixture shape as the adapter tests: the
+        # first feature perfectly determines the label, the second is pure
+        # noise the model should learn to ignore. A real `numpy.ndarray`,
+        # not a plain nested list — the same conversion every real adapter
+        # does at the one seam it actually needs one (`np.asarray(dataset
+        # .train.X)`), which `.fit()`/`permutation_importance` both expect.
+        X = np.asarray([[float(i), float(i % 5)] for i in range(-40, 40)])  # noqa: N806
+        y = ["pos" if row[0] > 0 else "neg" for row in X]
+        model = DecisionTreeClassifier(random_state=0).fit(X, y)
+        return model, X, y
+
+    def test_ranks_the_real_signal_feature_above_pure_noise(self) -> None:
+        model, X, y = self._fit_signal_vs_noise()  # noqa: N806
+
+        rows = compute_permutation_importance(["signal", "noise"], model, X, y, random_state=0)
+
+        assert [row["feature"] for row in rows] == ["signal", "noise"]
+        assert rows[0]["abs_importance"] > rows[1]["abs_importance"]
+        assert rows[0]["abs_importance"] > 0
+
+    def test_signs_are_always_neutral_unlike_a_linear_coefficient(self) -> None:
+        model, X, y = self._fit_signal_vs_noise()  # noqa: N806
+
+        rows = compute_permutation_importance(["signal", "noise"], model, X, y, random_state=0)
+
+        assert all(row["sign"] == "neutral" for row in rows)
+
+    def test_defaults_to_not_normalized_and_tags_when_requested(self) -> None:
+        model, X, y = self._fit_signal_vs_noise()  # noqa: N806
+
+        assert (
+            compute_permutation_importance(["signal", "noise"], model, X, y)[0]["normalized"]
+            is False
+        )
+        tagged = compute_permutation_importance(["signal", "noise"], model, X, y, normalized=True)
+        assert all(row["normalized"] is True for row in tagged)
+
+    def test_two_calls_with_the_same_seed_are_identical(self) -> None:
+        model, X, y = self._fit_signal_vs_noise()  # noqa: N806
+
+        first = compute_permutation_importance(["signal", "noise"], model, X, y, random_state=5)
+        second = compute_permutation_importance(["signal", "noise"], model, X, y, random_state=5)
+
+        assert first == second
+
+    def test_a_model_with_no_predictive_power_at_all_ranks_near_zero(self) -> None:
+        from sklearn.dummy import DummyClassifier
+
+        # A constant-predicting model: shuffling any feature cannot change its
+        # (already input-independent) predictions, so every importance should
+        # sit at exactly zero — the same "no decision skill -> zero
+        # permutation importance" signature the horizon-sweep research
+        # documented for a real near-constant model.
+        X = np.asarray([[float(i), float(i % 5)] for i in range(-20, 20)])  # noqa: N806
+        y = ["pos" if row[0] > 0 else "neg" for row in X]
+        model = DummyClassifier(strategy="most_frequent").fit(X, y)
+
+        rows = compute_permutation_importance(["signal", "noise"], model, X, y, random_state=0)
+
+        assert all(row["abs_importance"] == pytest.approx(0.0) for row in rows)
 
 
 class TestComputeConfusionDetails:

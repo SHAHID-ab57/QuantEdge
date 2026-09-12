@@ -42,8 +42,9 @@ ingestion/validation, the Feature Engineering Engine, Dataset Validation &
 Quality Engine, ML Dataset Builder, Experiment Management System, ML
 Training Framework (with per-column feature normalization) and Baseline
 Model Framework (real scikit-learn logistic/linear regression adapters,
-plus a non-linear `random_forest` adapter added under
-ADD-RANDOM-FOREST-RETEST, `TASKBOOK.md` `M1-E6-T5`), and the Model
+plus non-linear `random_forest` (ADD-RANDOM-FOREST-RETEST, `TASKBOOK.md`
+`M1-E6-T5`) and `gradient_boosting` (ADD-GRADIENT-BOOSTING, `TASKBOOK.md`
+`M1-E6-T6`) adapters), and the Model
 Evaluation & Benchmarking Engine. Every capability here has
 real code, passing tests, and is wired into the running API and dashboard
 — see `ARCHITECTURE.md` for the full per-capability design and
@@ -386,6 +387,23 @@ modelling redirect is not indicated (no regime signal to exploit); the
 A/B fork is now Epic 4.2 / Milestone 5 vs the order-flow / microstructure
 infrastructure bet — whose capture half M4-E2-T1 has now started.
 `docs/research/REGIME_WALKFORWARD_ASSESSMENT.md`.
+
+**The model repertoire was then extended with a third, structurally
+different model class (ADD-GRADIENT-BOOSTING, `TASKBOOK.md` `M1-E6-T6`) —
+one targeted spot-check, not a re-run of the closed research thread.**
+`gradient_boosting` (`HistGradientBoostingClassifier`, sequential boosting
+rather than Random Forest's bagging) is now a standing adapter, and the
+first to ship permutation importance natively. Exactly one comparison ran
+under it — baseline vs. baseline + DefiLlama TVL, the one connector that
+showed a directional effect under both prior model classes — on the same
+byte-identical window every prior comparison used. Both held-out deltas
+(+0.26 pp accuracy, +0.60 pp ROC-AUC) sit inside the noise band, and
+`eth_tvl`'s permutation importance (−0.10 pp) ranks last and is negative.
+**A third model class agrees: no measurable value.** Fear & Greed, FRED,
+and the remaining connectors were deliberately not re-tested — already
+closed under two model classes, five horizons, and three regimes.
+`docs/research/CONNECTOR_FEATURE_VALUE_ASSESSMENT.md` § "Gradient
+Boosting spot-check".
 
 **Milestone 5 — Production Hardening.** Authentication/authorization (none
 exists on any route today), CI/CD (none exists — all quality gates are

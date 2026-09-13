@@ -15,7 +15,9 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Path, Query, status
 
 from app.core.config import get_settings
+from app.dependencies.auth import get_current_user
 from app.dependencies.paper_trading import get_paper_trading_service
+from app.models.user import User
 from app.schemas.paper_trading import (
     PaperAccountCreateRequest,
     PaperAccountListResponse,
@@ -199,6 +201,7 @@ _ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
 }
 
 PaperTradingServiceDep = Annotated[PaperTradingService, Depends(get_paper_trading_service)]
+CurrentUser = Annotated[User, Depends(get_current_user)]
 AccountIdPath = Annotated[uuid.UUID, Path(description="Paper trading account id")]
 SymbolPath = Annotated[str, Path(description="Market symbol")]
 
@@ -210,10 +213,10 @@ SymbolPath = Annotated[str, Path(description="Market symbol")]
     summary="Open a new virtual trading account",
 )
 async def create_paper_account(
-    body: PaperAccountCreateRequest, service: PaperTradingServiceDep
+    body: PaperAccountCreateRequest, service: PaperTradingServiceDep, current_user: CurrentUser
 ) -> PaperAccountResponse:
     """Open a new paper trading account with a starting cash balance."""
-    return await service.create_account(body)
+    return await service.create_account(body, user_id=current_user.id)
 
 
 @router.get(
@@ -268,9 +271,10 @@ async def place_paper_order(
     account_id: AccountIdPath,
     body: PaperOrderRequest,
     service: PaperTradingServiceDep,
+    current_user: CurrentUser,
 ) -> PaperOrderResponse:
     """Place and fill one market order for this account."""
-    return await service.place_order(account_id, body)
+    return await service.place_order(account_id, body, user_id=current_user.id)
 
 
 @router.get(
@@ -355,10 +359,10 @@ async def get_paper_risk_summary(
     responses=_ERROR_RESPONSES,
 )
 async def resume_paper_trading(
-    account_id: AccountIdPath, service: PaperTradingServiceDep
+    account_id: AccountIdPath, service: PaperTradingServiceDep, current_user: CurrentUser
 ) -> PaperAccountResponse:
     """Clear this account's trading_halted flag and reset its peak_balance."""
-    return await service.resume_trading(account_id)
+    return await service.resume_trading(account_id, user_id=current_user.id)
 
 
 @router.patch(
@@ -379,9 +383,12 @@ async def update_paper_position_thresholds(
     symbol: SymbolPath,
     body: PositionThresholdsUpdateRequest,
     service: PaperTradingServiceDep,
+    current_user: CurrentUser,
 ) -> PaperPositionDTO:
     """Set/update/clear one position's stop-loss and take-profit."""
-    return await service.update_position_thresholds(account_id, symbol, body)
+    return await service.update_position_thresholds(
+        account_id, symbol, body, user_id=current_user.id
+    )
 
 
 @router.patch(
@@ -403,9 +410,10 @@ async def update_paper_strategy_config(
     account_id: AccountIdPath,
     body: PaperStrategyConfigUpdateRequest,
     service: PaperTradingServiceDep,
+    current_user: CurrentUser,
 ) -> PaperAccountResponse:
     """Enable/disable this account's automated strategy and tune its config."""
-    return await service.update_strategy_config(account_id, body)
+    return await service.update_strategy_config(account_id, body, user_id=current_user.id)
 
 
 @router.get(

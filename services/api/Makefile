@@ -15,9 +15,14 @@
 #   make test-integration  run integration tests (real APIs, opt-in)
 #   make test-performance  run performance tests (timing budgets, opt-in)
 #   make test-postgres     run PostgreSQL-backed tests (TEST_DATABASE_URL)
+#
+# User management (uv)
+#
+#   make create-user EMAIL="someone@example.com"   prompts for a password twice
 
 .PHONY: db-create-migration db-upgrade db-downgrade db-history db-current db-stamp
 .PHONY: test test-verbose test-coverage test-integration test-performance test-postgres
+.PHONY: create-user
 
 MESSAGE ?= "migration description"
 REV ?= -1
@@ -57,3 +62,6 @@ test-performance:
 
 test-postgres:
 	uv run pytest -m postgres
+
+create-user:
+	uv run python -m app.cli.create_user "$(EMAIL)"

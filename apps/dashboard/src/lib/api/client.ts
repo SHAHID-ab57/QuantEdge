@@ -25,8 +25,8 @@ apiClient.interceptors.response.use(
     const apiError = toApiError(error);
     if (apiError.status === 401) {
       clearSessionToken();
-      if (typeof window !== 'undefined') {
-        window.location.assign('/');
+      if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
+        window.location.assign('/login');
       }
     }
     console.warn(`[api] ${apiError.code}: ${apiError.message}`);

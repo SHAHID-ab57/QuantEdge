@@ -7,6 +7,13 @@ export function getSessionToken(): string | null {
   return window.sessionStorage.getItem(TOKEN_KEY);
 }
 
+export function setSessionToken(token: string): void {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  window.sessionStorage.setItem(TOKEN_KEY, token);
+}
+
 export function clearSessionToken(): void {
   if (typeof window === 'undefined') {
     return;

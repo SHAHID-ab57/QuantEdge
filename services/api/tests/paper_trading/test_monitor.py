@@ -73,7 +73,7 @@ class TestStopLossTrigger:
         state_manager = MarketStateManager().attach(bus)
         build_monitor(state_manager).attach(bus)
 
-        service = build_service(session_factory, state_manager)
+        service = await build_service(session_factory, state_manager)
         await publish_ticker(bus, "PTSLUSD", "1000")
         account = await service.create_account(
             PaperAccountCreateRequest(starting_balance=Decimal("100000"))
@@ -118,7 +118,7 @@ class TestTakeProfitTrigger:
         state_manager = MarketStateManager().attach(bus)
         build_monitor(state_manager).attach(bus)
 
-        service = build_service(session_factory, state_manager)
+        service = await build_service(session_factory, state_manager)
         await publish_ticker(bus, "PTTPUSD", "1000")
         account = await service.create_account(
             PaperAccountCreateRequest(starting_balance=Decimal("100000"))
@@ -161,7 +161,7 @@ class TestTriggeredSlippageModel:
         state_manager = MarketStateManager().attach(bus)
         build_monitor(state_manager).attach(bus)
 
-        service = build_service(session_factory, state_manager)
+        service = await build_service(session_factory, state_manager)
         await publish_ticker(bus, "PTTRIGSLIPUSD", "1000")
         account = await service.create_account(
             PaperAccountCreateRequest(starting_balance=Decimal("100000"))
@@ -228,7 +228,7 @@ class TestTriggeredFillPricesFromTheEventNotAFreshResolve:
         monitor_state_manager = MarketStateManager()
         build_monitor(monitor_state_manager).attach(bus)
 
-        service = build_service(session_factory, order_state_manager)
+        service = await build_service(session_factory, order_state_manager)
         await publish_ticker(bus, "PTEVENTPRICEUSD", "1000")
         account = await service.create_account(
             PaperAccountCreateRequest(starting_balance=Decimal("100000"))
@@ -285,7 +285,7 @@ class TestConcurrentTriggeredAndManualClose:
         state_manager = MarketStateManager().attach(bus)
         build_monitor(state_manager).attach(bus)
 
-        creator = build_service(session_factory, state_manager)
+        creator = await build_service(session_factory, state_manager)
         await publish_ticker(bus, "PTRACECLOSEUSD", "1000")
         account = await creator.create_account(
             PaperAccountCreateRequest(starting_balance=Decimal("100000"))
@@ -304,7 +304,7 @@ class TestConcurrentTriggeredAndManualClose:
         # A second, independent service instance — its own session —
         # racing a manual full close against the price event that's
         # about to trigger the same position's stop-loss.
-        manual_service = build_service(session_factory, state_manager)
+        manual_service = await build_service(session_factory, state_manager)
         manual_close_task = asyncio.create_task(
             manual_service.place_order(
                 account_id,
@@ -378,7 +378,7 @@ class TestGapThroughBothLevels:
         state_manager = MarketStateManager().attach(bus)
         build_monitor(state_manager).attach(bus)
 
-        service = build_service(session_factory, state_manager)
+        service = await build_service(session_factory, state_manager)
         await publish_ticker(bus, "PTGAPUSD", "100")
         account = await service.create_account(
             PaperAccountCreateRequest(starting_balance=Decimal("100000"))

@@ -5162,6 +5162,216 @@ A future microstructure research task consuming these tables must check
 for gaps (e.g. via `sequence`/`event_time` continuity) rather than assume
 uninterrupted coverage.
 
+### Authentication & Audit Trail
+
+Milestone 5, Epic 5.1 (M5-E1-T1). Two real incidents preceded this and
+motivated it directly: leaked third-party API keys with no way to trace
+exposure beyond a manual forensic sweep, and the `strategy_enabled`
+reversion documented at the end of the Paper Trading section above — a
+change that LOG-ACCOUNT-CONFIG-CHANGES could confirm was not an
+accident, but never attribute to a person, because no identity existed
+anywhere on this platform to attach to it. This task closes both: every
+mutating endpoint now requires a real, authenticated user, and every
+mutation that logging already covered is upgraded into a real,
+queryable, attributed `audit_log` row.
+
+**Basic authentication for a small number of real users — deliberately
+not a multi-tenant system.** No organizations, roles, or permission
+tiers: every authenticated user has identical access to every endpoint,
+including every other user's own audit trail (`GET /audit-log` draws no
+admin/member distinction). This is a scope decision, not an oversight —
+building role-based access control now, before this platform has more
+than a handful of real users, would be exactly the kind of premature
+infrastructure this project has otherwise been careful to defer (see
+the Paper Trading section's own "no margin, no shorting, no leverage"
+posture for the same discipline applied elsewhere).
+
+**`users`** (`app/models/user.py`): `id`, `email` (unique, indexed),
+`hashed_password`, `created_at`/`updated_at`. Passwords are hashed with
+`bcrypt` directly (`app/auth/security.py` — `bcrypt.hashpw`/`checkpw`,
+not `passlib`, whose own bcrypt backend has been effectively
+unmaintained) — never stored plaintext or in any reversible encoding.
+Verified directly against the real dev database, not assumed from the
+code: `SELECT hashed_password FROM users` returns a `$2b$12$...` string,
+60 characters, for a real user created via the CLI below.
+
+**First-user creation is a CLI command, not a self-registration
+endpoint** (`make create-user EMAIL=...`, wrapping
+`app/cli/create_user.py`) — deliberately the minimal path this task's
+own scope called for, not a full onboarding flow. Prompts for a password
+twice (never taken as a shell argument, so it never lands in shell
+history) and inserts the row directly. `POST /api/v1/auth/register`
+does not exist (`404`) — confirmed in
+`tests/auth/test_login.py::test_no_self_registration_endpoint_exists`.
+
+**`POST /auth/login`** (`app/api/v1/endpoints/auth.py`, the one
+unauthenticated endpoint this task adds) verifies the password and
+issues a signed JWT (`app/auth/security.py`, PyJWT, HS256, `sub` claim
+is the user's own id, default 60-minute expiry via
+`jwt_access_token_expire_minutes` — no refresh-token flow; a session
+past expiry simply logs in again). An unknown email and a correct
+email with the wrong password return the _identical_
+`invalid_credentials` (401) error — never a distinguishable one, so a
+login attempt can never be used to enumerate registered accounts
+(`tests/auth/test_login.py::test_unknown_email_and_wrong_password_return_the_identical_error`).
+
+**`get_current_user`** (`app/dependencies/auth.py`) is the one
+dependency every protected endpoint declares —
+`Annotated[User, Depends(get_current_user)]`, aliased `CurrentUser` per
+router file, the same shape every other per-request dependency on this
+platform already takes. A missing `Authorization` header, a malformed
+or wrong-signature token, an expired token, and a token naming a user
+id that no longer exists are each a distinct, typed `AppError` subclass
+(`app/auth/errors.py`) surfacing as a real `401` — `authentication_
+required`, `invalid_token`, or `token_expired` — never FastAPI's bare
+default and never a silent pass-through. `jwt_secret_key` has an empty
+default deliberately: `create_access_token`/`decode_access_token` raise
+`AuthNotConfiguredError` (500) rather than sign or verify anything with
+an empty key, the same "credentials required, no insecure default
+that's actually usable" posture `DeltaConfig` already takes for its own
+API secret.
+
+**Every mutating endpoint identified by an exhaustive sweep — not
+assumed from the HTTP verb.** Every `POST`/`PUT`/`PATCH`/`DELETE`
+handler across the entire API was read for its actual service call, the
+same "check the whole thing, don't assume" discipline the
+LOG-ACCOUNT-CONFIG-CHANGES sweep already applied to `PaperTradingService`
+alone, now applied platform-wide. 22 endpoints persist a change and now
+require `CurrentUser`: Paper Trading (create account, place order,
+resume trading, update position thresholds, update strategy config — 5),
+Experiment Management (create/update/delete experiment, create/delete
+metric, create/delete artifact — 7), ML Dataset Builder (build dataset,
+delete build — 2), Model Evaluation (run benchmark, delete benchmark run
+— 2), Backtesting (run — 1), Machine Learning Training (create/delete/
+run/cancel job — 4), Live Prediction Service (run — 1). Eight endpoints
+that looked mutating by verb alone were read in full and confirmed to
+be genuine read-only computations or exports with zero persistence, and
+were deliberately left unauthenticated: indicators batch calculation,
+the four Feature Engineering dataset/correlation/statistics/export
+endpoints, ML dataset export (`export_dataset`, unlike `build_dataset`,
+never persists — "deliberately ignores `preview_rows`" per its own
+docstring), and the Live Prediction Service's `predict` endpoint
+(loads a saved model and predicts "in order," per its own docstring —
+never writes anything). `GET /auth/me` and `GET /audit-log` are the two
+exceptions in the other direction: read-only, but still authenticated
+— a user's own profile check, and an audit trail naming who did what,
+which is itself sensitive.
+
+**`audit_log`** (`app/models/audit_log.py`): `id`, `user_id` (a real,
+`NOT NULL` foreign key to `users.id`, `ON DELETE RESTRICT`), `action`,
+`resource_type`, `resource_id`, `old_value`/`new_value` (JSON,
+nullable), `created_at`. Written through `AuditLogRepository` /
+`AuditService` (`app/services/audit.py`), never inline in a router —
+the same router → service → repository discipline every other mutation
+on this platform already follows.
+
+**Two-tier logging, by design, not by omission.** `PaperTradingService`'s
+own mutating methods (`create_account`, `place_order`,
+`update_position_thresholds`, `update_strategy_config`,
+`resume_trading`) write a _rich_ audit row with real old/new value
+snapshots, because those values are already local variables inside the
+method that changes them — this is the direct upgrade of
+LOG-ACCOUNT-CONFIG-CHANGES's own log lines, not a duplicate of them; the
+`strategy_enabled` flip keeps its own dedicated `paper_account
+.strategy_enabled` action (mirroring the dedicated `ENABLED`/`DISABLED`
+log line) in addition to the general `paper_account
+.update_strategy_config` summary. Every other mutating endpoint records
+a _generic_ audit entry at the router layer via `AuditService.record`
+— action, resource type, resource id, and (where cheaply available) the
+request body as `new_value` — because the router layer has no
+old-value snapshot to offer without an extra fetch this platform hasn't
+needed elsewhere. Both tiers write the same `audit_log` table; nothing
+about which tier a row came from is hidden from a reader of
+`GET /audit-log`.
+
+**Automated, system-triggered orders are not attributed to a person,
+because there is no person behind them.** `PaperTradingService
+.place_order`'s `user_id` parameter is `Optional[uuid.UUID] = None`
+specifically so `PaperTradingStrategyScheduler`'s own automated orders
+(the only caller that omits it) write no `audit_log` row at all — the
+`NOT NULL` foreign key on `user_id` makes a null or fabricated
+attribution impossible by construction, and an automated order's real
+account is already tracked in full via its own `PaperStrategyDecision`
+row, so nothing is lost by skipping the audit write.
+
+**Verified live against the real running dev server and the real
+Postgres database, not just by unit test.** A real unauthenticated
+`POST /paper-trading/accounts` returned `401 authentication_required`.
+A real login with a wrong password returned `401 invalid_credentials`;
+the correct password returned a real bearer token, and `GET /auth/me`
+with it returned the exact user (`verify-live@example.com`) the CLI had
+just created. Using that token: a real account was created, and its
+strategy was enabled against a real completed training job
+(`733082cc-61e9-4377-abaf-d99cafad6b76`, symbol `ETHUSD`). Both
+`GET /audit-log` and a direct `SELECT` against the `audit_log` table
+show the identical result — three rows (`paper_account.create`,
+`paper_account.strategy_enabled`, `paper_account
+.update_strategy_config`), every one naming the real user id
+(`866c3212-9c5f-4024-8493-a3fe7b22d4ff`) and a real timestamp — the
+exact fact the motivating incident had no way to establish.
+
+**Frontend**: a `/login` route (`src/features/auth/login-page.tsx`) —
+email/password, react-hook-form + Zod, the identical `invalid_
+credentials` message for either failure mode so the UI never implies
+which was wrong. A successful login stores the token in
+`sessionStorage` (`src/lib/api/session.ts`) and every request already
+attaches it (`src/lib/api/client.ts`'s existing bearer-token
+interceptor, unchanged). `AuthGuard`
+(`src/components/layout/auth-guard.tsx`), wrapping the entire
+`(dashboard)` route group's layout, redirects to `/login` when no token
+is present rather than rendering a page that would immediately fail
+every request it makes; the API client's own 401 interceptor now
+redirects to `/login` (previously `/`) so a token that expires mid-
+session is handled the same way. `TopBar` gained a small `UserMenu`
+(`GET /auth/me` via TanStack Query) showing the signed-in user's email
+and a sign-out affordance.
+
+**Testing** (`tests/auth/`, 40 tests, kept deliberately separate from
+the rest of the suite): `tests/conftest.py`'s shared `app`/`client`
+fixtures globally override `get_current_user` to a fixed, real,
+persisted `test_user` by default — the same reasoning `get_db`'s own
+override already follows — so the ~150 endpoint tests written before
+authentication existed keep exercising the behavior they actually test,
+unaffected by this cross-cutting change. `tests/auth/` is the one
+suite that cannot use that override, since it exists to prove the
+boundary the override bypasses: it builds its own `app`/`client`
+fixtures with a real `get_current_user` and a real (test-only) JWT
+secret. Covers login success and both failure modes, token validation
+(valid/expired/malformed/wrong-signature/unknown-subject), a
+parametrized 401 check across all 24 authenticated endpoints (22
+mutating plus `GET /auth/me`/`GET /audit-log`), and the
+`strategy_enabled` attribution proof end to end through a real
+`POST /auth/login` call, matching the live verification above.
+
+**Two real, currently-live gaps, disclosed rather than left implicit:**
+
+- **No rate limiting or lockout on `POST /auth/login`.** Confirmed
+  live: eight consecutive wrong-password attempts against a real
+  account each returned a plain `401`, with no throttling, backoff, or
+  account lockout, and the correct password still succeeded
+  immediately afterward — unlimited-attempt brute-forcing of any known
+  email is possible today. Independent of the general inbound
+  rate-limiting task planned next for this milestone (see `ROADMAP.md`
+  § "Milestone 5"), which is aimed at fair-use limits across the API
+  broadly, not login-specific brute-force protection specifically —
+  this endpoint needs its own attempt-based limiting (e.g. a per-email
+  or per-IP backoff) whenever that task or a dedicated follow-up lands.
+- **Logout does not invalidate the token server-side.** There is no
+  blocklist, token version, or `jti`/nonce check anywhere in
+  `decode_access_token` — it verifies only the signature, expiry, and
+  subject shape. The frontend's `logout()` only clears the token from
+  `sessionStorage` and redirects; it never calls any backend endpoint
+  (none exists to revoke a token). Confirmed live: a token captured
+  before "logging out" was replayed directly against `GET /auth/me`
+  afterward and still returned `200` with the real user's profile. A
+  token therefore remains fully valid and replayable for its full
+  `jwt_access_token_expire_minutes` (default 60) regardless of any
+  client-side logout — acceptable for this task's own small-real-users
+  scope given the short default expiry and no refresh-token flow to
+  extend it, but a real gap for a stolen-token scenario until a
+  revocation mechanism (most naturally, Redis-backed once that's wired
+  in — see `ROADMAP.md` § "Milestone 5") exists.
+
 ### Feature Store
 
 > Not built. Features are computed on demand and exported; no persisted,

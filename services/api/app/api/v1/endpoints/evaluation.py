@@ -15,7 +15,9 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Path, Query, status
 
 from app.core.config import get_settings
+from app.dependencies.auth import get_audit_service, get_current_user
 from app.dependencies.evaluation import get_evaluation_service
+from app.models.user import User
 from app.schemas.evaluation import (
     BenchmarkRequest,
     BenchmarkResponse,
@@ -23,6 +25,7 @@ from app.schemas.evaluation import (
     BenchmarkRunListResponse,
     MetricCatalogResponse,
 )
+from app.services.audit import AuditService
 from app.services.evaluation import EvaluationService
 
 router = APIRouter(tags=["evaluation"])
@@ -87,6 +90,8 @@ _ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
 }
 
 EvaluationServiceDep = Annotated[EvaluationService, Depends(get_evaluation_service)]
+AuditServiceDep = Annotated[AuditService, Depends(get_audit_service)]
+CurrentUser = Annotated[User, Depends(get_current_user)]
 
 
 @router.get(
@@ -116,9 +121,20 @@ async def list_metrics(service: EvaluationServiceDep) -> MetricCatalogResponse:
     ),
     responses=_ERROR_RESPONSES,
 )
-async def benchmark(body: BenchmarkRequest, service: EvaluationServiceDep) -> BenchmarkResponse:
+async def benchmark(
+    body: BenchmarkRequest,
+    service: EvaluationServiceDep,
+    audit: AuditServiceDep,
+    current_user: CurrentUser,
+) -> BenchmarkResponse:
     """Compare completed training jobs matching `body`."""
-    return await service.benchmark(body)
+    result = await service.benchmark(body)
+    await audit.record(
+        user_id=current_user.id,
+        action="evaluation.benchmark",
+        resource_type="benchmark_run",
+    )
+    return result
 
 
 BenchmarkRunIdPath = Annotated[uuid.UUID, Path(description="Benchmark History run id")]
@@ -195,6 +211,17 @@ async def get_benchmark_run(
     description="Deletes the persisted record only — never touches the underlying training jobs.",
     responses=_RUN_NOT_FOUND_RESPONSES,
 )
-async def delete_benchmark_run(run_id: BenchmarkRunIdPath, service: EvaluationServiceDep) -> None:
+async def delete_benchmark_run(
+    run_id: BenchmarkRunIdPath,
+    service: EvaluationServiceDep,
+    audit: AuditServiceDep,
+    current_user: CurrentUser,
+) -> None:
     """Delete one persisted benchmark run by id."""
     await service.delete_benchmark_run(run_id)
+    await audit.record(
+        user_id=current_user.id,
+        action="evaluation.delete_benchmark_run",
+        resource_type="benchmark_run",
+        resource_id=str(run_id),
+    )

@@ -14,12 +14,15 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Path, Query, status
 
 from app.core.config import get_settings
+from app.dependencies.auth import get_audit_service, get_current_user
 from app.dependencies.prediction import get_prediction_service
+from app.models.user import User
 from app.schemas.prediction import (
     PredictionListResponse,
     PredictionResponse,
     PredictionRunRequest,
 )
+from app.services.audit import AuditService
 from app.services.prediction import PredictionService
 
 router = APIRouter(tags=["prediction"])
@@ -83,6 +86,8 @@ _ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
 }
 
 PredictionServiceDep = Annotated[PredictionService, Depends(get_prediction_service)]
+AuditServiceDep = Annotated[AuditService, Depends(get_audit_service)]
+CurrentUser = Annotated[User, Depends(get_current_user)]
 PredictionIdPath = Annotated[uuid.UUID, Path(description="Prediction id")]
 
 
@@ -100,10 +105,20 @@ PredictionIdPath = Annotated[uuid.UUID, Path(description="Prediction id")]
     responses=_ERROR_RESPONSES,
 )
 async def run_prediction(
-    body: PredictionRunRequest, service: PredictionServiceDep
+    body: PredictionRunRequest,
+    service: PredictionServiceDep,
+    audit: AuditServiceDep,
+    current_user: CurrentUser,
 ) -> PredictionResponse:
     """Run and persist one live prediction."""
-    return await service.run(body)
+    result = await service.run(body)
+    await audit.record(
+        user_id=current_user.id,
+        action="prediction.run",
+        resource_type="prediction",
+        resource_id=result.id,
+    )
+    return result
 
 
 @router.get(

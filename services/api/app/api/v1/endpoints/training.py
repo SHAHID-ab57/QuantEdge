@@ -15,7 +15,9 @@ from fastapi import APIRouter, Depends, Path, Query, status
 from fastapi.responses import FileResponse
 
 from app.core.config import get_settings
+from app.dependencies.auth import get_audit_service, get_current_user
 from app.dependencies.training import get_training_job_service, schedule_training_job
+from app.models.user import User
 from app.schemas.training import (
     ModelAdapterCatalogResponse,
     TrainingArtifactListResponse,
@@ -25,6 +27,7 @@ from app.schemas.training import (
     TrainingJobPredictResponse,
     TrainingJobResponse,
 )
+from app.services.audit import AuditService
 from app.services.training import TrainingJobService
 
 router = APIRouter(tags=["training"])
@@ -65,6 +68,8 @@ _ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
 }
 
 TrainingJobServiceDep = Annotated[TrainingJobService, Depends(get_training_job_service)]
+AuditServiceDep = Annotated[AuditService, Depends(get_audit_service)]
+CurrentUser = Annotated[User, Depends(get_current_user)]
 TrainingJobIdPath = Annotated[uuid.UUID, Path(description="Training job id")]
 
 
@@ -96,10 +101,20 @@ async def list_model_adapters(service: TrainingJobServiceDep) -> ModelAdapterCat
     responses=_ERROR_RESPONSES,
 )
 async def create_training_job(
-    body: TrainingJobCreateRequest, service: TrainingJobServiceDep
+    body: TrainingJobCreateRequest,
+    service: TrainingJobServiceDep,
+    audit: AuditServiceDep,
+    current_user: CurrentUser,
 ) -> TrainingJobResponse:
     """Create a new training job record."""
-    return await service.create(body)
+    created = await service.create(body)
+    await audit.record(
+        user_id=current_user.id,
+        action="training_job.create",
+        resource_type="training_job",
+        resource_id=created.id,
+    )
+    return created
 
 
 @router.get(
@@ -170,9 +185,20 @@ async def get_training_job(
     description="Permanently delete a training job and its logs. Refuses a running job.",
     responses=_ERROR_RESPONSES,
 )
-async def delete_training_job(job_id: TrainingJobIdPath, service: TrainingJobServiceDep) -> None:
+async def delete_training_job(
+    job_id: TrainingJobIdPath,
+    service: TrainingJobServiceDep,
+    audit: AuditServiceDep,
+    current_user: CurrentUser,
+) -> None:
     """Delete one training job by id."""
     await service.delete(job_id)
+    await audit.record(
+        user_id=current_user.id,
+        action="training_job.delete",
+        resource_type="training_job",
+        resource_id=str(job_id),
+    )
 
 
 @router.post(
@@ -192,10 +218,19 @@ async def delete_training_job(job_id: TrainingJobIdPath, service: TrainingJobSer
     responses=_ERROR_RESPONSES,
 )
 async def run_training_job(
-    job_id: TrainingJobIdPath, service: TrainingJobServiceDep
+    job_id: TrainingJobIdPath,
+    service: TrainingJobServiceDep,
+    audit: AuditServiceDep,
+    current_user: CurrentUser,
 ) -> TrainingJobResponse:
     """Transition a pending job to 'running' and schedule its pipeline in the background."""
     response = await service.start(job_id)
+    await audit.record(
+        user_id=current_user.id,
+        action="training_job.run",
+        resource_type="training_job",
+        resource_id=str(job_id),
+    )
     schedule_training_job(job_id)
     return response
 
@@ -207,10 +242,20 @@ async def run_training_job(
     responses=_ERROR_RESPONSES,
 )
 async def cancel_training_job(
-    job_id: TrainingJobIdPath, service: TrainingJobServiceDep
+    job_id: TrainingJobIdPath,
+    service: TrainingJobServiceDep,
+    audit: AuditServiceDep,
+    current_user: CurrentUser,
 ) -> TrainingJobResponse:
     """Cancel one training job, if its current status allows it."""
-    return await service.cancel(job_id)
+    cancelled = await service.cancel(job_id)
+    await audit.record(
+        user_id=current_user.id,
+        action="training_job.cancel",
+        resource_type="training_job",
+        resource_id=str(job_id),
+    )
+    return cancelled
 
 
 @router.post(

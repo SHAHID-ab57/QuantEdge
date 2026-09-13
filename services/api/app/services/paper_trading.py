@@ -114,6 +114,7 @@ from app.paper_trading.errors import (
     TradingHaltedError,
 )
 from app.paper_trading.pricing import apply_fill_model, resolve_current_price
+from app.repositories.audit_log import AuditLogRepository
 from app.repositories.candles import CandleRepository
 from app.repositories.markets import MarketRepository
 from app.repositories.paper_trading import (
@@ -166,6 +167,7 @@ class PaperTradingService:
         candle_repository: CandleRepository,
         training_job_repository: TrainingJobRepository,
         strategy_decision_repository: PaperStrategyDecisionRepository,
+        audit_log_repository: AuditLogRepository,
         state_manager: MarketStateManager,
         slippage_bps: int,
         fee_bps: int,
@@ -185,6 +187,7 @@ class PaperTradingService:
         self.candle_repository = candle_repository
         self.training_job_repository = training_job_repository
         self.strategy_decision_repository = strategy_decision_repository
+        self.audit_log_repository = audit_log_repository
         self.state_manager = state_manager
         self.slippage_bps = slippage_bps
         self.fee_bps = fee_bps
@@ -197,7 +200,9 @@ class PaperTradingService:
         self.default_strategy_confidence_threshold_pct = default_strategy_confidence_threshold_pct
         self.default_strategy_default_stop_loss_pct = default_strategy_default_stop_loss_pct
 
-    async def create_account(self, request: PaperAccountCreateRequest) -> PaperAccountResponse:
+    async def create_account(
+        self, request: PaperAccountCreateRequest, *, user_id: uuid.UUID
+    ) -> PaperAccountResponse:
         account = PaperAccount(
             name=request.name,
             starting_balance=request.starting_balance,
@@ -238,6 +243,19 @@ class PaperTradingService:
             created.max_drawdown_pct,
             created.strategy_enabled,
         )
+        await self._record_audit(
+            user_id=user_id,
+            action="paper_account.create",
+            resource_id=created.id,
+            old_value=None,
+            new_value={
+                "name": created.name,
+                "starting_balance": str(created.starting_balance),
+                "max_position_size_pct": str(created.max_position_size_pct),
+                "max_exposure_pct": str(created.max_exposure_pct),
+                "max_drawdown_pct": str(created.max_drawdown_pct),
+            },
+        )
         return PaperAccountResponse.from_model(created)
 
     async def get_account(self, account_id: uuid.UUID) -> PaperAccountResponse:
@@ -254,7 +272,11 @@ class PaperTradingService:
         )
 
     async def place_order(
-        self, account_id: uuid.UUID, request: PaperOrderRequest
+        self,
+        account_id: uuid.UUID,
+        request: PaperOrderRequest,
+        *,
+        user_id: uuid.UUID | None = None,
     ) -> PaperOrderResponse:
         """Fill one market order immediately, completely, and realistically
         — guarded by pre-trade risk checks (halted, then position sizing,
@@ -288,6 +310,13 @@ class PaperTradingService:
         loop forever; exhausting it raises `AccountUpdateConflictError`,
         practically unreachable by a real two-way race (one retry is
         always enough) but never assumed away.
+
+        `user_id` names the authenticated caller for the audit trail
+        (`app.services.audit`) — `None` only for
+        `PaperTradingStrategyScheduler`'s own automated orders, which have
+        no human behind them to attribute and are already tracked in full
+        via `PaperStrategyDecision` (`list_strategy_decisions`); no
+        `audit_log` row is written for those.
         """
         market = await self.market_repository.get_by_symbol(request.symbol)
         if market is None:
@@ -466,6 +495,22 @@ class PaperTradingService:
                 realized_pnl=realized_pnl_this_order,
             )
             created = await self.order_repository.create(order)
+            if user_id is not None:
+                await self._record_audit(
+                    user_id=user_id,
+                    action="paper_account.place_order",
+                    resource_id=account_id,
+                    old_value=None,
+                    new_value={
+                        "order_id": str(created.id),
+                        "symbol": created.symbol,
+                        "side": created.side,
+                        "quantity": str(created.quantity),
+                        "fill_price": str(created.fill_price),
+                        "notional": str(created.notional),
+                        "fee_applied": str(created.fee_applied),
+                    },
+                )
             return PaperOrderResponse.from_model(created)
 
         raise AccountUpdateConflictError(self.max_order_attempts)
@@ -573,7 +618,12 @@ class PaperTradingService:
         return None  # retries exhausted — the next price tick gives this another chance
 
     async def update_position_thresholds(
-        self, account_id: uuid.UUID, symbol: str, request: PositionThresholdsUpdateRequest
+        self,
+        account_id: uuid.UUID,
+        symbol: str,
+        request: PositionThresholdsUpdateRequest,
+        *,
+        user_id: uuid.UUID,
     ) -> PaperPositionDTO:
         """Set, update, or clear a position's stop-loss/take-profit.
 
@@ -628,12 +678,35 @@ class PaperTradingService:
             old_take_profit_price,
             new_take_profit_price,
         )
+        await self._record_audit(
+            user_id=user_id,
+            action="paper_account.update_position_thresholds",
+            resource_id=account_id,
+            old_value={
+                "symbol": symbol,
+                "stop_loss_price": str(old_stop_loss_price) if old_stop_loss_price else None,
+                "take_profit_price": (
+                    str(old_take_profit_price) if old_take_profit_price else None
+                ),
+            },
+            new_value={
+                "symbol": symbol,
+                "stop_loss_price": str(new_stop_loss_price) if new_stop_loss_price else None,
+                "take_profit_price": (
+                    str(new_take_profit_price) if new_take_profit_price else None
+                ),
+            },
+        )
         return PaperPositionDTO.from_model(
             updated, current_price=quote.price, price_source=quote.source
         )
 
     async def update_strategy_config(
-        self, account_id: uuid.UUID, request: PaperStrategyConfigUpdateRequest
+        self,
+        account_id: uuid.UUID,
+        request: PaperStrategyConfigUpdateRequest,
+        *,
+        user_id: uuid.UUID,
     ) -> PaperAccountResponse:
         """Enable/disable the automated strategy and tune its threshold/stop-loss.
 
@@ -705,6 +778,23 @@ class PaperTradingService:
                 new_confidence_threshold_pct,
                 new_default_stop_loss_pct,
             )
+            # Its own dedicated audit action too, mirroring the log line
+            # above — the exact fact ("who enabled/disabled it, pointed at
+            # which job") the motivating incident had no way to attribute
+            # at all.
+            await self._record_audit(
+                user_id=user_id,
+                action="paper_account.strategy_enabled",
+                resource_id=account_id,
+                old_value={
+                    "enabled": old_enabled,
+                    "training_job_id": str(old_training_job_id) if old_training_job_id else None,
+                },
+                new_value={
+                    "enabled": new_enabled,
+                    "training_job_id": str(new_training_job_id) if new_training_job_id else None,
+                },
+            )
         logger.info(
             "Paper trading strategy config updated (account_id=%s "
             "enabled=%s->%s training_job_id=%s->%s "
@@ -718,6 +808,23 @@ class PaperTradingService:
             new_confidence_threshold_pct,
             old_default_stop_loss_pct,
             new_default_stop_loss_pct,
+        )
+        await self._record_audit(
+            user_id=user_id,
+            action="paper_account.update_strategy_config",
+            resource_id=account_id,
+            old_value={
+                "enabled": old_enabled,
+                "training_job_id": str(old_training_job_id) if old_training_job_id else None,
+                "confidence_threshold_pct": str(old_confidence_threshold_pct),
+                "default_stop_loss_pct": str(old_default_stop_loss_pct),
+            },
+            new_value={
+                "enabled": new_enabled,
+                "training_job_id": str(new_training_job_id) if new_training_job_id else None,
+                "confidence_threshold_pct": str(new_confidence_threshold_pct),
+                "default_stop_loss_pct": str(new_default_stop_loss_pct),
+            },
         )
         return PaperAccountResponse.from_model(updated)
 
@@ -739,7 +846,9 @@ class PaperTradingService:
             offset=offset,
         )
 
-    async def resume_trading(self, account_id: uuid.UUID) -> PaperAccountResponse:
+    async def resume_trading(
+        self, account_id: uuid.UUID, *, user_id: uuid.UUID
+    ) -> PaperAccountResponse:
         """Explicitly clear a drawdown halt — the *only* way it ever
         clears (this feature's own spec: no self-healing on balance
         recovery — nothing about *this* trade or any later one ever
@@ -768,6 +877,13 @@ class PaperTradingService:
             old_trading_halted,
             old_peak_balance,
             account.balance,
+        )
+        await self._record_audit(
+            user_id=user_id,
+            action="paper_account.resume_trading",
+            resource_id=account_id,
+            old_value={"trading_halted": old_trading_halted, "peak_balance": str(old_peak_balance)},
+            new_value={"trading_halted": False, "peak_balance": str(account.balance)},
         )
         return PaperAccountResponse.from_model(updated)
 
@@ -863,6 +979,29 @@ class PaperTradingService:
         if account is None:
             raise PaperAccountNotFoundError(account_id)
         return account
+
+    async def _record_audit(
+        self,
+        *,
+        user_id: uuid.UUID,
+        action: str,
+        resource_id: uuid.UUID,
+        old_value: dict[str, object] | None,
+        new_value: dict[str, object] | None,
+    ) -> None:
+        """The one place this service writes an `audit_log` row — every
+        value passed in is already a plain, JSON-serializable dict (the
+        caller stringifies any `Decimal` first, matching this platform's
+        own `order_flow.py` convention for the same JSON-column
+        constraint)."""
+        await self.audit_log_repository.create(
+            user_id=user_id,
+            action=action,
+            resource_type="paper_account",
+            resource_id=str(resource_id),
+            old_value=old_value,
+            new_value=new_value,
+        )
 
     async def _current_price_for_symbol(self, symbol: str) -> FillQuote | None:
         """The live-price-with-fallback quote for `symbol` right now, or

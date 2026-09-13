@@ -7,7 +7,9 @@ FastAPI service in `services/api` (OpenAPI docs at `/docs`).
 
 ## Status
 
-Draft — unauthenticated throughout. Market data, feature engineering,
+Draft. Every mutating endpoint now requires bearer-token authentication
+(see § "Authentication" below); read-only endpoints remain
+unauthenticated. Market data, feature engineering,
 dataset validation, and the ML dataset builder are read-only/build-only;
 Experiment Management and the Machine Learning Training Framework are the
 platform's genuinely persistent, full-CRUD surfaces. The Training
@@ -871,12 +873,12 @@ validation issue by the `feature_failures` rule.
 
 ### ML dataset builder
 
-| Method | Path                                         | Purpose                                                              |
-| ------ | -------------------------------------------- | -------------------------------------------------------------------- |
-| GET    | `/api/v1/ml/targets`                         | Catalogue of every registered prediction-target generator            |
-| GET    | `/api/v1/ml/targets/{target}`                | One target generator's full metadata                                 |
-| POST   | `/api/v1/markets/{symbol}/ml/dataset`        | Build a versioned, split, validated ML dataset                       |
-| POST   | `/api/v1/markets/{symbol}/ml/dataset/export` | Export the complete dataset (`?format=csv\|json`) with a split label |
+| Method | Path                                         | Auth | Purpose                                                              |
+| ------ | -------------------------------------------- | ---- | -------------------------------------------------------------------- |
+| GET    | `/api/v1/ml/targets`                         |      | Catalogue of every registered prediction-target generator            |
+| GET    | `/api/v1/ml/targets/{target}`                |      | One target generator's full metadata                                 |
+| POST   | `/api/v1/markets/{symbol}/ml/dataset`        | 🔒   | Build a versioned, split, validated ML dataset                       |
+| POST   | `/api/v1/markets/{symbol}/ml/dataset/export` |      | Export the complete dataset (`?format=csv\|json`) with a split label |
 
 This is the platform's one supported path for producing a dataset used in
 AI training — see `ARCHITECTURE.md` § "ML Dataset Builder" and `AI.md` §
@@ -1060,17 +1062,17 @@ surface identically (recorded in `quality.feature_failures`, not raised).
 
 ### Experiment management
 
-| Method | Path                                               | Purpose                                         |
-| ------ | -------------------------------------------------- | ----------------------------------------------- |
-| POST   | `/api/v1/experiments`                              | Register a new experiment                       |
-| GET    | `/api/v1/experiments`                              | Search, filter, sort, and paginate experiments  |
-| GET    | `/api/v1/experiments/{id}`                         | Get one experiment (with metrics and artifacts) |
-| PATCH  | `/api/v1/experiments/{id}`                         | Partial update                                  |
-| DELETE | `/api/v1/experiments/{id}`                         | Delete an experiment and its children           |
-| POST   | `/api/v1/experiments/{id}/metrics`                 | Record a metric                                 |
-| DELETE | `/api/v1/experiments/{id}/metrics/{metric_id}`     | Delete a metric                                 |
-| POST   | `/api/v1/experiments/{id}/artifacts`               | Record an artifact reference                    |
-| DELETE | `/api/v1/experiments/{id}/artifacts/{artifact_id}` | Delete an artifact reference                    |
+| Method | Path                                               | Auth | Purpose                                         |
+| ------ | -------------------------------------------------- | ---- | ----------------------------------------------- |
+| POST   | `/api/v1/experiments`                              | 🔒   | Register a new experiment                       |
+| GET    | `/api/v1/experiments`                              |      | Search, filter, sort, and paginate experiments  |
+| GET    | `/api/v1/experiments/{id}`                         |      | Get one experiment (with metrics and artifacts) |
+| PATCH  | `/api/v1/experiments/{id}`                         | 🔒   | Partial update                                  |
+| DELETE | `/api/v1/experiments/{id}`                         | 🔒   | Delete an experiment and its children           |
+| POST   | `/api/v1/experiments/{id}/metrics`                 | 🔒   | Record a metric                                 |
+| DELETE | `/api/v1/experiments/{id}/metrics/{metric_id}`     | 🔒   | Delete a metric                                 |
+| POST   | `/api/v1/experiments/{id}/artifacts`               | 🔒   | Record an artifact reference                    |
+| DELETE | `/api/v1/experiments/{id}/artifacts/{artifact_id}` | 🔒   | Delete an artifact reference                    |
 
 The platform's one registry for experiment provenance — see
 `ARCHITECTURE.md` § "Experiment Management System" for the full design.
@@ -1169,16 +1171,16 @@ omit it to leave tags untouched.
 
 ### Machine Learning Training Framework
 
-| Method | Path                                 | Purpose                                                   |
-| ------ | ------------------------------------ | --------------------------------------------------------- |
-| GET    | `/api/v1/training-jobs/models`       | List every registered model adapter (the extension point) |
-| POST   | `/api/v1/training-jobs`              | Register a new training job against an experiment         |
-| GET    | `/api/v1/training-jobs`              | Search, filter, sort, and paginate training jobs          |
-| GET    | `/api/v1/training-jobs/{id}`         | Get one training job (with its full log trail)            |
-| DELETE | `/api/v1/training-jobs/{id}`         | Delete a training job (refuses a running job)             |
-| POST   | `/api/v1/training-jobs/{id}/run`     | Start the six-stage pipeline in the background            |
-| POST   | `/api/v1/training-jobs/{id}/cancel`  | Cancel a pending job                                      |
-| POST   | `/api/v1/training-jobs/{id}/predict` | Predict using a completed job's trained model             |
+| Method | Path                                 | Auth | Purpose                                                   |
+| ------ | ------------------------------------ | ---- | --------------------------------------------------------- |
+| GET    | `/api/v1/training-jobs/models`       |      | List every registered model adapter (the extension point) |
+| POST   | `/api/v1/training-jobs`              | 🔒   | Register a new training job against an experiment         |
+| GET    | `/api/v1/training-jobs`              |      | Search, filter, sort, and paginate training jobs          |
+| GET    | `/api/v1/training-jobs/{id}`         |      | Get one training job (with its full log trail)            |
+| DELETE | `/api/v1/training-jobs/{id}`         | 🔒   | Delete a training job (refuses a running job)             |
+| POST   | `/api/v1/training-jobs/{id}/run`     | 🔒   | Start the six-stage pipeline in the background            |
+| POST   | `/api/v1/training-jobs/{id}/cancel`  | 🔒   | Cancel a pending job                                      |
+| POST   | `/api/v1/training-jobs/{id}/predict` |      | Predict using a completed job's trained model             |
 
 The orchestration layer BC4 adds on top of Experiment Management — see
 `ARCHITECTURE.md` § "Machine Learning Training Framework" and § "Baseline
@@ -1420,13 +1422,13 @@ mid-pipeline, surfacing as a `failed` job rather than an HTTP error, since
 
 ### Model Evaluation & Benchmarking Engine
 
-| Method | Path                              | Purpose                                                   |
-| ------ | --------------------------------- | --------------------------------------------------------- |
-| GET    | `/api/v1/evaluation/metrics`      | List every registered metric (the extension point)        |
-| POST   | `/api/v1/evaluation/benchmark`    | Compare completed training jobs by their recorded metrics |
-| GET    | `/api/v1/evaluation/history`      | List past benchmark comparisons (Benchmark History)       |
-| GET    | `/api/v1/evaluation/history/{id}` | Reopen one past comparison — its exact request/response   |
-| DELETE | `/api/v1/evaluation/history/{id}` | Remove one past comparison from Benchmark History         |
+| Method | Path                              | Auth | Purpose                                                   |
+| ------ | --------------------------------- | ---- | --------------------------------------------------------- |
+| GET    | `/api/v1/evaluation/metrics`      |      | List every registered metric (the extension point)        |
+| POST   | `/api/v1/evaluation/benchmark`    | 🔒   | Compare completed training jobs by their recorded metrics |
+| GET    | `/api/v1/evaluation/history`      |      | List past benchmark comparisons (Benchmark History)       |
+| GET    | `/api/v1/evaluation/history/{id}` |      | Reopen one past comparison — its exact request/response   |
+| DELETE | `/api/v1/evaluation/history/{id}` | 🔒   | Remove one past comparison from Benchmark History         |
 
 Full design in `ARCHITECTURE.md` § "Model Evaluation & Benchmarking
 Engine". This engine computes nothing new at request time — every metric
@@ -1569,11 +1571,11 @@ persisted record; the underlying `TrainingJob` rows are untouched.
 
 ### Live Prediction Service
 
-| Method | Path                       | Purpose                                                      |
-| ------ | -------------------------- | ------------------------------------------------------------ |
-| POST   | `/api/v1/predictions/run`  | Reconstruct a live feature vector and predict, synchronously |
-| GET    | `/api/v1/predictions/{id}` | Reopen one past prediction                                   |
-| GET    | `/api/v1/predictions`      | List past predictions (Prediction History)                   |
+| Method | Path                       | Auth | Purpose                                                      |
+| ------ | -------------------------- | ---- | ------------------------------------------------------------ |
+| POST   | `/api/v1/predictions/run`  | 🔒   | Reconstruct a live feature vector and predict, synchronously |
+| GET    | `/api/v1/predictions/{id}` |      | Reopen one past prediction                                   |
+| GET    | `/api/v1/predictions`      |      | List past predictions (Prediction History)                   |
 
 Full design in `ARCHITECTURE.md` § "Live Prediction Service". Given a
 **completed** training job with a saved model artifact, this recomputes the
@@ -1662,11 +1664,11 @@ combination on the list endpoint).
 
 ### Backtesting Engine
 
-| Method | Path                     | Purpose                                                         |
-| ------ | ------------------------ | --------------------------------------------------------------- |
-| POST   | `/api/v1/backtests/run`  | Plan, persist, and start a backtest; returns before it finishes |
-| GET    | `/api/v1/backtests/{id}` | Reopen one past backtest run                                    |
-| GET    | `/api/v1/backtests`      | List past backtest runs (Backtest History)                      |
+| Method | Path                     | Auth | Purpose                                                         |
+| ------ | ------------------------ | ---- | --------------------------------------------------------------- |
+| POST   | `/api/v1/backtests/run`  | 🔒   | Plan, persist, and start a backtest; returns before it finishes |
+| GET    | `/api/v1/backtests/{id}` |      | Reopen one past backtest run                                    |
+| GET    | `/api/v1/backtests`      |      | List past backtest runs (Backtest History)                      |
 
 Full design in `ARCHITECTURE.md` § "Backtesting Engine". Given a completed
 training job and a historical date range, walks it one step at a time —
@@ -1767,20 +1769,20 @@ the list endpoint) round out the rest.
 
 ### Paper Trading
 
-| Method | Path                                                     | Purpose                                                              |
-| ------ | -------------------------------------------------------- | -------------------------------------------------------------------- |
-| POST   | `/api/v1/paper-trading/accounts`                         | Open a new virtual trading account                                   |
-| GET    | `/api/v1/paper-trading/accounts`                         | List every account, most recently created first                      |
-| GET    | `/api/v1/paper-trading/accounts/{id}`                    | Get one account                                                      |
-| POST   | `/api/v1/paper-trading/accounts/{id}/orders`             | Place and fill a market order                                        |
-| GET    | `/api/v1/paper-trading/accounts/{id}/orders`             | List an account's own order history                                  |
-| GET    | `/api/v1/paper-trading/accounts/{id}/positions`          | List an account's currently-open positions                           |
-| GET    | `/api/v1/paper-trading/accounts/{id}/summary`            | Balance, realized PnL, and live unrealized PnL                       |
-| GET    | `/api/v1/paper-trading/accounts/{id}/risk`               | Current exposure %/drawdown %, distance to each limit, halted status |
-| POST   | `/api/v1/paper-trading/accounts/{id}/resume-trading`     | Clear a drawdown halt, resetting peak_balance to the current balance |
-| PATCH  | `/api/v1/paper-trading/accounts/{id}/positions/{symbol}` | Set, update, or clear a position's stop-loss/take-profit             |
-| PATCH  | `/api/v1/paper-trading/accounts/{id}/strategy`           | Enable/disable the automated strategy, tune threshold/stop-loss      |
-| GET    | `/api/v1/paper-trading/accounts/{id}/strategy/decisions` | An account's own automated-strategy decision log, paginated          |
+| Method | Path                                                     | Auth | Purpose                                                              |
+| ------ | -------------------------------------------------------- | ---- | -------------------------------------------------------------------- |
+| POST   | `/api/v1/paper-trading/accounts`                         | 🔒   | Open a new virtual trading account                                   |
+| GET    | `/api/v1/paper-trading/accounts`                         |      | List every account, most recently created first                      |
+| GET    | `/api/v1/paper-trading/accounts/{id}`                    |      | Get one account                                                      |
+| POST   | `/api/v1/paper-trading/accounts/{id}/orders`             | 🔒   | Place and fill a market order                                        |
+| GET    | `/api/v1/paper-trading/accounts/{id}/orders`             |      | List an account's own order history                                  |
+| GET    | `/api/v1/paper-trading/accounts/{id}/positions`          |      | List an account's currently-open positions                           |
+| GET    | `/api/v1/paper-trading/accounts/{id}/summary`            |      | Balance, realized PnL, and live unrealized PnL                       |
+| GET    | `/api/v1/paper-trading/accounts/{id}/risk`               |      | Current exposure %/drawdown %, distance to each limit, halted status |
+| POST   | `/api/v1/paper-trading/accounts/{id}/resume-trading`     | 🔒   | Clear a drawdown halt, resetting peak_balance to the current balance |
+| PATCH  | `/api/v1/paper-trading/accounts/{id}/positions/{symbol}` | 🔒   | Set, update, or clear a position's stop-loss/take-profit             |
+| PATCH  | `/api/v1/paper-trading/accounts/{id}/strategy`           | 🔒   | Enable/disable the automated strategy, tune threshold/stop-loss      |
+| GET    | `/api/v1/paper-trading/accounts/{id}/strategy/decisions` |      | An account's own automated-strategy decision log, paginated          |
 
 Full design in `ARCHITECTURE.md` § "Paper Trading". A virtual trading
 account: place simulated market orders against real prices, track
@@ -2004,6 +2006,71 @@ acted on or not — a below-threshold prediction, a non-directional
 signal, an order rejected by an existing risk limit, and a genuinely
 placed order all appear here, each with a plain-language `reason`.
 
+### Authentication & Audit Trail
+
+| Method | Path                 | Auth | Purpose                                                  |
+| ------ | -------------------- | ---- | -------------------------------------------------------- |
+| POST   | `/api/v1/auth/login` |      | Verify credentials, issue a bearer JWT                   |
+| GET    | `/api/v1/auth/me`    | 🔒   | The caller's own profile — the frontend's session check  |
+| GET    | `/api/v1/audit-log`  | 🔒   | Paginated audit trail, newest first — who did what, when |
+
+Full design in `ARCHITECTURE.md` § "Authentication & Audit Trail". There
+is no self-registration endpoint — a first user is created with
+`make create-user EMAIL=...` on the server. `POST /auth/login` is the
+one unauthenticated endpoint documented anywhere in this file; every
+other 🔒-marked endpoint on this page requires the bearer token it
+issues, rejecting a missing, malformed, or expired one with a real
+`401` rather than a silent pass-through.
+
+**Log in** (`POST /auth/login`):
+
+```jsonc
+// Request
+{ "email": "researcher@example.com", "password": "..." }
+
+// Response (200)
+{
+  "access_token": "eyJhbGciOi...",
+  "token_type": "bearer",
+  "expires_in": 3600, // seconds — jwt_access_token_expire_minutes, default 60 minutes
+}
+
+// An unknown email and a correct email with the wrong password return
+// the identical error below — never a distinguishable one:
+// 401 { "code": "invalid_credentials", "detail": "Invalid email or password" }
+```
+
+Send the token as `Authorization: Bearer <access_token>` on every
+protected request.
+
+**Read the audit trail** (`GET /audit-log`, optionally filtered by
+`user_id`/`resource_type`/`resource_id`):
+
+```jsonc
+{
+  "entries": [
+    {
+      "id": "7c876646-...",
+      "user_id": "866c3212-...",
+      "action": "paper_account.strategy_enabled",
+      "resource_type": "paper_account",
+      "resource_id": "37b2d8da-...",
+      "old_value": { "enabled": false, "training_job_id": null },
+      "new_value": { "enabled": true, "training_job_id": "733082cc-..." },
+      "created_at": "2026-09-12T17:38:35Z",
+    },
+  ],
+  "total": 3,
+  "limit": 50,
+  "offset": 0,
+}
+```
+
+Every mutating endpoint marked 🔒 on this page writes at least one row
+here, naming the real authenticated caller — never `null`, never a
+placeholder. No admin/member distinction exists: any authenticated user
+may read the full trail, including other users' own actions.
+
 ### Platform health
 
 | Method | Path                     | Purpose                                            |
@@ -2047,8 +2114,18 @@ consume it.
 
 ## Authentication
 
-None — the current surface is read-only and public. Private endpoints will
-use HMAC/JWT credentials when trading/AI surfaces are added.
+Basic bearer-token authentication (M5-E1-T1) — see § "Authentication &
+Audit Trail" above and `ARCHITECTURE.md` § "Authentication & Audit
+Trail" for the full design. Every endpoint marked 🔒 in the tables above
+requires `Authorization: Bearer <access_token>`, obtained from
+`POST /auth/login`; a missing, malformed, or expired token is rejected
+with a real `401` (`authentication_required` / `invalid_token` /
+`token_expired`), never a silent pass-through. Every endpoint without
+that marker (including this whole surface before this task) remains
+unauthenticated. No self-registration endpoint exists — a first user is
+created with `make create-user` on the server. No roles, organizations,
+or permission tiers exist: every authenticated user has identical
+access, deliberately, for this platform's current scope.
 
 ## Error Handling
 

@@ -86,6 +86,7 @@ from app.dependencies.prediction import get_prediction_service
 from app.models.paper_trading import PaperAccount, PaperStrategyDecision
 from app.paper_trading.errors import NoPriceAvailableError
 from app.paper_trading.pricing import resolve_current_price
+from app.repositories.audit_log import AuditLogRepository
 from app.repositories.candles import CandleRepository
 from app.repositories.markets import MarketRepository
 from app.repositories.paper_trading import (
@@ -531,6 +532,7 @@ def _build_trading_service(
         candle_repository=CandleRepository(session),
         training_job_repository=TrainingJobRepository(session),
         strategy_decision_repository=PaperStrategyDecisionRepository(session),
+        audit_log_repository=AuditLogRepository(session),
         state_manager=state_manager,
         slippage_bps=settings.paper_trading_slippage_bps,
         fee_bps=settings.paper_trading_fee_bps,

@@ -33,11 +33,15 @@ from app.schemas.paper_trading import (
 )
 from app.schemas.prediction import PredictionResponse
 from app.services import paper_trading_strategy as strategy_module
-from app.services.paper_trading import PaperTradingService
 from app.services.paper_trading_strategy import PaperTradingStrategyScheduler, run_strategy_once
 from app.state.manager import MarketStateManager
 from tests.conftest import SessionFactory
-from tests.paper_trading.test_service import build_service, publish_ticker, seed_market
+from tests.paper_trading.test_service import (
+    _TestPaperTradingService,
+    build_service,
+    publish_ticker,
+    seed_market,
+)
 from tests.prediction.test_service import train_completed_job
 
 
@@ -136,7 +140,7 @@ class _FreshEachCallPredictionService:
 
 
 async def enable_strategy(
-    service: PaperTradingService,
+    service: _TestPaperTradingService,
     account_id: uuid.UUID,
     job_id: str,
     *,
@@ -163,7 +167,7 @@ class TestAboveThresholdWithAFlatPositionOpensAnOrder:
             session_factory, symbol="STRATUPUSD", model_type="logistic_regression"
         )
         state_manager = MarketStateManager()
-        service = build_service(session_factory, state_manager)
+        service = await build_service(session_factory, state_manager)
         account = await service.create_account(
             PaperAccountCreateRequest(starting_balance=Decimal("100000"))
         )
@@ -209,7 +213,7 @@ class TestEachCycleRequestsAGenuinelyFreshPrediction:
             session_factory, symbol="STRATFRESHCALLUSD", model_type="logistic_regression"
         )
         state_manager = MarketStateManager()
-        service = build_service(session_factory, state_manager)
+        service = await build_service(session_factory, state_manager)
         account = await service.create_account(
             PaperAccountCreateRequest(starting_balance=Decimal("100000"))
         )
@@ -251,7 +255,7 @@ class TestEachCycleRequestsAGenuinelyFreshPrediction:
             session_factory, symbol="STRATREPEATUSD", model_type="logistic_regression"
         )
         state_manager = MarketStateManager()
-        service = build_service(session_factory, state_manager)
+        service = await build_service(session_factory, state_manager)
         account = await service.create_account(
             PaperAccountCreateRequest(starting_balance=Decimal("100000"))
         )
@@ -317,7 +321,7 @@ class TestAllFourPositionConsistencyCases:
             session_factory, symbol="STRATFLATDOWNUSD", model_type="logistic_regression"
         )
         state_manager = MarketStateManager()
-        service = build_service(session_factory, state_manager)
+        service = await build_service(session_factory, state_manager)
         account = await service.create_account(
             PaperAccountCreateRequest(starting_balance=Decimal("100000"))
         )
@@ -357,7 +361,7 @@ class TestAllFourPositionConsistencyCases:
             session_factory, symbol="STRATLONGUPUSD", model_type="logistic_regression"
         )
         state_manager = MarketStateManager()
-        service = build_service(session_factory, state_manager)
+        service = await build_service(session_factory, state_manager)
         account = await service.create_account(
             PaperAccountCreateRequest(starting_balance=Decimal("100000"))
         )
@@ -431,7 +435,7 @@ class TestRegressionJobsCanBeConfiguredButNeverAct:
             target="next_close",
         )
         state_manager = MarketStateManager()
-        service = build_service(session_factory, state_manager)
+        service = await build_service(session_factory, state_manager)
         account = await service.create_account(
             PaperAccountCreateRequest(starting_balance=Decimal("100000"))
         )
@@ -476,7 +480,7 @@ class TestBelowThresholdResultsInNoOrder:
             session_factory, symbol="STRATLOWUSD", model_type="logistic_regression"
         )
         state_manager = MarketStateManager()
-        service = build_service(session_factory, state_manager)
+        service = await build_service(session_factory, state_manager)
         account = await service.create_account(
             PaperAccountCreateRequest(starting_balance=Decimal("100000"))
         )
@@ -517,7 +521,7 @@ class TestAutomatedPositionsAlwaysCarryAStopLoss:
             session_factory, symbol="STRATSLUSD", model_type="logistic_regression"
         )
         state_manager = MarketStateManager()
-        service = build_service(session_factory, state_manager)
+        service = await build_service(session_factory, state_manager)
         account = await service.create_account(
             PaperAccountCreateRequest(starting_balance=Decimal("100000"))
         )
@@ -559,7 +563,7 @@ class TestLongAndBearishClosesThePosition:
             session_factory, symbol="STRATDOWNUSD", model_type="logistic_regression"
         )
         state_manager = MarketStateManager()
-        service = build_service(session_factory, state_manager)
+        service = await build_service(session_factory, state_manager)
         account = await service.create_account(
             PaperAccountCreateRequest(starting_balance=Decimal("100000"))
         )
@@ -608,7 +612,7 @@ class TestLongAndBearishClosesThePosition:
             session_factory, symbol="STRATCLOSEHALTUSD", model_type="logistic_regression"
         )
         state_manager = MarketStateManager()
-        service = build_service(session_factory, state_manager)
+        service = await build_service(session_factory, state_manager)
         account = await service.create_account(
             PaperAccountCreateRequest(
                 starting_balance=Decimal("100000"),
@@ -670,7 +674,7 @@ class TestSharesExistingRiskLimits:
         state_manager = MarketStateManager().attach(bus)
         await publish_ticker(bus, "STRATOTHERUSD", "1000")
 
-        service = build_service(session_factory, state_manager)
+        service = await build_service(session_factory, state_manager)
         account = await service.create_account(
             PaperAccountCreateRequest(
                 starting_balance=Decimal("100000"),
@@ -723,7 +727,7 @@ class TestDisablingStopsFutureCycles:
             session_factory, symbol="STRATOFFUSD", model_type="logistic_regression"
         )
         state_manager = MarketStateManager()
-        service = build_service(session_factory, state_manager)
+        service = await build_service(session_factory, state_manager)
         account = await service.create_account(
             PaperAccountCreateRequest(starting_balance=Decimal("100000"))
         )
@@ -774,7 +778,7 @@ class TestDisablingStopsFutureCycles:
             session_factory, symbol="STRATMIDCYCLEUSD", model_type="logistic_regression"
         )
         state_manager = MarketStateManager()
-        service = build_service(session_factory, state_manager)
+        service = await build_service(session_factory, state_manager)
         account = await service.create_account(
             PaperAccountCreateRequest(starting_balance=Decimal("100000"))
         )
@@ -830,7 +834,7 @@ class TestEveryCycleIsLogged:
             session_factory, symbol="STRATLOGUSD", model_type="logistic_regression"
         )
         state_manager = MarketStateManager()
-        service = build_service(session_factory, state_manager)
+        service = await build_service(session_factory, state_manager)
         account = await service.create_account(
             PaperAccountCreateRequest(starting_balance=Decimal("100000"))
         )
@@ -912,7 +916,7 @@ class TestRealPredictionWiring:
             session_factory, symbol="STRATREALUSD", model_type="logistic_regression"
         )
         state_manager = MarketStateManager()
-        service = build_service(session_factory, state_manager)
+        service = await build_service(session_factory, state_manager)
         account = await service.create_account(
             PaperAccountCreateRequest(starting_balance=Decimal("100000"))
         )
@@ -938,7 +942,7 @@ class TestRealPredictionWiring:
         job_id, _ = await train_completed_job(
             session_factory, symbol="STRATONCEUSD", model_type="logistic_regression"
         )
-        service = build_service(session_factory, MarketStateManager())
+        service = await build_service(session_factory, MarketStateManager())
         account = await service.create_account(
             PaperAccountCreateRequest(starting_balance=Decimal("100000"))
         )

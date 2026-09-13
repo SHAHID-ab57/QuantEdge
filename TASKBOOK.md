@@ -143,6 +143,7 @@ that introduced it where the work has been committed.
 | M4-E3-T2 | M4: Data Breadth                 | E3: Feature Value Assessment                       | Redid the feature-value assessment on the corrected training pipeline (M1-E6-T3/T4), split into a statistically-powered **primary** comparison (baseline + Fear & Greed + FRED + DefiLlama, over the full 22,711-row ETHUSD/1h history — the longest window all three deep connectors support) and an explicitly under-powered **secondary** one (Etherscan + CoinGecko + Marketaux/News + all-six, bounded to those connectors' real ~4-day backfill depth, 69 rows). News's placement in the secondary group was checked against the task's own depth criterion, not assumed — 34 days of real data is an order of magnitude closer to the 4-day shallow end than the 8–30-year deep end. Result: **no primary connector feature adds measurable predictive value** (all held-out deltas < 1 pp over 3,408 test rows; DefiLlama TVL marginally _hurts_, −2.1 pp test accuracy); secondary comparison is **not measurable for lack of data depth** (all five variants produce byte-identical held-out predictions, all overfitting-flagged). Both tables, deltas, and the noise-band analysis in `docs/research/CONNECTOR_FEATURE_VALUE_ASSESSMENT.md` § "M4-E3-T2"                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | Completed | High     | M4-E3-T1     | `17c39d7`            |
 | M4-E3-T3 | M4: Data Breadth                 | E3: Feature Value Assessment                       | HORIZON-SWEEP — every feature so far had been tested at exactly one horizon (next hour). Swept the baseline feature set alone (`ohlcv` + `sma(20)`, no connectors) across `next_direction` horizons 1 h / 4 h / 12 h / 24 h / 48 h, same ETHUSD/1h window and split as every prior comparison, under both logistic regression and Random Forest (modest + regularized), with this thread's full diagnostic suite plus a **circular block bootstrap** for a problem that only appears at h > 1: consecutive h-candle-ahead targets overlap by h−1 candles, so the ~3,400 test rows are ~n/h independent outcomes and a per-row bootstrap CI is spuriously narrow. The naive CI makes held-out ROC-AUC look like it rises to 0.55–0.58 at h24/h48 (CI excluding 0.5); the block-corrected CI includes 0.5 at every horizon ≥ 4, and the generalizing models there predict a constant class (permutation importance exactly 0.000 for every feature, test-F1 = the mechanical "always predict up" value). The recent ~150-row cross-check replicates nothing. **No prediction horizon from 1 h to 48 h carries recoverable directional signal in OHLCV-derived features.** Step 2's conditional (re-run the six-connector comparison at a skillful horizon) is not triggered. No application code. `docs/research/HORIZON_SWEEP_ASSESSMENT.md`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | Completed | Medium   | M4-E3-T2     | `31e8513`            |
 | M4-E3-T4 | M4: Data Breadth                 | E3: Feature Value Assessment                       | REGIME-WALKFORWARD — every prior result rested on one chronological split against one test-period market regime; the horizon sweep's own diagnosis of the h24/h48 illusion (a near-constant probability rank-correlating with one trending test block) is why that matters. Identified three genuinely distinct ETHUSD regimes by inspecting the actual monthly history against stated criteria (net return, intra-window range, trend consistency): a +100% uptrend (2025-05-01..07-20), a −28% downtrend (2025-10-15..12-25), and a flat choppy range (2026-03-01..05-20, band 1900–2470), each ~1,700–1,920 hourly steps. One baseline logistic model (OHLCV + SMA(20), next_direction h=1) trained on an early 2024 window — so all three regimes are strictly out-of-sample — was walked forward over each via the **existing Backtesting engine, unmodified** (`POST /backtests/run`, one live prediction + immediate grade per step, aggregate metrics from the shared EvaluationEngine). Held-out ROC-AUC: 0.512 / 0.507 / 0.495 — every 5,000-sample bootstrap 95% CI includes 0.5. The model predicts a near-constant "down" in all three regimes (99.8%+ of its calls), so accuracy just tracks each regime's base rate and the one regime-varying metric (precision 0.62 / 0.25 / 0.46) is an artifact of that fixed lean, not skill. **The negative finding is regime-invariant.** No application code. `docs/research/REGIME_WALKFORWARD_ASSESSMENT.md`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | Completed | Medium   | M4-E3-T3     | pending commit       |
+| M5-E1-T1 | M5: Production Hardening         | E1: Authentication & Audit Trail                   | Basic bearer-token authentication for a small number of real users (deliberately no roles/organizations/permission tiers), applied to every one of 22 mutating endpoints found by an exhaustive sweep of the entire API; new `users` (bcrypt-hashed passwords) and `audit_log` tables, the latter upgrading — not duplicating — the existing LOG-ACCOUNT-CONFIG-CHANGES log lines into real, queryable, attributed rows. Closes both motivating gaps: no way to trace leaked API-key exposure, and no way to attribute the earlier `strategy_enabled` reversion to a person. First user created via `make create-user`, no self-registration endpoint. Frontend: `/login` page, `sessionStorage` token, `AuthGuard` on the whole dashboard route group, top-bar sign-out. 40 new tests in `tests/auth/`; ~150 pre-existing endpoint tests run unmodified against a fixed real test user via a global `get_current_user` override. **Verified live against the real dev server and Postgres**: a real unauthenticated request rejected with a real `401`; a real login (wrong password rejected, correct password issuing a real token); a real `strategy_enabled` flip while logged in produced a real `audit_log` row naming the real user, confirmed via `GET /audit-log` and a direct database query. Also fixed two pre-existing test-suite bugs this task's own changes surfaced (an audit-write scheduled after, not before, a background task on the same shared test connection; a raw, never-closed test session reclaimed mid-suite) — the second is the same failure class `TD-001` below already flagged under a different symptom. `ARCHITECTURE.md` § "Authentication & Audit Trail"                                                                                                                                                                                                                                                                                                                                 | Completed | Critical | None         | pending commit       |
 
 ---
 
@@ -154,7 +155,7 @@ that introduced it where the work has been committed.
 | M2        | Prediction & Backtesting                     | COMPLETE    |
 | M3        | Paper Trading & Risk                         | COMPLETE    |
 | M4        | Data Breadth                                 | IN PROGRESS |
-| M5        | Production Hardening                         | NOT STARTED |
+| M5        | Production Hardening                         | IN PROGRESS |
 | M6        | Live Trading (gated on extensive validation) | NOT STARTED |
 
 **M1-E6-T3, FIX-TRAINING-DATE-RANGE, is now real, tested, and wired in —
@@ -633,6 +634,58 @@ every finding above is confirmed against the real, live, unauthenticated
 error response and current documentation, the same evidentiary standard
 FRED's own task used before a real key was available. See
 `ARCHITECTURE.md` § "External Data Connectors" → "Marketaux Connector".
+
+**M5-E1-T1, basic authentication and a real, attributable audit trail, is
+done — Milestone 5's first task.** Two real incidents motivated it
+directly: leaked third-party API keys with no way to trace exposure
+beyond a manual forensic sweep, and the `strategy_enabled` reversion
+(`M3`) that LOG-ACCOUNT-CONFIG-CHANGES could confirm was not an accident
+but never attribute to a person, because no identity existed anywhere on
+this platform. An exhaustive sweep of the entire API (every
+`POST`/`PUT`/`PATCH`/`DELETE` handler read for its actual service call,
+not assumed from the verb) found 22 genuinely mutating endpoints across
+Paper Trading, Experiment Management, ML Dataset Builder, Model
+Evaluation, Backtesting, Machine Learning Training, and the Live
+Prediction Service; 8 more looked mutating by verb alone but were
+confirmed read-only (indicators batch, four Feature Engineering
+endpoints, ML dataset export, live prediction). All 22 now require a
+real `Authorization: Bearer` token via `get_current_user`, rejecting a
+missing/malformed/expired one with a real `401`. `users` (bcrypt-hashed
+passwords) and `audit_log` (who/what/old value/new value/when) are new
+tables; `audit_log` upgrades — never duplicates — LOG-ACCOUNT-CONFIG-
+CHANGES's own log lines, with a rich old/new snapshot inside
+`PaperTradingService`'s own mutating methods and a generic entry at the
+router layer everywhere else. Deliberately no roles, organizations, or
+permission tiers — basic auth for a small number of real users, not the
+multi-tenant system this platform doesn't need yet. A first user is
+created with `make create-user`, not a self-registration endpoint.
+Frontend: a `/login` page, `sessionStorage` token storage, an
+`AuthGuard` on the whole dashboard route group, and a top-bar sign-out
+affordance. 40 new tests in `tests/auth/` (login, token validation, a
+401 check across all 24 authenticated endpoints, and the
+`strategy_enabled` attribution proof end to end); the ~150 pre-existing
+endpoint tests run unmodified against a fixed real test user via a
+global `get_current_user` override rather than being individually
+rewritten. **Verified live against the real dev server and Postgres, not
+just by unit test**: a real unauthenticated request rejected with a real
+`401`; a real login (wrong password rejected, correct password issuing a
+real token); a real `strategy_enabled` flip on a real paper account
+produced a real `audit_log` row naming the real user, confirmed both via
+`GET /audit-log` and a direct `SELECT` against the table. Also fixed
+along the way: two pre-existing test-suite bugs surfaced only once every
+mutating endpoint started doing extra work per request — an `audit
+.record()` call placed after (rather than before) a background task was
+scheduled let the two interleave on the same shared in-memory SQLite
+connection during `POST /training-jobs/{id}/run` and `POST
+/backtests/run`, corrupting it (`training_job.run`/`backtest.run`
+reordered so scheduling is always last); and a raw, never-closed test
+session inside `tests/prediction/test_service.py::train_completed_job`
+left its own engine's single pooled connection to be silently reclaimed
+and replaced by Python's own reference counting, mid-suite, surfacing as
+a baffling "no such table" error in an unrelated later test (now closed
+explicitly) — the same failure class `TD-001` below already flagged
+under a different symptom. See `ARCHITECTURE.md` § "Authentication &
+Audit Trail", `docs/api/API.md`, `CHANGELOG.md`.
 
 ---
 

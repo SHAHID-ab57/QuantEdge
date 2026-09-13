@@ -68,6 +68,7 @@ from app.marketdata.bus_events import TickerUpdated, TradeEventReceived
 from app.models.paper_trading import PaperPosition
 from app.paper_trading.base import FillQuote
 from app.paper_trading.pricing import is_stale
+from app.repositories.audit_log import AuditLogRepository
 from app.repositories.candles import CandleRepository
 from app.repositories.markets import MarketRepository
 from app.repositories.paper_trading import (
@@ -171,6 +172,7 @@ class StopLossTakeProfitMonitor:
                 candle_repository=CandleRepository(session),
                 training_job_repository=TrainingJobRepository(session),
                 strategy_decision_repository=PaperStrategyDecisionRepository(session),
+                audit_log_repository=AuditLogRepository(session),
                 state_manager=self._state_manager,
                 slippage_bps=self._slippage_bps,
                 fee_bps=self._fee_bps,

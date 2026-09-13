@@ -62,7 +62,9 @@ class TestOwnDatabaseSession:
         )
         job = await starter.create(
             TrainingJobCreateRequest(
-                experiment_id=experiment_id, model_type="placeholder", hyperparameters={"epochs": 2}
+                experiment_id=uuid.UUID(experiment_id),
+                model_type="placeholder",
+                hyperparameters={"epochs": 2},
             )
         )
         await starter.start(uuid.UUID(job.id))
@@ -90,7 +92,9 @@ class TestFailurePaths:
         experiment_id = await seed_experiment(session_factory)  # no dataset_version -> fails
         service = build_service(session_factory)
         job = await service.create(
-            TrainingJobCreateRequest(experiment_id=experiment_id, model_type="placeholder")
+            TrainingJobCreateRequest(
+                experiment_id=uuid.UUID(experiment_id), model_type="placeholder"
+            )
         )
         await service.start(uuid.UUID(job.id))
 
@@ -112,7 +116,9 @@ class TestFailurePaths:
         experiment_id = await seed_experiment(session_factory, dataset_version="ds-crash")
         service = build_service(session_factory)
         job = await service.create(
-            TrainingJobCreateRequest(experiment_id=experiment_id, model_type="placeholder")
+            TrainingJobCreateRequest(
+                experiment_id=uuid.UUID(experiment_id), model_type="placeholder"
+            )
         )
         await service.start(uuid.UUID(job.id))
 
@@ -147,7 +153,9 @@ class TestFailurePaths:
         experiment_id = await seed_experiment(session_factory, dataset_version="ds-crash-recovery")
         service = build_service(session_factory)
         job = await service.create(
-            TrainingJobCreateRequest(experiment_id=experiment_id, model_type="placeholder")
+            TrainingJobCreateRequest(
+                experiment_id=uuid.UUID(experiment_id), model_type="placeholder"
+            )
         )
         await service.start(uuid.UUID(job.id))
 
@@ -182,7 +190,9 @@ class TestSchedulingAndWaiting:
         experiment_id = await seed_experiment(session_factory, dataset_version="ds-wait")
         service = build_service(session_factory)
         job = await service.create(
-            TrainingJobCreateRequest(experiment_id=experiment_id, model_type="placeholder")
+            TrainingJobCreateRequest(
+                experiment_id=uuid.UUID(experiment_id), model_type="placeholder"
+            )
         )
         await service.start(uuid.UUID(job.id))
 

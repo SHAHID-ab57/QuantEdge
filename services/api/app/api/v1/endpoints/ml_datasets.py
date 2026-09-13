@@ -24,8 +24,10 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Path, Query, Response, status
 
 from app.core.config import get_settings
+from app.dependencies.auth import get_audit_service, get_current_user
 from app.dependencies.ml_datasets import get_ml_dataset_service
 from app.ml_datasets.export import EXPORT_FORMATS
+from app.models.user import User
 from app.schemas.ml_datasets import (
     MLDatasetBuildDetailResponse,
     MLDatasetBuildListResponse,
@@ -34,6 +36,7 @@ from app.schemas.ml_datasets import (
     TargetCatalogResponse,
     TargetDTO,
 )
+from app.services.audit import AuditService
 from app.services.ml_datasets import MLDatasetService
 
 router = APIRouter(tags=["ml-datasets"])
@@ -108,6 +111,8 @@ _ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
 }
 
 MLDatasetServiceDep = Annotated[MLDatasetService, Depends(get_ml_dataset_service)]
+AuditServiceDep = Annotated[AuditService, Depends(get_audit_service)]
+CurrentUser = Annotated[User, Depends(get_current_user)]
 SymbolPath = Annotated[str, Path(examples=["ETHUSD"], description="Market symbol")]
 TargetPath = Annotated[str, Path(examples=["next_close"], description="Registered target name")]
 
@@ -161,9 +166,18 @@ async def build_ml_dataset(
     symbol: SymbolPath,
     body: MLDatasetRequest,
     service: MLDatasetServiceDep,
+    audit: AuditServiceDep,
+    current_user: CurrentUser,
 ) -> MLDatasetResponse:
     """Build, validate, and split an ML dataset for one market/timeframe/range."""
-    return await service.build_dataset(symbol, body)
+    built = await service.build_dataset(symbol, body)
+    await audit.record(
+        user_id=current_user.id,
+        action="ml_dataset.build",
+        resource_type="ml_dataset_build",
+        resource_id=built.ml_dataset_id,
+    )
+    return built
 
 
 @router.post(
@@ -295,7 +309,16 @@ async def get_ml_dataset_build(
     responses=_BUILD_NOT_FOUND_RESPONSES,
 )
 async def delete_ml_dataset_build(
-    build_id: MLDatasetBuildIdPath, service: MLDatasetServiceDep
+    build_id: MLDatasetBuildIdPath,
+    service: MLDatasetServiceDep,
+    audit: AuditServiceDep,
+    current_user: CurrentUser,
 ) -> None:
     """Delete one persisted ML dataset build by id."""
     await service.delete_build(build_id)
+    await audit.record(
+        user_id=current_user.id,
+        action="ml_dataset.delete_build",
+        resource_type="ml_dataset_build",
+        resource_id=str(build_id),
+    )

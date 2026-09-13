@@ -36,11 +36,13 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.pool import StaticPool
 
 from app.application import create_app
+from app.auth.security import hash_password
 from app.db.base import Base
 from app.db.session import get_db
+from app.dependencies.auth import get_current_user
 from app.events.bus import EventBus
 from app.marketdata.models import OrderBookEvent, OrderBookLevel, TickerEvent, TradeEvent
-from app.models import Candle, Exchange, Market
+from app.models import Candle, Exchange, Market, User
 
 SessionFactory = async_sessionmaker[AsyncSession]
 
@@ -110,16 +112,47 @@ async def db_session(session_factory: SessionFactory) -> AsyncIterator[AsyncSess
         yield session
 
 
+@pytest_asyncio.fixture
+async def test_user(session_factory: SessionFactory) -> User:
+    """A real, persisted user — every mutating endpoint now requires
+    authentication, so this is the identity the `app`/`client` fixtures'
+    own `get_current_user` override resolves to by default. A genuine row
+    (not a bare in-memory object standing in for one) because `audit_log
+    .user_id` is a real foreign key: a mutating call that writes an audit
+    entry must reference a user that actually exists, in SQLite here
+    exactly as it would in Postgres.
+    """
+    async with session_factory() as session:
+        user = User(email="test-user@example.com", hashed_password=hash_password("test-password"))
+        session.add(user)
+        await session.commit()
+        await session.refresh(user)
+        return user
+
+
 @pytest.fixture
-def app(session_factory: SessionFactory) -> Generator[FastAPI]:
-    """A fresh FastAPI app whose database dependency uses the test engine."""
+def app(session_factory: SessionFactory, test_user: User) -> Generator[FastAPI]:
+    """A fresh FastAPI app whose database dependency uses the test engine.
+
+    `get_current_user` is overridden to resolve to `test_user` by default,
+    so the ~60 existing endpoint tests written before authentication
+    existed keep exercising the behavior they actually test, unaffected by
+    this cross-cutting change — the same reasoning `get_db`'s own override
+    already follows. Tests that specifically need to prove the real 401
+    behavior (`tests/auth/`) build their own app without this override —
+    see `tests/auth/conftest.py`.
+    """
     app = create_app()
 
     async def override_get_db() -> AsyncIterator[AsyncSession]:
         async with session_factory() as session:
             yield session
 
+    async def override_get_current_user() -> User:
+        return test_user
+
     app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_current_user] = override_get_current_user
     yield app
     app.dependency_overrides.clear()
 

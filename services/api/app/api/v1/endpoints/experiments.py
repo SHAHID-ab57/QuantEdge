@@ -12,7 +12,9 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Path, Query, status
 
 from app.core.config import get_settings
+from app.dependencies.auth import get_audit_service, get_current_user
 from app.dependencies.experiments import get_experiment_service
+from app.models.user import User
 from app.schemas.experiments import (
     ArtifactCreateRequest,
     ArtifactDTO,
@@ -23,6 +25,7 @@ from app.schemas.experiments import (
     MetricCreateRequest,
     MetricDTO,
 )
+from app.services.audit import AuditService
 from app.services.experiments import ExperimentService
 
 router = APIRouter(tags=["experiments"])
@@ -67,6 +70,8 @@ _ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
 }
 
 ExperimentServiceDep = Annotated[ExperimentService, Depends(get_experiment_service)]
+AuditServiceDep = Annotated[AuditService, Depends(get_audit_service)]
+CurrentUser = Annotated[User, Depends(get_current_user)]
 ExperimentIdPath = Annotated[uuid.UUID, Path(description="Experiment id")]
 
 
@@ -83,10 +88,20 @@ ExperimentIdPath = Annotated[uuid.UUID, Path(description="Experiment id")]
     ),
 )
 async def create_experiment(
-    body: ExperimentCreateRequest, service: ExperimentServiceDep
+    body: ExperimentCreateRequest,
+    service: ExperimentServiceDep,
+    audit: AuditServiceDep,
+    current_user: CurrentUser,
 ) -> ExperimentResponse:
     """Create a new experiment record."""
-    return await service.create(body)
+    created = await service.create(body)
+    await audit.record(
+        user_id=current_user.id,
+        action="experiment.create",
+        resource_type="experiment",
+        resource_id=str(created.id),
+    )
+    return created
 
 
 @router.get(
@@ -168,9 +183,19 @@ async def update_experiment(
     experiment_id: ExperimentIdPath,
     body: ExperimentUpdateRequest,
     service: ExperimentServiceDep,
+    audit: AuditServiceDep,
+    current_user: CurrentUser,
 ) -> ExperimentResponse:
     """Apply a partial update to one experiment."""
-    return await service.update(experiment_id, body)
+    updated = await service.update(experiment_id, body)
+    await audit.record(
+        user_id=current_user.id,
+        action="experiment.update",
+        resource_type="experiment",
+        resource_id=str(experiment_id),
+        new_value=body.model_dump(exclude_unset=True, mode="json"),
+    )
+    return updated
 
 
 @router.delete(
@@ -180,9 +205,20 @@ async def update_experiment(
     description="Permanently delete an experiment and its metrics and artifact references.",
     responses=_ERROR_RESPONSES,
 )
-async def delete_experiment(experiment_id: ExperimentIdPath, service: ExperimentServiceDep) -> None:
+async def delete_experiment(
+    experiment_id: ExperimentIdPath,
+    service: ExperimentServiceDep,
+    audit: AuditServiceDep,
+    current_user: CurrentUser,
+) -> None:
     """Delete one experiment by id."""
     await service.delete(experiment_id)
+    await audit.record(
+        user_id=current_user.id,
+        action="experiment.delete",
+        resource_type="experiment",
+        resource_id=str(experiment_id),
+    )
 
 
 @router.post(
@@ -196,9 +232,19 @@ async def create_metric(
     experiment_id: ExperimentIdPath,
     body: MetricCreateRequest,
     service: ExperimentServiceDep,
+    audit: AuditServiceDep,
+    current_user: CurrentUser,
 ) -> MetricDTO:
     """Record one evaluation metric against an experiment."""
-    return await service.add_metric(experiment_id, body)
+    created = await service.add_metric(experiment_id, body)
+    await audit.record(
+        user_id=current_user.id,
+        action="experiment.create_metric",
+        resource_type="experiment_metric",
+        resource_id=str(created.id),
+        new_value=body.model_dump(mode="json"),
+    )
+    return created
 
 
 @router.delete(
@@ -211,9 +257,17 @@ async def delete_metric(
     experiment_id: ExperimentIdPath,
     metric_id: Annotated[uuid.UUID, Path(description="Metric id")],
     service: ExperimentServiceDep,
+    audit: AuditServiceDep,
+    current_user: CurrentUser,
 ) -> None:
     """Delete one metric from an experiment."""
     await service.delete_metric(experiment_id, metric_id)
+    await audit.record(
+        user_id=current_user.id,
+        action="experiment.delete_metric",
+        resource_type="experiment_metric",
+        resource_id=str(metric_id),
+    )
 
 
 @router.post(
@@ -231,9 +285,19 @@ async def create_artifact(
     experiment_id: ExperimentIdPath,
     body: ArtifactCreateRequest,
     service: ExperimentServiceDep,
+    audit: AuditServiceDep,
+    current_user: CurrentUser,
 ) -> ArtifactDTO:
     """Record one artifact reference against an experiment."""
-    return await service.add_artifact(experiment_id, body)
+    created = await service.add_artifact(experiment_id, body)
+    await audit.record(
+        user_id=current_user.id,
+        action="experiment.create_artifact",
+        resource_type="experiment_artifact",
+        resource_id=str(created.id),
+        new_value=body.model_dump(mode="json"),
+    )
+    return created
 
 
 @router.delete(
@@ -246,6 +310,14 @@ async def delete_artifact(
     experiment_id: ExperimentIdPath,
     artifact_id: Annotated[uuid.UUID, Path(description="Artifact id")],
     service: ExperimentServiceDep,
+    audit: AuditServiceDep,
+    current_user: CurrentUser,
 ) -> None:
     """Delete one artifact reference from an experiment."""
     await service.delete_artifact(experiment_id, artifact_id)
+    await audit.record(
+        user_id=current_user.id,
+        action="experiment.delete_artifact",
+        resource_type="experiment_artifact",
+        resource_id=str(artifact_id),
+    )

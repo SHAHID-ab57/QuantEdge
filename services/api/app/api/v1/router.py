@@ -2,6 +2,7 @@
 
 from fastapi import APIRouter
 
+from app.api.v1.endpoints.auth import router as auth_router
 from app.api.v1.endpoints.backtest import router as backtest_router
 from app.api.v1.endpoints.connectors import router as connectors_router
 from app.api.v1.endpoints.dataset_validation import router as dataset_validation_router
@@ -21,6 +22,7 @@ from app.api.v1.endpoints.training import router as training_router
 
 router = APIRouter()
 router.include_router(health_router, tags=["health"])
+router.include_router(auth_router)
 router.include_router(features_router)
 router.include_router(connectors_router)
 router.include_router(news_router)

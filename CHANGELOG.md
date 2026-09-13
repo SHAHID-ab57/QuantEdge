@@ -8,6 +8,67 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Basic authentication and a real, attributable audit trail
+  (M5-E1-T1).** Milestone 5's first epic — closing two real gaps at
+  once: leaked third-party API keys with no way to trace exposure, and
+  the `strategy_enabled` reversion (see the Paper Trading entry below)
+  that LOG-ACCOUNT-CONFIG-CHANGES could confirm but never attribute to
+  a person, because no identity existed anywhere on this platform.
+  - **`users`** table (bcrypt-hashed passwords, never plaintext or
+    reversible) and **`POST /auth/login`**, issuing a signed JWT
+    (PyJWT, HS256, 60-minute default expiry). The identical
+    `invalid_credentials` error for an unknown email and a wrong
+    password, so login can never enumerate accounts. No
+    self-registration endpoint — a first user is created with
+    `make create-user EMAIL=...` (`app/cli/create_user.py`), matching
+    this task's own "don't over-build this into a full onboarding
+    flow" scope.
+  - **`get_current_user`**, the one dependency every protected endpoint
+    now declares, applied to every one of the 22 mutating endpoints
+    identified by an exhaustive sweep of the entire API (not assumed
+    from the HTTP verb — every handler was read for its actual service
+    call): Paper Trading, Experiment Management, ML Dataset Builder,
+    Model Evaluation, Backtesting, Machine Learning Training, and the
+    Live Prediction Service. A missing, malformed, or expired token is
+    rejected with a real `401`, never a silent pass-through. Eight
+    genuinely read-only computation/export endpoints were confirmed to
+    persist nothing and deliberately left open.
+  - **Deliberately no roles, organizations, or permission tiers** —
+    basic authentication for a small number of real users, not the
+    multi-tenant system this platform doesn't need yet.
+  - **`audit_log`** table (who, what, old/new value, when), upgrading
+    — not duplicating — LOG-ACCOUNT-CONFIG-CHANGES's own log lines:
+    `PaperTradingService`'s own mutating methods write a rich audit
+    row with real old/new value snapshots; every other mutating
+    endpoint records a generic entry at the router layer via a shared
+    `AuditService`. An automated, scheduler-triggered order is still
+    never attributed to a person — `place_order`'s `user_id` is
+    optional specifically so the strategy scheduler's own orders write
+    no audit row, matching the `NOT NULL` foreign key that makes a
+    fabricated attribution impossible by construction. Readable via
+    **`GET /audit-log`** (paginated, filterable), itself authenticated.
+  - **Frontend**: a `/login` page (email/password, react-hook-form +
+    Zod), token storage in `sessionStorage`, an `AuthGuard` wrapping
+    the whole dashboard route group (redirects to `/login` rather than
+    rendering a page that would immediately fail every request), the
+    existing API client's 401 interceptor now redirects to `/login`
+    (previously `/`), and a small `UserMenu` in the top bar (current
+    user + sign out).
+  - **Verified live against the real dev server and Postgres, not just
+    by unit test**: a real unauthenticated request rejected with a
+    real `401`; a real login with a wrong password rejected, the
+    correct password issuing a real token; a real `strategy_enabled`
+    flip on a real paper account, while logged in, produced a real
+    `audit_log` row naming the real user — confirmed both via
+    `GET /audit-log` and a direct database query.
+  - **40 new tests** in `tests/auth/` (login success/failure, token
+    validation, a parametrized 401 check across all 24 authenticated
+    endpoints, and the `strategy_enabled` attribution proof end to
+    end), kept deliberately separate from the ~150 pre-existing
+    endpoint tests, which now run against a fixed, real, persisted
+    test user via a global `get_current_user` override rather than
+    being individually rewritten to carry a bearer token.
+
 - **Funding rate + open interest completion, and the start of order-flow
   data capture (M4-E2-T1).** Milestone 4's second epic — Delta REST/WS
   completion — closing the gap between what Delta's own feed already

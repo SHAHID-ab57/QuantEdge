@@ -442,12 +442,26 @@ closed under two model classes, five horizons, and three regimes.
 `docs/research/CONNECTOR_FEATURE_VALUE_ASSESSMENT.md` § "Gradient
 Boosting spot-check".
 
-**Milestone 5 — Production Hardening.** Authentication/authorization (none
-exists on any route today), CI/CD (none exists — all quality gates are
-local git hooks today), structured logging/tracing/metrics/error tracking
-(today: plain `logging.basicConfig` only), inbound rate limiting, and a
-real background job/task queue (today: in-process `asyncio` loops only).
-Not started.
+**Milestone 5 — Production Hardening.** CI/CD (none exists — all quality
+gates are local git hooks today), structured logging/tracing/metrics/
+error tracking (today: plain `logging.basicConfig` only), inbound rate
+limiting, and a real background job/task queue (today: in-process
+`asyncio` loops only). In progress.
+
+**Epic 5.1 — Authentication & Audit Trail (M5-E1-T1) is done.**
+Basic bearer-token authentication for a small number of real users
+(deliberately no roles/organizations/permission tiers), applied to
+every one of the 22 mutating endpoints found by an exhaustive sweep of
+the entire API, plus a real `audit_log` table upgrading the existing
+LOG-ACCOUNT-CONFIG-CHANGES log lines into queryable, attributed rows —
+closing both motivating gaps: no way to trace API-key exposure, and no
+way to attribute the earlier `strategy_enabled` reversion to a person.
+Verified live against the real dev server and Postgres, not just by
+unit test. See `ARCHITECTURE.md` § "Authentication & Audit Trail",
+`CHANGELOG.md`, and `TASKBOOK.md` `M5-E1-T1`. Rate limiting is next —
+now that per-user limits are actually meaningful — then Redis (finally
+wired in, for session/token storage), then CI/CD and monitoring round
+out this milestone.
 
 **Milestone 6 — Live Trading (gated on extensive validation).** Real order
 execution against a live exchange. Deliberately last, and deliberately

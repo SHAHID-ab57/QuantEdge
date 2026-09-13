@@ -24,12 +24,14 @@ import pytest
 from pydantic import ValidationError
 from sqlalchemy.exc import IntegrityError
 
+from app.auth.security import hash_password
 from app.events.bus import EventBus
 from app.marketdata.bus_events import TickerUpdated
 from app.marketdata.models import TickerEvent
 from app.models.candle import Candle
 from app.models.exchange import Exchange
 from app.models.market import Market
+from app.models.user import User
 from app.paper_trading.errors import (
     AccountUpdateConflictError,
     InsufficientBalanceError,
@@ -45,6 +47,7 @@ from app.paper_trading.errors import (
     StrategyTrainingJobMissingSymbolError,
     TradingHaltedError,
 )
+from app.repositories.audit_log import AuditLogRepository
 from app.repositories.candles import CandleRepository
 from app.repositories.markets import MarketRepository
 from app.repositories.paper_trading import (
@@ -56,7 +59,9 @@ from app.repositories.paper_trading import (
 from app.repositories.training import TrainingJobRepository
 from app.schemas.paper_trading import (
     PaperAccountCreateRequest,
+    PaperAccountResponse,
     PaperOrderRequest,
+    PaperPositionDTO,
     PaperStrategyConfigUpdateRequest,
     PositionThresholdsUpdateRequest,
 )
@@ -111,11 +116,87 @@ async def seed_market(session_factory: SessionFactory, *, symbol: str) -> None:
         await session.commit()
 
 
-def build_service(
+async def _persisted_test_user_id(session_factory: SessionFactory) -> uuid.UUID:
+    """A real, persisted `User` row for these unit tests' `user_id=` calls.
+
+    `audit_log.user_id` is a real foreign key, so the id these tests
+    attribute mutations to must actually exist — the same reasoning
+    `tests/conftest.py`'s own `test_user` fixture already follows for the
+    API-level test suite.
+    """
+    async with session_factory() as session:
+        user = User(
+            email=f"paper-trading-unit-test-{uuid.uuid4()}@example.com",
+            hashed_password=hash_password("test-password"),
+        )
+        session.add(user)
+        await session.commit()
+        await session.refresh(user)
+        return user.id
+
+
+class _TestPaperTradingService(PaperTradingService):
+    """`PaperTradingService`, with a real, persisted `user_id` bound at
+    construction and defaulted into every mutating method's `user_id`
+    keyword-only argument.
+
+    These tests predate authentication and call the service's mutating
+    methods without a `user_id` at ~80 call sites — overriding each
+    method here (rather than monkey-patching an instance attribute with
+    `functools.partial`, which works at runtime but is invisible to a
+    type checker, since it doesn't change what type `service` is
+    statically understood to be) keeps every existing call site
+    type-correct as well as runtime-correct. A caller that does pass
+    `user_id` explicitly still gets exactly that user, not the bound
+    default — the same "attribute pre-existing tests to a real user
+    rather than rewriting every call site" approach `tests/conftest.py`'s
+    global `get_current_user` override takes at the API layer.
+    """
+
+    def __init__(self, *args: object, user_id: uuid.UUID, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+        self._default_user_id = user_id
+
+    async def create_account(
+        self, request: PaperAccountCreateRequest, *, user_id: uuid.UUID | None = None
+    ) -> PaperAccountResponse:
+        return await super().create_account(request, user_id=user_id or self._default_user_id)
+
+    async def update_strategy_config(
+        self,
+        account_id: uuid.UUID,
+        request: PaperStrategyConfigUpdateRequest,
+        *,
+        user_id: uuid.UUID | None = None,
+    ) -> PaperAccountResponse:
+        return await super().update_strategy_config(
+            account_id, request, user_id=user_id or self._default_user_id
+        )
+
+    async def update_position_thresholds(
+        self,
+        account_id: uuid.UUID,
+        symbol: str,
+        request: PositionThresholdsUpdateRequest,
+        *,
+        user_id: uuid.UUID | None = None,
+    ) -> PaperPositionDTO:
+        return await super().update_position_thresholds(
+            account_id, symbol, request, user_id=user_id or self._default_user_id
+        )
+
+    async def resume_trading(
+        self, account_id: uuid.UUID, *, user_id: uuid.UUID | None = None
+    ) -> PaperAccountResponse:
+        return await super().resume_trading(account_id, user_id=user_id or self._default_user_id)
+
+
+async def build_service(
     session_factory: SessionFactory, state_manager: MarketStateManager
-) -> PaperTradingService:
+) -> _TestPaperTradingService:
     session = session_factory()
-    return PaperTradingService(
+    user_id = await _persisted_test_user_id(session_factory)
+    return _TestPaperTradingService(
         account_repository=PaperAccountRepository(session),
         order_repository=PaperOrderRepository(session),
         position_repository=PaperPositionRepository(session),
@@ -123,6 +204,7 @@ def build_service(
         candle_repository=CandleRepository(session),
         training_job_repository=TrainingJobRepository(session),
         strategy_decision_repository=PaperStrategyDecisionRepository(session),
+        audit_log_repository=AuditLogRepository(session),
         state_manager=state_manager,
         slippage_bps=SLIPPAGE_BPS,
         fee_bps=FEE_BPS,
@@ -134,6 +216,7 @@ def build_service(
         max_order_attempts=MAX_ORDER_ATTEMPTS,
         default_strategy_confidence_threshold_pct=DEFAULT_STRATEGY_CONFIDENCE_THRESHOLD_PCT,
         default_strategy_default_stop_loss_pct=DEFAULT_STRATEGY_STOP_LOSS_PCT,
+        user_id=user_id,
     )
 
 
@@ -181,7 +264,7 @@ class TestCreateAccountLogging:
         self, session_factory: SessionFactory, caplog: pytest.LogCaptureFixture
     ) -> None:
         state_manager = MarketStateManager()
-        service = build_service(session_factory, state_manager)
+        service = await build_service(session_factory, state_manager)
         with caplog.at_level(logging.INFO, logger="app.services.paper_trading"):
             account = await service.create_account(
                 PaperAccountCreateRequest(
@@ -209,7 +292,7 @@ class TestPlaceOrderFillModel:
         state_manager = MarketStateManager().attach(bus)
         await publish_ticker(bus, "PTFILLUSD", "1000")
 
-        service = build_service(session_factory, state_manager)
+        service = await build_service(session_factory, state_manager)
         account = await service.create_account(
             PaperAccountCreateRequest(starting_balance=Decimal("100000"))
         )
@@ -232,7 +315,7 @@ class TestPlaceOrderFillModel:
         bus = EventBus()
         state_manager = MarketStateManager().attach(bus)
         await publish_ticker(bus, "PTSELLFILLUSD", "1000")
-        service = build_service(session_factory, state_manager)
+        service = await build_service(session_factory, state_manager)
         account = await service.create_account(
             PaperAccountCreateRequest(starting_balance=Decimal("100000"))
         )
@@ -290,7 +373,7 @@ class TestPlaceOrderFillModel:
             await session.commit()
 
         state_manager = MarketStateManager()  # no live data at all
-        service = build_service(session_factory, state_manager)
+        service = await build_service(session_factory, state_manager)
         account = await service.create_account(
             PaperAccountCreateRequest(starting_balance=Decimal("100000"))
         )
@@ -338,7 +421,7 @@ class TestPlaceOrderFillModel:
             await session.commit()
 
         state_manager = MarketStateManager()
-        service = build_service(session_factory, state_manager)
+        service = await build_service(session_factory, state_manager)
         account = await service.create_account(
             PaperAccountCreateRequest(starting_balance=Decimal("100000"))
         )
@@ -360,7 +443,7 @@ class TestBalanceAndPositionRejection:
         bus = EventBus()
         state_manager = MarketStateManager().attach(bus)
         await publish_ticker(bus, "PTPOORUSD", "1000")
-        service = build_service(session_factory, state_manager)
+        service = await build_service(session_factory, state_manager)
         account = await service.create_account(
             PaperAccountCreateRequest(starting_balance=Decimal("500"))
         )
@@ -383,7 +466,7 @@ class TestBalanceAndPositionRejection:
         bus = EventBus()
         state_manager = MarketStateManager().attach(bus)
         await publish_ticker(bus, "PTSHORTUSD", "1000")
-        service = build_service(session_factory, state_manager)
+        service = await build_service(session_factory, state_manager)
         account = await service.create_account(
             PaperAccountCreateRequest(starting_balance=Decimal("100000"))
         )
@@ -405,7 +488,7 @@ class TestBalanceAndPositionRejection:
         bus = EventBus()
         state_manager = MarketStateManager().attach(bus)
         await publish_ticker(bus, "PTNOPOSUSD", "1000")
-        service = build_service(session_factory, state_manager)
+        service = await build_service(session_factory, state_manager)
         account = await service.create_account(
             PaperAccountCreateRequest(starting_balance=Decimal("100000"))
         )
@@ -417,14 +500,14 @@ class TestBalanceAndPositionRejection:
             )
 
     async def test_raises_for_an_unknown_account(self, session_factory: SessionFactory) -> None:
-        service = build_service(session_factory, MarketStateManager())
+        service = await build_service(session_factory, MarketStateManager())
         with pytest.raises(PaperAccountNotFoundError):
             await service.get_account(uuid.uuid4())
 
     async def test_raises_for_an_unknown_market_symbol(
         self, session_factory: SessionFactory
     ) -> None:
-        service = build_service(session_factory, MarketStateManager())
+        service = await build_service(session_factory, MarketStateManager())
         account = await service.create_account(
             PaperAccountCreateRequest(starting_balance=Decimal("1000"))
         )
@@ -463,7 +546,7 @@ class TestHandComputedPnl:
         state_manager = MarketStateManager().attach(bus)
         await publish_ticker(bus, "PTPNLUSD", "1000")
 
-        service = build_service(session_factory, state_manager)
+        service = await build_service(session_factory, state_manager)
         account = await service.create_account(
             PaperAccountCreateRequest(starting_balance=Decimal("100000"))
         )
@@ -552,7 +635,7 @@ class TestAverageCostBasisAcrossMultipleBuys:
         await seed_market(session_factory, symbol="PTBLENDUSD")
         bus = EventBus()
         state_manager = MarketStateManager().attach(bus)
-        service = build_service(session_factory, state_manager)
+        service = await build_service(session_factory, state_manager)
         account = await service.create_account(
             PaperAccountCreateRequest(starting_balance=Decimal("100000"))
         )
@@ -612,7 +695,7 @@ class TestPositionSizeLimit:
         bus = EventBus()
         state_manager = MarketStateManager().attach(bus)
         await publish_ticker(bus, "PTPOSLIMITUSD", "1000")
-        service = build_service(session_factory, state_manager)
+        service = await build_service(session_factory, state_manager)
         account = await service.create_account(
             PaperAccountCreateRequest(
                 starting_balance=Decimal("100000"),
@@ -644,7 +727,7 @@ class TestPositionSizeLimit:
         bus = EventBus()
         state_manager = MarketStateManager().attach(bus)
         await publish_ticker(bus, "PTPOSOKUSD", "1000")
-        service = build_service(session_factory, state_manager)
+        service = await build_service(session_factory, state_manager)
         account = await service.create_account(
             PaperAccountCreateRequest(
                 starting_balance=Decimal("100000"),
@@ -678,7 +761,7 @@ class TestExposureLimit:
         await seed_market(session_factory, symbol="PTEXPNEWUSD")
         bus = EventBus()
         state_manager = MarketStateManager().attach(bus)
-        service = build_service(session_factory, state_manager)
+        service = await build_service(session_factory, state_manager)
         account = await service.create_account(
             PaperAccountCreateRequest(
                 starting_balance=Decimal("100000"),
@@ -732,7 +815,7 @@ class TestDrawdownHalt:
         bus = EventBus()
         state_manager = MarketStateManager().attach(bus)
         await publish_ticker(bus, "PTDRAWDOWNUSD", "1000")
-        service = build_service(session_factory, state_manager)
+        service = await build_service(session_factory, state_manager)
         account = await service.create_account(
             PaperAccountCreateRequest(
                 starting_balance=Decimal("10000"),
@@ -788,7 +871,7 @@ class TestResumeTrading:
         bus = EventBus()
         state_manager = MarketStateManager().attach(bus)
         await publish_ticker(bus, "PTRESUMEUSD", "1000")
-        service = build_service(session_factory, state_manager)
+        service = await build_service(session_factory, state_manager)
         account = await service.create_account(
             PaperAccountCreateRequest(
                 starting_balance=Decimal("10000"),
@@ -842,7 +925,7 @@ class TestResumeTrading:
         bus = EventBus()
         state_manager = MarketStateManager().attach(bus)
         await publish_ticker(bus, "PTRESUMELOGUSD", "1000")
-        service = build_service(session_factory, state_manager)
+        service = await build_service(session_factory, state_manager)
         account = await service.create_account(
             PaperAccountCreateRequest(
                 starting_balance=Decimal("10000"),
@@ -888,7 +971,7 @@ class TestConcurrentExposureRace:
         await publish_ticker(bus, "PTRACEAUSD", "1000")
         await publish_ticker(bus, "PTRACEBUSD", "1000")
 
-        creator = build_service(session_factory, state_manager)
+        creator = await build_service(session_factory, state_manager)
         account = await creator.create_account(
             PaperAccountCreateRequest(
                 starting_balance=Decimal("100000"),
@@ -904,8 +987,8 @@ class TestConcurrentExposureRace:
         # concurrently, not one after the other. Each order alone
         # (~$30,015, ~30.015% of balance) is comfortably under the 50%
         # exposure limit; together (~60.03%) they are not.
-        service_a = build_service(session_factory, state_manager)
-        service_b = build_service(session_factory, state_manager)
+        service_a = await build_service(session_factory, state_manager)
+        service_b = await build_service(session_factory, state_manager)
 
         results = await asyncio.gather(
             service_a.place_order(
@@ -977,7 +1060,7 @@ class TestConcurrencyGuardExhaustion:
         bus = EventBus()
         state_manager = MarketStateManager().attach(bus)
         await publish_ticker(bus, "PTCONFLICTUSD", "1000")
-        service = build_service(session_factory, state_manager)
+        service = await build_service(session_factory, state_manager)
         account = await service.create_account(
             PaperAccountCreateRequest(starting_balance=Decimal("100000"))
         )
@@ -1045,7 +1128,7 @@ class TestStopLossTakeProfitValidation:
         bus = EventBus()
         state_manager = MarketStateManager().attach(bus)
         await publish_ticker(bus, "PTVALSLUSD", "1000")
-        service = build_service(session_factory, state_manager)
+        service = await build_service(session_factory, state_manager)
         account = await service.create_account(
             PaperAccountCreateRequest(
                 starting_balance=Decimal("100000"),
@@ -1083,7 +1166,7 @@ class TestStopLossTakeProfitValidation:
         bus = EventBus()
         state_manager = MarketStateManager().attach(bus)
         await publish_ticker(bus, "PTVALTPUSD", "1000")
-        service = build_service(session_factory, state_manager)
+        service = await build_service(session_factory, state_manager)
         account = await service.create_account(
             PaperAccountCreateRequest(
                 starting_balance=Decimal("100000"),
@@ -1121,7 +1204,7 @@ class TestStopLossTakeProfitValidation:
         bus = EventBus()
         state_manager = MarketStateManager().attach(bus)
         await publish_ticker(bus, "PTVALOKUSD", "1000")
-        service = build_service(session_factory, state_manager)
+        service = await build_service(session_factory, state_manager)
         account = await service.create_account(
             PaperAccountCreateRequest(
                 starting_balance=Decimal("100000"),
@@ -1155,7 +1238,7 @@ class TestStopLossTakeProfitValidation:
         bus = EventBus()
         state_manager = MarketStateManager().attach(bus)
         await publish_ticker(bus, "PTVALKEEPUSD", "1000")
-        service = build_service(session_factory, state_manager)
+        service = await build_service(session_factory, state_manager)
         account = await service.create_account(
             PaperAccountCreateRequest(
                 starting_balance=Decimal("100000"),
@@ -1200,7 +1283,7 @@ class TestStopLossTakeProfitValidation:
         await seed_market(session_factory, symbol="PTVALCROSSUSD")
         bus = EventBus()
         state_manager = MarketStateManager().attach(bus)
-        service = build_service(session_factory, state_manager)
+        service = await build_service(session_factory, state_manager)
         account = await service.create_account(
             PaperAccountCreateRequest(
                 starting_balance=Decimal("100000"),
@@ -1251,7 +1334,7 @@ class TestUpdatePositionThresholds:
         bus = EventBus()
         state_manager = MarketStateManager().attach(bus)
         await publish_ticker(bus, "PTUPDATESETUSD", "1000")
-        service = build_service(session_factory, state_manager)
+        service = await build_service(session_factory, state_manager)
         account = await service.create_account(
             PaperAccountCreateRequest(starting_balance=Decimal("100000"))
         )
@@ -1278,7 +1361,7 @@ class TestUpdatePositionThresholds:
         bus = EventBus()
         state_manager = MarketStateManager().attach(bus)
         await publish_ticker(bus, "PTUPDATEKEEPUSD", "1000")
-        service = build_service(session_factory, state_manager)
+        service = await build_service(session_factory, state_manager)
         account = await service.create_account(
             PaperAccountCreateRequest(starting_balance=Decimal("100000"))
         )
@@ -1311,7 +1394,7 @@ class TestUpdatePositionThresholds:
         bus = EventBus()
         state_manager = MarketStateManager().attach(bus)
         await publish_ticker(bus, "PTUPDATECLEARUSD", "1000")
-        service = build_service(session_factory, state_manager)
+        service = await build_service(session_factory, state_manager)
         account = await service.create_account(
             PaperAccountCreateRequest(starting_balance=Decimal("100000"))
         )
@@ -1342,7 +1425,7 @@ class TestUpdatePositionThresholds:
     ) -> None:
         await seed_market(session_factory, symbol="PTUPDATENOPOSUSD")
         state_manager = MarketStateManager()
-        service = build_service(session_factory, state_manager)
+        service = await build_service(session_factory, state_manager)
         account = await service.create_account(
             PaperAccountCreateRequest(starting_balance=Decimal("100000"))
         )
@@ -1363,7 +1446,7 @@ class TestUpdatePositionThresholds:
         bus = EventBus()
         state_manager = MarketStateManager().attach(bus)
         await publish_ticker(bus, "PTUPDATELOGUSD", "1000")
-        service = build_service(session_factory, state_manager)
+        service = await build_service(session_factory, state_manager)
         account = await service.create_account(
             PaperAccountCreateRequest(starting_balance=Decimal("100000"))
         )
@@ -1408,7 +1491,7 @@ class TestUpdateStrategyConfig:
         self, session_factory: SessionFactory
     ) -> None:
         state_manager = MarketStateManager()
-        service = build_service(session_factory, state_manager)
+        service = await build_service(session_factory, state_manager)
         account = await service.create_account(
             PaperAccountCreateRequest(starting_balance=Decimal("100000"))
         )
@@ -1424,7 +1507,7 @@ class TestUpdateStrategyConfig:
             session_factory, symbol="PTSTRATOKUSD", model_type="logistic_regression"
         )
         state_manager = MarketStateManager()
-        service = build_service(session_factory, state_manager)
+        service = await build_service(session_factory, state_manager)
         account = await service.create_account(
             PaperAccountCreateRequest(starting_balance=Decimal("100000"))
         )
@@ -1455,7 +1538,7 @@ class TestUpdateStrategyConfig:
             session_factory, symbol="PTSTRATLOGUSD", model_type="logistic_regression"
         )
         state_manager = MarketStateManager()
-        service = build_service(session_factory, state_manager)
+        service = await build_service(session_factory, state_manager)
         account = await service.create_account(
             PaperAccountCreateRequest(starting_balance=Decimal("100000"))
         )
@@ -1478,7 +1561,7 @@ class TestUpdateStrategyConfig:
             session_factory, symbol="PTSTRATDISUSD", model_type="logistic_regression"
         )
         state_manager = MarketStateManager()
-        service = build_service(session_factory, state_manager)
+        service = await build_service(session_factory, state_manager)
         account = await service.create_account(
             PaperAccountCreateRequest(starting_balance=Decimal("100000"))
         )
@@ -1505,7 +1588,7 @@ class TestUpdateStrategyConfig:
         line — but not the dedicated ENABLED/DISABLED line, which is only
         for an actual flip."""
         state_manager = MarketStateManager()
-        service = build_service(session_factory, state_manager)
+        service = await build_service(session_factory, state_manager)
         account = await service.create_account(
             PaperAccountCreateRequest(starting_balance=Decimal("100000"))
         )
@@ -1525,7 +1608,7 @@ class TestUpdateStrategyConfig:
         self, session_factory: SessionFactory
     ) -> None:
         state_manager = MarketStateManager()
-        service = build_service(session_factory, state_manager)
+        service = await build_service(session_factory, state_manager)
         account = await service.create_account(
             PaperAccountCreateRequest(starting_balance=Decimal("100000"))
         )
@@ -1539,7 +1622,7 @@ class TestUpdateStrategyConfig:
         self, session_factory: SessionFactory
     ) -> None:
         state_manager = MarketStateManager()
-        service = build_service(session_factory, state_manager)
+        service = await build_service(session_factory, state_manager)
         account = await service.create_account(
             PaperAccountCreateRequest(starting_balance=Decimal("100000"))
         )
@@ -1554,7 +1637,7 @@ class TestUpdateStrategyConfig:
         self, session_factory: SessionFactory
     ) -> None:
         state_manager = MarketStateManager()
-        service = build_service(session_factory, state_manager)
+        service = await build_service(session_factory, state_manager)
         account = await service.create_account(
             PaperAccountCreateRequest(starting_balance=Decimal("100000"))
         )
@@ -1586,7 +1669,7 @@ class TestUpdateStrategyConfig:
             session_factory, symbol="PTSTRATOFFUSD", model_type="logistic_regression"
         )
         state_manager = MarketStateManager()
-        service = build_service(session_factory, state_manager)
+        service = await build_service(session_factory, state_manager)
         account = await service.create_account(
             PaperAccountCreateRequest(starting_balance=Decimal("100000"))
         )
@@ -1607,7 +1690,7 @@ class TestUpdateStrategyConfig:
             session_factory, symbol="PTSTRATPARTIALUSD", model_type="logistic_regression"
         )
         state_manager = MarketStateManager()
-        service = build_service(session_factory, state_manager)
+        service = await build_service(session_factory, state_manager)
         account = await service.create_account(
             PaperAccountCreateRequest(starting_balance=Decimal("100000"))
         )
@@ -1658,7 +1741,7 @@ class TestUpdateStrategyConfig:
         enforces it at the database itself, the actual backstop under the
         API-level validation this class otherwise tests."""
         state_manager = MarketStateManager()
-        service = build_service(session_factory, state_manager)
+        service = await build_service(session_factory, state_manager)
         account = await service.create_account(
             PaperAccountCreateRequest(starting_balance=Decimal("100000"))
         )

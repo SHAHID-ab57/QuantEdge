@@ -17,8 +17,11 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Path, Query, status
 
 from app.core.config import get_settings
+from app.dependencies.auth import get_audit_service, get_current_user
 from app.dependencies.backtest import get_backtest_service, schedule_backtest_run
+from app.models.user import User
 from app.schemas.backtest import BacktestListResponse, BacktestRunRequest, BacktestRunResponse
+from app.services.audit import AuditService
 from app.services.backtest import BacktestService
 
 router = APIRouter(tags=["backtest"])
@@ -106,6 +109,8 @@ _ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
 }
 
 BacktestServiceDep = Annotated[BacktestService, Depends(get_backtest_service)]
+AuditServiceDep = Annotated[AuditService, Depends(get_audit_service)]
+CurrentUser = Annotated[User, Depends(get_current_user)]
 BacktestRunIdPath = Annotated[uuid.UUID, Path(description="Backtest run id")]
 
 
@@ -125,10 +130,19 @@ BacktestRunIdPath = Annotated[uuid.UUID, Path(description="Backtest run id")]
     responses=_ERROR_RESPONSES,
 )
 async def run_backtest(
-    body: BacktestRunRequest, service: BacktestServiceDep
+    body: BacktestRunRequest,
+    service: BacktestServiceDep,
+    audit: AuditServiceDep,
+    current_user: CurrentUser,
 ) -> BacktestRunResponse:
     """Plan, persist, and start a backtest; schedule its walk in the background."""
     response = await service.start(body)
+    await audit.record(
+        user_id=current_user.id,
+        action="backtest.run",
+        resource_type="backtest_run",
+        resource_id=response.id,
+    )
     schedule_backtest_run(uuid.UUID(response.id))
     return response
 

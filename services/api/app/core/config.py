@@ -132,6 +132,23 @@ class Settings(BaseSettings):
     #: a day-old cutoff is cheap regardless of how often it's checked.
     orderflow_prune_interval_seconds: int = 3600
 
+    #: Authentication (M5-E1-T1) — basic login for a small number of real
+    #: users, no roles/organizations. `jwt_secret_key` has an empty
+    #: default deliberately: `app.auth.security.create_access_token`
+    #: raises rather than sign a token with an empty key, the same
+    #: "credentials required, no insecure default that's actually usable"
+    #: posture `DeltaConfig` already takes for its own API secret. Set a
+    #: real, random value via `JWT_SECRET_KEY` before running with
+    #: authentication enabled outside a throwaway dev/test environment.
+    jwt_secret_key: str = ""
+    jwt_algorithm: str = "HS256"
+    #: 60 minutes — a reasonable default for a small, trusted user base;
+    #: short enough to limit a leaked token's own blast radius, long
+    #: enough that a working session isn't repeatedly interrupted. No
+    #: refresh-token flow exists (deliberately, per this task's own scope)
+    #: — a session past this simply logs in again.
+    jwt_access_token_expire_minutes: int = 60
+
     candle_sync_enabled: bool = True
     candle_sync_interval_seconds: int = 300
     candle_sync_timeframes: str = "1m,5m,15m,30m,1h,4h,1d"

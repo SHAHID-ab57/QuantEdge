@@ -90,18 +90,35 @@ async def train_completed_job(
     await seed_real_candles(session_factory, symbol=symbol)
     experiment_id = await seed_experiment_with_real_config(session_factory, target=target)
     training_service = build_training_service(session_factory)
-    job = await training_service.create(
-        TrainingJobCreateRequest(
-            experiment_id=experiment_id,
-            model_type=model_type,
-            symbol=symbol,
-            timeframe="1h",
-            normalize_features=normalize_features,
+    try:
+        job = await training_service.create(
+            TrainingJobCreateRequest(
+                experiment_id=uuid.UUID(experiment_id),
+                model_type=model_type,
+                symbol=symbol,
+                timeframe="1h",
+                normalize_features=normalize_features,
+            )
         )
-    )
-    completed = await training_service.run(uuid.UUID(job.id))
-    assert completed.status == "completed", completed.error_message
-    return completed.id, experiment_id
+        completed = await training_service.run(uuid.UUID(job.id))
+        assert completed.status == "completed", completed.error_message
+        return completed.id, experiment_id
+    finally:
+        # `build_training_service` opens a raw session via `session_factory()`
+        # and never closes it — fine while a caller keeps `training_service`
+        # (and its session) alive, but this helper's own local reference to
+        # it is dropped the instant this function returns. An unclosed
+        # session's underlying pooled connection is then reclaimed by
+        # Python's own reference counting *during whatever later statement
+        # happens to run once that refcount hits zero* — for the shared
+        # in-memory SQLite `StaticPool` engine these tests use, reclaiming
+        # a checked-out connection this way terminates the single physical
+        # connection the whole engine depends on, silently replacing it
+        # with a fresh, schema-less `:memory:` database on the next
+        # checkout (surfacing as a baffling "no such table" error in
+        # whatever unrelated statement runs next). Closing explicitly here
+        # checks the connection back in instead.
+        await training_service.repository.session.close()
 
 
 @pytest.mark.asyncio
@@ -318,7 +335,9 @@ class TestErrors:
         experiment_id = await seed_experiment(session_factory, dataset_version="ds-pending")
         training_service = build_training_service(session_factory)
         job = await training_service.create(
-            TrainingJobCreateRequest(experiment_id=experiment_id, model_type="placeholder")
+            TrainingJobCreateRequest(
+                experiment_id=uuid.UUID(experiment_id), model_type="placeholder"
+            )
         )
         service = build_prediction_service(session_factory)
 
@@ -336,7 +355,9 @@ class TestErrors:
         experiment_id = await seed_experiment(session_factory, dataset_version="ds-placeholder")
         training_service = build_training_service(session_factory)
         job = await training_service.create(
-            TrainingJobCreateRequest(experiment_id=experiment_id, model_type="placeholder")
+            TrainingJobCreateRequest(
+                experiment_id=uuid.UUID(experiment_id), model_type="placeholder"
+            )
         )
         completed = await training_service.run(uuid.UUID(job.id))
         assert completed.status == "completed"

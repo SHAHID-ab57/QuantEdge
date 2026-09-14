@@ -2127,17 +2127,48 @@ created with `make create-user` on the server. No roles, organizations,
 or permission tiers exist: every authenticated user has identical
 access, deliberately, for this platform's current scope.
 
+`POST /auth/login` itself is locked out (429, `too_many_login_attempts`,
+with a `Retry-After` header) after repeated failures for the same email
+or the same client IP — see "Rate Limiting" below (M5-E2-T1). The
+server also refuses to start at all with no `JWT_SECRET_KEY` configured
+— a deliberate, loud startup failure rather than a lazy error on first
+use; see `ARCHITECTURE.md` § "Authentication & Audit Trail" → "JWT
+secret startup enforcement".
+
 ## Error Handling
 
 - Domain errors return `4xx` with `{"code": "...", "detail": "..."}`.
 - Liveness endpoints return `503` when the database is unreachable.
 - System endpoints always return `200`; component states are carried in the
   body so dashboards can render granular states.
+- A rate-limited or locked-out request returns `429` with a `Retry-After`
+  header (seconds until the caller may try again) — see "Rate Limiting".
 
 ## Rate Limiting
 
-Not implemented. Delta REST calls are bounded by the client's retry/backoff
-policy (see `app/integrations/delta/client.py`).
+Implemented (M5-E2-T1) — in-process only, no distributed store yet (see
+`ARCHITECTURE.md` § "Rate Limiting" for why a single-instance deployment
+doesn't need one). Two independent, deliberately separate mechanisms:
+
+- **General inbound limiting**, applied to every request except CORS
+  preflight and the liveness endpoints (`/health`, `/api/v1/health`): a
+  token bucket per caller — the authenticated user's id when a valid
+  bearer token is present, else the client IP — 120 requests refilling
+  continuously over 60 seconds by default. Exceeding it returns
+  `429 {"code": "rate_limited", "detail": "Too many requests"}` with a
+  `Retry-After` header.
+- **Login lockout**, specifically on `POST /auth/login`: 5 consecutive
+  failures within a 5-minute window (for the same submitted email _or_
+  the same client IP) locks that key out for 15 minutes, returning
+  `429 {"code": "too_many_login_attempts", "detail": "Too many login
+attempts. Try again later."}` — a distinct, stricter, account-security
+  mechanism, not the general limiter above. An unknown email locks out
+  identically to a real one, so this can never be used to enumerate
+  accounts. A successful login clears the failure count immediately.
+
+Delta REST calls (outbound, not this API's own inbound surface) are
+separately bounded by the client's own retry/backoff policy (see
+`app/integrations/delta/client.py`).
 
 ## SDKs
 

@@ -19,11 +19,17 @@ class AppError(Exception):
         message: str,
         code: str = "app_error",
         status_code: int = status.HTTP_400_BAD_REQUEST,
+        headers: dict[str, str] | None = None,
     ) -> None:
         super().__init__(message)
         self.message = message
         self.code = code
         self.status_code = status_code
+        #: Optional response headers — added for `LoginLockedError`'s own
+        #: `Retry-After`, so a caller told to back off is also told for
+        #: how long, not just that it must. `None` for every error that
+        #: predates this and never needs one.
+        self.headers = headers
 
 
 def register_exception_handlers(app: FastAPI) -> None:
@@ -34,6 +40,7 @@ def register_exception_handlers(app: FastAPI) -> None:
         return JSONResponse(
             status_code=exc.status_code,
             content={"code": exc.code, "detail": exc.message},
+            headers=exc.headers,
         )
 
     @app.exception_handler(Exception)

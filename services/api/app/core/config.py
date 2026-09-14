@@ -134,20 +134,59 @@ class Settings(BaseSettings):
 
     #: Authentication (M5-E1-T1) — basic login for a small number of real
     #: users, no roles/organizations. `jwt_secret_key` has an empty
-    #: default deliberately: `app.auth.security.create_access_token`
-    #: raises rather than sign a token with an empty key, the same
-    #: "credentials required, no insecure default that's actually usable"
-    #: posture `DeltaConfig` already takes for its own API secret. Set a
-    #: real, random value via `JWT_SECRET_KEY` before running with
-    #: authentication enabled outside a throwaway dev/test environment.
+    #: default deliberately, but unlike a merely-unusable default
+    #: elsewhere in this file (an unset `DELTA_API_KEY`, an unset
+    #: `DATABASE_URL` — both degrade gracefully, a feature just doesn't
+    #: work), an unset JWT secret now fails the whole application at
+    #: startup (`app.application.startup`, M5-E2-T1) rather than lazily
+    #: on first login attempt. This is a deliberate departure from this
+    #: codebase's own established "missing configuration degrades
+    #: gracefully" convention, made because a security-critical secret
+    #: failing silently — the authentication system built specifically to
+    #: fix two accountability incidents quietly signing or accepting
+    #: tokens with no real secret — is a categorically different risk
+    #: than a functional integration not working. See `ARCHITECTURE.md`
+    #: § "Authentication & Audit Trail" → "JWT secret startup
+    #: enforcement" for the full reasoning. Set a real, random value via
+    #: `JWT_SECRET_KEY` before running this service at all.
     jwt_secret_key: str = ""
     jwt_algorithm: str = "HS256"
     #: 60 minutes — a reasonable default for a small, trusted user base;
     #: short enough to limit a leaked token's own blast radius, long
     #: enough that a working session isn't repeatedly interrupted. No
     #: refresh-token flow exists (deliberately, per this task's own scope)
-    #: — a session past this simply logs in again.
+    #: — a session past this simply logs in again. Logout does not
+    #: invalidate a token server-side (no blocklist/`jti` check exists);
+    #: a token remains valid and replayable for up to this long
+    #: regardless — closing that gap is deferred to the upcoming Redis
+    #: task (see `ROADMAP.md` § "Milestone 5"), not forgotten.
     jwt_access_token_expire_minutes: int = 60
+
+    #: General inbound rate limiting (M5-E2-T1) — in-process only, no
+    #: Redis or other distributed store yet (this platform runs a single
+    #: instance; see `ARCHITECTURE.md` § "Rate Limiting" for why a
+    #: distributed store isn't needed yet). A simple token bucket per key
+    #: (the authenticated user's id where a valid bearer token is
+    #: present, else the client's IP address) — `rate_limit_requests`
+    #: tokens refilling continuously over `rate_limit_window_seconds`.
+    #: Deliberately separate from `login_lockout_*` below: this is
+    #: general fair-use throttling, not a brute-force defense.
+    rate_limit_enabled: bool = True
+    rate_limit_requests: int = 120
+    rate_limit_window_seconds: int = 60
+
+    #: Login-specific lockout (M5-E2-T1) — a dedicated brute-force /
+    #: credential-stuffing defense on `POST /auth/login`, distinct from
+    #: the general limiter above. Tracked by the raw *submitted* email
+    #: (normalized, but never resolved to a real user id) and separately
+    #: by client IP — either key alone can trigger a lockout, so an
+    #: unknown email locks out identically to a real one after the same
+    #: number of failures, preserving `InvalidCredentialsError`'s own
+    #: "never reveal which thing was wrong" property. A successful login
+    #: clears both keys' failure counts immediately.
+    login_lockout_max_attempts: int = 5
+    login_lockout_window_seconds: int = 300
+    login_lockout_cooldown_seconds: int = 900
 
     candle_sync_enabled: bool = True
     candle_sync_interval_seconds: int = 300

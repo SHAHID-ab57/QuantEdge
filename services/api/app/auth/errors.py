@@ -81,3 +81,28 @@ class EmailAlreadyRegisteredError(AppError):
             code="email_already_registered",
             status_code=status.HTTP_409_CONFLICT,
         )
+
+
+class LoginLockedError(AppError):
+    """Raised when `POST /auth/login` is locked out for the submitted
+    email or the caller's IP (M5-E2-T1) — a dedicated brute-force /
+    credential-stuffing defense, distinct from `InvalidCredentialsError`.
+
+    The same generic message regardless of which key (email or IP)
+    triggered it, and regardless of whether the submitted email belongs
+    to a real user — `app.auth.login_lockout.LoginLockoutTracker` tracks
+    the raw submitted email, never a resolved user id, so an unknown
+    email locks out identically to a real one. `retry_after_seconds` is
+    still surfaced (in the body and the `Retry-After` header) since
+    *how long* to wait back off is not the same kind of information leak
+    as *whether this account exists*.
+    """
+
+    def __init__(self, retry_after_seconds: int) -> None:
+        self.retry_after_seconds = retry_after_seconds
+        super().__init__(
+            "Too many login attempts. Try again later.",
+            code="too_many_login_attempts",
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            headers={"Retry-After": str(retry_after_seconds)},
+        )

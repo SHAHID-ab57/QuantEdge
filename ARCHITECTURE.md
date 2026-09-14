@@ -5343,19 +5343,10 @@ mutating plus `GET /auth/me`/`GET /audit-log`), and the
 `strategy_enabled` attribution proof end to end through a real
 `POST /auth/login` call, matching the live verification above.
 
-**Two real, currently-live gaps, disclosed rather than left implicit:**
+**One real gap remains, disclosed rather than left implicit — the other
+that stood here has since been closed (see "Rate Limiting" and "Login
+Lockout" below, both M5-E2-T1):**
 
-- **No rate limiting or lockout on `POST /auth/login`.** Confirmed
-  live: eight consecutive wrong-password attempts against a real
-  account each returned a plain `401`, with no throttling, backoff, or
-  account lockout, and the correct password still succeeded
-  immediately afterward — unlimited-attempt brute-forcing of any known
-  email is possible today. Independent of the general inbound
-  rate-limiting task planned next for this milestone (see `ROADMAP.md`
-  § "Milestone 5"), which is aimed at fair-use limits across the API
-  broadly, not login-specific brute-force protection specifically —
-  this endpoint needs its own attempt-based limiting (e.g. a per-email
-  or per-IP backoff) whenever that task or a dedicated follow-up lands.
 - **Logout does not invalidate the token server-side.** There is no
   blocklist, token version, or `jti`/nonce check anywhere in
   `decode_access_token` — it verifies only the signature, expiry, and
@@ -5368,9 +5359,209 @@ mutating plus `GET /auth/me`/`GET /audit-log`), and the
   `jwt_access_token_expire_minutes` (default 60) regardless of any
   client-side logout — acceptable for this task's own small-real-users
   scope given the short default expiry and no refresh-token flow to
-  extend it, but a real gap for a stolen-token scenario until a
-  revocation mechanism (most naturally, Redis-backed once that's wired
-  in — see `ROADMAP.md` § "Milestone 5") exists.
+  extend it, but a real gap for a stolen-token scenario. The rate
+  limiter and login lockout added below (both M5-E2-T1) share this same
+  in-process characteristic: a process restart silently clears all
+  three (revocation, rate-limit buckets, and any active lockout) — see
+  "Login Lockout"'s own note on this. **Deliberately deferred, not
+  forgotten**: the upcoming Redis task (see `ROADMAP.md` §
+  "Milestone 5") closes this alongside adding a distributed store for
+  the rate limiter below, since both naturally want the same fast,
+  TTL-capable backend — building a bespoke in-process revocation
+  mechanism now, only to replace it immediately after, was judged not
+  worth doing twice.
+
+**JWT secret startup enforcement (M5-E2-T1) — a deliberate departure
+from this codebase's own convention.** Every other optional integration
+in `app/core/config.py` degrades gracefully when unconfigured: an unset
+`DELTA_API_KEY`/`DELTA_API_SECRET` pair is valid (`DeltaConfig` only
+requires the two to be set _together_, never that they be set at all),
+and an unset `DATABASE_URL` just logs a warning and runs the API
+DB-less (`app.db.engine.get_engine` returns `None`, per this platform's
+own "health/dev scenarios" design). `JWT_SECRET_KEY` explicitly does
+**not** follow that pattern: `app.application.startup` checks it first,
+before the database check and unconditionally, and raises `RuntimeError`
+— not a warning, not a lazy failure on first login attempt — if it's
+unset. This is a new precedent for this codebase, made on purpose: a
+missing Delta key or database means a feature doesn't work, which is a
+normal, recoverable operational state; a missing JWT secret failing
+silently would mean the authentication system built specifically to fix
+two accountability incidents (see the top of this section) could sign
+or verify tokens with an insecure default, or simply never notice it
+wasn't configured, until someone went looking. That is a categorically
+different risk, and it earns a stricter default. Verified live, not
+just reviewed: `JWT_SECRET_KEY="" uv run uvicorn app.main:app --port
+8001` printed `RuntimeError: JWT_SECRET_KEY is not configured...`,
+logged `Application startup failed. Exiting.`, and never bound the
+port — a subsequent request to it returned connection-refused, not a
+503 or a 401. `tests/unit/core/test_application.py` covers the same
+boundary as a fast, deterministic unit test (`get_settings` and
+`get_engine` monkeypatched, mirroring `tests/unit/db/test_engine.py`'s
+own convention), including that the JWT check runs _before_ the
+database check even when both would fail.
+
+### Rate Limiting
+
+M5-E2-T1. In-process only, deliberately — this platform runs a single
+instance today, so a distributed store isn't needed yet (the same
+reasoning that kept the async-training background-task fix in-process
+rather than reaching for Redis prematurely, back in M2). `app.middleware
+.rate_limit.TokenBucketRateLimiter` — one bucket per key, `capacity`
+(`rate_limit_requests`, default 120) tokens refilling continuously over
+`window_seconds` (`rate_limit_window_seconds`, default 60), so a short
+burst up to capacity is always allowed and only the _sustained_ rate is
+actually bounded, never a hard reset-to-zero-every-window cliff. Applied
+by `RateLimitMiddleware` to every request except `OPTIONS` (CORS
+preflight) and the liveness endpoints (`/health`, `/api/v1/health` —
+orchestration/monitoring probes must never be throttled); a request
+over its bucket's capacity gets a real `429` (`code: "rate_limited"`)
+with a `Retry-After` header naming how long to wait.
+
+**One global bucket per key, shared across every endpoint** — confirmed
+by reading `_resolve_key` itself: it returns only `user:<id>` or
+`ip:<ip>`, with no per-path component at all. A single authenticated
+user's health-page polling, paper-trading polling, and everything else
+they have open all draw from the _same_ 120-tokens-per-60s bucket, not
+one bucket per endpoint. Keyed by the authenticated user's id when a
+valid bearer token is present (`decode_access_token` — a
+malformed/expired token is treated as anonymous for this purpose only;
+the actual auth check downstream still rejects it properly), else the
+client's IP address — proven distinct in `tests/api/test_rate_limiting
+.py`: exhausting the anonymous bucket via repeated unauthenticated
+calls does not affect a subsequently-authenticated request's own
+separate bucket.
+
+**Measured live against a real, two-tab dashboard session** (a real
+browser, not an assumption): one tab on `/paper-trading` with a real
+account selected (four polling queries at 10s each), one tab on
+`/health` (three polling queries at 10s each), both authenticated as
+the same real user, run for a real 5 minutes with focus alternated
+between them — **sustained 50.6 requests/minute** (253 requests over
+300 real seconds), 0 rejections, comfortably under the 120/min default
+but at roughly 42% of it for just two realistically-busy tabs — a third
+similarly-busy tab, or two browser tabs' polling happening to land on
+one shared IP for two _different_ anonymous users, would meaningfully
+close that margin. `SYSTEM_REFRESH_INTERVAL_MS`/paper-trading's own
+10-second `refetchInterval`s (`apps/dashboard/src/features/health/hooks
+/use-system-data.ts`, `.../paper-trading/hooks/use-paper-trading-data.ts`)
+are the frontend's own real polling rates this was measured against —
+not a hypothetical.
+
+**Client IP is `request.client.host` — populated by uvicorn's own
+`ProxyHeadersMiddleware`, enabled by default, not this codebase's
+code.** This module never reads `X-Forwarded-For` itself; Starlette's
+`request.client` is whatever the ASGI server puts in `scope["client"]`,
+and uvicorn (`>=0.29`, confirmed here on 0.52.1) trusts
+`X-Forwarded-For`/`Forwarded` by default from any peer in
+`forwarded_allow_ips` (default: `127.0.0.1` only). **Verified live**: a
+`curl` sent directly to the local dev server (peer = `127.0.0.1`) with
+a forged `X-Forwarded-For: 1.2.3.4` header had that value trusted
+outright — it appeared as the tracked IP in the login-lockout log line,
+not the real loopback address. Concretely: **anyone who can reach this
+app via a connection uvicorn considers a trusted proxy (by default,
+127.0.0.1 — true for local dev today, and would also be true of a
+same-host reverse proxy in a future deployment) can spoof their
+apparent IP for both rate-limiting and login-lockout purposes by simply
+setting that header**, evading the IP-keyed half of both defenses
+entirely (an authenticated user's own `user:<id>` key is unaffected — a
+JWT can't be spoofed the same way). This is not currently exploitable
+by a real external attacker reaching this API directly over the
+internet, since their connection wouldn't originate from a trusted
+peer and the header would be ignored — but no reverse-proxy deployment
+is defined anywhere in this repo yet, so whether this matters in
+production depends entirely on a deployment-topology decision nobody
+has made. Disclosed here rather than silently "fixed" by guessing that
+topology (e.g. passing `--forwarded-allow-ips=""` would break real IP
+visibility if this app is later put behind a proxy that legitimately
+needs to be trusted).
+
+The tracker lives on `app.state`, created fresh in `create_app()` —
+deliberately not a module-level singleton, since a shared global would
+leak rate-limit state across the many independent `FastAPI` app
+instances this test suite creates in the same process (`app.middleware
+.rate_limit`'s own module docstring covers this in full). A coarse
+prune (`TokenBucketRateLimiter._maybe_prune`) drops idle buckets once
+tracked keys pass 10,000, bounding memory growth from a very large
+number of distinct IPs over a long uptime. **Its first implementation
+had a real bug, caught by its own test**: staleness was checked via
+`bucket.tokens >= capacity`, but `tokens` is only ever recomputed as a
+side effect of a _later_ `allow()` call for that same key — a bucket
+touched exactly once (an ordinary one-off visitor) keeps its
+`capacity - 1` value frozen forever and would never look "full" by
+that measure no matter how much real time passed, making such buckets
+permanently unprunable — precisely the unbounded-growth case the prune
+exists to prevent.
+`tests/unit/middleware/test_rate_limit.py::test_idle_buckets_are_pruned_once_the_tracker_grows_large`
+failed against the original implementation and passes against the
+fix, which judges staleness purely by elapsed time since `last_refill`
+(`>= window_seconds`) instead.
+
+### Login Lockout
+
+M5-E2-T1. A dedicated brute-force / credential-stuffing defense on
+`POST /auth/login`, deliberately separate from the general rate limiter
+above — this is an account-security mechanism, not fair-use throttling,
+and closes a real, previously-disclosed, currently-exploitable gap:
+M5-E1-T1's own live verification sent eight consecutive wrong-password
+requests against a real account and found every one returned a plain
+`401` with no throttling at all, and the correct password still
+succeeded immediately afterward.
+
+`app.auth.login_lockout.LoginLockoutTracker`: `login_lockout_max_attempts`
+(default 5) failures within a rolling `login_lockout_window_seconds`
+(default 300) window locks a key out for `login_lockout_cooldown_seconds`
+(default 900). Tracked by **two independent keys** — the raw _submitted_
+email, normalized but never resolved to a real user id, and separately
+the client's IP — either alone can trigger a lockout. Keying by the
+submitted string rather than a resolved user preserves
+`InvalidCredentialsError`'s own "never reveal which thing was wrong"
+property: a fabricated email locks out after exactly the same number of
+attempts as a real one (`tests/auth/test_login_lockout.py::
+test_an_unknown_email_locks_out_identically_to_a_real_one`). A
+successful login clears both keys' failure counts immediately, so an
+earlier typo is never held against a later correct attempt. Lockout
+transitions (the specific failure that crosses `max_attempts`) and every
+subsequent rejected attempt while still locked are both logged at
+`WARNING` in `app.api.v1.endpoints.auth`, naming the email and IP
+involved — the same "log the account-security-relevant event" standard
+LOG-ACCOUNT-CONFIG-CHANGES and this task's own audit trail already hold
+every other mutation to.
+
+**Verified live, repeating the exact scenario from M5-E1-T1's own
+disclosure**: eight consecutive wrong-password requests against the
+real `admin@gmail.com` account returned `401` for attempts 1–5, then
+`429 too_many_login_attempts` for attempts 6–8; the _correct_ password
+submitted immediately afterward was also rejected with `429` and a
+`Retry-After: 894` header (just under the 900-second default cooldown)
+— confirming this is a real account lockout, not merely continued
+wrong-password rejection. `tests/auth/test_login_lockout.py` covers the
+tracker in isolation (a fake, injectable clock — window expiry, cooldown
+expiry, success clearing failures, independent keys) and the same
+eight-attempt scenario through the real endpoint.
+
+**Bounded, like the rate limiter above**: `LoginLockoutTracker
+._maybe_prune` drops records once tracked keys pass 10,000 and a
+record's own window has long expired and it isn't currently locked —
+without it, every distinct email or IP that ever failed even once
+would stay resident in memory for the life of the process, an
+unbounded dict (`tests/auth/test_login_lockout.py::
+test_stale_records_are_pruned_once_the_tracker_grows_large`). Unlike
+the rate limiter's own bug (above), this one's staleness check was
+correct from the start — both fields it compares (`locked_until`,
+`window_started_at`) are raw timestamps set once and read directly,
+never a lazily-recomputed derived value.
+
+**A process restart silently clears both the rate limiter and the
+lockout tracker — a disclosed limitation of the in-process approach,
+not fixed here.** Both live as plain dictionaries on `app.state`,
+created fresh in `create_app()`; nothing persists them anywhere. An
+account mid-lockout, or a caller mid-rate-limit, is fully reset by a
+restart — deploying a fix, a crash-and-recovery, or a routine
+`--reload` all have this effect today. This is the same category as
+the token-revocation gap above, and closes the same way: the upcoming
+Redis task's distributed, TTL-capable store survives a restart by
+construction, so this limitation (like that one) is deliberately
+deferred there rather than solved twice.
 
 ### Feature Store
 

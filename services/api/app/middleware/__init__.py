@@ -1,5 +1,6 @@
-"""Middleware package marker.
+"""Custom middleware.
 
-Custom middleware implementations will live here in a future milestone.
-CORS middleware is configured in the application factory.
+`rate_limit.py` — general inbound rate limiting (M5-E2-T1). CORS
+middleware itself is still configured directly in the application
+factory (`app.application.create_app`), not here.
 """

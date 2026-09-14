@@ -458,10 +458,25 @@ closing both motivating gaps: no way to trace API-key exposure, and no
 way to attribute the earlier `strategy_enabled` reversion to a person.
 Verified live against the real dev server and Postgres, not just by
 unit test. See `ARCHITECTURE.md` § "Authentication & Audit Trail",
-`CHANGELOG.md`, and `TASKBOOK.md` `M5-E1-T1`. Rate limiting is next —
-now that per-user limits are actually meaningful — then Redis (finally
-wired in, for session/token storage), then CI/CD and monitoring round
-out this milestone.
+`CHANGELOG.md`, and `TASKBOOK.md` `M5-E1-T1`.
+
+**Epic 5.2 — Rate Limiting (M5-E2-T1) is done.** Closes the one required
+fix M5-E1-T1 left open (JWT secret now fails the app at startup, not
+lazily on first use — a deliberate, explicitly-documented departure from
+this codebase's "missing configuration degrades gracefully" convention)
+and both of that task's own disclosed gaps except token revocation:
+general in-process rate limiting (a token bucket, keyed by user or IP,
+120 req/min default) and a dedicated login lockout (5 failures/5 min
+locks a submitted email or IP out for 15 minutes). Verified live,
+repeating the exact eight-wrong-password sequence M5-E1-T1 disclosed as
+unlimited — it now locks out at attempt 6, and the correct password is
+rejected too until the cooldown expires. See `ARCHITECTURE.md` §
+"Rate Limiting" and § "Login Lockout", `CHANGELOG.md`, and
+`TASKBOOK.md` `M5-E2-T1`. Token revocation on logout remains
+deliberately deferred to the next task, not forgotten — Redis (finally
+wired in) closes it alongside giving the rate limiter and lockout a
+distributed store, once this platform runs more than one instance; then
+CI/CD and monitoring round out this milestone.
 
 **Milestone 6 — Live Trading (gated on extensive validation).** Real order
 execution against a live exchange. Deliberately last, and deliberately

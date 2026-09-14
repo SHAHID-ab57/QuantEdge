@@ -20,6 +20,16 @@ from decimal import Decimal
 
 os.environ["DATABASE_URL"] = ""
 os.environ["DB_URL"] = ""
+#: `app.application.startup` (M5-E2-T1) now fails the whole app at startup
+#: with no JWT secret configured — every test's `client` fixture runs the
+#: real lifespan via `LifespanManager`, so a real (test-only) secret must
+#: exist here, at import time, before `get_settings()` is ever called and
+#: its `lru_cache` bakes in whatever's in the environment for the rest of
+#: the session. `tests/auth/conftest.py`'s own dedicated JWT secret for
+#: actually signing/verifying tokens is unrelated to this one — that one
+#: is injected per-request via a `get_settings` dependency override, so
+#: it's never affected by this process-wide environment variable.
+os.environ.setdefault("JWT_SECRET_KEY", "root-conftest-only-secret-never-used-to-sign-a-real-token")
 
 import httpx
 import pytest

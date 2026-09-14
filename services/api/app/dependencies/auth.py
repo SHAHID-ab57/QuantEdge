@@ -8,11 +8,12 @@ takes.
 
 from typing import Annotated
 
-from fastapi import Depends, Security
+from fastapi import Depends, Request, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.errors import InvalidTokenError, MissingCredentialsError
+from app.auth.login_lockout import LoginLockoutTracker
 from app.auth.security import decode_access_token
 from app.core.config import Settings, get_settings
 from app.db.session import get_db
@@ -40,6 +41,23 @@ def get_auth_service(
 def get_audit_service(session: Annotated[AsyncSession, Depends(get_db)]) -> AuditService:
     """Build the audit service wired to the request session."""
     return AuditService(audit_log_repository=AuditLogRepository(session))
+
+
+def get_login_lockout_tracker(request: Request) -> LoginLockoutTracker:
+    """The per-app `LoginLockoutTracker` created in `create_app`
+    (`app.state.login_lockout_tracker`) — see that module's own
+    docstring for why this lives on `app.state` rather than as a
+    module-level singleton."""
+    return request.app.state.login_lockout_tracker  # type: ignore[no-any-return]
+
+
+def get_client_ip(request: Request) -> str:
+    """The requesting client's IP address, or `"unknown"` when Starlette
+    couldn't determine one (e.g. certain test transports) — used only as
+    a rate-limit/lockout key, never for anything security-load-bearing
+    on its own."""
+    client = request.client
+    return client.host if client is not None else "unknown"
 
 
 async def get_current_user(

@@ -8,6 +8,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **JWT secret startup enforcement, general rate limiting, and login
+  lockout (M5-E2-T1).** Closes the one required fix from M5-E1-T1 and
+  both of that task's own disclosed, currently-live gaps except token
+  revocation (deliberately deferred to the upcoming Redis task).
+  - **JWT secret now fails the whole app at startup, not on first use**
+    — a deliberate departure from this codebase's own "missing
+    configuration degrades gracefully" convention (an unset
+    `DELTA_API_KEY` or `DATABASE_URL` still works fine without one). A
+    security-critical secret failing silently was judged a categorically
+    different risk. Verified live: `JWT_SECRET_KEY="" uv run uvicorn
+app.main:app` prints `Application startup failed. Exiting.` and
+    never binds the port.
+  - **General inbound rate limiting** — an in-process token bucket
+    (`app.middleware.rate_limit`, no Redis yet, matching the
+    in-process-now pattern already used for the async training fix),
+    120 requests/minute by default, keyed by authenticated user id or
+    client IP, exempting CORS preflight and liveness checks. Returns
+    `429` with `Retry-After`.
+  - **Login lockout**, distinct from the general limiter — 5 consecutive
+    failures within 5 minutes locks out the submitted email _and_
+    separately the client IP for 15 minutes (`app.auth.login_lockout`).
+    An unknown email locks out identically to a real one, preserving
+    the existing enumeration-resistance. Lockout transitions are logged.
+  - **Verified live, repeating the exact 8-wrong-password sequence from
+    M5-E1-T1's own disclosure**: attempts 1–5 returned `401`, attempts
+    6–8 returned `429 too_many_login_attempts`, and the _correct_
+    password was rejected too with `Retry-After: 894` — confirming a
+    real account lockout, not just continued rejection.
+  - New tests: `tests/unit/core/test_application.py` (startup
+    enforcement), `tests/unit/middleware/test_rate_limit.py` +
+    `tests/api/test_rate_limiting.py` (rate limiting, unit and
+    end-to-end), `tests/auth/test_login_lockout.py` (lockout, unit and
+    end-to-end).
+
 - **Basic authentication and a real, attributable audit trail
   (M5-E1-T1).** Milestone 5's first epic — closing two real gaps at
   once: leaked third-party API keys with no way to trace exposure, and

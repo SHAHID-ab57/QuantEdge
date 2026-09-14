@@ -5343,33 +5343,15 @@ mutating plus `GET /auth/me`/`GET /audit-log`), and the
 `strategy_enabled` attribution proof end to end through a real
 `POST /auth/login` call, matching the live verification above.
 
-**One real gap remains, disclosed rather than left implicit — the other
-that stood here has since been closed (see "Rate Limiting" and "Login
-Lockout" below, both M5-E2-T1):**
-
-- **Logout does not invalidate the token server-side.** There is no
-  blocklist, token version, or `jti`/nonce check anywhere in
-  `decode_access_token` — it verifies only the signature, expiry, and
-  subject shape. The frontend's `logout()` only clears the token from
-  `sessionStorage` and redirects; it never calls any backend endpoint
-  (none exists to revoke a token). Confirmed live: a token captured
-  before "logging out" was replayed directly against `GET /auth/me`
-  afterward and still returned `200` with the real user's profile. A
-  token therefore remains fully valid and replayable for its full
-  `jwt_access_token_expire_minutes` (default 60) regardless of any
-  client-side logout — acceptable for this task's own small-real-users
-  scope given the short default expiry and no refresh-token flow to
-  extend it, but a real gap for a stolen-token scenario. The rate
-  limiter and login lockout added below (both M5-E2-T1) share this same
-  in-process characteristic: a process restart silently clears all
-  three (revocation, rate-limit buckets, and any active lockout) — see
-  "Login Lockout"'s own note on this. **Deliberately deferred, not
-  forgotten**: the upcoming Redis task (see `ROADMAP.md` §
-  "Milestone 5") closes this alongside adding a distributed store for
-  the rate limiter below, since both naturally want the same fast,
-  TTL-capable backend — building a bespoke in-process revocation
-  mechanism now, only to replace it immediately after, was judged not
-  worth doing twice.
+**Both gaps that stood here are now closed** (see "Token Revocation",
+"Rate Limiting", and "Login Lockout" below — M5-E2-T1 for the latter
+two, M5-E3-T1 for revocation and for making all three durable):
+logout genuinely invalidates a token server-side now, and none of the
+three in-process mechanisms are silently cleared by a restart anymore
+— when Redis is configured. Redis is a soft dependency, not a hard
+requirement (see "Redis" below for the full reasoning); when it isn't
+configured, all three still work exactly as before this task, in-process,
+restart-resetting.
 
 **JWT secret startup enforcement (M5-E2-T1) — a deliberate departure
 from this codebase's own convention.** Every other optional integration
@@ -5400,13 +5382,169 @@ boundary as a fast, deterministic unit test (`get_settings` and
 own convention), including that the JWT check runs _before_ the
 database check even when both would fail.
 
+### Redis
+
+M5-E3-T1. Provisioned since Milestone 1 (`infra/docker/docker-compose
+.yml`) and used for nothing until now — `redis>=5.2.0` sat in
+`pyproject.toml` as a declared dependency with no wired-up code path.
+It now backs three mechanisms that all specifically wanted a fast,
+TTL-capable, restart-surviving store: rate limiting, login lockout
+(both M5-E2-T1, in-process originally), and token revocation (new in
+this task).
+
+**A soft dependency, deliberately — its own precedent, distinct from
+both existing conventions in this file.** `Settings.redis_url` is
+empty by default. Three behaviors, matched to three different
+situations:
+
+1. **Unconfigured** (`REDIS_URL` unset): every one of the three
+   features falls back to its original in-process implementation —
+   exactly this platform's behavior before this task, restart-resetting
+   and single-instance-only. This follows `database_url`'s own
+   "unconfigured degrades gracefully" precedent exactly.
+2. **Configured but unreachable at startup**: `app.application.startup`
+   calls `probe_redis()` (mirroring `probe_database()` byte-for-byte)
+   and raises `RuntimeError`, failing the app before it binds a port —
+   again following `database_url`'s own precedent, not the JWT secret's:
+   a deployment that declared it wants Redis-backed durability should
+   not silently and invisibly fall back to a materially weaker
+   guarantee without an operator ever finding out.
+3. **Reachable at startup, drops mid-runtime**: handled _per mechanism_,
+   not uniformly — see "Mid-runtime failure handling" below. This is
+   the one place none of `database_url`'s or `jwt_secret_key`'s own
+   precedents quite apply on their own: unlike the database (this
+   platform's primary data store, no graceful degradation possible) or
+   the JWT secret (the primary authentication gate itself), none of
+   these three features are _individually_ load-bearing for request
+   handling in the same all-or-nothing way — JWT signature verification
+   has no Redis dependency at all — but one of the three (token
+   revocation) turns out to need `jwt_secret_key`'s own hard-failure
+   posture anyway, for reasons specific to what it protects, not a
+   blanket rule.
+
+Why not just always fail open, or always require Redis outright, matching
+one existing convention exactly? Neither fits uniformly: always-fail-open
+would mean an _unreachable-at-startup_ misconfiguration goes unnoticed
+indefinitely (bad — the same reasoning that makes case 2 a hard
+failure) _and_, for revocation specifically, would silently undo a real
+logout the moment Redis blipped — defeating that feature's entire
+purpose; always-hard-fail would mean a transient Redis blip takes the
+_entire platform_ down over what are, for rate limiting and lockout, two
+genuinely non-load-bearing defense-in-depth features (worse than the
+pre-Redis baseline, which had no such single point of failure at all).
+The per-mechanism split below is the reasoned answer, chosen and written
+down here — including a real correction made to it, caught by directly
+testing the behavior rather than trusting the design's own stated intent
+— rather than defaulting to whichever existing precedent was easiest to
+copy uniformly.
+
+### Mid-runtime failure handling
+
+Three different answers, not one, because the three mechanisms are not
+equally forgiving of a wrong one — reasoned through explicitly per
+mechanism below, and each one's _actual_ behavior confirmed directly
+against a real, deliberately-unreachable Redis connection (a real closed
+TCP port, a real exception from the `redis` library), not assumed from
+the design.
+
+**Rate limiting and login lockout: fall back to a real, independently-
+complete in-process limiter/tracker — never a bare "allow everything".**
+`RedisTokenBucketRateLimiter` and `RedisLoginLockoutTracker` each hold an
+internal instance of their own in-process sibling class
+(`TokenBucketRateLimiter`/`LoginLockoutTracker`) and delegate to it on
+any Redis error. This is not a placeholder — it is the _exact same
+algorithm_ these two ran before Redis was wired in at all, just scoped
+to this one process rather than durable/shared. For login lockout
+specifically, this directly answers the attack scenario a naive
+fail-open would enable: an attacker who causes or benefits from Redis
+instability does **not** get an unlimited-attempts window, because the
+fallback keeps counting failures and locking out on its own, completely
+independently of Redis.
+`tests/auth/test_redis_login_lockout.py::
+test_a_mid_runtime_redis_failure_still_locks_out_via_the_fallback` and
+`tests/unit/middleware/test_redis_rate_limit.py::
+test_a_mid_runtime_redis_failure_falls_back_to_a_real_in_process_limit`
+prove this against a real closed-port connection: several calls succeed
+(the fallback starts with a full bucket/zero failures, same as any fresh
+key would), then the fallback's own real limit is hit and further calls
+are genuinely rejected — not "the first call after an error happens to
+still say allowed," a real, continuing limit.
+
+**Token revocation: fails closed, and the practical cost is larger than
+it might look at first — worth stating precisely, not just in
+principle.** `RedisTokenBlocklist.revoke()` writes through to an
+internal `InProcessTokenBlocklist` unconditionally, before attempting
+Redis at all — so, since this platform runs a single instance today,
+every revocation this process has ever issued stays known to it
+regardless of Redis's own health afterward. `is_revoked()` checks that
+local copy first and returns `True` immediately if it has a record — no
+Redis round trip needed for that case. But the local copy is **only**
+trusted positively, never negatively: "no local record" is never taken
+as proof a token wasn't revoked (a restart could have discarded that
+knowledge, and in a future multi-instance deployment another process
+could hold the only record), so an ordinary, never-revoked token still
+requires a real Redis round trip to confirm — and if that round trip
+errors, `RevocationCheckUnavailableError` (503) is raised rather than
+guessing `False`. **Measured directly, not assumed**: with a real
+closed-port connection substituted for a healthy one, a token revoked
+moments earlier via the same blocklist instance still correctly
+returned `is_revoked() == True` (the write-through fallback working as
+intended); an entirely fresh, never-revoked token raised
+`RevocationCheckUnavailableError` rather than returning `False`. **This
+means, in practice, that once `REDIS_URL` is configured, a Redis outage
+denies nearly every authenticated request** — not just replays of
+already-revoked tokens — for as long as it lasts, with the sole
+exception of tokens this exact process instance has itself already
+revoked. `tests/auth/test_token_revocation.py::
+TestRevocationCheckUnavailablePropagatesThroughTheRealEndpoint` confirms
+this reaches a real caller as `503`, not a silently-accepted `200`,
+through the actual `GET /auth/me` endpoint. This is treated as the
+correct, deliberate cost of the fail-closed choice above — not
+something to engineer smaller — because there is no honest middle
+ground: any rule that treated "no local record" as reassuring would
+reopen exactly the gap this whole task exists to close, just for a
+narrower set of tokens instead of all of them. Redis becomes a hard
+dependency for authenticated traffic only once an operator has
+explicitly opted into Redis-backed revocation by setting `REDIS_URL` —
+never before, and never for the rate limiter or login lockout, which
+remain genuinely soft.
+
+**Implementation**: `app.core.redis.get_redis_client()` — lazily
+created, cached, mirroring `app.db.engine.get_engine()` exactly, down
+to `dispose_redis_client()` being called from the same `shutdown()`
+that disposes the database engine. `RedisTokenBucketRateLimiter` and
+`RedisLoginLockoutTracker` each evaluate their whole algorithm
+atomically inside Redis via a single Lua script (`EVAL`) — a read,
+compute, and write in one round trip, so concurrent callers sharing a
+key can't race past each other the way two separate read-then-write
+calls could. Proven directly, not just argued: both
+`tests/unit/middleware/test_redis_rate_limit.py::
+test_concurrent_requests_for_the_same_key_never_over_allow` and
+`tests/auth/test_redis_login_lockout.py::
+test_concurrent_failures_never_lock_out_more_than_once` fire many
+truly-concurrent requests for one shared key against a real Redis
+instance and assert the limit is respected exactly, not
+approximately. `RedisTokenBlocklist` needs no Lua script (`SET`/
+`EXISTS` alone are already atomic for this shape). Every Redis key
+across all three carries its own TTL — Redis's own expiry replaces
+every one of the in-process fallback's own manual, bounded prune
+methods entirely on this path (`TokenBucketRateLimiter._maybe_prune`,
+`LoginLockoutTracker._maybe_prune`, `InProcessTokenBlocklist
+._maybe_prune`); none of those three are ever called when a Redis
+backend is in use.
+
+**Testing**: every Redis-backed test runs against a real, local Redis
+instance (`tests/conftest.py`'s `redis_client` fixture, logical DB 15,
+flushed before and after, auto-skipping when unreachable — mirroring
+`postgres_engine`'s own established convention exactly), never mocked,
+per this task's own explicit requirement.
+
 ### Rate Limiting
 
-M5-E2-T1. In-process only, deliberately — this platform runs a single
-instance today, so a distributed store isn't needed yet (the same
-reasoning that kept the async-training background-task fix in-process
-rather than reaching for Redis prematurely, back in M2). `app.middleware
-.rate_limit.TokenBucketRateLimiter` — one bucket per key, `capacity`
+M5-E2-T1, Redis-backed since M5-E3-T1 — see "Redis" above for the full
+backend-selection reasoning. `app.middleware.rate_limit
+.TokenBucketRateLimiter` (in-process fallback) / `RedisTokenBucketRateLimiter`
+(when `REDIS_URL` is configured) — one bucket per key, `capacity`
 (`rate_limit_requests`, default 120) tokens refilling continuously over
 `window_seconds` (`rate_limit_window_seconds`, default 60), so a short
 burst up to capacity is always allowed and only the _sustained_ rate is
@@ -5451,29 +5589,16 @@ not a hypothetical.
 `ProxyHeadersMiddleware`, enabled by default, not this codebase's
 code.** This module never reads `X-Forwarded-For` itself; Starlette's
 `request.client` is whatever the ASGI server puts in `scope["client"]`,
-and uvicorn (`>=0.29`, confirmed here on 0.52.1) trusts
-`X-Forwarded-For`/`Forwarded` by default from any peer in
-`forwarded_allow_ips` (default: `127.0.0.1` only). **Verified live**: a
-`curl` sent directly to the local dev server (peer = `127.0.0.1`) with
-a forged `X-Forwarded-For: 1.2.3.4` header had that value trusted
-outright — it appeared as the tracked IP in the login-lockout log line,
-not the real loopback address. Concretely: **anyone who can reach this
-app via a connection uvicorn considers a trusted proxy (by default,
-127.0.0.1 — true for local dev today, and would also be true of a
-same-host reverse proxy in a future deployment) can spoof their
-apparent IP for both rate-limiting and login-lockout purposes by simply
-setting that header**, evading the IP-keyed half of both defenses
-entirely (an authenticated user's own `user:<id>` key is unaffected — a
-JWT can't be spoofed the same way). This is not currently exploitable
-by a real external attacker reaching this API directly over the
-internet, since their connection wouldn't originate from a trusted
-peer and the header would be ignored — but no reverse-proxy deployment
-is defined anywhere in this repo yet, so whether this matters in
-production depends entirely on a deployment-topology decision nobody
-has made. Disclosed here rather than silently "fixed" by guessing that
-topology (e.g. passing `--forwarded-allow-ips=""` would break real IP
-visibility if this app is later put behind a proxy that legitimately
-needs to be trusted).
+and uvicorn (`>=0.29`, confirmed here on 0.52.1) trusts that header by
+default from any peer in `forwarded_allow_ips` (default: `127.0.0.1`
+only) — meaning it's spoofable today from anything that can reach this
+app via loopback, and becomes spoofable from the public internet too if
+a future reverse proxy is misconfigured to forward rather than
+overwrite it. Not currently exploitable by a real external attacker
+(their connection isn't from a trusted peer, so the header is ignored)
+— see "Deployment View" § "Reverse proxy configuration warning" for the
+full live-verified finding and the rule for whoever configures that
+proxy.
 
 The tracker lives on `app.state`, created fresh in `create_app()` —
 deliberately not a module-level singleton, since a shared global would
@@ -5498,14 +5623,15 @@ fix, which judges staleness purely by elapsed time since `last_refill`
 
 ### Login Lockout
 
-M5-E2-T1. A dedicated brute-force / credential-stuffing defense on
-`POST /auth/login`, deliberately separate from the general rate limiter
-above — this is an account-security mechanism, not fair-use throttling,
-and closes a real, previously-disclosed, currently-exploitable gap:
-M5-E1-T1's own live verification sent eight consecutive wrong-password
-requests against a real account and found every one returned a plain
-`401` with no throttling at all, and the correct password still
-succeeded immediately afterward.
+M5-E2-T1, Redis-backed since M5-E3-T1 (see "Redis" above). A dedicated
+brute-force / credential-stuffing defense on `POST /auth/login`,
+deliberately separate from the general rate limiter above — this is an
+account-security mechanism, not fair-use throttling, and closes a real,
+previously-disclosed, currently-exploitable gap: M5-E1-T1's own live
+verification sent eight consecutive wrong-password requests against a
+real account and found every one returned a plain `401` with no
+throttling at all, and the correct password still succeeded immediately
+afterward.
 
 `app.auth.login_lockout.LoginLockoutTracker`: `login_lockout_max_attempts`
 (default 5) failures within a rolling `login_lockout_window_seconds`
@@ -5551,17 +5677,87 @@ correct from the start — both fields it compares (`locked_until`,
 `window_started_at`) are raw timestamps set once and read directly,
 never a lazily-recomputed derived value.
 
-**A process restart silently clears both the rate limiter and the
-lockout tracker — a disclosed limitation of the in-process approach,
-not fixed here.** Both live as plain dictionaries on `app.state`,
-created fresh in `create_app()`; nothing persists them anywhere. An
-account mid-lockout, or a caller mid-rate-limit, is fully reset by a
-restart — deploying a fix, a crash-and-recovery, or a routine
-`--reload` all have this effect today. This is the same category as
-the token-revocation gap above, and closes the same way: the upcoming
-Redis task's distributed, TTL-capable store survives a restart by
-construction, so this limitation (like that one) is deliberately
-deferred there rather than solved twice.
+**Restart survival, verified live against the real dev server, not just
+by unit test.** With `REDIS_URL` configured: tripped the lockout for a
+real email (5 wrong-password requests), confirmed `429
+too_many_login_attempts` and a real `lockout:email:...` key in Redis,
+then `kill -9`'d the entire uvicorn process (not `--reload`, a genuine
+process death) and started a brand-new one — the very first login
+attempt against the new process for that same email was still `429`.
+The exact opposite of what this same section found before this task
+("a process restart silently clears both the rate limiter and the
+lockout tracker"). `tests/api/test_redis_restart_survival.py` covers
+this deterministically: two separate `create_app()` calls (so two
+genuinely distinct Python tracker objects — asserted directly, not
+assumed) pointed at the same Redis, with state observed through the
+second that could only have come from the first. Without `REDIS_URL`
+configured, this limitation still applies exactly as before — the
+in-process fallback is unchanged, and a restart resets it the same way
+it always did (see "Redis" above for why that's an accepted, documented
+trade-off of treating Redis as a soft dependency, not a regression).
+
+### Token Revocation
+
+M5-E3-T1. Closes the one gap M5-E1-T1 disclosed and M5-E2-T1
+deliberately deferred: logout never invalidated a token server-side, so
+a captured token stayed fully valid and replayable for its full
+`jwt_access_token_expire_minutes` regardless of logout.
+
+**`jti` (JWT ID) added to every issued token** (`app.auth.security
+.create_access_token`, a fresh `uuid4` per token) — a `sub` (user id)
+claim alone can't name _one_ token for revocation, since a user's other,
+still-valid sessions must not all be invalidated by logging out of one
+of them. `decode_access_token` now returns a `TokenClaims` dataclass
+(`user_id`, `jti`, `expires_at`) rather than a bare `UUID` — every call
+site (`get_current_user`, `app.middleware.rate_limit._resolve_key`)
+updated accordingly.
+
+**`POST /auth/logout`** (new endpoint): depends on `get_current_token_claims`
+(a lighter sibling of `get_current_user` — decodes and validates the
+token but doesn't hit the database resolving a `User`, since revoking
+doesn't need one) and blocklists `claims.jti` with a TTL matching the
+token's own remaining lifetime (`claims.expires_at - now`) — a
+blocklist entry never outlives the token it blocks, so this can never
+accumulate entries for tokens that would have expired naturally anyway.
+`get_current_user` checks the blocklist on every authenticated request
+via a new `TokenRevokedError` (401, `token_revoked` — its own distinct
+code, not folded into `invalid_token`, since "this was fine, then the
+user logged out" is meaningfully different from "this was never valid"
+for a caller or a log reader to know). Idempotent: logging out an
+already-revoked token is a no-op, not an error. Only the one token is
+revoked — a user's other sessions are unaffected
+(`tests/auth/test_token_revocation.py::
+test_logout_only_revokes_the_one_token_not_every_session`).
+
+`app.auth.token_revocation.TokenBlocklist`: `InProcessTokenBlocklist`
+(a `jti -> expires_at` dict, the fallback) / `RedisTokenBlocklist`
+(`SET`/`EXISTS` with the token's own TTL — no Lua script needed, unlike
+rate limiting/lockout, since a single `SET`/`EXISTS` is already atomic
+for this shape) — chosen the same way as the other two mechanisms (see
+"Redis" above), but with a deliberately different mid-runtime-failure
+answer: see "Redis" → "Mid-runtime failure handling" for why this one
+fails _closed_ rather than falling back like the other two.
+
+**Verified live, repeating the exact replay scenario M5-E1-T1's own
+disclosure described** (issue a token, "log out," replay the token):
+against the real dev server with Redis configured — `GET /auth/me`
+with a fresh token returned `200`; the real Redis key
+(`auth:revoked:<jti>`) did not exist yet; `POST /auth/logout` returned
+`204` and the key appeared, TTL `3600` (matching the token's own
+60-minute remaining lifetime); replaying the _identical_ token
+afterward now returns `401 token_revoked` — where M5-E1-T1 found `200`
+with the real user's profile. `tests/auth/test_token_revocation.py::
+TestRealReplayFromM5E1T1::test_issue_logout_replay_is_now_rejected`
+covers the identical scenario as a deterministic test, plus session
+independence and logout idempotency; `TestInProcessTokenBlocklist`/
+`TestRedisTokenBlocklist` cover both backends in isolation, including
+natural TTL expiry un-revoking a token, a revocation surviving a
+mid-runtime Redis failure via the write-through fallback, and the
+residual case — a token neither source can vouch for — raising
+`RevocationCheckUnavailableError` rather than returning `False`. See
+"Redis" → "Mid-runtime failure handling" above for the full,
+directly-measured account of exactly how wide that failure mode is in
+practice.
 
 ### Feature Store
 
@@ -5621,7 +5817,43 @@ Management" for the current, honest boundary between the two.
 
 ## Deployment View
 
-> To be completed in future tasks.
+No production deployment topology is defined anywhere in this repository
+yet (no Dockerfile, no reverse-proxy config, no orchestration manifest) —
+the rest of this section is deliberately narrow: one concrete warning to
+apply _whenever_ that topology gets decided, not a deployment guide.
+
+**Reverse proxy configuration warning (M5-E3-T1).** uvicorn's own
+`ProxyHeadersMiddleware` is enabled by default and trusts
+`X-Forwarded-For`/`Forwarded` from any peer in `forwarded_allow_ips`
+(default: `127.0.0.1` only) — confirmed live during M5-E2-T1's own
+verification: a forged `X-Forwarded-For` header sent directly to the
+local dev server (whose connecting peer _is_ `127.0.0.1`) was trusted
+outright, spoofing the IP `app.middleware.rate_limit`'s `_resolve_key`
+and `POST /auth/login`'s own lockout keying both rely on for their
+IP-keyed half (see `ARCHITECTURE.md` § "Rate Limiting" for the full
+finding). Not currently exploitable by a real external attacker — their
+connection doesn't originate from a trusted peer, so the header is
+ignored — but this becomes a **real, live risk the moment a reverse
+proxy is placed in front of this API**, for a subtle and easy-to-miss
+reason: once a proxy runs on (or otherwise connects from) a trusted
+peer, uvicorn will trust _whatever_ `X-Forwarded-For` value arrives —
+including one a malicious client set themselves, if the proxy merely
+forwards the client's own header instead of overwriting it with the
+real connecting IP it saw.
+
+**The rule for whoever configures that proxy, stated plainly so it
+isn't rediscovered as a live incident later**: a reverse proxy placed
+in front of this API must _always overwrite_ `X-Forwarded-For` with the
+real client IP it observed — never blindly forward a client-supplied
+value unmodified. (Nginx's own default, `proxy_set_header
+X-Forwarded-For $proxy_add_x_forwarded_for`, _appends_ to an existing
+header rather than replacing it — the wrong default for this purpose;
+`$remote_addr` alone, replacing the header outright, is the safe
+setting.) Getting this wrong makes the rate limiter's and login
+lockout's IP-keyed defenses trivially bypassable by anyone who can set
+an arbitrary header — the exact spoofing vector already confirmed live
+against uvicorn's own loopback-trust default, just reachable from the
+public internet instead of only from the proxy's own host.
 
 ## Scalability Strategy
 

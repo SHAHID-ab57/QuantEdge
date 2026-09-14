@@ -39,6 +39,28 @@ class Settings(BaseSettings):
     db_max_overflow: int = 10
     db_echo: bool = False
 
+    #: Redis (M5-E3-T1) — backs rate limiting, login lockout, and token
+    #: revocation with durable, TTL-capable, restart-surviving state.
+    #: Empty by default, deliberately treated as a *soft* dependency —
+    #: distinct from `jwt_secret_key`'s hard startup failure, and
+    #: following the same "unconfigured degrades gracefully" convention
+    #: `database_url` already establishes: unset here, and every one of
+    #: those three features simply falls back to its in-process
+    #: equivalent (the same behavior this platform had before this
+    #: task) — never a startup failure. Set but unreachable *at startup*
+    #: still fails loudly, though, mirroring `database_url`'s own
+    #: "configured-but-broken" precedent exactly: a deployment that
+    #: declared it wants Redis-backed durability should not silently and
+    #: invisibly fall back to a materially weaker guarantee without an
+    #: operator ever finding out. A connection that drops mid-runtime
+    #: *after* a successful startup is the one place this still degrades
+    #: gracefully — each Redis-backed call fails open with a logged
+    #: warning rather than crashing the request, since none of these
+    #: three features are the primary authentication gate (JWT signature
+    #: verification itself has no Redis dependency at all). See
+    #: `ARCHITECTURE.md` § "Redis" for the full reasoning.
+    redis_url: str = ""
+
     candles_default_limit: int = 100
     candles_max_limit: int = 1000
 

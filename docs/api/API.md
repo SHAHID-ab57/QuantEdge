@@ -2008,11 +2008,12 @@ placed order all appear here, each with a plain-language `reason`.
 
 ### Authentication & Audit Trail
 
-| Method | Path                 | Auth | Purpose                                                  |
-| ------ | -------------------- | ---- | -------------------------------------------------------- |
-| POST   | `/api/v1/auth/login` |      | Verify credentials, issue a bearer JWT                   |
-| GET    | `/api/v1/auth/me`    | 🔒   | The caller's own profile — the frontend's session check  |
-| GET    | `/api/v1/audit-log`  | 🔒   | Paginated audit trail, newest first — who did what, when |
+| Method | Path                  | Auth | Purpose                                                  |
+| ------ | --------------------- | ---- | -------------------------------------------------------- |
+| POST   | `/api/v1/auth/login`  |      | Verify credentials, issue a bearer JWT                   |
+| POST   | `/api/v1/auth/logout` | 🔒   | Revoke the calling token server-side (M5-E3-T1)          |
+| GET    | `/api/v1/auth/me`     | 🔒   | The caller's own profile — the frontend's session check  |
+| GET    | `/api/v1/audit-log`   | 🔒   | Paginated audit trail, newest first — who did what, when |
 
 Full design in `ARCHITECTURE.md` § "Authentication & Audit Trail". There
 is no self-registration endpoint — a first user is created with
@@ -2042,6 +2043,19 @@ issues, rejecting a missing, malformed, or expired one with a real
 
 Send the token as `Authorization: Bearer <access_token>` on every
 protected request.
+
+**Log out** (`POST /auth/logout`, M5-E3-T1): revokes the calling token
+server-side — it can no longer authenticate anything, even if already
+captured, for the remainder of its natural lifetime. Only this one
+token; a user's other, still-valid sessions are unaffected. No request
+or response body; `204` on success, idempotent (logging out an
+already-revoked token is still `204`, not an error). Requires the same
+bearer token it revokes.
+
+```jsonc
+// A token replayed after logout:
+// 401 { "code": "token_revoked", "detail": "This token has been revoked" }
+```
 
 **Read the audit trail** (`GET /audit-log`, optionally filtered by
 `user_id`/`resource_type`/`resource_id`):
@@ -2135,6 +2149,11 @@ server also refuses to start at all with no `JWT_SECRET_KEY` configured
 use; see `ARCHITECTURE.md` § "Authentication & Audit Trail" → "JWT
 secret startup enforcement".
 
+`POST /auth/logout` (M5-E3-T1) genuinely revokes the calling token
+server-side — before this, logout only ever cleared the token
+client-side, and a captured token stayed valid and replayable until
+natural expiry. See "Authentication & Audit Trail" above.
+
 ## Error Handling
 
 - Domain errors return `4xx` with `{"code": "...", "detail": "..."}`.
@@ -2146,9 +2165,12 @@ secret startup enforcement".
 
 ## Rate Limiting
 
-Implemented (M5-E2-T1) — in-process only, no distributed store yet (see
-`ARCHITECTURE.md` § "Rate Limiting" for why a single-instance deployment
-doesn't need one). Two independent, deliberately separate mechanisms:
+Implemented (M5-E2-T1), Redis-backed when `REDIS_URL` is configured
+(M5-E3-T1) — otherwise falls back to the original in-process
+implementation with no error; see `ARCHITECTURE.md` § "Redis" for the
+full backend-selection reasoning (a soft dependency, distinct from the
+JWT secret's own hard-startup-failure requirement). Two independent,
+deliberately separate mechanisms:
 
 - **General inbound limiting**, applied to every request except CORS
   preflight and the liveness endpoints (`/health`, `/api/v1/health`): a

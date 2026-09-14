@@ -20,6 +20,19 @@ from decimal import Decimal
 
 os.environ["DATABASE_URL"] = ""
 os.environ["DB_URL"] = ""
+#: `create_app()` calls the real, process-wide `get_settings()` directly
+#: (not via a FastAPI dependency override) to decide whether to build
+#: Redis-backed or in-process rate limiting/lockout/token-revocation
+#: (M5-E3-T1) — so a real `REDIS_URL` sitting in `.env` (e.g. left there
+#: for local live verification against a real Redis instance) would
+#: otherwise leak into *every* test app built via `create_app()` in this
+#: entire suite, having them all share real, persistent Redis state
+#: across test runs. Forced empty here for the same reason
+#: `DATABASE_URL`/`DB_URL` are, immediately above. Tests that
+#: specifically want the Redis-backed path (`tests/unit/middleware
+#: /test_redis_rate_limit.py` and friends) monkeypatch `get_settings`
+#: directly in their own fixtures, unaffected by this.
+os.environ["REDIS_URL"] = ""
 #: `app.application.startup` (M5-E2-T1) now fails the whole app at startup
 #: with no JWT secret configured — every test's `client` fixture runs the
 #: real lifespan via `LifespanManager`, so a real (test-only) secret must
@@ -34,6 +47,7 @@ os.environ.setdefault("JWT_SECRET_KEY", "root-conftest-only-secret-never-used-to
 import httpx
 import pytest
 import pytest_asyncio
+import redis.asyncio as redis
 from asgi_lifespan import LifespanManager
 from fastapi import FastAPI
 from sqlalchemy import text
@@ -442,3 +456,29 @@ async def pg_session_factory(
 ) -> SessionFactory:
     """Session factory bound to the isolated PostgreSQL schema."""
     return async_sessionmaker(bind=postgres_engine, expire_on_commit=False)
+
+
+@pytest_asyncio.fixture
+async def redis_client() -> AsyncIterator[redis.Redis]:
+    """Opt-in real Redis client from ``TEST_REDIS_URL`` (M5-E3-T1).
+
+    Used only by tests marked ``redis`` — the Redis-backed rate
+    limiter/lockout/token-revocation implementations, exercised against
+    a real instance, never mocked, mirroring `postgres_engine`'s own
+    convention exactly (including auto-skipping when unreachable).
+    Isolated to logical DB 15 (Redis's own built-in database-number
+    namespacing) so these tests never collide with real app data on the
+    default DB 0, and `FLUSHDB` before and after so no state leaks
+    between tests or across runs.
+    """
+    url = os.environ.get("TEST_REDIS_URL", "redis://localhost:6379/15")
+    client = redis.from_url(url, decode_responses=True)
+    try:
+        await client.ping()
+    except Exception as exc:
+        await client.aclose()
+        pytest.skip(f"Redis unreachable at {url}: {exc}")
+    await client.flushdb()
+    yield client
+    await client.flushdb()
+    await client.aclose()

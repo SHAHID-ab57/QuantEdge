@@ -8,6 +8,13 @@ eight consecutive wrong-password attempts against a real account each
 returned a plain `401` with no throttling at all. This file's own
 `TestRealLockoutThroughTheEndpoint.test_the_exact_eight_attempt_sequence_from_the_last_tasks_verification_now_locks_out`
 repeats that exact scenario and asserts it no longer succeeds unlimited times.
+
+`LoginLockoutTracker`'s methods are `async` (M5-E3-T1, to match
+`RedisLoginLockoutTracker`'s own interface — see `app.auth.login_lockout`'s
+module docstring), though nothing in the in-process implementation ever
+actually awaits; `asyncio_mode = "auto"` runs these `async def` tests
+with no extra marker needed. `tests/auth/test_redis_login_lockout.py`
+covers the Redis-backed implementation against a real Redis instance.
 """
 
 import httpx
@@ -32,32 +39,32 @@ class FakeClock:
 
 
 class TestLoginLockoutTrackerUnit:
-    def test_a_fresh_key_is_never_locked(self) -> None:
+    async def test_a_fresh_key_is_never_locked(self) -> None:
         tracker = LoginLockoutTracker(
             max_attempts=3, window_seconds=60, cooldown_seconds=300, clock=FakeClock()
         )
-        assert tracker.seconds_locked("email:nobody@example.com") == 0.0
+        assert await tracker.seconds_locked("email:nobody@example.com") == 0.0
 
-    def test_fewer_than_max_attempts_does_not_lock(self) -> None:
+    async def test_fewer_than_max_attempts_does_not_lock(self) -> None:
         clock = FakeClock()
         tracker = LoginLockoutTracker(
             max_attempts=3, window_seconds=60, cooldown_seconds=300, clock=clock
         )
-        assert tracker.record_failure("email:x") is False
-        assert tracker.record_failure("email:x") is False
-        assert tracker.seconds_locked("email:x") == 0.0
+        assert await tracker.record_failure("email:x") is False
+        assert await tracker.record_failure("email:x") is False
+        assert await tracker.seconds_locked("email:x") == 0.0
 
-    def test_the_max_attempt_th_failure_locks_and_returns_true_exactly_once(self) -> None:
+    async def test_the_max_attempt_th_failure_locks_and_returns_true_exactly_once(self) -> None:
         clock = FakeClock()
         tracker = LoginLockoutTracker(
             max_attempts=3, window_seconds=60, cooldown_seconds=300, clock=clock
         )
-        assert tracker.record_failure("email:x") is False
-        assert tracker.record_failure("email:x") is False
-        assert tracker.record_failure("email:x") is True  # the transition into lockout
-        assert tracker.seconds_locked("email:x") == pytest.approx(300.0)
+        assert await tracker.record_failure("email:x") is False
+        assert await tracker.record_failure("email:x") is False
+        assert await tracker.record_failure("email:x") is True  # the transition into lockout
+        assert await tracker.seconds_locked("email:x") == pytest.approx(300.0)
 
-    def test_further_failures_while_already_locked_are_a_silent_no_op(self) -> None:
+    async def test_further_failures_while_already_locked_are_a_silent_no_op(self) -> None:
         """A stray call during an active lockout (the endpoint is expected
         to check `seconds_locked` first and never reach this) must not
         reset the window and accidentally shorten the lockout."""
@@ -65,59 +72,61 @@ class TestLoginLockoutTrackerUnit:
         tracker = LoginLockoutTracker(
             max_attempts=2, window_seconds=60, cooldown_seconds=300, clock=clock
         )
-        tracker.record_failure("email:x")
-        tracker.record_failure("email:x")  # now locked
+        await tracker.record_failure("email:x")
+        await tracker.record_failure("email:x")  # now locked
         clock.advance(250.0)  # still within the 300s cooldown
-        assert tracker.record_failure("email:x") is False  # no-op, not a re-trigger
-        assert tracker.seconds_locked("email:x") == pytest.approx(50.0)
+        assert await tracker.record_failure("email:x") is False  # no-op, not a re-trigger
+        assert await tracker.seconds_locked("email:x") == pytest.approx(50.0)
 
-    def test_the_cooldown_expiring_unlocks_the_key(self) -> None:
+    async def test_the_cooldown_expiring_unlocks_the_key(self) -> None:
         clock = FakeClock()
         tracker = LoginLockoutTracker(
             max_attempts=2, window_seconds=60, cooldown_seconds=300, clock=clock
         )
-        tracker.record_failure("email:x")
-        tracker.record_failure("email:x")
-        assert tracker.seconds_locked("email:x") > 0
+        await tracker.record_failure("email:x")
+        await tracker.record_failure("email:x")
+        assert await tracker.seconds_locked("email:x") > 0
         clock.advance(300.0)
-        assert tracker.seconds_locked("email:x") == 0.0
+        assert await tracker.seconds_locked("email:x") == 0.0
 
-    def test_a_failure_outside_the_window_does_not_accumulate_toward_a_lockout(self) -> None:
+    async def test_a_failure_outside_the_window_does_not_accumulate_toward_a_lockout(
+        self,
+    ) -> None:
         clock = FakeClock()
         tracker = LoginLockoutTracker(
             max_attempts=3, window_seconds=60, cooldown_seconds=300, clock=clock
         )
-        tracker.record_failure("email:x")
+        await tracker.record_failure("email:x")
         clock.advance(61.0)  # outside the 60s window — the count resets
-        tracker.record_failure("email:x")
-        tracker.record_failure("email:x")
+        await tracker.record_failure("email:x")
+        await tracker.record_failure("email:x")
         # Only 2 failures inside the *current* window, one short of max_attempts.
-        assert tracker.seconds_locked("email:x") == 0.0
+        assert await tracker.seconds_locked("email:x") == 0.0
 
-    def test_success_clears_the_failure_count(self) -> None:
+    async def test_success_clears_the_failure_count(self) -> None:
         clock = FakeClock()
         tracker = LoginLockoutTracker(
             max_attempts=3, window_seconds=60, cooldown_seconds=300, clock=clock
         )
-        tracker.record_failure("email:x")
-        tracker.record_failure("email:x")
-        tracker.record_success("email:x")
+        await tracker.record_failure("email:x")
+        await tracker.record_failure("email:x")
+        await tracker.record_success("email:x")
         # Back to zero — two more failures alone must not lock it out.
-        tracker.record_failure("email:x")
-        tracker.record_failure("email:x")
-        assert tracker.seconds_locked("email:x") == 0.0
+        await tracker.record_failure("email:x")
+        await tracker.record_failure("email:x")
+        assert await tracker.seconds_locked("email:x") == 0.0
 
-    def test_two_different_keys_are_tracked_independently(self) -> None:
+    async def test_two_different_keys_are_tracked_independently(self) -> None:
         clock = FakeClock()
         tracker = LoginLockoutTracker(
             max_attempts=2, window_seconds=60, cooldown_seconds=300, clock=clock
         )
-        tracker.record_failure("email:a@example.com")
-        tracker.record_failure("email:a@example.com")
-        assert tracker.seconds_locked("email:a@example.com") > 0
-        assert tracker.seconds_locked("email:b@example.com") == 0.0
+        await tracker.record_failure("email:a@example.com")
+        await tracker.record_failure("email:a@example.com")
+        assert await tracker.seconds_locked("email:a@example.com") > 0
+        assert await tracker.seconds_locked("email:b@example.com") == 0.0
 
-    def test_stale_records_are_pruned_once_the_tracker_grows_large(self) -> None:
+    async def test_stale_records_are_pruned_once_the_tracker_grows_large(self) -> None:
         """Without this, every distinct email/IP that ever failed once
         stays resident for the life of the process — an unbounded dict.
         Mirrors `TokenBucketRateLimiter`'s own bounded prune."""
@@ -126,11 +135,11 @@ class TestLoginLockoutTrackerUnit:
             max_attempts=100, window_seconds=60, cooldown_seconds=300, clock=clock
         )
         for i in range(10_001):
-            tracker.record_failure(f"email:stale-{i}@example.com")
+            await tracker.record_failure(f"email:stale-{i}@example.com")
         clock.advance(61.0)  # every one of those records' window has now expired
         # One more failure (a real, current key) is enough to trigger the
         # opportunistic prune inside `record_failure` itself.
-        tracker.record_failure("email:current@example.com")
+        await tracker.record_failure("email:current@example.com")
         assert len(tracker._records) < 10_001, (
             "stale records were never pruned — the tracker grows unbounded"
         )

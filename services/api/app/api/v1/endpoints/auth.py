@@ -1,4 +1,4 @@
-"""Authentication + audit trail API (M5-E1-T1).
+"""Authentication + audit trail API (M5-E1-T1; token revocation, M5-E3-T1).
 
 `POST /auth/login` is the one unauthenticated endpoint here — everything
 else on this platform that mutates state now requires the bearer token
@@ -9,18 +9,23 @@ who did what is itself sensitive.
 
 import logging
 import uuid
+from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, status
 
 from app.auth.errors import InvalidCredentialsError, LoginLockedError
-from app.auth.login_lockout import LoginLockoutTracker
+from app.auth.login_lockout import LoginLockout
+from app.auth.security import TokenClaims
+from app.auth.token_revocation import TokenBlocklist
 from app.dependencies.auth import (
     get_audit_service,
     get_auth_service,
     get_client_ip,
+    get_current_token_claims,
     get_current_user,
     get_login_lockout_tracker,
+    get_token_blocklist,
 )
 from app.models.user import User
 from app.schemas.audit import AuditLogEntryDTO, AuditLogListResponse
@@ -35,7 +40,9 @@ router = APIRouter(tags=["auth"])
 AuthServiceDep = Annotated[AuthService, Depends(get_auth_service)]
 AuditServiceDep = Annotated[AuditService, Depends(get_audit_service)]
 CurrentUser = Annotated[User, Depends(get_current_user)]
-LoginLockoutTrackerDep = Annotated[LoginLockoutTracker, Depends(get_login_lockout_tracker)]
+CurrentTokenClaims = Annotated[TokenClaims, Depends(get_current_token_claims)]
+LoginLockoutDep = Annotated[LoginLockout, Depends(get_login_lockout_tracker)]
+TokenBlocklistDep = Annotated[TokenBlocklist, Depends(get_token_blocklist)]
 ClientIp = Annotated[str, Depends(get_client_ip)]
 
 DEFAULT_LIMIT = 50
@@ -60,11 +67,12 @@ MAX_LIMIT = 200
 async def login(
     body: LoginRequest,
     service: AuthServiceDep,
-    lockout: LoginLockoutTrackerDep,
+    lockout: LoginLockoutDep,
     client_ip: ClientIp,
 ) -> TokenResponse:
     """Verify credentials and issue a bearer token, enforcing the login
-    lockout (M5-E2-T1) before and after the credential check.
+    lockout (M5-E2-T1, Redis-backed since M5-E3-T1) before and after the
+    credential check.
 
     Keyed by the *submitted* email (normalized, never resolved to a real
     user id) and separately by `client_ip` — either key alone can lock
@@ -74,7 +82,7 @@ async def login(
     email_key = f"email:{normalize_email(body.email)}"
     ip_key = f"ip:{client_ip}"
 
-    locked_for = max(lockout.seconds_locked(email_key), lockout.seconds_locked(ip_key))
+    locked_for = max(await lockout.seconds_locked(email_key), await lockout.seconds_locked(ip_key))
     if locked_for > 0:
         logger.warning(
             "Login rejected: already locked out (email=%s ip=%s retry_after=%.0fs)",
@@ -87,8 +95,8 @@ async def login(
     try:
         token = await service.login(email=body.email, password=body.password)
     except InvalidCredentialsError:
-        email_just_locked = lockout.record_failure(email_key)
-        ip_just_locked = lockout.record_failure(ip_key)
+        email_just_locked = await lockout.record_failure(email_key)
+        ip_just_locked = await lockout.record_failure(ip_key)
         if email_just_locked or ip_just_locked:
             logger.warning(
                 "Login locked out after repeated failures (email=%s ip=%s "
@@ -100,9 +108,30 @@ async def login(
             )
         raise
 
-    lockout.record_success(email_key)
-    lockout.record_success(ip_key)
+    await lockout.record_success(email_key)
+    await lockout.record_success(ip_key)
     return token
+
+
+@router.post(
+    "/auth/logout",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Log out — revokes the calling token server-side",
+    description=(
+        "Blocklists the calling token's own `jti` for the remainder of its natural "
+        "lifetime (M5-E3-T1), so it can no longer authenticate anything even if it was "
+        "already captured — closing the gap M5-E1-T1 disclosed, where logout only ever "
+        "cleared the token client-side and a captured token stayed fully valid and "
+        "replayable until natural expiry. Only revokes *this* token, naming this one "
+        "session — a user's other, still-valid tokens from other sessions are "
+        "unaffected. Idempotent: logging out an already-logged-out token is a no-op, "
+        "not an error."
+    ),
+)
+async def logout(claims: CurrentTokenClaims, blocklist: TokenBlocklistDep) -> None:
+    """Revoke the calling token so it can no longer authenticate anything."""
+    ttl_seconds = (claims.expires_at - datetime.now(UTC)).total_seconds()
+    await blocklist.revoke(claims.jti, ttl_seconds=ttl_seconds)
 
 
 @router.get(

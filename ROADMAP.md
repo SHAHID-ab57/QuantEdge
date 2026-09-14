@@ -472,11 +472,40 @@ repeating the exact eight-wrong-password sequence M5-E1-T1 disclosed as
 unlimited — it now locks out at attempt 6, and the correct password is
 rejected too until the cooldown expires. See `ARCHITECTURE.md` §
 "Rate Limiting" and § "Login Lockout", `CHANGELOG.md`, and
-`TASKBOOK.md` `M5-E2-T1`. Token revocation on logout remains
-deliberately deferred to the next task, not forgotten — Redis (finally
-wired in) closes it alongside giving the rate limiter and lockout a
-distributed store, once this platform runs more than one instance; then
-CI/CD and monitoring round out this milestone.
+`TASKBOOK.md` `M5-E2-T1`.
+
+**Epic 5.3 — Redis (Finally Used) (M5-E3-T1) is done.** Redis has been
+provisioned since Milestone 1 and used for nothing — now backs all
+three mechanisms that specifically wanted a fast, TTL-capable,
+restart-surviving store: rate limiting and login lockout (moved off
+their original in-process implementations) plus token revocation (new
+— a `jti` claim added to every token, `POST /auth/logout` blocklists
+it). A soft dependency, not a hard requirement: unconfigured falls back
+to the original in-process behavior exactly as before, configured-but-
+unreachable-at-startup fails loudly (mirroring `DATABASE_URL`'s own
+precedent), reachable-then-dropped is handled per mechanism, not
+uniformly: rate limiting and login lockout fall back to a real,
+independently-complete in-process limiter/tracker (never a bare "allow
+everything" — for lockout specifically, an attacker can't turn a Redis
+blip into unlimited login attempts), while token revocation fails
+closed — a real `503` rather than a silent pass-through for a token
+whose status can't be verified. That fail-closed design was corrected
+mid-task after directly measuring the original fail-open version's
+actual behavior rather than trusting its own stated intent; its real
+cost (near-total authenticated-API unavailability during a Redis outage
+once `REDIS_URL` is configured, not just rejected replays) is deliberate
+and documented, not minimized. Verified live against the real dev server
+and a real Redis instance: the exact replay scenario M5-E1-T1 disclosed
+(issue a token, log out, replay it) is now rejected where it used to
+succeed; a real lockout survived a genuine `kill -9` process restart,
+the opposite of what M5-E2-T1 found. Found and fixed a real bug along
+the way — the rate limiter's own pruning never actually fired, caught
+by a test written to exercise it. A
+deployment-readiness note (uvicorn's default `X-Forwarded-For` trust)
+added to `ARCHITECTURE.md` § "Deployment View" for whoever configures a
+future reverse proxy. See `ARCHITECTURE.md` § "Redis", § "Token
+Revocation", `CHANGELOG.md`, and `TASKBOOK.md` `M5-E3-T1`. CI/CD and
+monitoring round out the rest of this milestone.
 
 **Milestone 6 — Live Trading (gated on extensive validation).** Real order
 execution against a live exchange. Deliberately last, and deliberately

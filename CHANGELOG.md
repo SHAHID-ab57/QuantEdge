@@ -8,6 +8,66 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Redis-backed rate limiting, login lockout, and token revocation
+  (M5-E3-T1).** Redis has been provisioned since Milestone 1 and used
+  for nothing until now. Gives it a real job: the two mechanisms
+  M5-E2-T1 deferred to it specifically (rate limiting, login lockout,
+  both originally in-process) plus a new one (token revocation on
+  logout) all now use it — a soft dependency, not a hard requirement:
+  unconfigured falls back to the original in-process behavior with no
+  error; configured but unreachable at startup fails loudly (mirroring
+  `DATABASE_URL`'s own precedent); reachable at startup but drops
+  mid-runtime is handled _per mechanism_, not uniformly — see below.
+  - **Rate limiting and lockout fall back to a real, independently-
+    complete in-process limiter/tracker on a Redis error** — never a
+    bare "allow everything." For lockout specifically this directly
+    defeats the "attacker benefits from Redis instability" scenario: the
+    fallback keeps enforcing the real attempt limit on its own, so no
+    unlimited-attempts window ever opens. Both move their whole
+    algorithm into Redis atomically via a single Lua script per check
+    (proven under real concurrency against a real Redis instance — many
+    simultaneous requests for one shared key never exceed the limit),
+    with Redis's own key expiry replacing the manual, bounded pruning
+    both mechanisms otherwise do in-process.
+  - **Token revocation fails closed instead** — a `jti` claim added to
+    every issued token; new `POST /auth/logout` blocklists it with a
+    TTL matching the token's own remaining lifetime, write-through to an
+    in-process copy so a revocation this process just issued survives a
+    later Redis outage. Closes the exact gap M5-E1-T1 disclosed and
+    M5-E2-T1 deliberately deferred — verified live by repeating that
+    disclosure's own replay scenario: issue a token, log out, replay it
+    — now rejected (`401 token_revoked`) where before it returned `200`.
+    Unlike the two mechanisms above, an _unrevoked_ token checked during
+    a genuine Redis outage gets a real `503`
+    (`revocation_check_unavailable`), not a silent pass-through — this
+    was caught and corrected after directly measuring the original
+    fail-open design's actual behavior, not assumed safe from the design
+    alone; the corrected design's own real cost (in practice, almost all
+    authenticated traffic during a Redis outage once `REDIS_URL` is
+    configured) is deliberate and documented, not hidden.
+  - **A real bug found while adding that manual pruning's Redis
+    counterpart**: the rate limiter's own prune never actually fired —
+    it judged staleness by a bucket's stored token count, which is only
+    ever recomputed on a _later_ request for that same key, so a
+    one-off visitor's bucket could never be pruned. Fixed to judge
+    staleness by elapsed time instead, caught by a test that fails
+    against the original logic and passes against the fix.
+  - **Restart survival, verified live**: tripped a real lockout, then
+    `kill -9`'d the entire server process (not a reload) and started a
+    fresh one — the lockout was still active on the new process. The
+    exact opposite of M5-E2-T1's own disclosed limitation.
+  - **Deployment-readiness note added** (`ARCHITECTURE.md` §
+    "Deployment View"): uvicorn trusts `X-Forwarded-For` by default
+    from loopback, confirmed live by spoofing it against the local dev
+    server — not currently exploitable over the real internet, but a
+    real risk the moment a reverse proxy is added without overwriting
+    that header itself.
+  - New tests, all against a real Redis instance where Redis-backed,
+    never mocked: `tests/unit/middleware/test_redis_rate_limit.py`,
+    `tests/auth/test_redis_login_lockout.py`,
+    `tests/auth/test_token_revocation.py`,
+    `tests/api/test_redis_restart_survival.py`.
+
 - **JWT secret startup enforcement, general rate limiting, and login
   lockout (M5-E2-T1).** Closes the one required fix from M5-E1-T1 and
   both of that task's own disclosed, currently-live gaps except token

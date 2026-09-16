@@ -231,6 +231,7 @@ class TestBatchCalculation:
         assert response.symbol == "ETCUSD"
         assert len(response.results) == 2
         assert all(item.success for item in response.results)
+        assert response.results[0].series is not None
         assert response.results[0].series[0].values == [
             None,
             pytest.approx(17.5),
@@ -279,6 +280,7 @@ class TestBatchCalculation:
         )
         assert len(response.timestamps) == 3
         for item in response.results:
+            assert item.series is not None
             assert len(item.series[0].values) == len(response.timestamps)
 
     async def test_one_bad_indicator_does_not_fail_the_others(

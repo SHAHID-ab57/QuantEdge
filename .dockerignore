@@ -1,0 +1,19 @@
+# Root build context (used by apps/dashboard/Dockerfile — see its own
+# comment on why the dashboard build needs the monorepo root as context).
+# services/api builds with its own context and its own .dockerignore.
+node_modules/
+**/node_modules/
+.next/
+**/.next/
+.turbo/
+.git/
+.env
+.env.*
+!.env.example
+!**/.env.example
+coverage/
+**/coverage/
+services/api/.venv/
+services/api/var/
+services/api/__pycache__/
+services/api/**/__pycache__/

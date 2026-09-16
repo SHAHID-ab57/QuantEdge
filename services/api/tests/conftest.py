@@ -59,6 +59,11 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.pool import StaticPool
 
+import app.training.adapters.gradient_boosting as _gradient_boosting_module
+import app.training.adapters.linear_regression as _linear_regression_module
+import app.training.adapters.logistic_regression as _logistic_regression_module
+import app.training.adapters.random_forest as _random_forest_module
+import app.training.artifact_files as _artifact_files_module
 from app.application import create_app
 from app.auth.security import hash_password
 from app.db.base import Base
@@ -67,6 +72,7 @@ from app.dependencies.auth import get_current_user
 from app.events.bus import EventBus
 from app.marketdata.models import OrderBookEvent, OrderBookLevel, TickerEvent, TradeEvent
 from app.models import Candle, Exchange, Market, User
+from app.training.serialization import LocalDiskModelSerializer
 
 SessionFactory = async_sessionmaker[AsyncSession]
 
@@ -77,6 +83,41 @@ HOUR = timedelta(hours=1)
 def utc(hour: int) -> datetime:
     """Hour offset from the fixed 2026-01-01 test base time."""
     return BASE + timedelta(hours=hour)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_model_artifacts(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Redirects every real model adapter's `default_serializer` — and
+    `app.training.artifact_files`' separate `reports/` chart/metrics writer
+    — to a throwaway per-test directory, applied to the *entire* suite.
+
+    Was previously only done locally, per-file, by the five adapter unit
+    test files (`tests/training/test_{logistic_regression,linear_regression,
+    random_forest,gradient_boosting,serialization}.py`). A real, confirmed
+    audit (`STATE.md`'s flagged issue #6) found at least nine *other* files
+    across `tests/api/`, `tests/backtest/`, `tests/paper_trading/`,
+    `tests/prediction/`, `tests/services/`, and `tests/auth/` also drive
+    real end-to-end training (`model_type="logistic_regression"` and
+    friends, not the fake `"placeholder"` adapter) with no isolation of
+    their own — confirmed empirically, not just by code inspection: running
+    each of those directories in isolation and diffing `services/api/var/
+    model_artifacts/`'s file count before/after showed real growth in every
+    one of them. That directory is the platform's real, permanent,
+    gitignored model-artifact store (1.9GB / 164k+ files at time of audit,
+    99.9% of it orphaned test-run debris matching zero row in the real
+    database) — a local, per-file fixture is too easy to forget to add to
+    the next such file, which is exactly what happened nine more times
+    after the first five. One global, autouse fixture closes the entire
+    class of bug rather than the one file it happened to be noticed in.
+    """
+    serializer = LocalDiskModelSerializer(tmp_path)
+    monkeypatch.setattr(_logistic_regression_module, "default_serializer", serializer)
+    monkeypatch.setattr(_linear_regression_module, "default_serializer", serializer)
+    monkeypatch.setattr(_random_forest_module, "default_serializer", serializer)
+    monkeypatch.setattr(_gradient_boosting_module, "default_serializer", serializer)
+    monkeypatch.setattr(
+        _artifact_files_module, "_reports_directory", lambda: tmp_path / "reports"
+    )
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:

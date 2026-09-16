@@ -32,7 +32,11 @@ from tests.conftest import SessionFactory
 
 # `_training_background_uses_the_test_engine` (autouse) lives in
 # `tests/api/conftest.py` — every suite under `tests/api/` needs it, not
-# just this file.
+# just this file. `_isolate_model_artifacts` (autouse) lives in the root
+# `tests/conftest.py` and covers every test in the suite, not just this
+# file — this one drives real training through the full HTTP pipeline
+# (`run_and_wait`'s `POST /training-jobs/{id}/run`), which is exactly what
+# that fixture exists to isolate; see its own docstring for the full audit.
 
 
 async def run_and_wait(client: httpx.AsyncClient, job_id: str) -> dict:

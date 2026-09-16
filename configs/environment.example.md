@@ -1,152 +1,66 @@
 # Environment Variable Reference
 
-The canonical catalog of environment variables across the monorepo. Placeholder
-values only — never commit real values.
+**Superseded for anything actually implemented — see below before trusting a
+row in this file.** This document previously tried to be the canonical
+catalog for both real, currently-read variables and future/aspirational
+ones in one mixed list, using a naming scheme that had drifted from the
+real code (`JWT_SECRET` vs. the real `JWT_SECRET_KEY`, `DELTA_WEBSOCKET_URL`
+vs. the real `DELTA_WS_URL`/`DELTA_WS_PRIVATE_URL`, `DB_TIMEOUT` which no
+field reads at all, and no mention whatsoever of candles/pagination/
+rate-limiting/lockout/paper-trading/order-flow, all real and implemented).
+Fixed as part of the audit in `STATE.md` §4 — see that file for the full
+account of what was wrong and why.
 
-This file documents the variables future services may consume. Every variable
-belongs to a single domain prefix. See `configs/README.md` for the full
-configuration strategy.
+## For anything real and currently implemented, use the source of truth directly
 
----
+- **`services/api/.env.example`** — every one of the 106 real, typed
+  settings `services/api/app/core/config.py` actually reads, generated
+  directly from that file, grouped by section, with real code-level
+  defaults shown as comments and secrets left blank with instructions.
+  This is now the only place that list should be maintained — duplicating
+  it here would just create a second copy to keep in sync, which is
+  exactly how this file went stale the first time.
+- **`apps/dashboard/.env.example`** — the 3 real frontend variables
+  (`NEXT_PUBLIC_API_URL`, `NEXT_PUBLIC_WS_URL`, `NEXT_PUBLIC_APP_NAME`).
+  Already accurate; unchanged by this pass.
+- **`infra/docker/.env.example`** — the 6 real Docker Compose variables
+  (`POSTGRES_*`, `REDIS_*`). Already accurate; unchanged by this pass.
 
-## Application
+## Not yet implemented — genuinely future, not currently read by anything
 
-| Variable        | Required | Description        | Example                                           |
-| --------------- | -------- | ------------------ | ------------------------------------------------- |
-| `APP_ENV`       | Yes      | Active environment | `development` / `test` / `staging` / `production` |
-| `APP_PORT`      | No       | HTTP port          | `8000`                                            |
-| `APP_LOG_LEVEL` | No       | Logging verbosity  | `debug` / `info` / `warn` / `error`               |
+Kept here (not in `services/api/.env.example`, which documents only what
+exists today) because these name real target-state work described in
+`docs/architecture/ContainerArchitecture.md`/`DataArchitecture.md`, not
+invented placeholders. Confirmed absent from the codebase as of this pass
+(no `OPENAI_API_KEY`, `AI_MODEL_DIR`, or `FEATURE_STORE_URL` read
+anywhere in `services/api/app`) — do not treat any of these as configurable
+yet.
 
-## Database
+| Variable             | Would gate                                                                                                                                                                                                |
+| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `OPENAI_API_KEY`     | An LLM-backed service — none exists yet.                                                                                                                                                                  |
+| `OPENAI_MODEL`       | Same.                                                                                                                                                                                                     |
+| `AI_MODEL_DIR`       | A model-artifact store distinct from the real, already-implemented `MODEL_ARTIFACT_DIR` (`services/api/.env.example`) — would only matter if/when a _separate_ AI service is split out of `services/api`. |
+| `AI_BATCH_SIZE`      | Same future-service scope.                                                                                                                                                                                |
+| `AI_EXPERIMENT_DIR`  | Same future-service scope — distinct from the real, already-implemented Experiment Management System, which stores experiments in Postgres, not a directory.                                              |
+| `FEATURE_STORE_URL`  | The Feature Store bounded context (`ContainerArchitecture.md`) — target-state, confirmed not built (`STATE.md`/`docs/PROJECT_STATE.md`).                                                                  |
+| `FEATURE_BATCH_SIZE` | Same.                                                                                                                                                                                                     |
+| `LOG_FORMAT`         | Structured (JSON) logging — real logging today is `logging.basicConfig` only, no format switch exists.                                                                                                    |
+| `LOG_OUTPUT`         | Same — no log-destination config exists today.                                                                                                                                                            |
 
-| Variable       | Required | Description                  | Example                                             |
-| -------------- | -------- | ---------------------------- | --------------------------------------------------- |
-| `DB_URL`       | Yes      | PostgreSQL connection string | `postgresql://user:pass@postgres:5432/eth_platform` |
-| `DB_POOL_SIZE` | No       | Connection pool size         | `10`                                                |
-| `DB_TIMEOUT`   | No       | Connection timeout           | `5s`                                                |
+## Removed from this file — real names were simply wrong
 
-## Redis
+Previously listed under invented or mismatched names; the _real_ variable
+now lives correctly in `services/api/.env.example`, so it isn't repeated
+here: `JWT_SECRET`→real `JWT_SECRET_KEY`, `DELTA_WEBSOCKET_URL`→real
+`DELTA_WS_URL`/`DELTA_WS_PRIVATE_URL`, `DB_TIMEOUT` (no such field —
+`DB_POOL_SIZE`/`DB_MAX_OVERFLOW` are the real pool-shaped settings),
+`REDIS_TTL` (no such field — Redis-backed TTLs are computed per-mechanism
+in code, not one global setting).
 
-| Variable         | Required    | Description             | Example                          |
-| ---------------- | ----------- | ----------------------- | -------------------------------- |
-| `REDIS_URL`      | Yes         | Redis connection string | `redis://:password@redis:6379/0` |
-| `REDIS_PASSWORD` | Conditional | Redis password          | —                                |
-| `REDIS_TTL`      | No          | Default cache TTL       | `300`                            |
-
-## Authentication
-
-| Variable                 | Required | Description        | Example |
-| ------------------------ | -------- | ------------------ | ------- |
-| `JWT_SECRET`             | Yes      | JWT signing secret | —       |
-| `JWT_EXPIRATION_MINUTES` | No       | Token lifetime     | `60`    |
-
-## Delta Exchange India
-
-| Variable                | Required    | Description                             | Example                             |
-| ----------------------- | ----------- | --------------------------------------- | ----------------------------------- |
-| `DELTA_API_KEY`         | Conditional | API key                                 | —                                   |
-| `DELTA_API_SECRET`      | Conditional | API secret                              | —                                   |
-| `DELTA_BASE_URL`        | No          | REST base URL                           | `https://api.india.delta.exchange`  |
-| `DELTA_REQUEST_TIMEOUT` | No          | REST request timeout (seconds)          | `10`                                |
-| `DELTA_WEBSOCKET_URL`   | No          | WebSocket URL                           | `wss://socket.india.delta.exchange` |
-| `DELTA_MARKET_SYMBOLS`  | No          | Live-streamed symbols (comma-separated) | `BTCUSD,ETHUSD`                     |
-
-## Platform Health
-
-| Variable           | Required | Description                                                                                           | Example                        |
-| ------------------ | -------- | ----------------------------------------------------------------------------------------------------- | ------------------------------ |
-| `MARKET_DATA_LIVE` | No       | Start the live WebSocket client + pipeline inside the API process                                     | `true`                         |
-| `CORS_ORIGINS`     | No       | Allowed browser origins (JSON list; defaults to `["http://localhost:3000", "http://127.0.0.1:3000"]`) | `["https://dash.example.com"]` |
-
-## CoinGecko
-
-| Variable             | Required | Description | Example                            |
-| -------------------- | -------- | ----------- | ---------------------------------- |
-| `COINGECKO_API_KEY`  | Optional | API key     | —                                  |
-| `COINGECKO_BASE_URL` | No       | Base URL    | `https://api.coingecko.com/api/v3` |
-
-## Marketaux
-
-| Variable             | Required    | Description | Example                     |
-| -------------------- | ----------- | ----------- | --------------------------- |
-| `MARKETAUX_API_KEY`  | Conditional | API key     | —                           |
-| `MARKETAUX_BASE_URL` | No          | Base URL    | `https://api.marketaux.com` |
-
-## Etherscan
-
-| Variable             | Required    | Description | Example                    |
-| -------------------- | ----------- | ----------- | -------------------------- |
-| `ETHERSCAN_API_KEY`  | Conditional | API key     | —                          |
-| `ETHERSCAN_BASE_URL` | No          | Base URL    | `https://api.etherscan.io` |
-
-## FRED
-
-| Variable        | Required    | Description | Example                           |
-| --------------- | ----------- | ----------- | --------------------------------- |
-| `FRED_API_KEY`  | Conditional | API key     | —                                 |
-| `FRED_BASE_URL` | No          | Base URL    | `https://api.stlouisfed.org/fred` |
-
-## DefiLlama
-
-| Variable             | Required | Description | Example                |
-| -------------------- | -------- | ----------- | ---------------------- |
-| `DEFILLAMA_BASE_URL` | No       | Base URL    | `https://api.llama.fi` |
-
-## OpenAI
-
-| Variable         | Required    | Description      | Example  |
-| ---------------- | ----------- | ---------------- | -------- |
-| `OPENAI_API_KEY` | Conditional | API key          | —        |
-| `OPENAI_MODEL`   | No          | Model identifier | `gpt-4o` |
-
-## Logging
-
-| Variable     | Required | Description        | Example         |
-| ------------ | -------- | ------------------ | --------------- |
-| `LOG_LEVEL`  | No       | Log level          | `info`          |
-| `LOG_FORMAT` | No       | Output format      | `json` / `text` |
-| `LOG_OUTPUT` | No       | Output destination | `stdout`        |
-
-## AI / ML Services
-
-| Variable            | Required | Description                   | Example                 |
-| ------------------- | -------- | ----------------------------- | ----------------------- |
-| `AI_MODEL_DIR`      | No       | Model artifact directory      | `artifacts/models`      |
-| `AI_BATCH_SIZE`     | No       | Training/inference batch size | `256`                   |
-| `AI_EXPERIMENT_DIR` | No       | Experiment output directory   | `artifacts/experiments` |
-
-## Feature Pipeline
-
-| Variable             | Required    | Description                    | Example |
-| -------------------- | ----------- | ------------------------------ | ------- |
-| `FEATURE_STORE_URL`  | Conditional | Feature store endpoint         | —       |
-| `FEATURE_BATCH_SIZE` | No          | Feature computation batch size | `10000` |
-
-## Notifications (SMTP)
-
-| Variable        | Required    | Description   | Example |
-| --------------- | ----------- | ------------- | ------- |
-| `SMTP_HOST`     | Conditional | SMTP server   | —       |
-| `SMTP_PORT`     | No          | SMTP port     | `587`   |
-| `SMTP_USER`     | Conditional | SMTP user     | —       |
-| `SMTP_PASSWORD` | Conditional | SMTP password | —       |
-
-## Object Storage
-
-| Variable                    | Required    | Description      | Example |
-| --------------------------- | ----------- | ---------------- | ------- |
-| `OBJECT_STORAGE_ENDPOINT`   | Conditional | Storage endpoint | —       |
-| `OBJECT_STORAGE_BUCKET`     | Conditional | Default bucket   | —       |
-| `OBJECT_STORAGE_ACCESS_KEY` | Conditional | Access key       | —       |
-| `OBJECT_STORAGE_SECRET_KEY` | Conditional | Secret key       | —       |
-
----
-
-## Notes
-
-- **Conditional** means required only when the associated feature is enabled.
-- Secrets (`*_KEY`, `*_SECRET`, `*_PASSWORD`, `JWT_SECRET`) never appear in
-  committed files.
-- Templates: root `.env.example`, `infra/docker/.env.example`.
-- See `configs/README.md` for naming, hierarchy, loading, validation, and
-  secrets policies.
+See `configs/README.md` for the monorepo's naming/hierarchy/loading
+conventions — its prefix table is illustrative of the pattern (`JWT_`,
+`DB_`, etc.), not a field-by-field catalog, but note its own `JWT_`/`DB_`/
+`REDIS_` example values (`JWT_SECRET`, `DB_TIMEOUT`, `REDIS_TTL`) share
+this same now-fixed naming drift and weren't in this task's scope to
+correct — worth a follow-up pass.

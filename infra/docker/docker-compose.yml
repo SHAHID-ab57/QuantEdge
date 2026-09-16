@@ -1,12 +1,24 @@
-# Docker Compose — Local Development Infrastructure
+# Docker Compose — Full Local Stack
 #
-# Infrastructure services only (PostgreSQL, Redis).
-# Application services (api, worker, web) are placeholders;
-# see the commented example blocks at the bottom of this file.
+# Postgres + Redis (infrastructure), a one-shot `migrate` job, the API,
+# and the dashboard. There is no `worker` service — no queue/worker code
+# exists in this repo (see STATE.md's Cross-Cutting Infrastructure
+# section); the only application processes are `api` and `web`.
 #
 # Usage:
-#   docker compose -f infra/docker/docker-compose.yml up -d
-#   Or copy .env.example to .env and run:  docker compose up -d
+#   cp infra/docker/.env.example infra/docker/.env   # POSTGRES/REDIS passwords
+#   docker compose -f infra/docker/docker-compose.yml up -d --build
+#
+# The `api` service loads services/api/.env (the same file `uv run
+# uvicorn` reads locally, per STATE.md §3/§4 — see the DELTA_*/JWT_*/
+# connector keys documented there) for everything EXCEPT DATABASE_URL and
+# REDIS_URL, which `environment:` below overrides to point at the
+# in-network `postgres`/`redis` hostnames instead of whatever host-local
+# values that file has for a bare `uv run` (`localhost:5433`/`:6379`,
+# which do not resolve the same way from inside a container). If that
+# file is absent, only JWT_SECRET_KEY genuinely needs to come from
+# somewhere else — the app already hard-fails at startup without it
+# (app/core/config.py), same as running it outside Docker.
 
 name: eth-ai-platform-dev
 
@@ -58,42 +70,107 @@ services:
       retries: 5
       start_period: 10s
 
-  # ------------------------------------------------------------------
-  # Placeholder example — Future application services follow this pattern.
-  # Joining the network and depending on healthy infrastructure:
-  #
-  # api:
-  #   build:
-  #     context: ../../.
-  #     dockerfile: apps/api/Dockerfile
-  #   container_name: eth-api
-  #   depends_on:
-  #     postgres:
-  #       condition: service_healthy
-  #     redis:
-  #       condition: service_healthy
-  #   networks:
-  #     - eth-platform-net
-  #
-  # worker:
-  #   build:
-  #     context: ../../.
-  #     dockerfile: apps/workers/Dockerfile
-  #   depends_on:
-  #     api:
-  #       condition: service_started
-  #   networks:
-  #     - eth-platform-net
-  #
-  # web:
-  #   build:
-  #     context: ../../.
-  #     dockerfile: apps/web/Dockerfile
-  #   ports:
-  #     - "${WEB_PORT:-3000}:3000"
-  #   networks:
-  #     - eth-platform-net
-  # ------------------------------------------------------------------
+  # One-shot: applies Alembic migrations, then exits. `api` waits on its
+  # successful completion rather than running migrations from its own
+  # entrypoint — so scaling `api` to N replicas later never races N
+  # concurrent `alembic upgrade head` calls against the same database.
+  migrate:
+    build:
+      context: ../../services/api
+      dockerfile: Dockerfile
+    env_file:
+      - path: ../../services/api/.env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-research}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-eth_platform}
+    # Not `uv run alembic ...` — the runtime image only ships the
+    # synced venv (PATH already includes .venv/bin), not the `uv`
+    # launcher binary itself; confirmed live ("uv: executable file not
+    # found") before switching to calling alembic directly.
+    command: ['alembic', 'upgrade', 'head']
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - eth-platform-net
+
+  api:
+    build:
+      context: ../../services/api
+      dockerfile: Dockerfile
+    container_name: eth-api
+    restart: unless-stopped
+    env_file:
+      - path: ../../services/api/.env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-research}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-eth_platform}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      MARKET_DATA_LIVE: ${MARKET_DATA_LIVE:-true}
+      # NOT `JWT_SECRET_KEY: ${JWT_SECRET_KEY:?...}` here — that form
+      # requires JWT_SECRET_KEY in *compose's own* interpolation sources
+      # (infra/docker/.env or the shell), which is the wrong file: this
+      # secret belongs in services/api/.env per that service's own
+      # .env.example, and env_file below already delivers it from there
+      # into the container. Confirmed live: the `${...:?}` form here
+      # made `docker compose config` fail even with a real
+      # services/api/.env present, because compose never reads env_file
+      # contents for its own variable substitution. Leaving it unset
+      # here means the app's own existing startup check (app/core/
+      # config.py, already covered by tests) is what catches a missing
+      # secret — same behavior as running it outside Docker, which is
+      # what the (now-corrected) comment above the `migrate`/`api`
+      # blocks always intended.
+    ports:
+      - '${API_PORT:-8000}:8000'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      - eth-platform-net
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'python',
+          '-c',
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health')",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  web:
+    build:
+      context: ../../.
+      dockerfile: apps/dashboard/Dockerfile
+      args:
+        # Baked into the client bundle at build time (Next.js
+        # NEXT_PUBLIC_* convention) — must be reachable from the
+        # *browser*, so this is the host-published port, not the
+        # in-network `api` hostname the other services use.
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+        NEXT_PUBLIC_APP_NAME: ${NEXT_PUBLIC_APP_NAME:-Eth AI Platform}
+        # Confirmed live: src/config/env.ts validates this with z.url(),
+        # and Zod only applies a schema .default() to an *absent* key —
+        # an explicit empty string still fails validation and hard-fails
+        # the build ("Invalid dashboard environment"). Unused/reserved
+        # per CLAUDE.md, but still needs a real URL value, matching
+        # apps/dashboard/.env.example's own default.
+        NEXT_PUBLIC_WS_URL: ${NEXT_PUBLIC_WS_URL:-wss://public-socket.india.delta.exchange}
+    container_name: eth-web
+    restart: unless-stopped
+    ports:
+      - '${WEB_PORT:-3000}:3000'
+    depends_on:
+      - api
+    networks:
+      - eth-platform-net
 
 networks:
   eth-platform-net:

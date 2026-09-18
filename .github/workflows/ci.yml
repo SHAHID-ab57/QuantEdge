@@ -1,0 +1,147 @@
+name: CI
+# Automates the checks already run by hand at the end of every task in this
+# project (see services/api/TESTING.md's own "Gates" section and this repo's
+# root package.json scripts) — nothing here is a new or additional check.
+#
+# Deliberate boundary — do not "improve" this by adding real external-API
+# calls: this project treats live verification against Delta Exchange,
+# CoinGecko, Marketaux, Etherscan, FRED, and DefiLlama as a human-supervised
+# step performed once, deliberately, before accepting a connector's work —
+# never something re-run automatically on every push. Automating it here
+# would make CI depend on third-party uptime and rate limits on every
+# commit, and would blur a distinction this project has relied on
+# repeatedly: mocked/unit tests prove the code understands a contract, only
+# a real call proves the contract itself, and that real call belongs under
+# a human's own judgment, not a CI trigger. `tests/conftest.py`'s own
+# `--run-integration`/`--run-performance` flags already gate these tests
+# off by default; this workflow simply never passes them.
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend (services/api)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/api
+
+    # Real service containers, not mocks — matching this project's own
+    # standard (docs/deployment/DEPLOYMENT.md, docker-compose.yml: Postgres
+    # 17 / Redis 7) rather than sqlite-only or fakeredis substitutes.
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: research
+          POSTGRES_PASSWORD: research
+          POSTGRES_DB: eth_platform_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U research -d eth_platform_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      # NOT DATABASE_URL/REDIS_URL — tests/conftest.py forces both of
+      # those empty for every test app, on purpose, regardless of what the
+      # environment sets (see that file's own docstring on
+      # os.environ["DATABASE_URL"] = ""). The default suite always runs
+      # against the in-memory SQLite engine; the `postgres`/`redis`-marked
+      # tests opt in to these real service containers through the
+      # dedicated TEST_* variables below instead, exactly like local dev.
+      TEST_DATABASE_URL: postgresql+asyncpg://research:research@localhost:5432/eth_platform_test
+      TEST_REDIS_URL: redis://localhost:6379/15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          # Pinned to the same version services/api/Dockerfile builds with.
+          version: '0.11.30'
+
+      - name: Install Python
+        run: uv python install
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: ruff check
+        run: uv run ruff check app tests scripts alembic
+
+      - name: pyright
+        run: uvx pyright app tests
+
+      - name: pytest (coverage-gated, includes real-Postgres/Redis-marked tests)
+        run: make test-coverage
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-coverage
+          path: |
+            services/api/coverage.xml
+            services/api/htmlcov/
+          retention-days: 14
+
+  frontend:
+    name: Frontend (pnpm workspace)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        # No explicit version — reads root package.json's own
+        # "packageManager": "pnpm@11.15.1" pin, the same single source of
+        # truth apps/dashboard/Dockerfile's corepack step uses.
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          # Matches apps/dashboard/Dockerfile's node:24-bookworm-slim —
+          # pnpm 11.15.1 itself refuses to run under Node <22.13.
+          node-version: '24'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Test
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build
+        # No NEXT_PUBLIC_* build args set on purpose: every one of them has
+        # a real Zod .default() (apps/dashboard/src/config/env.ts), so the
+        # build succeeds using those defaults. This step only proves the
+        # build itself succeeds — it is never the artifact that gets
+        # deployed, which is built fresh by apps/dashboard/Dockerfile with
+        # real values, as documented in docs/deployment/DEPLOYMENT.md.

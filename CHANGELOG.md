@@ -8,6 +8,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **CI: automated testing, linting, and build checks on push/PR
+  (M5-E4-T1).** GitHub Actions (`.github/workflows/ci.yml`), two jobs.
+  `backend` runs real PostgreSQL 17 and Redis 7 service containers (not
+  mocks), `ruff check`, `uvx pyright`, and `make test-coverage` (the
+  existing 80% gate). `frontend` runs `pnpm lint`, `pnpm typecheck`,
+  `pnpm test`, `pnpm build`. Every check was already the documented
+  manual standard (`services/api/TESTING.md`'s "Gates" section, root
+  `package.json` scripts) — this automates it, it doesn't add a new one.
+  Deliberately excludes live external-API verification
+  (`--run-integration`/`--run-performance` stay unset): that stays a
+  human-supervised step before accepting a connector's work, not
+  something CI re-runs on every commit against third-party rate limits.
+  See `ARCHITECTURE.md`'s new "CI/CD Pipeline" section for the full
+  rationale.
+
 - **Redis-backed rate limiting, login lockout, and token revocation
   (M5-E3-T1).** Redis has been provisioned since Milestone 1 and used
   for nothing until now. Gives it a real job: the two mechanisms

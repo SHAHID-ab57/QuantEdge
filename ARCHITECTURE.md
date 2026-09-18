@@ -5855,6 +5855,67 @@ an arbitrary header — the exact spoofing vector already confirmed live
 against uvicorn's own loopback-trust default, just reachable from the
 public internet instead of only from the proxy's own host.
 
+## CI/CD Pipeline
+
+**Real, as of M5-E4-T1** (`.github/workflows/ci.yml`) — GitHub Actions,
+two jobs, triggered on every push and every pull request:
+
+- **`backend`** (`services/api`) — real PostgreSQL 17 and Redis 7 service
+  containers (matching `docker-compose.yml`'s own versions, not sqlite-only
+  or a fake/mocked Redis), then `uv sync --locked`, `ruff check`,
+  `uvx pyright`, and `make test-coverage` (the same 80% gate
+  `pyproject.toml`'s `[tool.coverage.report]` already defines — this
+  workflow doesn't invent a new threshold, it's the first thing to
+  actually enforce the existing one automatically).
+- **`frontend`** (pnpm workspace root) — `pnpm install --frozen-lockfile`,
+  `pnpm lint`, `pnpm typecheck`, `pnpm test`, `pnpm build`.
+
+Every command the workflow runs is one already documented as the manual
+standard elsewhere in this repo — `services/api/TESTING.md`'s own "Gates"
+section (`ruff check`, `pyright`, `make test-coverage`) and the root
+`package.json` scripts (`lint`, `typecheck`, `test`, `build`) — CI adds no
+check beyond what was already expected of every change by hand.
+
+**Why real service containers, not mocks.** `tests/conftest.py` forces
+`DATABASE_URL`/`DB_URL`/`REDIS_URL` empty for every test app regardless of
+the environment (its own docstring explains why: a stray real `REDIS_URL`
+must never leak into the default suite), so the default test run always
+exercises the in-memory SQLite engine no matter what CI sets. The
+`postgres`- and `redis`-marked tests reach the real service containers
+through the separate `TEST_DATABASE_URL`/`TEST_REDIS_URL` variables
+instead — the exact same opt-in mechanism local development already uses
+(`postgres_engine`/`redis_client` fixtures, both auto-skip if unreachable)
+— so CI genuinely runs these against real Postgres/Redis rather than
+skipping them, without changing how the fixtures themselves work.
+
+**A genuinely clean environment.** GitHub-hosted runners start from a
+fresh VM every run — no local `.env`, no pre-existing native Redis or
+Postgres a stray env var could accidentally resolve to. This incidentally
+gives the Redis-related environment-variable leaks found and fixed during
+M5-E3-T1 a standing regression check: if a future change reintroduced one,
+CI's clean environment would surface it the same way a fresh clone already
+does locally, rather than only being caught by chance on a developer's own
+already-configured machine.
+
+**Deliberate exclusion — live external-API verification.** This workflow
+never passes `--run-integration` or `--run-performance`, so
+`tests/integration/delta/*` (real Delta Exchange REST/WS calls) and
+`tests/performance/*` stay opt-in, exactly as they are locally. This
+project's standard for every connector (Delta, CoinGecko, Marketaux,
+Etherscan, FRED, DefiLlama) has been a real, human-supervised call against
+the live API before accepting the work — not something to re-run
+automatically on every push, which would make CI's pass/fail depend on
+third-party uptime and rate limits rather than on this project's own code.
+Mocked/unit tests prove the code understands a contract; only a real call
+proves the contract itself, and that real call stays a deliberate act.
+Do not "improve" this workflow by adding live external calls to it.
+
+**Not yet covered by this workflow**: this repository's own
+`docs/deployment/DEPLOYMENT.md` records that the current production
+deploy process is entirely manual (SSH + `docker compose build`/`up -d` by
+hand) — this CI workflow verifies the code, it does not deploy it. No
+continuous-deployment step exists.
+
 ## Scalability Strategy
 
 > To be completed in future tasks.

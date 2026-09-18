@@ -16,6 +16,7 @@ the rest of the catalog.
 import asyncio
 import contextlib
 import logging
+import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -150,9 +151,9 @@ class CandleSyncScheduler:
         synced = 0
         skipped = 0
         failed = 0
-        for symbol, timeframe in pairs:
+        for symbol, market_id, timeframe in pairs:
             try:
-                window = await self._catch_up_window(symbol, timeframe)
+                window = await self._catch_up_window(market_id, timeframe)
             except Exception as exc:
                 failed += 1
                 logger.error("Candle sync failed to plan %s %s: %s", symbol, timeframe, exc)
@@ -183,8 +184,15 @@ class CandleSyncScheduler:
             reports=tuple(reports),
         )
 
-    async def _target_pairs(self) -> list[tuple[str, str]]:
-        """Resolve (symbol, timeframe) pairs that exist in the database."""
+    async def _target_pairs(self) -> list[tuple[str, uuid.UUID, str]]:
+        """Resolve (symbol, market_id, timeframe) triples that exist in the database.
+
+        Resolves each market's id here — a plain lookup against the small
+        ``markets`` table — so ``_catch_up_window`` below never needs to
+        join the much larger ``candles`` table to ``markets`` just to
+        filter by symbol (see that method's own docstring for why that
+        join defeats ``candles``' own market_id/timeframe index).
+        """
         engine = get_engine()
         if engine is None:
             logger.warning("Candle sync skipped: database is not configured")
@@ -204,27 +212,42 @@ class CandleSyncScheduler:
         session = async_sessionmaker(bind=engine, expire_on_commit=False)()
         try:
             rows = await session.execute(
-                select(Market.symbol).where(
+                select(Market.symbol, Market.id).where(
                     Market.symbol.in_(configured), Market.is_active.is_(True)
                 )
             )
-            known = set(rows.scalars())
+            known: dict[str, uuid.UUID] = {row.symbol: row.id for row in rows}
         finally:
             await session.close()
 
         missing = [symbol for symbol in configured if symbol not in known]
         if missing:
             logger.warning("Candle sync skipping unknown markets: %s", ", ".join(missing))
-        return [(symbol, timeframe) for symbol in sorted(known) for timeframe in self._timeframes]
+        return [
+            (symbol, known[symbol], timeframe)
+            for symbol in sorted(known)
+            for timeframe in self._timeframes
+        ]
 
     async def _catch_up_window(
-        self, symbol: str, timeframe: str
+        self, market_id: uuid.UUID, timeframe: str
     ) -> tuple[datetime, datetime] | None:
         """Return ``[start, end)`` of closed buckets to sync, or ``None``.
 
         ``end`` is ``now`` truncated to the bucket boundary, so only buckets
         that have fully closed are requested. When nothing is stored yet, the
         window is seeded with the configured backfill window.
+
+        Takes an already-resolved ``market_id`` (see ``_target_pairs``)
+        rather than a ``symbol`` — this used to join ``candles`` to
+        ``markets`` and filter by ``Market.symbol`` here, which defeats
+        ``candles``' own ``(market_id, timeframe, open_time)`` index the
+        same way the dashboard's candle-listing endpoint was suspected of
+        doing (see the investigation that led here: that suspicion didn't
+        hold for the listing endpoint, which already resolved market_id
+        first, but this method really did have the anti-pattern). Filtering
+        directly by ``market_id`` lets Postgres use the index instead of a
+        sequential scan over the full, ever-growing ``candles`` table.
         """
         engine = get_engine()
         if engine is None:
@@ -234,9 +257,9 @@ class CandleSyncScheduler:
         try:
             last_open = (
                 await session.execute(
-                    select(func.max(Candle.open_time))
-                    .join(Market, Candle.market_id == Market.id)
-                    .where(Market.symbol == symbol, Candle.timeframe == timeframe)
+                    select(func.max(Candle.open_time)).where(
+                        Candle.market_id == market_id, Candle.timeframe == timeframe
+                    )
                 )
             ).scalar()
         finally:

@@ -73,7 +73,8 @@ class TestTrain:
         assert result.metrics["mae"] == pytest.approx(0.0, abs=1e-8)
         assert result.metrics["rmse"] == pytest.approx(0.0, abs=1e-8)
         assert result.metrics["r2"] == pytest.approx(1.0)
-        assert result.artifact_uri.startswith("file://")
+        assert not result.artifact_uri.startswith("file://")  # bare relative filename now
+        assert result.artifact_uri.endswith(".joblib")
         assert result.summary["coefficients"] == pytest.approx([2.0])
         assert result.summary["intercept"] == pytest.approx(0.0, abs=1e-8)
         assert result.summary["n_train"] == 20

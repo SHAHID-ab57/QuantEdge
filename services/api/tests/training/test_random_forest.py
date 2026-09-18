@@ -88,7 +88,8 @@ class TestTrain:
 
         assert result.metrics["accuracy"] == pytest.approx(1.0)
         assert result.metrics["f1"] == pytest.approx(1.0)
-        assert result.artifact_uri.startswith("file://")
+        assert not result.artifact_uri.startswith("file://")  # bare relative filename now
+        assert result.artifact_uri.endswith(".joblib")
         assert set(result.summary["classes"]) == {"neg", "pos"}
         assert result.summary["target_column"] == "label"
         assert result.summary["feature_columns"] == ["signal", "noise"]

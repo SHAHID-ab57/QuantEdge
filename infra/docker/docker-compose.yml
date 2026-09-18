@@ -103,6 +103,20 @@ services:
     env_file:
       - path: ../../services/api/.env
         required: false
+    # Bind-mounted, not baked into the image: `var/` is in
+    # services/api/.dockerignore (the 1.9GB dev-machine debris this was
+    # never meant to ship in an image — see STATE.md's flagged issue #6),
+    # so without this the container's /app/var/model_artifacts is always
+    # an empty directory. Real production bug this caused: paper
+    # trading's automated strategy failed with a real FileNotFoundError
+    # on every prediction, because there was no artifact directory here
+    # at all to find the file in — not just a wrong path (that part is
+    # separately fixed at app/training/serialization.py's own
+    # resolve_artifact_uri). Populate the host side with
+    # `rsync services/api/var/model_artifacts/` before starting this
+    # service; the directory is created empty otherwise, same as today.
+    volumes:
+      - ../../services/api/var/model_artifacts:/app/var/model_artifacts
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-research}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-eth_platform}
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0

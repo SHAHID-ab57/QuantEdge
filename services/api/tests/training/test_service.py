@@ -674,7 +674,8 @@ class TestRealDataTraining:
         assert "recall" in metrics
         assert "f1" in metrics
         assert "confusion_matrix" in completed.result_summary
-        assert completed.result_summary["artifact_uri"].startswith("file://")
+        assert not completed.result_summary["artifact_uri"].startswith("file://")
+        assert completed.result_summary["artifact_uri"].endswith(".joblib")
 
         summary = completed.result_summary
         assert "train_metrics" in summary

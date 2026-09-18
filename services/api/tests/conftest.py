@@ -59,6 +59,7 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.pool import StaticPool
 
+import app.services.training as _training_service_module
 import app.training.adapters.gradient_boosting as _gradient_boosting_module
 import app.training.adapters.linear_regression as _linear_regression_module
 import app.training.adapters.logistic_regression as _logistic_regression_module
@@ -72,7 +73,7 @@ from app.dependencies.auth import get_current_user
 from app.events.bus import EventBus
 from app.marketdata.models import OrderBookEvent, OrderBookLevel, TickerEvent, TradeEvent
 from app.models import Candle, Exchange, Market, User
-from app.training.serialization import LocalDiskModelSerializer
+from app.training.serialization import LocalDiskModelSerializer, resolve_artifact_uri
 
 SessionFactory = async_sessionmaker[AsyncSession]
 
@@ -115,8 +116,19 @@ def _isolate_model_artifacts(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(_linear_regression_module, "default_serializer", serializer)
     monkeypatch.setattr(_random_forest_module, "default_serializer", serializer)
     monkeypatch.setattr(_gradient_boosting_module, "default_serializer", serializer)
+    monkeypatch.setattr(_artifact_files_module, "_reports_directory", lambda: tmp_path / "reports")
+    # `TrainingJobService.get_artifact_file` (the artifact-download endpoint)
+    # has no serializer instance of its own to draw a directory from — it
+    # calls the module-level `resolve_artifact_uri` directly, which defaults
+    # to the real, global `model_artifact_dir` setting. Without this, that
+    # one call site alone stayed unisolated even after everything above:
+    # confirmed the hard way, `test_get_artifact_file_resolves_a_real_file_
+    # on_disk` looked for its file in the real `var/model_artifacts/`
+    # instead of this test's own `tmp_path`.
     monkeypatch.setattr(
-        _artifact_files_module, "_reports_directory", lambda: tmp_path / "reports"
+        _training_service_module,
+        "resolve_artifact_uri",
+        lambda uri: resolve_artifact_uri(uri, base=tmp_path),
     )
 
 

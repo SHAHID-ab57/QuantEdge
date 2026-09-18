@@ -62,6 +62,7 @@ from app.training.errors import (
 from app.training.interpretability import confidence_level
 from app.training.normalization import DEFAULT_NORMALIZATION_METHOD, apply_normalization
 from app.training.pipeline import TrainingPipeline
+from app.training.serialization import resolve_artifact_uri
 from app.training.state_machine import assert_transition_allowed
 
 logger = logging.getLogger("app.services.training")
@@ -536,9 +537,9 @@ class TrainingJobService:
             uri = summary.get("artifact_uri")
         else:
             uri = (summary.get("artifacts") or {}).get(artifact_type)
-        if not uri or not isinstance(uri, str) or not uri.startswith("file://"):
+        if not uri or not isinstance(uri, str):
             raise TrainingArtifactNotFoundError(job_id, artifact_type)
-        path = Path.from_uri(uri)
+        path = resolve_artifact_uri(uri)
         if not path.exists():
             raise TrainingArtifactNotFoundError(job_id, artifact_type)
         return path, TrainingArtifactDTO.build(job_id, artifact_type, uri).content_type

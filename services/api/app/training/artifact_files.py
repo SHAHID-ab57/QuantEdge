@@ -7,11 +7,15 @@ write plain report files (JSON/CSV/PNG) a researcher downloads to inspect a run,
 reloaded by any adapter. Both happen to live under the same
 `Settings.model_artifact_dir` root (a `reports/` subdirectory here) purely so one
 setting controls where this platform's training-run output goes; nothing here imports
-from or extends `serialization.py`.
+from or extends `serialization.py` — except `resolve_artifact_uri`, whose whole job is
+being the one shared, environment-portable way to turn a stored reference back into a
+real path (see that function's own docstring).
 
-Every `write_*` function returns a `file://` URI, exactly like `LocalDiskModelSerializer.save`,
-so `TrainingJobService`'s artifact-download endpoint resolves every artifact type
-(model included) through the same `Path.from_uri(uri)` logic.
+Every `write_*` function returns a path relative to `model_artifact_dir`
+(``reports/<filename>``), not an absolute ``file://`` URI — the same fix, and for the
+same reason, as `LocalDiskModelSerializer.save`. `TrainingJobService`'s
+artifact-download endpoint resolves every artifact type (model included) through
+`resolve_artifact_uri`.
 """
 
 import csv
@@ -40,9 +44,12 @@ def _reports_directory() -> Path:
 def _write_bytes(name: str, suffix: str, data: bytes) -> str:
     directory = _reports_directory()
     directory.mkdir(parents=True, exist_ok=True)
-    path = directory / f"{name}-{uuid.uuid4().hex}{suffix}"
-    path.write_bytes(data)
-    return path.resolve().as_uri()
+    filename = f"{name}-{uuid.uuid4().hex}{suffix}"
+    (directory / filename).write_bytes(data)
+    # A path relative to `model_artifact_dir` (not an absolute file:// URI —
+    # see app/training/serialization.py's own docstring for the production
+    # incident that fix addressed; report files had the identical bug).
+    return f"reports/{filename}"
 
 
 def write_metrics_json(name: str, metrics: dict[str, Any]) -> str:

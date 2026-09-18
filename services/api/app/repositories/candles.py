@@ -4,7 +4,9 @@ All SQL for reading candle data lives in this module; services and routers
 never build queries themselves.
 """
 
+import time
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -24,6 +26,52 @@ SORT_COLUMNS: dict[str, InstrumentedAttribute[Any]] = {
     "close": Candle.close,
     "volume": Candle.volume,
 }
+
+#: Process-wide (module-level, not per-request — `CandleRepository` itself
+#: is constructed fresh per request via dependency injection, so an
+#: instance attribute would never be shared) TTL cache for the three
+#: unbounded-range aggregate queries below.
+#:
+#: **Real production incident, not a hypothetical.** A live chart legitimately
+#: fetches up to 10,000 recent candles (`MAX_CHART_CANDLES`,
+#: `apps/dashboard/src/components/chart/hooks/use-chart-candles.ts`) as up to
+#: 10 *concurrent* `/candles` page requests (`Promise.all` over offsets
+#: 0/1000/2000/.../9000) — and every one of those 10 requests independently
+#: recomputes the *identical* full-range stats/quality result (these three
+#: methods' cache key never includes `offset`/`limit`, only market_id/
+#: timeframe/start/end — the page position genuinely doesn't affect them).
+#: Confirmed live on the actual production server (`ETHUSD`/`1m`, 1.36M
+#: rows): `get_candle_stats` ~2.4s + `count_invalid_ohlc` ~1.6s per request,
+#: times up to 10 concurrent requests, on 2 shared vCPUs — that is exactly
+#: what produced the real "Failed to load chart data: Request timed out"
+#: (10s client timeout) a user hit on the live dashboard, not a hypothetical
+#: worst case. A short TTL turns 10 concurrent identical computations into 1
+#: real one and 9 cache hits, without changing what any endpoint returns
+#: beyond ordinary, bounded staleness (`_ANALYTICS_CACHE_TTL_SECONDS`) —
+#: unlike bounding the default query range, which would change what "no
+#: range given" *means*. That's a real, separate design question, deliberately
+#: left open here rather than decided unilaterally under this fix.
+_ANALYTICS_CACHE_TTL_SECONDS = 30.0
+_ANALYTICS_CACHE_MAX_SIZE = 1024
+_analytics_cache: dict[tuple[Any, ...], tuple[float, Any]] = {}
+
+
+async def _cached(key: tuple[Any, ...], compute: Callable[[], Awaitable[Any]]) -> Any:
+    """Return `_analytics_cache[key]` if fresh, else await `compute()` and store it."""
+    now = time.monotonic()
+    cached = _analytics_cache.get(key)
+    if cached is not None and cached[0] > now:
+        return cached[1]
+    value = await compute()
+    if len(_analytics_cache) >= _ANALYTICS_CACHE_MAX_SIZE:
+        # Bounded the same coarse way as the in-process fallbacks elsewhere
+        # in this codebase (e.g. app/auth/token_revocation.py) — evict
+        # anything already stale rather than reason about true LRU order.
+        stale = [k for k, (expires_at, _) in _analytics_cache.items() if expires_at <= now]
+        for k in stale:
+            del _analytics_cache[k]
+    _analytics_cache[key] = (now + _ANALYTICS_CACHE_TTL_SECONDS, value)
+    return value
 
 
 @dataclass
@@ -142,12 +190,28 @@ class CandleRepository:
         start: datetime | None = None,
         end: datetime | None = None,
     ) -> CandleStats:
-        """Return aggregate statistics for candles in the range.
+        """Return aggregate statistics for candles in the range — cached
+        for `_ANALYTICS_CACHE_TTL_SECONDS` (see that constant's own
+        docstring for why: this is the expensive full-range aggregate a
+        real production incident traced to real client timeouts).
 
         ``start``/``end`` form a half-open range ``[start, end)``; when
         omitted no temporal filter is applied. ``total_candles`` is 0 when
         nothing matches — callers decide how to present that.
         """
+        return await _cached(
+            ("get_candle_stats", market_id, timeframe, start, end),
+            lambda: self._get_candle_stats_uncached(market_id, timeframe, start=start, end=end),
+        )
+
+    async def _get_candle_stats_uncached(
+        self,
+        market_id: uuid.UUID,
+        timeframe: str,
+        *,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> CandleStats:
         conditions = [
             Candle.market_id == market_id,
             Candle.timeframe == timeframe,
@@ -201,12 +265,26 @@ class CandleRepository:
         start: datetime | None = None,
         end: datetime | None = None,
     ) -> int:
-        """Count candles violating OHLC dominance or non-negative volume.
+        """Count candles violating OHLC dominance or non-negative volume —
+        cached, see `get_candle_stats`'s own docstring for why.
 
         A candle is invalid when ``high`` is below ``open`` or ``close``,
         ``low`` is above ``open`` or ``close``, ``high`` is below ``low``,
         or ``volume`` is negative — mirroring the validation service rules.
         """
+        return await _cached(
+            ("count_invalid_ohlc", market_id, timeframe, start, end),
+            lambda: self._count_invalid_ohlc_uncached(market_id, timeframe, start=start, end=end),
+        )
+
+    async def _count_invalid_ohlc_uncached(
+        self,
+        market_id: uuid.UUID,
+        timeframe: str,
+        *,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> int:
         conditions = [
             Candle.market_id == market_id,
             Candle.timeframe == timeframe,
@@ -290,7 +368,25 @@ class CandleRepository:
         Measured: ~592ms, a ~36% cut with zero change in what this returns.
         Scoped to only this query, in a try/finally, rather than left set
         on this pooled connection for whatever runs on it next.
+
+        Also cached — see `get_candle_stats`'s own docstring for why (this
+        is the single most expensive of the three, and the one most
+        responsible for real client timeouts under concurrent chart-page
+        fan-out).
         """
+        return await _cached(
+            ("count_out_of_order", market_id, timeframe, start, end),
+            lambda: self._count_out_of_order_uncached(market_id, timeframe, start=start, end=end),
+        )
+
+    async def _count_out_of_order_uncached(
+        self,
+        market_id: uuid.UUID,
+        timeframe: str,
+        *,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> int:
         conditions = [
             Candle.market_id == market_id,
             Candle.timeframe == timeframe,

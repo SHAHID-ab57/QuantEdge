@@ -4,7 +4,11 @@ import type { ReactNode } from 'react';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import * as marketApi from '@/lib/api/market';
 import type { Candle, CandlePage } from '@/types/api/market';
-import { MAX_CHART_CANDLES, useChartCandles } from './use-chart-candles';
+import {
+  MAX_CHART_CANDLES,
+  MAX_CONCURRENT_PAGE_REQUESTS,
+  useChartCandles,
+} from './use-chart-candles';
 
 vi.mock('@/lib/api/market', () => ({
   fetchCandlePage: vi.fn(),
@@ -168,6 +172,60 @@ describe('useChartCandles', () => {
     expect(result.current.data?.candles).toHaveLength(MAX_CHART_CANDLES);
     // 10 requests of 1000 candles each cover MAX_CHART_CANDLES.
     expect(mocked.fetchCandlePage).toHaveBeenCalledTimes(MAX_CHART_CANDLES / 1000);
+  });
+
+  it('never has more than MAX_CONCURRENT_PAGE_REQUESTS page fetches in flight at once', async () => {
+    // Regression coverage for a real production incident: this hook used to
+    // fire every remaining page via one unbounded `Promise.all`, which
+    // produced up to 10 simultaneous `/candles` requests for a full chart
+    // load — confirmed live against the production server to blow the
+    // client's own 10s timeout under real concurrent load (see this hook's
+    // own MAX_CONCURRENT_PAGE_REQUESTS docstring for the full account).
+    // Passing tests alone can't catch a regression back to unbounded
+    // concurrency the way the incident was actually caught (a real
+    // browser network trace) — but tracking how many mocked calls are
+    // simultaneously unresolved, at any point during the fetch, can.
+    const total = MAX_CHART_CANDLES;
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const resolvers: Array<() => void> = [];
+
+    mocked.fetchCandlePage.mockImplementation((_symbol, _timeframe, params) => {
+      const offset = params?.offset ?? 0;
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      return new Promise((resolve) => {
+        resolvers.push(() => {
+          inFlight -= 1;
+          const remaining = Math.min(1000, total - offset);
+          const items = Array.from({ length: remaining }, (_, index) =>
+            candle(new Date(Date.UTC(2026, 0, 1) - (offset + index) * 60_000).toISOString()),
+          );
+          resolve(page(items, total, offset));
+        });
+      });
+    });
+
+    renderHook(() => useChartCandles({ symbol: 'ETHUSD', timeframe: '1m' }), { wrapper });
+
+    // Resolve the first page (offset 0) alone, then let the rest settle at
+    // whatever pace the hook's own concurrency limit allows.
+    await vi.waitFor(() => expect(resolvers).toHaveLength(1));
+    resolvers.shift()!();
+
+    while (mocked.fetchCandlePage.mock.calls.length < total / 1000) {
+      await vi.waitFor(() => expect(resolvers.length).toBeGreaterThan(0));
+      resolvers.shift()!();
+    }
+    while (resolvers.length > 0) {
+      resolvers.shift()!();
+    }
+
+    expect(maxInFlight).toBeLessThanOrEqual(MAX_CONCURRENT_PAGE_REQUESTS);
+    // Sanity: this scenario really did need more pages than the limit, so
+    // the assertion above is proving something, not vacuously true.
+    expect(mocked.fetchCandlePage).toHaveBeenCalledTimes(total / 1000);
+    expect(mocked.fetchCandlePage.mock.calls.length).toBeGreaterThan(MAX_CONCURRENT_PAGE_REQUESTS);
   });
 
   it('does not poll by default, but refetches on the interval when one is given', async () => {

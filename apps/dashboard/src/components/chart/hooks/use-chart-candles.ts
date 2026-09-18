@@ -19,6 +19,24 @@ const CHART_PAGE_SIZE = 1000;
  */
 export const MAX_CHART_CANDLES = 10_000;
 
+/**
+ * How many `/candles` page requests run at once. Real production incident,
+ * not a hypothetical: a full 10,000-candle chart load fired all ~9 of its
+ * remaining pages via one unbounded `Promise.all`, and on the server's own
+ * 2-vCPU box (a single ASGI worker sharing that CPU with the live WebSocket
+ * feed and every background scheduler) ten concurrent requests queued badly
+ * enough to blow the client's own 10s request timeout — confirmed directly
+ * against the live server, not assumed: the identical fetch pattern run
+ * sequentially completed each page in well under a second once the backend's
+ * own cache warmed (see services/api/app/repositories/candles.py's own
+ * _ANALYTICS_CACHE), but ten *concurrent* copies of that same fetch took
+ * 25-30s each. Bounding concurrency here trades a slightly slower full
+ * chart load for not overwhelming a resource-constrained server — the
+ * option chosen deliberately over server-side or backend-architecture
+ * changes for this specific bottleneck.
+ */
+export const MAX_CONCURRENT_PAGE_REQUESTS = 3;
+
 export interface ChartCandlesQuery {
   symbol: string | null;
   timeframe: string | null;
@@ -44,6 +62,35 @@ export interface ChartCandlesResult {
   truncated: boolean;
 }
 
+/**
+ * Runs `fetch(item)` for every `items` entry with at most `concurrency` calls
+ * in flight at once, returning results in the same order as `items` —
+ * matches `Promise.all`'s own ordering contract, just bounded. A fixed pool
+ * of `concurrency` lanes each pulls the next unclaimed index and awaits its
+ * own fetch before pulling again, rather than batching in fixed-size groups,
+ * so a lane that finishes early immediately picks up the next item instead
+ * of waiting for the slowest item in its batch.
+ */
+async function fetchPagesWithBoundedConcurrency<T>(
+  items: number[],
+  fetch: (item: number) => Promise<T>,
+  concurrency: number,
+): Promise<T[]> {
+  const results: T[] = [];
+  const queue = items.map((item, index) => ({ item, index }));
+
+  async function lane(): Promise<void> {
+    let next = queue.shift();
+    while (next !== undefined) {
+      results[next.index] = await fetch(next.item);
+      next = queue.shift();
+    }
+  }
+
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, lane));
+  return results;
+}
+
 async function fetchChartCandles(
   symbol: string,
   timeframe: string,
@@ -65,14 +112,11 @@ async function fetchChartCandles(
     remainingOffsets.push(offset);
   }
 
-  const restPages =
-    remainingOffsets.length > 0
-      ? await Promise.all(
-          remainingOffsets.map((offset) =>
-            fetchCandlePage(symbol, timeframe, { ...shared, limit: CHART_PAGE_SIZE, offset }),
-          ),
-        )
-      : [];
+  const restPages = await fetchPagesWithBoundedConcurrency(
+    remainingOffsets,
+    (offset) => fetchCandlePage(symbol, timeframe, { ...shared, limit: CHART_PAGE_SIZE, offset }),
+    MAX_CONCURRENT_PAGE_REQUESTS,
+  );
 
   // Each page is newest-first (dir=desc); pages are requested in ascending
   // offset order, so concatenating them keeps the whole run newest-first.

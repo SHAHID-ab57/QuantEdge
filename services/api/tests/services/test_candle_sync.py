@@ -151,12 +151,12 @@ async def test_window_backfills_when_nothing_stored(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Empty markets seed from the backfill window, ending at the closed bucket."""
-    await seed_market(session_factory, "ETHUSD")
+    market_id = await seed_market(session_factory, "ETHUSD")
     monkeypatch.setattr(candle_sync, "get_engine", lambda: engine)
     monkeypatch.setattr(candle_sync, "datetime", FakeDatetime)
 
     scheduler = CandleSyncScheduler(symbols=["ETHUSD"], timeframes=["1h"], backfill_days=7)
-    window = await scheduler._catch_up_window("ETHUSD", "1h")
+    window = await scheduler._catch_up_window(market_id, "1h")
     assert window is not None
     start, end = window
     assert end == datetime(2026, 8, 20, 16, 0, tzinfo=UTC)
@@ -180,7 +180,7 @@ async def test_window_resumes_after_last_candle(
     monkeypatch.setattr(candle_sync, "datetime", FakeDatetime)
 
     scheduler = CandleSyncScheduler(symbols=["ETHUSD"], timeframes=["1h"])
-    window = await scheduler._catch_up_window("ETHUSD", "1h")
+    window = await scheduler._catch_up_window(market_id, "1h")
     assert window is not None
     start, end = window
     assert start == datetime(2026, 8, 19, 17, 0, tzinfo=UTC)
@@ -204,7 +204,7 @@ async def test_window_is_none_when_current(
     monkeypatch.setattr(candle_sync, "datetime", FakeDatetime)
 
     scheduler = CandleSyncScheduler(symbols=["ETHUSD"], timeframes=["1h"])
-    assert await scheduler._catch_up_window("ETHUSD", "1h") is None
+    assert await scheduler._catch_up_window(market_id, "1h") is None
 
 
 @pytest.mark.asyncio

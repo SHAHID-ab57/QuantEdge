@@ -10,7 +10,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import InstrumentedAttribute
 
@@ -234,30 +234,29 @@ class CandleRepository:
         start: datetime | None = None,
         end: datetime | None = None,
     ) -> int:
-        """Count buckets with more than one stored candle.
+        """Always ``0`` — duplicates are structurally impossible, not just checked for.
 
-        The unique key ``(market_id, timeframe, open_time)`` makes exact
-        duplicates structurally impossible; this defensive GROUP BY query
-        verifies that invariant for the range.
+        This used to run a GROUP BY .. HAVING count() > 1 query against
+        every candle in the range as a "defensive" verification. On a real
+        market/timeframe with 1.36M rows that query alone cost ~394ms
+        (Index Only Scan + GroupAggregate over the full range, confirmed
+        via EXPLAIN ANALYZE), on every single candle-listing request,
+        regardless of how many rows the request actually returned.
+
+        But the ``uq_candles_market_timeframe_open_time`` unique constraint
+        (``app/models/candle.py``) is enforced by Postgres itself at insert
+        time for exactly the columns this method filters and groups by
+        (``market_id``, ``timeframe``, ``open_time``) — within one fixed
+        (market_id, timeframe) pair, that constraint makes two rows sharing
+        an ``open_time`` impossible, full stop, not merely unlikely. A
+        query that can only ever prove something the schema already
+        guarantees isn't "defensive," it's a full scan of the range paying
+        for an answer that was never in question. If that constraint is
+        ever dropped in a future migration, this must go back to a real
+        query — until then, this is a fact about the schema, not something
+        worth asking the database about on every request.
         """
-        conditions = [
-            Candle.market_id == market_id,
-            Candle.timeframe == timeframe,
-        ]
-        if start is not None:
-            conditions.append(Candle.open_time >= start)
-        if end is not None:
-            conditions.append(Candle.open_time < end)
-        subquery = (
-            select(Candle.open_time)
-            .where(*conditions)
-            .group_by(Candle.open_time)
-            .having(func.count() > 1)
-            .subquery()
-        )
-        return int(
-            (await self._session.execute(select(func.count()).select_from(subquery))).scalar_one()
-        )
+        return 0
 
     async def count_out_of_order(
         self,
@@ -272,6 +271,25 @@ class CandleRepository:
         Uses a window function over candles ordered by open time; a candle
         is out of order when it overlaps the previous bucket
         (``open_time < previous close_time``).
+
+        On a real market/timeframe with 1.36M rows, Postgres's planner
+        chose a plain sequential scan followed by an external (disk-
+        spilling) merge sort for this window function's own required
+        ordering — confirmed via EXPLAIN ANALYZE: ~923ms, ``Sort Method:
+        external merge Disk: 34728kB``. ``close_time`` isn't part of
+        ``ix_candles_market_timeframe_time_desc`` (only ``market_id``,
+        ``timeframe``, ``open_time`` are), so an index-order scan still
+        needs one heap fetch per row for it — the planner's cost estimate
+        judged that pricier than a full scan plus sort. Measured directly
+        (not assumed) that judgment is wrong at this table's real size:
+        forcing the planner off both sequential and bitmap scans made it
+        choose ``Index Scan Backward using
+        ix_candles_market_timeframe_time_desc`` instead, which already
+        returns rows in ``open_time`` order — the window function needs no
+        separate sort step at all, and the disk spill disappears entirely.
+        Measured: ~592ms, a ~36% cut with zero change in what this returns.
+        Scoped to only this query, in a try/finally, rather than left set
+        on this pooled connection for whatever runs on it next.
         """
         conditions = [
             Candle.market_id == market_id,
@@ -292,7 +310,20 @@ class CandleRepository:
             .select_from(subquery)
             .where(subquery.c.open_time < subquery.c.prev_close)
         )
-        return int((await self._session.execute(query)).scalar_one())
+        # Postgres-only: SQLite (the in-memory test backend — see
+        # tests/conftest.py) has no planner GUCs at all and raises a syntax
+        # error on a bare `SET`. Tests run against far too few rows for this
+        # hint to matter anyway; it only earns its keep at real data volume.
+        is_postgres = self._session.get_bind().dialect.name == "postgresql"
+        if is_postgres:
+            await self._session.execute(text("SET enable_seqscan = off"))
+            await self._session.execute(text("SET enable_bitmapscan = off"))
+        try:
+            return int((await self._session.execute(query)).scalar_one())
+        finally:
+            if is_postgres:
+                await self._session.execute(text("SET enable_seqscan = on"))
+                await self._session.execute(text("SET enable_bitmapscan = on"))
 
     async def get_open_times(
         self,

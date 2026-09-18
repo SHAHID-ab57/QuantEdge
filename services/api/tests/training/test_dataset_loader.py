@@ -73,6 +73,7 @@ class TestBuildTrainingDataset:
         dataset = build_training_dataset(ml_dataset, model_kind="classification")
 
         assert dataset.target_column == "next_direction_1"
+        assert dataset.train is not None
         assert all(isinstance(value, str) for value in dataset.train.y)
 
     def test_defaults_to_the_first_target_column_when_none_is_given(

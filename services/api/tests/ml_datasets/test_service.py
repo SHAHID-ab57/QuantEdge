@@ -248,6 +248,7 @@ class TestExportDataset:
     ) -> None:
         exported = await build_service(session_factory).export_dataset("ETCUSD", request(), "csv")
         assert exported.media_type.startswith("text/csv")
+        assert isinstance(exported.content, str)  # CSV is always text, never Parquet's bytes
         assert "next_close_1" in exported.content
 
     async def test_exports_a_json_download(
@@ -255,6 +256,7 @@ class TestExportDataset:
     ) -> None:
         exported = await build_service(session_factory).export_dataset("ETCUSD", request(), "json")
         assert exported.media_type.startswith("application/json")
+        assert isinstance(exported.content, str)  # JSON is always text, never Parquet's bytes
         assert "ml_dataset_id" in exported.content
 
 

@@ -134,11 +134,12 @@ class TestForwardLookingContractIsEnforced:
             )
 
             def generate(self, ctx: TargetContext) -> TargetOutput:
+                from app.features.base import FeatureValue
                 from app.ml_datasets.base import TargetColumn
 
                 # Fabricates a value for the very last row, which has no
                 # future candle — exactly the bug this contract exists to catch.
-                values = [1.0] * len(ctx.candles)
+                values: list[FeatureValue] = [1.0] * len(ctx.candles)
                 column = TargetColumn(name="cheat", label="Cheat", dtype="float")
                 return TargetOutput(series=[TargetSeries(column=column, values=values)])
 

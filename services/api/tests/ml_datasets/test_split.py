@@ -11,13 +11,13 @@ def make_feature_dataset(row_count: int):
     """A minimal, valid `FeatureDataset` with `row_count` rows, for split-only tests."""
     from datetime import UTC, datetime, timedelta
 
-    from app.features.base import FeatureColumn
+    from app.features.base import FeatureColumn, FeatureValue
     from app.features.dataset import FeatureDataset
     from app.features.quality import DatasetQualityReport
 
     base = datetime(2026, 1, 1, tzinfo=UTC)
     timestamps = [base + timedelta(hours=i) for i in range(row_count)]
-    rows = [[float(i)] for i in range(row_count)]
+    rows: list[list[FeatureValue]] = [[float(i)] for i in range(row_count)]
     return FeatureDataset(
         dataset_id="test-dataset",
         symbol="ETHUSD",

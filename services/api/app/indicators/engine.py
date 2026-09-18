@@ -24,7 +24,7 @@ from app.indicators.base import (
     IndicatorOutput,
     OHLCVPoint,
 )
-from app.indicators.cache import IndicatorCache, build_cache_key
+from app.indicators.cache import CacheKey, IndicatorCache, build_cache_key
 from app.indicators.errors import (
     IndicatorExecutionError,
     InsufficientDataError,
@@ -152,7 +152,7 @@ class IndicatorEngine:
         name: str,
         params: Mapping[str, Any],
         candles: Sequence[OHLCVPoint],
-    ) -> tuple[IndicatorOutput | None, object | None]:
+    ) -> tuple[IndicatorOutput | None, CacheKey | None]:
         """Check the cache, returning the hit (if any) and the key to store under."""
         if self._cache is None:
             return None, None

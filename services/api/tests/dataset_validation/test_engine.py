@@ -11,6 +11,8 @@ import pytest
 
 from app.dataset_validation.base import (
     VALIDATION_CATEGORIES,
+    Severity,
+    ValidationCategory,
     ValidationContext,
     ValidationIssue,
     ValidationRule,
@@ -22,7 +24,9 @@ from app.dataset_validation.registry import ValidationRuleRegistry
 from tests.dataset_validation.conftest import make_dataset
 
 
-def rule_emitting(name: str, severity: str, category: str = "structural") -> type[ValidationRule]:
+def rule_emitting(
+    name: str, severity: Severity, category: ValidationCategory = "structural"
+) -> type[ValidationRule]:
     """A rule that always emits exactly one issue at the given severity."""
 
     class _Rule(ValidationRule):
@@ -44,7 +48,7 @@ def rule_emitting(name: str, severity: str, category: str = "structural") -> typ
     return _Rule
 
 
-def clean_rule(name: str, category: str = "structural") -> type[ValidationRule]:
+def clean_rule(name: str, category: ValidationCategory = "structural") -> type[ValidationRule]:
     """A rule that never finds anything."""
 
     class _Rule(ValidationRule):

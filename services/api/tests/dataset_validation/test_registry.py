@@ -9,6 +9,7 @@ catalogue.
 import pytest
 
 from app.dataset_validation.base import (
+    ValidationCategory,
     ValidationContext,
     ValidationIssue,
     ValidationRule,
@@ -18,7 +19,7 @@ from app.dataset_validation.errors import DuplicateValidationRuleError, UnknownV
 from app.dataset_validation.registry import ValidationRuleRegistry
 
 
-def make_rule(name: str, category: str = "structural") -> type[ValidationRule]:
+def make_rule(name: str, category: ValidationCategory = "structural") -> type[ValidationRule]:
     """A throwaway rule class that never finds any issue."""
 
     class _Rule(ValidationRule):

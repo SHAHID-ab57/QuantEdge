@@ -107,5 +107,5 @@ class TestDataTypesRule:
             FeatureColumn(name="mystery", label="Mystery", dtype="int"),
             dtype="future_dtype",  # type: ignore[arg-type]
         )
-        dataset = make_dataset(columns=[column], rows=[["anything"], [object()]])
+        dataset = make_dataset(columns=[column], rows=[["anything"], [object()]])  # type: ignore[list-item]
         assert DataTypesRule().check(ValidationContext(dataset=dataset)) == []

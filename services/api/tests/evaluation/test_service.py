@@ -9,6 +9,7 @@ to `result_summary["metrics"]` is already covered by
 
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 
@@ -45,9 +46,9 @@ def build_service(session_factory: SessionFactory) -> EvaluationService:
     )
 
 
-async def seed_experiment(session_factory: SessionFactory, **overrides: object) -> uuid.UUID:
+async def seed_experiment(session_factory: SessionFactory, **overrides: Any) -> uuid.UUID:
     service = ExperimentService(repository=ExperimentRepository(session_factory()))
-    payload = {"name": "benchmark target experiment"}
+    payload: dict[str, Any] = {"name": "benchmark target experiment"}
     payload.update(overrides)
     experiment = await service.create(ExperimentCreateRequest(**payload))
     return uuid.UUID(experiment.id)

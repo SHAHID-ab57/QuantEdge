@@ -2,18 +2,18 @@
 
 import math
 
-from app.features.base import FeatureColumn
+from app.features.base import FeatureColumn, FeatureDType, FeatureValue
 from app.features.statistics import compute_dataset_statistics
 
 
-def col(name: str, dtype: str = "float") -> FeatureColumn:
+def col(name: str, dtype: FeatureDType = "float") -> FeatureColumn:
     return FeatureColumn(name=name, label=name, dtype=dtype)
 
 
 class TestStatistics:
     def test_computes_exact_mean_min_max_for_known_values(self) -> None:
         columns = [col("a")]
-        rows = [[1.0], [2.0], [3.0], [4.0]]
+        rows: list[list[FeatureValue]] = [[1.0], [2.0], [3.0], [4.0]]
         result = compute_dataset_statistics(columns, rows)
         stats = result.columns[0]
         assert stats.mean == 2.5
@@ -27,9 +27,20 @@ class TestStatistics:
         # a textbook example, and the same population (not sample) formula
         # the frontend's own computeColumnStats uses.
         columns = [col("a")]
-        rows = [[2.0], [4.0], [4.0], [4.0], [5.0], [5.0], [7.0], [9.0]]
+        rows: list[list[FeatureValue]] = [
+            [2.0],
+            [4.0],
+            [4.0],
+            [4.0],
+            [5.0],
+            [5.0],
+            [7.0],
+            [9.0],
+        ]
         result = compute_dataset_statistics(columns, rows)
-        assert math.isclose(result.columns[0].std, 2.0, rel_tol=1e-9)
+        std = result.columns[0].std
+        assert std is not None
+        assert math.isclose(std, 2.0, rel_tol=1e-9)
 
     def test_counts_nulls_separately_from_the_numeric_stats(self) -> None:
         columns = [col("a")]
@@ -54,7 +65,7 @@ class TestStatistics:
 
     def test_an_entirely_null_numeric_column_reports_none_rather_than_raising(self) -> None:
         columns = [col("a")]
-        rows = [[None], [None]]
+        rows: list[list[FeatureValue]] = [[None], [None]]
         result = compute_dataset_statistics(columns, rows)
         stats = result.columns[0]
         assert stats.count == 2
@@ -63,7 +74,7 @@ class TestStatistics:
 
     def test_row_count_matches_the_dataset(self) -> None:
         columns = [col("a")]
-        rows = [[1.0], [2.0], [3.0]]
+        rows: list[list[FeatureValue]] = [[1.0], [2.0], [3.0]]
         result = compute_dataset_statistics(columns, rows)
         assert result.row_count == 3
 

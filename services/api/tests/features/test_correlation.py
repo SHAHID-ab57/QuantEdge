@@ -1,17 +1,17 @@
 """Feature correlation matrix tests — pure computation, no pipeline involved."""
 
-from app.features.base import FeatureColumn
+from app.features.base import FeatureColumn, FeatureDType, FeatureValue
 from app.features.correlation import compute_correlation_matrix
 
 
-def col(name: str, dtype: str = "float") -> FeatureColumn:
+def col(name: str, dtype: FeatureDType = "float") -> FeatureColumn:
     return FeatureColumn(name=name, label=name, dtype=dtype)
 
 
 class TestCorrelation:
     def test_perfectly_correlated_columns_score_one(self) -> None:
         columns = [col("a"), col("b")]
-        rows = [[1.0, 2.0], [2.0, 4.0], [3.0, 6.0], [4.0, 8.0]]
+        rows: list[list[FeatureValue]] = [[1.0, 2.0], [2.0, 4.0], [3.0, 6.0], [4.0, 8.0]]
         result = compute_correlation_matrix(columns, rows)
         assert result.columns == ["a", "b"]
         assert result.matrix[0][1] == 1.0
@@ -19,19 +19,19 @@ class TestCorrelation:
 
     def test_perfectly_inversely_correlated_columns_score_negative_one(self) -> None:
         columns = [col("a"), col("b")]
-        rows = [[1.0, 8.0], [2.0, 6.0], [3.0, 4.0], [4.0, 2.0]]
+        rows: list[list[FeatureValue]] = [[1.0, 8.0], [2.0, 6.0], [3.0, 4.0], [4.0, 2.0]]
         result = compute_correlation_matrix(columns, rows)
         assert result.matrix[0][1] == -1.0
 
     def test_diagonal_is_always_one(self) -> None:
         columns = [col("a"), col("b"), col("c")]
-        rows = [[1.0, 5.0, 9.0], [2.0, 3.0, 1.0], [3.0, 9.0, 4.0]]
+        rows: list[list[FeatureValue]] = [[1.0, 5.0, 9.0], [2.0, 3.0, 1.0], [3.0, 9.0, 4.0]]
         result = compute_correlation_matrix(columns, rows)
         assert all(result.matrix[i][i] == 1.0 for i in range(3))
 
     def test_a_constant_column_correlates_at_zero_not_nan(self) -> None:
         columns = [col("a"), col("constant")]
-        rows = [[1.0, 5.0], [2.0, 5.0], [3.0, 5.0]]
+        rows: list[list[FeatureValue]] = [[1.0, 5.0], [2.0, 5.0], [3.0, 5.0]]
         result = compute_correlation_matrix(columns, rows)
         assert result.matrix[0][1] == 0.0
 
@@ -63,6 +63,6 @@ class TestCorrelation:
 
     def test_row_count_reflects_pairwise_complete_rows_used(self) -> None:
         columns = [col("a"), col("b")]
-        rows = [[1.0, 2.0], [2.0, 4.0], [3.0, 6.0]]
+        rows: list[list[FeatureValue]] = [[1.0, 2.0], [2.0, 4.0], [3.0, 6.0]]
         result = compute_correlation_matrix(columns, rows)
         assert result.row_count == 3

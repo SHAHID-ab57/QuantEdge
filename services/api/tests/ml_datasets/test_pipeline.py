@@ -8,6 +8,7 @@ one generator's own maths.
 
 import pytest
 
+from app.features.base import FeatureValue
 from app.ml_datasets.base import (
     TargetColumn,
     TargetContext,
@@ -82,7 +83,7 @@ class DuplicateColumns(TargetGenerator):
     metadata = TargetMetadata(name="dupes", label="Dupes", description="", category="test")
 
     def generate(self, ctx: TargetContext) -> TargetOutput:
-        values = [None] * len(ctx.candles)
+        values: list[FeatureValue] = [None] * len(ctx.candles)
         return TargetOutput(
             series=[
                 TargetSeries(column=_column("same"), values=values),

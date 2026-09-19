@@ -422,6 +422,17 @@ class MarketauxConnector:
             "the daily aggregate the ML pipeline consumes."
         ),
         frequency="several times daily (see NewsSyncScheduler)",
+        # The derived daily aggregate lands once per weekday, never on
+        # weekends: real observed gaps (dev DB, source=news_sentiment) are
+        # 24h on weekdays and exactly 72h Fri->Mon, in 6 of 6 weeks
+        # checked. A plain 24h cadence (72h threshold) would flag this
+        # connector stale every Monday morning before ingestion catches
+        # up, a recurring false positive that trains people to ignore the
+        # signal. 36h x STALE_MULTIPLIER = 108h covers the weekly gap plus
+        # ingest delay while still flagging a genuinely dead connector
+        # within ~4.5 days. (NewsSyncScheduler's own 6h tick is how often
+        # it *checks*, not how often a new value appears.)
+        expected_interval_seconds=129_600,
         requires_auth=True,
         version="1.0.0",
         aliases=("news", "marketaux", "sentiment"),

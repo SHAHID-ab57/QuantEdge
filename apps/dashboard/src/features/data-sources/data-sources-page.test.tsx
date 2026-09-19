@@ -21,6 +21,7 @@ const fearGreed: Connector = {
   requires_auth: false,
   latest_value: 42,
   latest_timestamp: '2026-01-02T00:00:00Z',
+  health_status: 'healthy',
 };
 
 const emptyHistory: ConnectorHistory = {
@@ -37,6 +38,7 @@ const newsSentiment: Connector = {
   requires_auth: true,
   latest_value: -0.12,
   latest_timestamp: '2026-01-02T00:00:00Z',
+  health_status: 'stale',
 };
 
 function renderPage() {
@@ -78,7 +80,14 @@ describe('DataSourcesPage — Active Data Sources', () => {
 
   it('shows an unavailable value for a connector registered but never ingested', async () => {
     mockedConnectorsApi.fetchConnectors.mockResolvedValue({
-      connectors: [{ ...fearGreed, latest_value: null, latest_timestamp: null }],
+      connectors: [
+        {
+          ...fearGreed,
+          latest_value: null,
+          latest_timestamp: null,
+          health_status: 'never_ingested',
+        },
+      ],
       total: 1,
     });
     renderPage();

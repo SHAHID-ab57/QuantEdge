@@ -647,11 +647,39 @@ connector with zero stored points, never a 404 or a crash:
       "requires_auth": false,
       "latest_value": 42.0,
       "latest_timestamp": "2026-01-02T00:00:00Z",
+      "health_status": "healthy",
     },
   ],
   "total": 1,
 }
 ```
+
+**`health_status`** (M5-E5-T1) is one of `healthy`, `stale`, `failing`, or
+`never_ingested`, computed on every request from the connector's newest
+stored point and its most recent sync attempts — not a stored flag, so it
+can never lag behind the data. Checked in this order, first match wins:
+
+| Value            | Meaning                                                                                                                     |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `failing`        | The connector's 3 most recent sync attempts all errored, even if its last good point is still recent                        |
+| `never_ingested` | No point has ever been stored for this source (`latest_timestamp` is `null`)                                                |
+| `stale`          | The newest point is older than this connector's own threshold — its data has stopped moving forward (see `ARCHITECTURE.md`) |
+| `healthy`        | Anything else                                                                                                               |
+
+`failing` outranks `stale` and `never_ingested`: a connector erroring on
+every tick is the more urgent situation and the likelier root cause. The
+response says a connector is failing, not why; the individual error
+messages are recorded but not yet exposed by any endpoint.
+
+The threshold is scaled per connector, not one flat number: a daily source
+(Fear & Greed, DefiLlama TVL) goes `stale` after 3 days, the monthly FRED
+series after 60 days, the hourly-sampled sources (Etherscan, CoinGecko)
+after 3 hours, and Marketaux news sentiment after 108 hours (it has no
+weekend values, so a Friday-to-Monday gap is normal). The expected interval
+is not itself an API field. This is a health _signal_ only — nothing is
+notified when a connector goes `stale` or `failing`; see `ARCHITECTURE.md` § "Connector
+Health Monitoring" for the evidence behind the thresholds and the known
+limitations.
 
 A second connector, `fed_funds_rate` (`app/connectors/fred.py`), is
 registered the same way with `"requires_auth": true` — the catalogue

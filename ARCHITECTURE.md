@@ -5012,6 +5012,163 @@ real-article, null-sentiment, empty, error, and filter/clear states;
 `news_sentiment` connector renders as an ordinary card with zero
 News-specific code, alongside Fear & Greed's own.
 
+#### Connector Health Monitoring (M5-E5-T1)
+
+**The motivating evidence: three real, silent failures.** Each of these
+was invisible from the outside — no error raised, no crash, nothing
+logged above INFO — and each was found only by someone deliberately
+hitting the real system:
+
+- **M4-E1-T1 (Fear & Greed).** `external_sources` was computed
+  server-side but never threaded onto the `/features` response DTO, so the
+  real HTTP catalogue silently omitted a documented field. The mocked
+  suite passed throughout.
+- **M4-E1-T2 (FRED).** FRED silently defaults its own `realtime_start`/
+  `realtime_end` to "today" when omitted, collapsing every observation
+  onto one fake vintage date; the idempotency check then discarded 865 of
+  866 real values as duplicates. The scheduler reported a healthy tick the
+  whole time.
+- **M4-E1-T4 (Etherscan).** The scheduler snapshots `now` before the
+  connector's HTTP round trip, so the connector's own post-round-trip
+  timestamp always landed just past the stale `end` bound, returning
+  `received=0` on every tick, forever.
+
+The common shape: a scheduler that looks perfectly healthy while quietly
+doing nothing useful. Nothing on the platform asked "how long since this
+connector's data actually moved forward?"
+
+**Scope: a health _signal_, not alerting.** This piece answers that one
+question and makes it queryable. Turning it into a notification (email,
+Slack, pager) belongs with error tracking, the remaining piece of this
+epic; standing up a third-party alerting service before the platform can
+even tell a connector has gone quiet would be the wrong order.
+
+**Two parts.**
+
+1. **Per-tick outcomes are persisted, not just logged.**
+   `ExternalDataSyncScheduler.run_catch_up` already built an
+   `ExternalDataIngestReport` (received/inserted/updated/
+   duplicates_skipped/rejected/duration) per source per tick, and threw it
+   away when the coroutine returned; the periodic `_loop` did not even log
+   those numbers (only `synced`/`failed`). Each attempt now writes one
+   `connector_sync_runs` row (`ConnectorSyncRun`,
+   `app/models/external_data.py`), including a `success=False` row with
+   `error_message` when a source raises (the exception's type name if its
+   message is blank). Marketaux is ingested by its own `NewsSyncScheduler`
+   rather than the generic one, so that scheduler records its tick the same
+   way; otherwise five of the six connectors would be covered and the sixth
+   silently not. Both go through one helper,
+   `app/services/connector_sync_runs.py`. A source with nothing to fetch
+   (window already current) writes no row, since no attempt happened.
+   Recording is best-effort: a failure writing health history is logged and
+   swallowed, never allowed to fail, or look like a failure of, the
+   ingestion it describes.
+2. **Health is judged per connector, from both the data and the syncs.**
+   `app/connectors/health.py::compute_health_status` returns one of four
+   statuses, checked in this order: `failing` (the connector's
+   `FAILING_STREAK` (3) most recent `connector_sync_runs` attempts all
+   failed), `never_ingested` (no point ever), `stale` (newest point older
+   than its threshold), else `healthy`. The threshold is `STALE_MULTIPLIER`
+   (3) x the connector's own `ConnectorMetadata.expected_interval_seconds`,
+   unless the connector sets `stale_after_seconds` (only FRED does, below).
+   Each connector declares its own real cadence, so a monthly series and
+   an hourly one are not held to one flat threshold. The status is
+   surfaced as `health_status` on the existing `GET /connectors` response
+   (no second endpoint) and as a pill on each `/data-sources` card.
+
+   **Why `failing` exists.** Staleness alone measures only "is the newest
+   stored point recent enough." A connector erroring on every sync tick
+   still has a recent last-good point, so it kept reading `healthy` until
+   its threshold independently elapsed (up to 60 days for FRED): the same
+   "looks fine from the outside while doing nothing useful" failure this
+   feature exists to catch, one layer deeper, with the raw failure rows
+   sitting unread beside it. `failing` takes precedence over `stale` and
+   `never_ingested` because it is the more urgent situation and the root
+   cause when they coincide. Three consecutive failures, not one: a single
+   failed tick is routinely a network blip or an upstream 5xx. Sync
+   attempts happen roughly hourly (every 6 hours for Marketaux), so a
+   connector is reported `failing` after about three hours of continuous
+   failure (about eighteen for Marketaux), instead of after its staleness
+   threshold. Only the newest attempts count: a success clears it.
+
+**The thresholds come from real data, and checking them changed one.**
+Gaps between consecutive stored points, from the dev database
+(`external_data_points`, source-wide rows), in hours:
+
+| source           | median | p95  | max   | `expected_interval_seconds` | stale after |
+| ---------------- | ------ | ---- | ----- | --------------------------- | ----------- |
+| `eth_tvl`        | 24     | 24   | 24    | 86,400 (1d)                 | 3d          |
+| `fear_greed`     | 24     | 24   | 96    | 86,400 (1d)                 | 3d          |
+| `fed_funds_rate` | 696    | 840  | 1,008 | 2,592,000 (30d)             | 60d         |
+| `news_sentiment` | 24     | 72   | 72    | 129,600 (36h)               | 108h        |
+| `eth_gas_price`  | 0.01   | 1    | 22    | 3,600 (1h)                  | 3h          |
+| `btc_dominance`  | 0.5    | 17.7 | 23    | 3,600 (1h)                  | 3h          |
+
+- `news_sentiment` was first set to a plain 24h cadence (72h threshold).
+  Checking the actual gaps showed a Friday-to-Monday 72h gap in 6 of 6
+  weeks (no weekend aggregates): with a 72h threshold the connector would
+  have flipped to `stale` every Monday morning before ingestion caught up,
+  a recurring false positive that teaches people to ignore the signal. It
+  is now 36h (108h threshold), which covers the weekly gap plus ingest
+  delay and still flags a dead connector within about 4.5 days.
+- `fear_greed`'s one 96h gap (April 2018) would have been flagged, as it
+  should: a daily source going three or more days without a value is
+  exactly the abnormal case.
+- `eth_gas_price` and `btc_dominance` have no publication cadence of their
+  own (they are sampled per scheduler tick), so their expected interval is
+  the scheduler's own 3,600s tick: "stale" means the scheduler stopped
+  ticking. Their historical max gaps (22-23h) are dev-machine downtime
+  (the local server is not always on), not a source property; on an
+  always-on server these are far tighter.
+- `fed_funds_rate` was first left at the default 3 x 30 = 90 days. That
+  waits out two missed monthly releases before flagging a silently broken
+  monthly connector, which is the slow detection this feature exists to
+  avoid, so it now sets `stale_after_seconds` to 60 days (an explicit
+  decision). 60 clears the real maximum gap (42 days over 30 years) by 18
+  days. It is a separate override rather than a 20-day
+  `expected_interval_seconds`, so that field keeps stating FRED's real
+  30-day cadence. Against the stored data: newest value is 18 days old
+  today, so `healthy`; it would turn `stale` only past 60 days.
+
+**Verified against real data, not only mocks.** (The staleness checks
+below predate `failing`; the `failing` path was checked separately, see the
+end of this paragraph.) One real sync tick against
+the real APIs and the real dev Postgres wrote correct rows (e.g.
+`eth_gas_price received=1 inserted=1`, `eth_tvl received=2 inserted=1
+updated=1` showing DefiLlama's revisable behavior). Advancing the clock
+against the real stored data, with no new points arriving, flipped each
+connector at its own threshold: at +2 days only the hourly connectors were
+`stale`; at +5 days the daily ones flipped while monthly `fed_funds_rate`
+stayed `healthy`; at +100 days all were `stale`. That is a simulation of
+elapsed time, not a naturally occurring outage. The `failing` status was
+checked against real Postgres by inserting three failed runs for
+`fear_greed` (whose data was fresh) inside a transaction and rolling it
+back: the connector read `failing`, the other five stayed `healthy`, and no
+rows were left behind. An end-to-end test seeds the same situation through
+the real HTTP endpoint, and was confirmed to fail (reading `healthy`) when
+the service is temporarily made to ignore sync-run history.
+
+**Known limitations.**
+
+- `connector_sync_runs` is append-only with no retention (unlike
+  `trade_flow`/`orderbook_snapshots`). At roughly 5 rows/hour that is
+  about 44,000 rows/year, small, but unbounded; add pruning if it matters.
+- `failing` is judged from recorded attempts alone, with no recency bound:
+  if the scheduler itself later dies while the API keeps running, the last
+  known state stays `failing` until a success is recorded, and staleness is
+  what eventually reports the silence. The individual failure rows
+  (`error_message` etc.) are queryable through
+  `ConnectorSyncRunRepository.list_recent` but no endpoint exposes them;
+  the status only reports that a connector is failing, not why. Surfacing
+  the reason belongs with the error-tracking piece.
+- `GET /connectors` now issues one extra small query per connector (its
+  newest 3 sync runs), 6 today; fine at this scale, worth batching if the
+  connector count grows.
+- Pre-existing, unrelated schema drift surfaced while generating the
+  migration (a comment-text change on `ml_dataset_builds.ml_dataset_id`, a
+  check-constraint name on `paper_strategy_decisions`) was deliberately
+  left out of this migration; `alembic check` still reports it.
+
 ### Funding Rate, Open Interest & Order-Flow Capture (M4-E2-T1)
 
 Milestone 4's second epic — **Delta REST/WS completion** — is a different

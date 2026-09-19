@@ -386,6 +386,10 @@ class CoinGeckoConnector:
             "earlier."
         ),
         frequency="continuous (sampled per sync tick)",
+        # Same reasoning as Etherscan's own expected_interval_seconds:
+        # no fixed real-world publication cadence, so "stale" here means
+        # the scheduler itself stopped ticking, not a slow source.
+        expected_interval_seconds=3_600,
         requires_auth=False,
         version="1.0.0",
         aliases=("btc_dom", "dominance", "bitcoin_dominance"),

@@ -11,9 +11,12 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 import app.services.news_sync as news_sync_module
+from app.connectors.marketaux import MARKETAUX_SOURCE
+from app.models.external_data import ConnectorSyncRun
 from app.models.news import NewsArticle
 from app.services.news_ingest import NewsIngestError, NewsIngestReport
 from app.services.news_sync import DISCOVERY_SAFETY_MARGIN, NewsSyncScheduler
@@ -212,3 +215,89 @@ async def test_loop_runs_ticks_until_stopped(
 
     await scheduler.stop()
     assert not scheduler.running
+
+
+async def _sync_runs(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> list[ConnectorSyncRun]:
+    async with session_factory() as session:
+        result = await session.execute(
+            select(ConnectorSyncRun).where(ConnectorSyncRun.source == MARKETAUX_SOURCE)
+        )
+        return list(result.scalars())
+
+
+@pytest.mark.asyncio
+async def test_run_catch_up_records_a_successful_sync_run(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Marketaux runs on its own scheduler, not the generic one — its
+    per-tick outcome must be recorded too, or connector health monitoring
+    would silently cover five of the six connectors."""
+
+    async def fake_ingest_news(*, start: datetime, end: datetime) -> NewsIngestReport:
+        return NewsIngestReport(
+            received=5,
+            inserted=3,
+            duplicates_skipped=1,
+            rejected=1,
+            days_recomputed=2,
+            duration_seconds=0.5,
+        )
+
+    monkeypatch.setattr(news_sync_module, "get_engine", lambda: engine)
+    monkeypatch.setattr(news_sync_module, "ingest_news", fake_ingest_news)
+
+    await NewsSyncScheduler().run_catch_up()
+
+    runs = await _sync_runs(session_factory)
+    assert len(runs) == 1
+    run = runs[0]
+    assert run.success is True
+    assert (run.received, run.inserted, run.duplicates_skipped, run.rejected) == (5, 3, 1, 1)
+    assert run.duration_seconds == 0.5
+    assert run.error_message is None
+
+
+@pytest.mark.asyncio
+async def test_run_catch_up_records_a_failed_sync_run(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def failing_ingest_news(*, start: datetime, end: datetime) -> NewsIngestReport:
+        raise NewsIngestError("boom")
+
+    monkeypatch.setattr(news_sync_module, "get_engine", lambda: engine)
+    monkeypatch.setattr(news_sync_module, "ingest_news", failing_ingest_news)
+
+    await NewsSyncScheduler().run_catch_up()
+
+    runs = await _sync_runs(session_factory)
+    assert len(runs) == 1
+    assert runs[0].success is False
+    assert runs[0].error_message == "boom"
+    assert runs[0].received == 0
+
+
+@pytest.mark.asyncio
+async def test_a_failure_with_a_blank_message_records_the_exception_type(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bare `RuntimeError()` has an empty `str()` — recording that
+    verbatim would leave a failed run with a blank, useless message."""
+
+    async def failing_ingest_news(*, start: datetime, end: datetime) -> NewsIngestReport:
+        raise RuntimeError
+
+    monkeypatch.setattr(news_sync_module, "get_engine", lambda: engine)
+    monkeypatch.setattr(news_sync_module, "ingest_news", failing_ingest_news)
+
+    await NewsSyncScheduler().run_catch_up()
+
+    runs = await _sync_runs(session_factory)
+    assert [run.error_message for run in runs] == ["RuntimeError"]

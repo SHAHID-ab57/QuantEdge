@@ -63,6 +63,23 @@ class ConnectorMetadata:
     #: `"daily"` — documents intent for a scheduler/backfill script to read;
     #: not machine-enforced anywhere.
     frequency: str = ""
+    #: This source's own real, machine-readable publication cadence, in
+    #: seconds — unlike `frequency` above, this *is* enforced: it's the
+    #: basis `app.connectors.health.compute_health_status` scales its
+    #: staleness threshold against, so a daily connector (86400) and an
+    #: hourly one (3600) are each judged against their own real cadence,
+    #: never a single flat threshold. Chosen from each connector's own
+    #: real observed history, not guessed — see that connector's own
+    #: module for the reasoning (`ARCHITECTURE.md` § "Connector Health
+    #: Monitoring" has the full account for all six).
+    expected_interval_seconds: int = 86400
+    #: Overrides the default staleness threshold (`STALE_MULTIPLIER` x
+    #: `expected_interval_seconds`) for a connector where that multiple is
+    #: the wrong shape. Kept separate from `expected_interval_seconds` so
+    #: that field keeps stating the real cadence: FRED publishes monthly
+    #: (30 days), but 3 x 30 = 90 days would wait out two missed releases
+    #: before flagging a silently broken monthly connector, so it sets 60.
+    stale_after_seconds: int | None = None
     requires_auth: bool = False
     version: str = "1.0.0"
     aliases: tuple[str, ...] = field(default_factory=tuple)

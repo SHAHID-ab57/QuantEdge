@@ -11,10 +11,11 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.connectors.base import ConnectorMetadata
-from app.models.external_data import ExternalDataPoint
+from app.models.external_data import ConnectorSyncRun, ExternalDataPoint
 from app.services import external_data_sync
 from app.services.external_data_ingest import ExternalDataIngestReport
 from app.services.external_data_sync import ExternalDataSyncScheduler
@@ -333,3 +334,117 @@ async def test_a_source_with_auto_synced_false_is_excluded_even_when_explicitly_
     assert summary.attempted == 1
     assert [call[0] for call in calls] == ["fear_greed"]
     assert summary.failed == 0
+
+
+async def _sync_runs_for(
+    session_factory: async_sessionmaker[AsyncSession], source: str
+) -> list[ConnectorSyncRun]:
+    async with session_factory() as session:
+        result = await session.execute(
+            select(ConnectorSyncRun).where(ConnectorSyncRun.source == source)
+        )
+        return list(result.scalars())
+
+
+@pytest.mark.asyncio
+async def test_run_catch_up_records_a_successful_sync_run(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tick's own received/inserted/etc counts are persisted, not just
+    logged and lost — the exact gap that let three real connector bugs
+    (Fear & Greed, FRED, Etherscan) go unnoticed (see
+    `app.connectors.health`'s own module docstring)."""
+    monkeypatch.setattr(external_data_sync, "get_engine", lambda: engine)
+    monkeypatch.setattr(external_data_sync, "load_builtin_connectors", lambda: None)
+    monkeypatch.setattr(external_data_sync.default_connector_registry, "has", lambda source: True)
+    monkeypatch.setattr(external_data_sync.default_connector_registry, "describe", _fake_describe)
+    ingest, _ = fake_ingest()
+    monkeypatch.setattr(external_data_sync, "ingest_external_data", ingest)
+
+    scheduler = ExternalDataSyncScheduler(sources=["fear_greed"])
+    monkeypatch.setattr(scheduler, "_catch_up_window", _fixed_window)
+    monkeypatch.setattr(external_data_sync, "datetime", FakeDatetime)
+
+    await scheduler.run_catch_up()
+
+    runs = await _sync_runs_for(session_factory, "fear_greed")
+    assert len(runs) == 1
+    run = runs[0]
+    assert run.success is True
+    assert run.received == 1
+    assert run.inserted == 1
+    assert run.updated == 0
+    assert run.duplicates_skipped == 0
+    assert run.rejected == 0
+    assert run.error_message is None
+    # SQLite round-trips a tz-aware DateTime column as naive (Postgres does
+    # not have this quirk) — the same normalization already documented in
+    # `app.repositories.external_data._as_utc`.
+    started_at = (
+        run.started_at if run.started_at.tzinfo is not None else run.started_at.replace(tzinfo=UTC)
+    )
+    completed_at = (
+        run.completed_at
+        if run.completed_at.tzinfo is not None
+        else run.completed_at.replace(tzinfo=UTC)
+    )
+    # started_at comes from this module's own (frozen) clock; completed_at is
+    # stamped by the shared recorder with real wall-clock time.
+    assert started_at == FIXED_NOW
+    assert completed_at >= started_at
+
+
+@pytest.mark.asyncio
+async def test_run_catch_up_records_a_failed_sync_run(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A source that raises every tick is a real, queryable fact — not
+    only something that eventually shows up as staleness once enough
+    time has passed."""
+    monkeypatch.setattr(external_data_sync, "get_engine", lambda: engine)
+    monkeypatch.setattr(external_data_sync, "load_builtin_connectors", lambda: None)
+    monkeypatch.setattr(external_data_sync.default_connector_registry, "has", lambda source: True)
+    monkeypatch.setattr(external_data_sync.default_connector_registry, "describe", _fake_describe)
+    ingest, _ = fake_ingest(failure_source="fear_greed")
+    monkeypatch.setattr(external_data_sync, "ingest_external_data", ingest)
+
+    scheduler = ExternalDataSyncScheduler(sources=["fear_greed"])
+    monkeypatch.setattr(scheduler, "_catch_up_window", _fixed_window)
+    monkeypatch.setattr(external_data_sync, "datetime", FakeDatetime)
+
+    await scheduler.run_catch_up()
+
+    runs = await _sync_runs_for(session_factory, "fear_greed")
+    assert len(runs) == 1
+    run = runs[0]
+    assert run.success is False
+    assert run.received == 0
+    assert run.inserted == 0
+    assert run.error_message == "boom"
+
+
+@pytest.mark.asyncio
+async def test_run_catch_up_records_no_sync_run_when_already_current(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A source with nothing new to fetch is skipped entirely — no sync
+    run is written for an attempt that never actually happened."""
+    await seed_point(session_factory, "fear_greed", timestamp=FIXED_NOW)
+    monkeypatch.setattr(external_data_sync, "get_engine", lambda: engine)
+    monkeypatch.setattr(external_data_sync, "load_builtin_connectors", lambda: None)
+    monkeypatch.setattr(external_data_sync.default_connector_registry, "has", lambda source: True)
+    monkeypatch.setattr(external_data_sync.default_connector_registry, "describe", _fake_describe)
+    monkeypatch.setattr(external_data_sync, "datetime", FakeDatetime)
+    ingest, _ = fake_ingest()
+    monkeypatch.setattr(external_data_sync, "ingest_external_data", ingest)
+
+    scheduler = ExternalDataSyncScheduler(sources=["fear_greed"])
+    await scheduler.run_catch_up()
+
+    assert await _sync_runs_for(session_factory, "fear_greed") == []

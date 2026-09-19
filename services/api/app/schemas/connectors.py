@@ -18,6 +18,8 @@ from datetime import UTC, datetime
 
 from pydantic import BaseModel, Field, field_validator
 
+from app.connectors.health import ConnectorHealthStatus
+
 
 def _ensure_utc(value: datetime) -> datetime:
     """Normalize a timestamp to aware UTC for a stable JSON contract.
@@ -51,6 +53,15 @@ class ConnectorDTO(BaseModel):
     )
     latest_timestamp: datetime | None = Field(
         default=None, description="That value's own timestamp, or null if nothing is stored yet"
+    )
+    health_status: ConnectorHealthStatus = Field(
+        description=(
+            "'healthy': a new point has arrived within this source's own expected "
+            "cadence. 'stale': it hasn't. 'failing': its last 3 sync attempts all "
+            "errored (takes precedence, even if the last good point is still "
+            "recent). 'never_ingested': no point has ever been stored. See "
+            "ARCHITECTURE.md § 'Connector Health Monitoring'."
+        )
     )
 
     @field_validator("latest_timestamp", mode="before")

@@ -402,6 +402,16 @@ class FredConnector:
             "early September."
         ),
         frequency="monthly",
+        # Real observed gap (dev DB, source=fed_funds_rate): median 29
+        # days, p95 35, max 42 over 30 years — 30 days states the real
+        # cadence, not a flat daily/hourly one that would flag this source
+        # stale every single day.
+        expected_interval_seconds=30 * 86_400,
+        # 60 days, not the default 3 x 30 = 90: two months with no new
+        # value means a whole monthly release was missed, and waiting out a
+        # second one (90 days) is exactly the slow detection this feature
+        # exists to avoid. Clears the real max gap (42 days) by 18 days.
+        stale_after_seconds=60 * 86_400,
         requires_auth=True,
         version="1.0.0",
         aliases=("fedfunds", "fed_funds", "interest_rate", "federal_funds_rate"),

@@ -1,13 +1,46 @@
 'use client';
 
+import Chip from '@mui/material/Chip';
 import Paper from '@mui/material/Paper';
 import Stack from '@mui/material/Stack';
 import Typography from '@mui/material/Typography';
 import { StatTile } from '@/components/stat-tile';
 import { Sparkline } from '@/features/trades/components/sparkline';
-import type { Connector } from '@/types/api/connectors';
+import type { Connector, ConnectorHealthStatus } from '@/types/api/connectors';
 import { HISTORY_SPARKLINE_LIMIT, useConnectorHistory } from '../hooks/use-connector-data';
 import { formatConnectorValue, formatLastUpdated } from '../lib/format';
+
+const HEALTH_COLOR: Record<ConnectorHealthStatus, 'success' | 'warning' | 'error' | 'default'> = {
+  healthy: 'success',
+  stale: 'warning',
+  failing: 'error',
+  never_ingested: 'default',
+};
+
+const HEALTH_LABEL: Record<ConnectorHealthStatus, string> = {
+  healthy: 'Healthy',
+  stale: 'Stale',
+  failing: 'Failing',
+  never_ingested: 'Never ingested',
+};
+
+/**
+ * A connector's health status, matching `StatusPill`'s own convention in
+ * `features/health/components/primitives.tsx` (small `Chip`, one of a
+ * fixed set of colors/labels keyed by status) — not imported directly,
+ * since that one is typed to `ComponentStatus['status']`
+ * (ok/degraded/unavailable), a different, unrelated status vocabulary.
+ */
+function HealthPill({ status }: Readonly<{ status: ConnectorHealthStatus }>) {
+  return (
+    <Chip
+      size="small"
+      color={HEALTH_COLOR[status]}
+      label={HEALTH_LABEL[status]}
+      sx={{ fontWeight: 700, letterSpacing: '0.04em' }}
+    />
+  );
+}
 
 export interface ConnectorCardProps {
   connector: Connector;
@@ -35,9 +68,12 @@ export function ConnectorCard({ connector }: ConnectorCardProps) {
   return (
     <Paper component="section" aria-labelledby={titleId} sx={{ p: 2, height: '100%' }}>
       <Stack spacing={0.5}>
-        <Typography id={titleId} variant="subtitle1" component="h3">
-          {connector.label}
-        </Typography>
+        <Stack direction="row" spacing={1} alignItems="center" justifyContent="space-between">
+          <Typography id={titleId} variant="subtitle1" component="h3">
+            {connector.label}
+          </Typography>
+          <HealthPill status={connector.health_status} />
+        </Stack>
         <Typography variant="body2" color="text.secondary">
           {connector.description}
         </Typography>

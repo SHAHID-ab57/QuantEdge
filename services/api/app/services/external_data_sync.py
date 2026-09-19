@@ -30,6 +30,7 @@ from app.connectors.registry import default_registry as default_connector_regist
 from app.core.config import get_settings
 from app.db.engine import get_engine
 from app.models.external_data import ExternalDataPoint
+from app.services.connector_sync_runs import describe_failure, record_sync_run
 from app.services.external_data_ingest import (
     ExternalDataIngestError,
     ExternalDataIngestReport,
@@ -143,16 +144,43 @@ class ExternalDataSyncScheduler:
             if window is None:
                 continue
             start, end = window
+            attempt_started = datetime.now(UTC)
             try:
                 report = await ingest_external_data(source=source, start=start, end=end)
                 reports.append(report)
                 synced += 1
+                await record_sync_run(
+                    get_engine(),
+                    source=source,
+                    started_at=attempt_started,
+                    success=True,
+                    received=report.received,
+                    inserted=report.inserted,
+                    updated=report.updated,
+                    duplicates_skipped=report.duplicates_skipped,
+                    rejected=report.rejected,
+                    duration_seconds=report.duration_seconds,
+                )
             except ExternalDataIngestError as exc:
                 failed += 1
                 logger.error("External data sync failed for %s: %s", source, exc)
-            except Exception:
+                await record_sync_run(
+                    get_engine(),
+                    source=source,
+                    started_at=attempt_started,
+                    success=False,
+                    error_message=describe_failure(exc),
+                )
+            except Exception as exc:
                 failed += 1
                 logger.exception("External data sync crashed for %s", source)
+                await record_sync_run(
+                    get_engine(),
+                    source=source,
+                    started_at=attempt_started,
+                    success=False,
+                    error_message=describe_failure(exc),
+                )
 
         return ExternalDataSyncTickSummary(
             attempted=len(sources),

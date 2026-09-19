@@ -6,11 +6,13 @@ only ever reads, mirroring `app.services.features.FeatureService`'s own
 """
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 
 from app.connectors import load_builtin_connectors
 from app.connectors.errors import ConnectorSourceNotFoundError
+from app.connectors.health import FAILING_STREAK, compute_health_status
 from app.connectors.registry import default_registry as default_connector_registry
+from app.repositories.connector_sync_runs import ConnectorSyncRunRepository
 from app.repositories.external_data import ExternalDataRepository
 from app.schemas.connectors import (
     ConnectorCatalogResponse,
@@ -36,6 +38,7 @@ class ConnectorService:
     """Business logic for `GET /connectors` and `GET /connectors/{source}/history`."""
 
     external_data_repository: ExternalDataRepository
+    sync_run_repository: ConnectorSyncRunRepository
 
     async def list_connectors(self) -> ConnectorCatalogResponse:
         """Every registered connector, each with its own most recent value.
@@ -48,9 +51,14 @@ class ConnectorService:
         a crash or a fabricated value.
         """
         load_builtin_connectors()
+        now = datetime.now(UTC)
         entries = []
         for metadata in default_connector_registry.describe_all():
             latest = await self.external_data_repository.get_latest(metadata.source, _GLOBAL_SYMBOL)
+            latest_timestamp = latest.timestamp if latest is not None else None
+            recent_runs = await self.sync_run_repository.list_recent(
+                metadata.source, limit=FAILING_STREAK
+            )
             entries.append(
                 ConnectorDTO(
                     source=metadata.source,
@@ -59,7 +67,14 @@ class ConnectorService:
                     frequency=metadata.frequency,
                     requires_auth=metadata.requires_auth,
                     latest_value=latest.value if latest is not None else None,
-                    latest_timestamp=latest.timestamp if latest is not None else None,
+                    latest_timestamp=latest_timestamp,
+                    health_status=compute_health_status(
+                        latest_timestamp=latest_timestamp,
+                        expected_interval_seconds=metadata.expected_interval_seconds,
+                        now=now,
+                        stale_after_seconds=metadata.stale_after_seconds,
+                        recent_run_successes=[run.success for run in recent_runs],
+                    ),
                 )
             )
         return ConnectorCatalogResponse(connectors=entries, total=len(entries))

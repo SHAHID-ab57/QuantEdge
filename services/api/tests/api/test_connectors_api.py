@@ -5,14 +5,14 @@ serialization, and the shared ``AppError`` -> JSON envelope are all
 covered end to end.
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
 
 import app.services.connectors as connectors_service_module
 from app.connectors.registry import ConnectorRegistry
-from app.models.external_data import ExternalDataPoint
+from app.models.external_data import ConnectorSyncRun, ExternalDataPoint
 from tests.conftest import SessionFactory
 
 
@@ -27,6 +27,36 @@ async def seed_point(
     async with session_factory() as session:
         session.add(ExternalDataPoint(source=source, symbol=None, timestamp=timestamp, value=value))
         await session.commit()
+
+
+async def seed_runs(
+    session_factory: SessionFactory,
+    outcomes: list[bool],
+    *,
+    source: str = "fear_greed",
+) -> None:
+    """Insert sync runs for a source, `outcomes` given newest first."""
+    now = datetime.now(UTC)
+    async with session_factory() as session:
+        for minutes_ago, success in enumerate(outcomes):
+            started = now - timedelta(minutes=minutes_ago)
+            session.add(
+                ConnectorSyncRun(
+                    source=source,
+                    started_at=started,
+                    completed_at=started,
+                    success=success,
+                    received=1 if success else 0,
+                    inserted=0,
+                    error_message=None if success else "upstream 503",
+                )
+            )
+        await session.commit()
+
+
+async def fear_greed_status(client: httpx.AsyncClient) -> str:
+    body = (await client.get("/api/v1/connectors")).json()
+    return next(e for e in body["connectors"] if e["source"] == "fear_greed")["health_status"]
 
 
 class TestConnectorCatalogueEndpoint:
@@ -90,6 +120,7 @@ class TestConnectorCatalogueEndpoint:
         assert entry["latest_timestamp"] is None
         assert entry["label"] == "Fear & Greed Index"
         assert entry["requires_auth"] is False
+        assert entry["health_status"] == "never_ingested"
 
     async def test_reports_the_real_latest_value_once_ingested(
         self, client: httpx.AsyncClient, session_factory: SessionFactory
@@ -101,6 +132,85 @@ class TestConnectorCatalogueEndpoint:
         entry = next(e for e in body["connectors"] if e["source"] == "fear_greed")
         assert entry["latest_value"] == 70.0
         assert entry["latest_timestamp"] == "2026-01-02T00:00:00Z"
+
+    async def test_reports_healthy_for_a_point_within_the_expected_cadence(
+        self, client: httpx.AsyncClient, session_factory: SessionFactory
+    ) -> None:
+        """Fear & Greed's own real expected_interval_seconds is 86400s (1
+        day) — a point from an hour ago is well within that."""
+        await seed_point(
+            session_factory, value=42.0, timestamp=datetime.now(UTC) - timedelta(hours=1)
+        )
+
+        body = (await client.get("/api/v1/connectors")).json()
+        entry = next(e for e in body["connectors"] if e["source"] == "fear_greed")
+        assert entry["health_status"] == "healthy"
+
+    async def test_reports_stale_for_a_point_well_past_the_expected_cadence(
+        self, client: httpx.AsyncClient, session_factory: SessionFactory
+    ) -> None:
+        """A point 30 days old is far past Fear & Greed's own 3-day
+        (STALE_MULTIPLIER x 1 day) staleness threshold."""
+        await seed_point(
+            session_factory, value=42.0, timestamp=datetime.now(UTC) - timedelta(days=30)
+        )
+
+        body = (await client.get("/api/v1/connectors")).json()
+        entry = next(e for e in body["connectors"] if e["source"] == "fear_greed")
+        assert entry["health_status"] == "stale"
+
+    async def test_reports_failing_when_recent_syncs_all_failed_despite_fresh_data(
+        self, client: httpx.AsyncClient, session_factory: SessionFactory
+    ) -> None:
+        """The gap this closes: a connector erroring on every tick used to
+        read `healthy` until its staleness threshold independently elapsed,
+        because its last good point was still recent."""
+        await seed_point(
+            session_factory, value=42.0, timestamp=datetime.now(UTC) - timedelta(hours=1)
+        )
+        assert await fear_greed_status(client) == "healthy"
+
+        await seed_runs(session_factory, [False, False, False])
+
+        assert await fear_greed_status(client) == "failing"
+
+    async def test_two_failed_syncs_are_not_yet_failing(
+        self, client: httpx.AsyncClient, session_factory: SessionFactory
+    ) -> None:
+        await seed_point(
+            session_factory, value=42.0, timestamp=datetime.now(UTC) - timedelta(hours=1)
+        )
+        await seed_runs(session_factory, [False, False])
+
+        assert await fear_greed_status(client) == "healthy"
+
+    async def test_a_recent_success_after_failures_clears_failing(
+        self, client: httpx.AsyncClient, session_factory: SessionFactory
+    ) -> None:
+        """Newest first: the connector recovered on its latest attempt."""
+        await seed_point(
+            session_factory, value=42.0, timestamp=datetime.now(UTC) - timedelta(hours=1)
+        )
+        await seed_runs(session_factory, [True, False, False, False, False])
+
+        assert await fear_greed_status(client) == "healthy"
+
+    async def test_failing_takes_precedence_over_never_ingested(
+        self, client: httpx.AsyncClient, session_factory: SessionFactory
+    ) -> None:
+        await seed_runs(session_factory, [False, False, False])
+
+        assert await fear_greed_status(client) == "failing"
+
+    async def test_failures_for_one_source_do_not_affect_another(
+        self, client: httpx.AsyncClient, session_factory: SessionFactory
+    ) -> None:
+        await seed_point(
+            session_factory, value=42.0, timestamp=datetime.now(UTC) - timedelta(hours=1)
+        )
+        await seed_runs(session_factory, [False, False, False], source="eth_tvl")
+
+        assert await fear_greed_status(client) == "healthy"
 
     async def test_zero_registered_connectors_is_handled_not_crashed_on(
         self, client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch

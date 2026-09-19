@@ -7,6 +7,22 @@ import { z } from 'zod';
  * as `market.ts` and `features.ts`.
  */
 
+/**
+ * 'healthy': a new point has arrived within this source's own expected
+ * cadence. 'stale': it hasn't (see `services/api/app/connectors/health.py`).
+ * 'failing': its most recent sync attempts all errored, even if its last
+ * good point is still recent. 'never_ingested': no point has ever been
+ * stored.
+ */
+export const ConnectorHealthStatusSchema = z.enum([
+  'healthy',
+  'stale',
+  'failing',
+  'never_ingested',
+]);
+
+export type ConnectorHealthStatus = z.infer<typeof ConnectorHealthStatusSchema>;
+
 export const ConnectorSchema = z.object({
   source: z.string(),
   label: z.string(),
@@ -16,6 +32,7 @@ export const ConnectorSchema = z.object({
   /** Null when this connector is registered but has never been ingested. */
   latest_value: z.number().nullable(),
   latest_timestamp: z.string().datetime().nullable(),
+  health_status: ConnectorHealthStatusSchema,
 });
 
 export type Connector = z.infer<typeof ConnectorSchema>;

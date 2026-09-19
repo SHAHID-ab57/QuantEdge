@@ -347,6 +347,10 @@ class DefiLlamaConnector:
             "overwritten if a re-fetch reports a genuine revision."
         ),
         frequency="daily (most recent day may still be settling)",
+        # Real observed gap (dev DB, source=eth_tvl): exactly 1 day, every
+        # single row, no drift — the tightest, most reliable cadence of
+        # any registered connector.
+        expected_interval_seconds=86_400,
         requires_auth=False,
         version="1.0.0",
         aliases=("tvl", "defillama", "chain_tvl"),

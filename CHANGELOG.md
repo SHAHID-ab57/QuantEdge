@@ -8,6 +8,50 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Connector health monitoring (M5-E5-T1).** Three real connector bugs
+  in this project's history (Fear & Greed's missing `external_sources`
+  field, FRED's silent date-defaulting that discarded 865 of 866 values,
+  Etherscan's clock-read timing bug that returned zero rows every tick)
+  were each invisible from the outside: no error, no crash, a scheduler
+  that looked healthy while doing nothing useful. This adds the signal
+  that would have caught them; it is a health _signal_, not alerting.
+  - **Per-tick outcomes are now persisted, not only logged.** A new
+    `connector_sync_runs` table (migration `d2d7b08d88e9`) records each
+    sync attempt's received/inserted/updated/duplicates_skipped/rejected
+    counts and duration, plus a `success=False` row with an
+    `error_message` when a connector raises. Both periodic pipelines write
+    it: the generic `ExternalDataSyncScheduler` and Marketaux's separate
+    `NewsSyncScheduler`, through one shared helper. Recording is
+    best-effort and can never fail the ingestion it describes.
+  - **Staleness is per connector.** New
+    `ConnectorMetadata.expected_interval_seconds` (each connector declares
+    its own real cadence) and `app/connectors/health.py`:
+    `healthy` / `stale` / `failing` / `never_ingested`, where stale means
+    the newest point is older than 3 x that connector's own interval, not
+    one flat threshold. `failing` means its 3 most recent sync attempts
+    all errored, and outranks the others: without it a connector erroring
+    on every tick kept reading `healthy` until its staleness threshold
+    independently elapsed (up to 60 days for FRED), the same silent-failure
+    shape one layer deeper.
+  - **FRED's stale threshold is 60 days** (a new optional
+    `ConnectorMetadata.stale_after_seconds`), not the default 90: two
+    missed monthly releases is too slow to notice a broken monthly
+    connector, and 60 still clears FRED's real 42-day maximum gap.
+  - **`GET /connectors` gains `health_status`** (no second endpoint), and
+    each `/data-sources` card shows it as a pill.
+  - **Thresholds were checked against real gaps and one was wrong.**
+    `news_sentiment` has no weekend values (a Friday-to-Monday 72h gap in
+    6 of 6 weeks), so a plain daily cadence would have flagged it stale
+    every Monday morning; it now uses 36h (108h threshold).
+  - **Verified live**: one real sync tick against the real APIs and dev
+    Postgres wrote correct rows, and advancing the clock over the real
+    stored data flipped each connector at its own threshold (+2 days:
+    hourly sources only; +5 days: daily sources but not monthly FRED).
+    Known limits: `connector_sync_runs` has no retention, and the API
+    reports that a connector is `failing` but not why (the error messages
+    are recorded, not yet exposed).
+    See `ARCHITECTURE.md` § "Connector Health Monitoring".
+
 - **CI: automated testing, linting, and build checks on push/PR
   (M5-E4-T1).** GitHub Actions (`.github/workflows/ci.yml`), two jobs.
   `backend` runs real PostgreSQL 17 and Redis 7 service containers (not

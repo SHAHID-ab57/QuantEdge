@@ -19,6 +19,8 @@ from app.auth.token_revocation import TokenBlocklist
 from app.core.config import Settings, get_settings
 from app.db.session import get_db
 from app.models.user import User
+from app.monitoring.context import set_user_id
+from app.monitoring.error_tracking import set_user
 from app.repositories.audit_log import AuditLogRepository
 from app.repositories.users import UserRepository
 from app.services.audit import AuditService
@@ -106,4 +108,9 @@ async def get_current_user(
     user = await auth_service.get_user(claims.user_id)
     if user is None:
         raise InvalidTokenError("Token does not correspond to a real user")
+    # Only the id: never email or name, which are personal data an error
+    # tracker has no need for. Most routes are unauthenticated reads, so
+    # this is set only where a user is genuinely resolved.
+    set_user_id(str(user.id))
+    set_user(str(user.id))
     return user

@@ -5916,6 +5916,203 @@ residual case — a token neither source can vouch for — raising
 directly-measured account of exactly how wide that failure mode is in
 practice.
 
+### Structured Logging & Error Tracking (M5-E5-T2)
+
+**Why.** The connector health task (M5-E5-T1) produced a signal, a pill on
+a dashboard someone has to remember to open, and explicitly deferred the
+harder half: making a person actually _get told_. This task closes that,
+for connector failures and for any unhandled exception anywhere in the API.
+
+**Starting point.** `app/core/logging.py` called `logging.basicConfig` with
+a plain-text format (`%(asctime)s %(levelname)s [%(name)s] %(message)s`).
+No error tracking of any kind existed; an unhandled exception became a
+`logger.exception` line and a generic 500.
+
+**Structured logging: a formatter, not a framework.** Every existing
+`logger.*` call is untouched. `app/monitoring/json_logging.py`'s
+`JsonFormatter` (stdlib only, no new dependency) emits one JSON object per
+line: `timestamp` (ISO-8601 UTC, ms), `level`, `logger`, `message`,
+`exception` (the traceback, as a string) and any `extra=` fields as
+top-level keys. Inside a request it also adds `request_id`, `method`,
+`path` and, on authenticated routes, `user_id`. `LOG_FORMAT=text` is the
+opt-in for reading a local console. uvicorn's three loggers ship their own
+plain-text handlers with `propagate=False`; left alone they would
+interleave non-JSON lines with the app's JSON lines and break every parser
+reading the stream, so `configure_logging` brings them under the same
+handler. The existing suppression of httpx's request logger (which would
+print connector API keys from their query strings) is preserved and has a
+test.
+
+**Error tracking: the Sentry protocol, hosted-vs-self-hosted left open.**
+`sentry-sdk` speaks a wire protocol that Sentry, GlitchTip and Bugsink all
+accept, so the choice of backend is one value, `SENTRY_DSN`, and the code
+is identical for all three. Blank (the default) initializes nothing and
+every call is a no-op, the same soft-dependency convention as `REDIS_URL`.
+
+#### The cost and limits comparison (checked 2026-09-19)
+
+Numbers are from each vendor's own pricing page unless marked; third-party
+comparison sites disagreed with each other (one gave Sentry's retention as
+14 days, another 30), which is why the primary pages were used.
+
+| Option                    | Free tier                                                   | Retention             | Alerts on the free tier                           | Self-host requirement                                                                |
+| ------------------------- | ----------------------------------------------------------- | --------------------- | ------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| Sentry (hosted Developer) | 5k errors/month, 1 user, unlimited projects                 | 30-day lookback       | Email listed; Slack not listed                    | n/a (self-hosting not compared)                                                      |
+| GlitchTip (hosted)        | 1,000 events/month, unlimited projects and members          | Not stated on pricing | Not stated on the pricing page                    | n/a                                                                                  |
+| GlitchTip (self-hosted)   | Free, no event cap                                          | 90 days (default)     | Its own                                           | Postgres 14+ and one service; 512 MB RAM recommended, 256 MB minimum; Redis optional |
+| Bugsink (hosted)          | 15K events/month, 1 user, but only 5K events retained       | 5K events on free     | Slack, Discord, email, webhooks, on the free plan | n/a                                                                                  |
+| Bugsink (self-hosted)     | Free, all features, unlimited users, volume set by hardware | Set by hardware       | Same as hosted                                    | Not on the pricing page                                                              |
+
+Paid tiers, for scale only: GlitchTip $15/month for 100k events; Bugsink
+EUR 16/month for 75K events. Sentry's paid prices were not retrieved from
+its own page and are not quoted.
+
+**What this platform's volume actually is.** The design below sends only
+unhandled exceptions and one event per connector outage, never log lines
+and never performance traces. That is a handful of events a month in normal
+operation; even six connectors each flapping in and out of `failing` daily
+is about 200 a month. Every free tier's event cap is far above that, so
+volume does not decide anything here.
+
+**Recommendation: hosted Sentry, Developer (free) plan.** The reasoning,
+in the order it mattered:
+
+1. **Hosted, not self-hosted.** The production droplet is one 2-vCPU /
+   3.8 GB machine that was already CPU-starved earlier in this project
+   (see `docs/deployment/DEPLOYMENT.md`). A tracker on the same box uses
+   memory the API needs and, worse, dies with the box, exactly when its
+   alert would matter. A second droplet costs more than any of these free
+   tiers. That rules out both self-hosted options for now.
+2. **Retention.** Sentry keeps full events for 30 days; Bugsink's free
+   plan keeps only the newest 5K events; GlitchTip's hosted retention is
+   not published on its pricing page.
+3. **It was not chosen for being best known.** On volume all three tie,
+   and Bugsink is ahead on one thing that may matter: Slack, Discord and
+   webhook alerts are on its free plan, while Sentry's free plan page lists
+   email only. If a push notification to a chat channel is wanted rather
+   than an email, switch to Bugsink hosted; it is a DSN change and nothing
+   else. Sentry's one-user limit is fine for a solo operator and becomes a
+   reason to revisit if a second person joins.
+
+**Not verified:** that an alert email actually arrives. That needs an
+account and an alert rule in the chosen tracker; the code guarantees a
+distinct, correctly-grouped issue reaches it (below), not what the tracker
+does with it.
+
+#### What is sent, and what is deliberately not
+
+An error tracker's defaults are not acceptable for a platform with a login
+endpoint and connector API keys in query strings. `init_error_tracking`
+sets these explicitly, and each has a test that fails when the protection
+is removed (checked by disabling each one in turn):
+
+| Never sent                                                              | How                                                                                                                                                                                                                                                        |
+| ----------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Request bodies (a crash in a login-style route would ship the password) | `max_request_body_size="never"`; the SDK records that config removed it                                                                                                                                                                                    |
+| Local variables in stack frames                                         | `include_local_variables=False`. The SDK's scrubber matches whole key names, so a local named `hashed_password` or `api_token` would go out. Turning this on failed five tests at once, including leaking the `Authorization` header and the user's email. |
+| Default PII, cookies, the Authorization header                          | `send_default_pii=False`, plus extra scrubber key names                                                                                                                                                                                                    |
+| HTTP-client breadcrumbs                                                 | Dropped. The SDK's `httpx` breadcrumbs record the full URL, and Etherscan, FRED and Marketaux put their real key in the query string (`apikey`, `api_key`, `api_token`)                                                                                    |
+| An API key inside an exception message or query string                  | `redact_secrets` in `before_send` rewrites `name=value` for secret-looking names to `[Filtered]`                                                                                                                                                           |
+| Log lines as events                                                     | `LoggingIntegration(event_level=None)`: log records are breadcrumbs only                                                                                                                                                                                   |
+
+The last row is a quota decision as much as a privacy one. Left at the
+SDK default, an hourly sync failing for a week would be one event per tick
+per connector (over 1,000 a week for six connectors), exhausting a 5k plan.
+
+**What is sent:** the exception type, message (redacted) and stack trace,
+including a few lines of _source code_ around each frame (normal for an
+error tracker, and the reason the tests build their fake secrets at
+runtime: a secret spelled out in source would appear as context). Nothing
+in this repository hardcodes a secret; they come from the environment.
+Also: request method, URL (redacted) and non-sensitive headers, the
+`request_id` tag, the authenticated user's **id only** (never email or
+name), `environment` and a `release` of `eth-ai-api@<version>`.
+
+#### Connector `failing` becomes a real alert
+
+Health status is computed on read, so before this nothing watched the
+_transition_: a connector could start failing at 3am and stay red until
+someone opened `/data-sources`. `record_sync_run` (shared by both the
+generic and the Marketaux scheduler) now checks, right after recording a
+failed attempt, whether that attempt completed a streak of
+`FAILING_STREAK` (3) failures. `entered_failing` in
+`app/connectors/health.py` is the one definition of that transition, tested
+against `compute_health_status` so they cannot disagree about when
+"failing" starts. It fires once per outage, not once per tick: the 4th,
+5th... consecutive failure is not a transition, and a recovery followed by
+a second outage alerts again. The event carries the connector name as a
+tag, a fingerprint of `["connector-failing", source]` (so one connector is
+one issue), and the last three error messages, redacted, so the alert says
+_why_ and not only _that_.
+
+#### Request context, and a bug the tests found in the first design
+
+`RequestContextMiddleware` (pure ASGI; `BaseHTTPMiddleware` runs the app in
+a separate task and does not reliably carry `contextvars`) gives every
+request a `request_id`, used both in log lines and as a tag on error
+events, so an alert can be matched to the exact log lines of that request.
+
+The first version bound the context with a context manager and reset it on
+exit. A test comparing the log line to the event found that the most
+important log line, "Unhandled exception", had **no request id or path**.
+The app's catch-all handler runs in Starlette's `ServerErrorMiddleware`,
+which sits outside every user middleware, so the context was already
+unbound. The fix keeps the context dict on the request
+(`scope["state"]["log_context"]`) and rebinds it in the handler.
+
+**Ordering constraint:** `init_error_tracking` runs at the top of
+`create_app()`, not in the lifespan, because the SDK's Starlette
+integration hooks the middleware stack, which Starlette builds on the
+first ASGI call, before the lifespan starts.
+
+#### Verified against a real server, not only an in-process transport
+
+Beyond the unit tests (which assert on the SDK's actual wire payload), a
+throwaway local Bugsink container (a real Sentry-protocol server, since
+removed) received events from the real SDK over real HTTP. It stored
+exactly two issues: the unhandled `RuntimeError`, with its message showing
+`apikey=[Filtered]` and the `request_id` tag, and the connector alert as
+**one** event after **five** consecutive failures were recorded. The fake
+API key placed in both error messages appeared nowhere in what the server
+stored. This proves the payload is accepted, grouped and scrubbed by a
+real server. It is not the recommended hosted service, and it does not
+prove notification delivery.
+
+Bugs found and fixed while testing, none reported by anyone else: the
+missing request context in the exception handler (above); `is_enabled()`
+answering "yes" for the DSN-less client the SDK leaves behind after a
+reset; a user id and tag written to the SDK's shared process-wide scope
+even with error tracking disabled (with no client there is no per-request
+scope isolation, so one request's user could colour a later, unrelated
+event; found only because the full suite failed while the file alone
+passed, and fixed by making both calls no-ops when disabled); and a
+redaction pattern that also consumed a trailing comma
+(deliberately kept: over-redacting a punctuation mark beats leaving a
+fragment of a secret that itself contained a comma).
+
+#### Known limitations
+
+- **Changing `LOG_FORMAT`'s default changes the log format on the next
+  deploy.** Anything that parsed the old plain-text lines (a `grep` on
+  `docker compose logs`) sees JSON instead. `LOG_FORMAT=text` restores it.
+- **An alert only fires if the API process is running and recording sync
+  runs.** If the process or the scheduler task dies, no failing alert
+  fires; the dashboard's staleness status eventually reports the silence.
+  Nothing watches the API from outside (no uptime monitor exists).
+- **No recovery notification.** A connector coming back is not reported.
+- **Exceptions inside background asyncio tasks** (the schedulers'
+  loops) are not covered by the ASGI integration. Each source's failure is
+  caught and recorded per tick, which is what the `failing` alert reads,
+  but a bug that kills a scheduler loop outright has not been tested for
+  capture.
+- **User id is attached only on authenticated routes.** Most reads are
+  unauthenticated, so their events carry no user.
+- **Nothing monitors the tracker's own quota or health.**
+- **uvicorn's access log still prints query strings.** Unchanged from
+  before; it now appears as a `message` field.
+- **Not deployed.** Nothing here is active on the production droplet until
+  it is deployed and `SENTRY_DSN` is set in `services/api/.env`.
+
 ### Feature Store
 
 > Not built. Features are computed on demand and exported; no persisted,
@@ -5958,7 +6155,9 @@ Management" for the current, honest boundary between the two.
 
 ### Monitoring
 
-> To be completed in future tasks.
+> See § "Connector Health Monitoring" (under External Data Connectors) and
+> § "Structured Logging & Error Tracking" above. No uptime monitor or
+> metrics collection exists yet.
 
 ## Data Flow
 

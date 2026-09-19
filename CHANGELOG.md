@@ -8,6 +8,64 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Structured logging and error tracking; connector `failing` now raises
+  a real alert (M5-E5-T2).** The connector health task deferred making a
+  person actually get told; this closes it.
+  - **Logs are one JSON object per line** (a formatter change on stdlib
+    `logging`, no new framework, no existing log call touched): timestamp,
+    level, logger, message, exception traceback, `extra=` fields, and
+    `request_id`/`method`/`path`/`user_id` inside a request. uvicorn's own
+    loggers are brought under the same handler so no plain-text lines are
+    interleaved. `LOG_FORMAT=text` restores the old console line.
+    **Behaviour change on next deploy: the log format changes for
+    anything that parsed the old text lines.**
+  - **Error tracking over the Sentry protocol** (`sentry-sdk`), optional
+    and off unless `SENTRY_DSN` is set. The same DSN works with Sentry,
+    GlitchTip or Bugsink, so the backend is a one-value choice. The
+    investigation (real, current limits from each vendor's pricing page,
+    in `ARCHITECTURE.md`) recommends hosted Sentry's free plan: hosted so
+    the tracker does not die with the 2-vCPU droplet it monitors, and
+    30-day retention; Bugsink hosted is the alternative if Slack/webhook
+    alerts are wanted on the free plan.
+  - **What is deliberately never sent:** request bodies, local variables,
+    HTTP-client breadcrumbs, `Authorization`/cookies, and any
+    `name=value` API key in an error message or query string (Etherscan,
+    FRED and Marketaux put keys in query strings). Each protection has a
+    test that was confirmed to fail when the protection is removed. Log
+    lines are breadcrumbs, never events, so an hourly failing sync cannot
+    exhaust a free quota.
+  - **A connector entering `failing` raises one alert per outage**, not
+    one per tick: 5 consecutive failures produce one event; a recovery
+    then a second outage alerts again. The alert carries the last three
+    (redacted) error messages. `entered_failing` shares one definition with
+    `compute_health_status`, and is tested against it.
+  - **Bugs found by the tests while building it:** the most important log
+    line ("Unhandled exception") had no request id or path, because the
+    app's catch-all handler runs outside every user middleware (fixed by
+    carrying the context on the request); `is_enabled()` reported true for
+    the DSN-less client the SDK leaves behind after a reset; and, found
+    only because the full suite failed while the file alone passed, the
+    user id/request tag were written to the SDK's shared global scope even
+    with tracking disabled (now a no-op unless a DSN is configured).
+  - **Verified against a real server**, not only an in-process transport: a
+    throwaway local Bugsink container received the real SDK's events over
+    real HTTP and stored exactly two issues (the unhandled exception, and
+    the connector alert as one event after five failures), with the fake
+    API key in both messages redacted. **Not verified:** delivery of an
+    email or chat notification, and the recommended hosted tracker itself;
+    both need an account and are the operator's step.
+  - `SENTRY_DSN` is forced empty in the test suite's environment, the same
+    leak class as `DATABASE_URL`/`REDIS_URL`, so a developer's real DSN can
+    never make tests report to a real project. `.env.example` gains
+    `LOG_FORMAT`, `SENTRY_DSN`, `SENTRY_ENVIRONMENT` (checked against
+    `Settings` in both directions).
+  - `CLAUDE.md` gains a working-agreement rule: never pipe a verification
+    command through anything without capturing its own exit code first.
+  - Known limits: not deployed anywhere yet; no recovery notification;
+    exceptions that kill a scheduler loop outright are untested for
+    capture; nothing monitors the API from outside. See `ARCHITECTURE.md`
+    § "Structured Logging & Error Tracking".
+
 - **Connector health monitoring (M5-E5-T1).** Three real connector bugs
   in this project's history (Fear & Greed's missing `external_sources`
   field, FRED's silent date-defaulting that discarded 865 of 866 values,

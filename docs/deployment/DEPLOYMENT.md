@@ -249,7 +249,16 @@ rediscovered the hard way:
 
 Nothing beyond manual checks exists. There is no metrics collection, no
 log aggregation, no uptime monitoring, and no alerting configured anywhere
-for the production droplet. The only ways to check on the system today
+for the production droplet.
+
+**Code now exists, but is not active in production.** M5-E5-T2 added JSON
+logging and optional error tracking (`SENTRY_DSN`) to the API. Neither
+takes effect on the droplet until that commit is deployed, and error
+tracking additionally needs `SENTRY_DSN` set in `services/api/.env` (then
+`docker compose up -d api`, not `restart`, per the gotcha above). After
+that deploy, `docker compose logs api` prints JSON lines instead of the old
+text, so anything grepping them changes; `LOG_FORMAT=text` restores it.
+Still true regardless: no uptime monitor watches the API from outside. The only ways to check on the system today
 are:
 
 - `docker compose -f infra/docker/docker-compose.yml logs -f <service>`,

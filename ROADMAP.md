@@ -34,7 +34,7 @@ a versioned dataset citation, a recorded experiment) — it is now complete.
 | 2         | Prediction & Backtesting                     | COMPLETE    |
 | 3         | Paper Trading & Risk                         | COMPLETE    |
 | 4         | Data Breadth                                 | COMPLETE    |
-| 5         | Production Hardening                         | NOT STARTED |
+| 5         | Production Hardening                         | COMPLETE    |
 | 6         | Live Trading (gated on extensive validation) | NOT STARTED |
 
 **Milestone 1 — Research & Training Platform (COMPLETE).** Market data
@@ -442,11 +442,21 @@ closed under two model classes, five horizons, and three regimes.
 `docs/research/CONNECTOR_FEATURE_VALUE_ASSESSMENT.md` § "Gradient
 Boosting spot-check".
 
-**Milestone 5 — Production Hardening.** CI/CD (none exists — all quality
-gates are local git hooks today), structured logging/tracing/metrics/
-error tracking (today: plain `logging.basicConfig` only), inbound rate
-limiting, and a real background job/task queue (today: in-process
-`asyncio` loops only). In progress.
+**Milestone 5 — Production Hardening (COMPLETE, against the scope
+below).** Delivered: authentication and an audit trail, inbound rate
+limiting and login lockout, Redis (rate limiting, lockout, token
+revocation), CI/CD (GitHub Actions), connector health monitoring, and
+structured logging with error tracking. **This milestone was originally
+scoped wider, and three of those items were not built:** distributed
+tracing, metrics collection, and a real background job/task queue (the
+schedulers are still in-process `asyncio` loops inside the single API
+process, which is also why the API cannot run multiple workers; see
+`docs/deployment/DEPLOYMENT.md`). They are recorded here as deliberately
+out of this milestone's delivered scope, not forgotten: nothing was
+descoped silently, and a future task can reopen any of them. Also not
+done, and not part of "complete": nothing here is deployed to the
+production droplet yet, and no uptime monitor or external check of the API
+exists.
 
 **Epic 5.1 — Authentication & Audit Trail (M5-E1-T1) is done.**
 Basic bearer-token authentication for a small number of real users
@@ -504,8 +514,29 @@ by a test written to exercise it. A
 deployment-readiness note (uvicorn's default `X-Forwarded-For` trust)
 added to `ARCHITECTURE.md` § "Deployment View" for whoever configures a
 future reverse proxy. See `ARCHITECTURE.md` § "Redis", § "Token
-Revocation", `CHANGELOG.md`, and `TASKBOOK.md` `M5-E3-T1`. CI/CD and
-monitoring round out the rest of this milestone.
+Revocation", `CHANGELOG.md`, and `TASKBOOK.md` `M5-E3-T1`.
+
+**Epic 5.4 — CI/CD (M5-E4-T1) is done.** A GitHub Actions workflow runs
+the exact checks previously run by hand on every push and pull request,
+against real PostgreSQL and Redis service containers. Its first real run
+failed, correctly, exposing 55 real `pyright` errors a locally piped
+command had been hiding; the fix pushed after it passed both jobs. Live
+external-API verification is deliberately excluded. See `ARCHITECTURE.md`
+§ "CI/CD Pipeline" and `TASKBOOK.md` `M5-E4-T1`.
+
+**Epic 5.5 — Monitoring (M5-E5-T1, M5-E5-T2) is done.** Connector health:
+per-tick sync outcomes are persisted, and each connector is `healthy`,
+`stale`, `failing` or `never_ingested` against its own real cadence
+(thresholds checked against real gap data, which changed two decisions).
+Logging and error tracking: logs are one JSON object per line; unhandled
+exceptions and a connector entering `failing` reach an error tracker over
+the Sentry protocol, with request bodies, local variables and API keys
+deliberately never sent. Two verification steps remain the operator's
+own: confirming an event and its notification in the chosen hosted tracker
+(verified here only against a local Sentry-compatible server), and the
+`/data-sources` health pill in a browser. See `ARCHITECTURE.md`
+§ "Connector Health Monitoring" and § "Structured Logging & Error
+Tracking".
 
 **Milestone 6 — Live Trading (gated on extensive validation).** Real order
 execution against a live exchange. Deliberately last, and deliberately

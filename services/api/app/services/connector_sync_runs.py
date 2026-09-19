@@ -12,7 +12,9 @@ from datetime import UTC, datetime
 
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
+from app.connectors.health import FAILING_STREAK, entered_failing
 from app.models.external_data import ConnectorSyncRun
+from app.monitoring.error_tracking import capture_connector_failing
 from app.repositories.connector_sync_runs import ConnectorSyncRunRepository
 
 logger = logging.getLogger("app.services.connector_sync_runs")
@@ -49,7 +51,8 @@ async def record_sync_run(
         return
     session = async_sessionmaker(bind=engine, expire_on_commit=False)()
     try:
-        await ConnectorSyncRunRepository(session).record(
+        repository = ConnectorSyncRunRepository(session)
+        await repository.record(
             ConnectorSyncRun(
                 source=source,
                 started_at=started_at,
@@ -64,7 +67,28 @@ async def record_sync_run(
                 error_message=error_message,
             )
         )
+        if not success:
+            await _alert_if_newly_failing(repository, source)
     except Exception:
         logger.exception("Failed to record sync run for %s", source)
     finally:
         await session.close()
+
+
+async def _alert_if_newly_failing(repository: ConnectorSyncRunRepository, source: str) -> None:
+    """Raise an alert at the moment a connector's failure streak completes.
+
+    The health status (`app.connectors.health`) is computed on read, so
+    nothing was watching for the *transition*: a connector could go
+    `failing` at 3am and stay that way until someone opened the dashboard.
+    This is that watcher, run right after each failed attempt is recorded.
+    It reports once per outage: `entered_failing` is false for the 4th,
+    5th... consecutive failure.
+    """
+    recent = await repository.list_recent(source, limit=FAILING_STREAK + 1)
+    if entered_failing([run.success for run in recent]):
+        capture_connector_failing(
+            source,
+            recent_errors=[run.error_message or "" for run in recent[:FAILING_STREAK]],
+            streak=FAILING_STREAK,
+        )

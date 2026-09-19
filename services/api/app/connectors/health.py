@@ -25,6 +25,7 @@ __all__ = [
     "STALE_MULTIPLIER",
     "ConnectorHealthStatus",
     "compute_health_status",
+    "entered_failing",
 ]
 
 ConnectorHealthStatus = Literal["healthy", "stale", "failing", "never_ingested"]
@@ -45,6 +46,24 @@ STALE_MULTIPLIER = 3
 #: real, short enough that it does not wait out a staleness threshold
 #: (up to 60 days for FRED) to be noticed.
 FAILING_STREAK = 3
+
+
+def _streak_failed(recent_run_successes: Sequence[bool]) -> bool:
+    latest_attempts = recent_run_successes[:FAILING_STREAK]
+    return len(latest_attempts) == FAILING_STREAK and not any(latest_attempts)
+
+
+def entered_failing(recent_run_successes: Sequence[bool]) -> bool:
+    """Whether the newest attempt is the one that *made* the connector fail.
+
+    `recent_run_successes` is newest first and includes the attempt just
+    recorded. True only at the transition: the newest `FAILING_STREAK`
+    attempts all failed, but the streak was not already complete one
+    attempt earlier. Attempt number 4, 5, 6... of a continuing outage is
+    not a transition, so an alert built on this fires once per outage, not
+    once per tick.
+    """
+    return _streak_failed(recent_run_successes) and not _streak_failed(recent_run_successes[1:])
 
 
 def compute_health_status(
@@ -81,8 +100,7 @@ def compute_health_status(
     state stays `failing` until a success is recorded, and staleness is
     what eventually reports the silence.
     """
-    latest_attempts = recent_run_successes[:FAILING_STREAK]
-    if len(latest_attempts) == FAILING_STREAK and not any(latest_attempts):
+    if _streak_failed(recent_run_successes):
         return "failing"
     if latest_timestamp is None:
         return "never_ingested"

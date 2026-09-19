@@ -20,6 +20,8 @@ from app.core.logging import setup_logging
 from app.core.redis import dispose_redis_client, get_redis_client, probe_redis
 from app.db.engine import dispose_engine, get_engine, probe_database
 from app.middleware.rate_limit import RateLimitMiddleware, build_rate_limiter
+from app.middleware.request_context import RequestContextMiddleware
+from app.monitoring.error_tracking import init_error_tracking
 from app.runtime import shutdown_runtime, start_runtime
 from app.services import background_tasks
 
@@ -124,6 +126,12 @@ def create_app() -> FastAPI:
     """Create and configure the FastAPI application."""
     settings = get_settings()
 
+    # Before the app object exists, deliberately: the SDK's Starlette
+    # integration hooks the middleware stack, which Starlette builds on
+    # the first ASGI call — earlier than the lifespan, where a call like
+    # `setup_logging()` can safely live.
+    init_error_tracking(settings)
+
     app = FastAPI(
         title=settings.app_name,
         version=settings.app_version,
@@ -158,6 +166,9 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
     app.add_middleware(RateLimitMiddleware, settings=settings)
+    # Added last, so it is the outermost: everything below (rate limiting,
+    # handlers, routes) runs with the request id bound.
+    app.add_middleware(RequestContextMiddleware)
 
     register_exception_handlers(app)
     app.include_router(api_router)

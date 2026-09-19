@@ -597,3 +597,20 @@ DECISIONS.md duplication above; `docs/database/DATABASE.md` and
   standard applied retroactively to Milestones 2–3, which all came back
   genuinely real). A chat-reported status is not evidence; the repository
   is.
+- **Never pipe a verification command through anything without capturing
+  its own exit code first.** A test, lint, typecheck, `pyright`, or build
+  command must not be run as `cmd | tail`, `cmd | grep`, or any other pipe
+  whose result is then trusted: without `pipefail`, a pipe reports the
+  _last_ command's status (`tail` always succeeds), so a failing gate
+  reads as passing. Redirect the output to a file and record the command's
+  own status (`cmd > out.log 2>&1; echo "EXIT=$?"`), or run it unpiped, and
+  report that exit code plus the real summary line. A background task
+  "completing" only means its wrapper shell ended, never that the check
+  passed. Added after this happened three times across three tasks; two are
+  documented in this repo's history: a `pyright` run piped through `tail`
+  reported success while 55 real type errors were present (found only by a
+  real GitHub Actions run, M5-E4-T1), and a frontend `pnpm test` reported
+  exit 0 while 5 tests were failing (M5-E5-T1). The CI workflow
+  (`.github/workflows/ci.yml`) has no such problem, since GitHub Actions
+  fails a step on its own exit code, which is the standard to match
+  locally.

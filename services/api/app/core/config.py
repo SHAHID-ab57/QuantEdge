@@ -26,6 +26,18 @@ class Settings(BaseSettings):
     app_version: str = "0.1.0"
     app_env: Literal["development", "test", "staging", "production"] = "development"
     log_level: str = "INFO"
+    #: `json` (default) emits one JSON object per line — what a log
+    #: aggregator or `jq` can actually parse — `text` is the old
+    #: human-readable line, an opt-in for reading a local dev console.
+    log_format: Literal["json", "text"] = "json"
+    #: Error tracking (M5-E5-T2). Blank disables it entirely: no SDK
+    #: initialization, no network calls, every capture call a no-op — the
+    #: same soft-dependency convention as `redis_url`. Any Sentry-protocol
+    #: server accepts the same DSN (Sentry, GlitchTip, Bugsink), so this
+    #: is the only thing that changes when switching between them.
+    sentry_dsn: str = ""
+    #: Sentry "environment" tag; blank falls back to `app_env`.
+    sentry_environment: str = ""
     cors_origins: list[str] = [
         "http://localhost:3000",
         "http://127.0.0.1:3000",

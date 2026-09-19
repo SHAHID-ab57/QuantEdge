@@ -4,7 +4,12 @@ fixed inputs rather than through a real ingestion run."""
 
 from datetime import UTC, datetime, timedelta
 
-from app.connectors.health import FAILING_STREAK, STALE_MULTIPLIER, compute_health_status
+from app.connectors.health import (
+    FAILING_STREAK,
+    STALE_MULTIPLIER,
+    compute_health_status,
+    entered_failing,
+)
 
 NOW = datetime(2026, 9, 18, 12, 0, 0, tzinfo=UTC)
 ONE_DAY = 86_400
@@ -276,3 +281,57 @@ class TestFredThresholds:
             )
             == "stale"
         )
+
+
+class TestEnteredFailing:
+    """The transition, not the state: an alert built on this must fire once
+    per outage, not once per tick. Sequences are newest first and include
+    the attempt just recorded."""
+
+    def test_the_attempt_that_completes_the_streak_is_the_transition(self) -> None:
+        assert entered_failing([False, False, False]) is True
+
+    def test_earlier_attempts_in_the_streak_are_not(self) -> None:
+        assert entered_failing([False]) is False
+        assert entered_failing([False, False]) is False
+
+    def test_continuing_failures_after_the_transition_are_not(self) -> None:
+        assert entered_failing([False, False, False, False]) is False
+        assert entered_failing([False] * 10) is False
+
+    def test_the_streak_completing_right_after_a_success_is_a_transition(self) -> None:
+        assert entered_failing([False, False, False, True]) is True
+
+    def test_a_streak_broken_by_a_success_is_not(self) -> None:
+        assert entered_failing([False, False, True]) is False
+        assert entered_failing([True, False, False, False]) is False
+
+    def test_a_second_outage_after_recovery_is_a_new_transition(self) -> None:
+        recovered_then_failed_again = [False, False, False, True, False, False, False]
+        assert entered_failing(recovered_then_failed_again) is True
+
+    def test_no_history_is_not_a_transition(self) -> None:
+        assert entered_failing([]) is False
+
+    def test_agrees_with_compute_health_status_on_when_failing_starts(self) -> None:
+        """One definition of 'failing': the transition is exactly the moment
+        the status flips to failing."""
+        history: list[bool] = []
+        flips = []
+        for outcome in [True, False, False, False, False, True, False, False, False]:
+            history.insert(0, outcome)
+            was = compute_health_status(
+                latest_timestamp=FRESH,
+                expected_interval_seconds=ONE_DAY,
+                now=NOW,
+                recent_run_successes=history[1:],
+            )
+            now_status = compute_health_status(
+                latest_timestamp=FRESH,
+                expected_interval_seconds=ONE_DAY,
+                now=NOW,
+                recent_run_successes=history,
+            )
+            flips.append(entered_failing(history))
+            assert entered_failing(history) == (now_status == "failing" and was != "failing")
+        assert flips.count(True) == 2

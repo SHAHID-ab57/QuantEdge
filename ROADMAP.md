@@ -159,6 +159,8 @@ intended bounded contexts. **Independently re-verified 2026-09-06**, the
 same way as Milestone 2 — see
 `docs/audits/MILESTONE_2_3_VERIFICATION.md`.
 
+**Milestone 3, Epic 3.5 — Futures Mechanics and Leverage (design only, not built).** Milestone 3's original scope above is unchanged and remains complete. Epic 3.5 extends it: short positions, margin and leverage, which the paper trading engine deliberately excludes today. Its first task, M3-E5-T1, is a research and design spike and wrote no application code: it documents Delta Exchange India's real perpetual-futures mechanics, designs how shorts, margin, liquidation and funding would fit the existing engine and its risk limits, and presents the leverage-sizing decision for a human to make, unresolved. See `docs/research/FUTURES_MECHANICS_AND_LEVERAGE_DESIGN.md`. Nothing in that design is implemented, and the epic's build tasks are not started until its decisions have answers.
+
 **Milestone 4 — Data Breadth (COMPLETE).** The additional external data
 connectors this platform has designed for but never implemented —
 Marketaux (news/sentiment), Etherscan (on-chain), FRED (macro),

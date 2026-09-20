@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { cleanup, render, screen } from '@testing-library/react';
+import { createTheme } from '@mui/material/styles';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as connectorsApi from '@/lib/api/connectors';
 import type { Connector, ConnectorHistory } from '@/types/api/connectors';
@@ -72,5 +73,72 @@ describe('ConnectorCard — health status', () => {
       health_status: 'never_ingested',
     });
     expect(screen.getByText('Never ingested')).toBeInTheDocument();
+  });
+});
+
+describe('ConnectorCard — card treatment by health', () => {
+  /** The card itself (the section), not the pill inside it. */
+  function cardStyle(health_status: Connector['health_status']) {
+    const { container } = renderCard({ ...baseConnector, health_status });
+    const card = container.querySelector('section');
+    if (!card) throw new Error('card section not rendered');
+    const style = getComputedStyle(card);
+    return {
+      status: card.getAttribute('data-health-status'),
+      border: style.borderTopColor,
+      ring: style.boxShadow,
+      background: style.backgroundColor,
+    };
+  }
+
+  afterEach(cleanup);
+
+  it('exposes the health status on the card for inspection', () => {
+    expect(cardStyle('failing').status).toBe('failing');
+  });
+
+  // jsdom does not resolve the CSS variable MUI uses for an untinted Paper's
+  // (absent) shadow, so "no ring" is asserted as "no explicit ring drawn",
+  // not as the literal `none` a real browser reports.
+  const RING = '0 0 0 1px';
+  const errorColor = createTheme().palette.error.main;
+
+  it('tints a failing card: a red border, an outer ring in the error color, and a red wash', () => {
+    const healthy = cardStyle('healthy');
+    cleanup();
+    const failing = cardStyle('failing');
+
+    expect(failing.border).not.toBe(healthy.border);
+    expect(failing.background).not.toBe(healthy.background);
+    // The ring is drawn outside the box (box-shadow), never a thicker border,
+    // so a failing card cannot change size and shift the grid.
+    expect(failing.ring).toContain(RING);
+    expect(failing.ring.toLowerCase()).toContain(errorColor.toLowerCase());
+    expect(healthy.ring).not.toContain(RING);
+  });
+
+  it('tints a stale card, more quietly than a failing one, with no ring', () => {
+    const healthy = cardStyle('healthy');
+    cleanup();
+    const stale = cardStyle('stale');
+    cleanup();
+    const failing = cardStyle('failing');
+
+    expect(stale.border).not.toBe(healthy.border);
+    expect(stale.border).not.toBe(failing.border);
+    expect(stale.background).not.toBe(healthy.background);
+    expect(stale.background).not.toBe(failing.background);
+    expect(stale.ring).not.toContain(RING);
+  });
+
+  it('leaves healthy and never-ingested cards untinted, identical to each other', () => {
+    const healthy = cardStyle('healthy');
+    cleanup();
+    const neverIngested = cardStyle('never_ingested');
+
+    expect(neverIngested.border).toBe(healthy.border);
+    expect(neverIngested.background).toBe(healthy.background);
+    expect(neverIngested.ring).toBe(healthy.ring);
+    expect(healthy.ring).not.toContain(RING);
   });
 });

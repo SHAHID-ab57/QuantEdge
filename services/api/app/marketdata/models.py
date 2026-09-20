@@ -84,9 +84,9 @@ class FundingRateEvent(MarketDataEvent):
 
     Arrives on its own channel, not the ticker — hence a separate domain
     event rather than a field on :class:`TickerEvent`. ``funding_rate`` is
-    a signed fraction per funding interval (e.g. ``-0.0002`` = the shorts
-    pay the longs 0.02% this interval); it is deliberately unconstrained in
-    sign.
+    a signed percentage per funding interval, Delta's own unit (e.g.
+    ``-0.0067`` = the shorts pay the longs 0.0067% this interval, ``0.01`` =
+    0.01%); it is deliberately unconstrained in sign.
     """
 
     funding_rate: Decimal

@@ -66,7 +66,7 @@ candles:
   "open_interest": "1793422",
   "price_change_24h": "-0.2466",
   "turnover_24h": "702460936.06",
-  "funding_rate": "0.000757002682453864", // signed fraction per interval
+  "funding_rate": "0.001666603719307179", // signed PERCENT per interval (0.01 = 0.01%)
   "funding_interval_seconds": 28800,
   "next_funding_time": "2026-09-11T00:00:00Z",
 }
@@ -2142,7 +2142,7 @@ is implicit); the server replies with an immediate `snapshot` and then
 for a client `ping`. The `snapshot` message carries `trade`, `ticker`,
 `funding` and `orderbook` fields (each `null` until first seen). The
 `ticker` payload now includes `open_interest`; the `funding` message /
-snapshot field carries `funding_rate` (signed fraction per interval),
+snapshot field carries `funding_rate` (signed percent per interval, e.g. `0.01` = 0.01%),
 `funding_interval_seconds`, `next_funding_time` and `event_time` — funding
 frames are infrequent, so `funding` stays `null` for a while after a fresh
 connection. Order-book messages carry an already-sorted (bids descending,

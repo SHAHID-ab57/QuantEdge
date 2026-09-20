@@ -31,7 +31,7 @@ export type LiveTickerData = z.infer<typeof LiveTickerDataSchema>;
 /**
  * The `funding_rate` frame — its own channel on the Delta feed (not the
  * ticker), so its own message type here. `funding_rate` is a signed
- * fraction per funding interval; frames are infrequent (roughly one per
+ * percentage per funding interval (Delta's own unit: `0.01` = 0.01%); frames are infrequent (roughly one per
  * interval plus one on each rate change), so `funding` can stay `null` on
  * the snapshot for a while after a fresh connection.
  */

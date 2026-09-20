@@ -45,6 +45,7 @@ from app.paper_trading.errors import (
     StopLossNotBelowTakeProfitError,
     StrategyMissingTrainingJobError,
     StrategyTrainingJobMissingSymbolError,
+    ThresholdsOnReducingOrderError,
     TradingHaltedError,
 )
 from app.repositories.audit_log import AuditLogRepository
@@ -116,7 +117,7 @@ async def seed_market(session_factory: SessionFactory, *, symbol: str) -> None:
         await session.commit()
 
 
-async def _persisted_test_user_id(session_factory: SessionFactory) -> uuid.UUID:
+async def persisted_test_user_id(session_factory: SessionFactory) -> uuid.UUID:
     """A real, persisted `User` row for these unit tests' `user_id=` calls.
 
     `audit_log.user_id` is a real foreign key, so the id these tests
@@ -195,7 +196,7 @@ async def build_service(
     session_factory: SessionFactory, state_manager: MarketStateManager
 ) -> _TestPaperTradingService:
     session = session_factory()
-    user_id = await _persisted_test_user_id(session_factory)
+    user_id = await persisted_test_user_id(session_factory)
     return _TestPaperTradingService(
         account_repository=PaperAccountRepository(session),
         order_repository=PaperOrderRepository(session),
@@ -233,6 +234,28 @@ async def publish_ticker(bus: EventBus, symbol: str, price: str) -> None:
         )
     )
     await bus.drain()
+
+
+async def induce_equity_halt(
+    service: PaperTradingService, bus: EventBus, symbol: str, account_id: uuid.UUID
+) -> None:
+    """Halt an account the way the drawdown limit now actually works: by
+    *losing equity*, not by spending cash.
+
+    Buy 5 units at a $1000 quote (a $5,002.50 position, cash falls to
+    $4,992.50, equity stays ~$9,995), then let the price fall to $500:
+    equity is now ~$7,492 (a ~25% drawdown from the $10,000 peak against a
+    20% limit). Nothing has *traded* since the loss, so the halt only lands
+    when the account next tries to add risk — which is rejected, and
+    persisted, here."""
+    await service.place_order(
+        account_id, PaperOrderRequest(symbol=symbol, side="buy", quantity=Decimal("5"))
+    )
+    await publish_ticker(bus, symbol, "500")
+    with pytest.raises(TradingHaltedError):
+        await service.place_order(
+            account_id, PaperOrderRequest(symbol=symbol, side="buy", quantity=Decimal("0.001"))
+        )
 
 
 def assert_decimal_approx(value: Decimal | None, expected: float) -> None:
@@ -804,11 +827,15 @@ class TestExposureLimit:
 
 @pytest.mark.asyncio
 class TestDrawdownHalt:
-    """`max_drawdown_pct` — evaluated against the account's own cash
-    `balance` after a trade completes (this feature's own spec), isolated
-    from the other two limits (both wide open here)."""
+    """`max_drawdown_pct` — evaluated against the account's own **equity**
+    (cash + margin + unrealized PnL at live prices), not its cash balance
+    (D3, M3-E5-T2). This is a deliberate, announced behaviour change: the
+    old rule halted an account merely for *spending* more than the limit's
+    share of its cash on a position, with no price movement at all — the
+    first test below is that exact old scenario, now asserting the opposite.
+    Isolated from the other two limits (both wide open here)."""
 
-    async def test_a_trade_that_breaches_drawdown_halts_the_account(
+    async def test_spending_cash_on_a_position_no_longer_halts_the_account(
         self, session_factory: SessionFactory
     ) -> None:
         await seed_market(session_factory, symbol="PTDRAWDOWNUSD")
@@ -826,40 +853,87 @@ class TestDrawdownHalt:
         )
         account_id = uuid.UUID(account.id)
 
-        # 2 units at a ~$1000.5 fill: notional $2001.0, fee $2.001, total
-        # cost $2003.001 — new balance $7996.999, a 20.03% drop from the
-        # $10,000 peak, just over the 20% drawdown limit. The order
-        # itself is not blocked by its own resulting halt (the halt is
-        # evaluated *after* this trade, per this feature's own spec).
+        # The old scenario: 2 units at a ~$1000.5 fill drops *cash* to
+        # $7,996.999 (a 20.03% drop) — but equity is ~$9,997, a 0.03% loss
+        # (the fee and the slippage), so nothing is halted.
         order = await service.place_order(
             account_id,
             PaperOrderRequest(symbol="PTDRAWDOWNUSD", side="buy", quantity=Decimal("2")),
         )
         assert float(order.fill_price) == pytest.approx(1000.5)
 
+        after = await service.get_account(account_id)
+        assert float(after.balance) == pytest.approx(7996.999)
+        assert after.trading_halted is False
+        risk = await service.risk_summary(account_id)
+        assert float(risk.equity) == pytest.approx(9996.999)
+        assert float(risk.current_drawdown_pct) == pytest.approx(0.03001, abs=1e-4)
+
+    async def test_an_equity_loss_past_the_limit_halts_the_account_and_rejects_new_risk(
+        self, session_factory: SessionFactory
+    ) -> None:
+        await seed_market(session_factory, symbol="PTDRAWDOWN2USD")
+        bus = EventBus()
+        state_manager = MarketStateManager().attach(bus)
+        await publish_ticker(bus, "PTDRAWDOWN2USD", "1000")
+        service = await build_service(session_factory, state_manager)
+        account = await service.create_account(
+            PaperAccountCreateRequest(
+                starting_balance=Decimal("10000"),
+                max_position_size_pct=GENEROUS_MAX_PCT,
+                max_exposure_pct=GENEROUS_MAX_PCT,
+                max_drawdown_pct=Decimal("20"),
+            )
+        )
+        account_id = uuid.UUID(account.id)
+
+        await induce_equity_halt(service, bus, "PTDRAWDOWN2USD", account_id)
+
         halted_account = await service.get_account(account_id)
         assert halted_account.trading_halted is True
         assert float(halted_account.peak_balance) == pytest.approx(10000.0)
 
-        # Any further order — even one that would otherwise be perfectly
-        # fine — is rejected outright until explicitly resumed.
-        with pytest.raises(TradingHaltedError):
-            await service.place_order(
-                account_id,
-                PaperOrderRequest(symbol="PTDRAWDOWNUSD", side="buy", quantity=Decimal("0.001")),
-            )
+        # Still halted, cash untouched by the rejected attempt.
+        assert float(halted_account.balance) == pytest.approx(4992.4975)
 
-        # Still halted, still exactly the same balance — the rejected
-        # attempt never touched anything.
+    async def test_a_halt_blocks_new_risk_but_never_a_reducing_order(
+        self, session_factory: SessionFactory
+    ) -> None:
+        """D4: the kill switch stops *new risk*, not risk reduction — a halted
+        account that could not sell what it holds would stay exposed."""
+        await seed_market(session_factory, symbol="PTHALTEXITUSD")
+        bus = EventBus()
+        state_manager = MarketStateManager().attach(bus)
+        await publish_ticker(bus, "PTHALTEXITUSD", "1000")
+        service = await build_service(session_factory, state_manager)
+        account = await service.create_account(
+            PaperAccountCreateRequest(
+                starting_balance=Decimal("10000"),
+                max_position_size_pct=GENEROUS_MAX_PCT,
+                max_exposure_pct=GENEROUS_MAX_PCT,
+                max_drawdown_pct=Decimal("20"),
+            )
+        )
+        account_id = uuid.UUID(account.id)
+        await induce_equity_halt(service, bus, "PTHALTEXITUSD", account_id)
+
+        sold = await service.place_order(
+            account_id,
+            PaperOrderRequest(symbol="PTHALTEXITUSD", side="sell", quantity=Decimal("5")),
+        )
+        assert sold.realized_pnl is not None
+
+        # Closing did not un-halt it: only an explicit resume does.
         still_halted = await service.get_account(account_id)
         assert still_halted.trading_halted is True
-        assert float(still_halted.balance) == pytest.approx(7996.999)
+        positions = await service.list_positions(account_id)
+        assert positions.positions == []
 
 
 @pytest.mark.asyncio
 class TestResumeTrading:
     """`resume_trading` is the *only* way a drawdown halt ever clears, and
-    also resets `peak_balance` to the account's current balance (see that
+    also resets `peak_balance` to the account's current *equity* (see that
     method's own docstring for why: without the reset, an account still
     deep in drawdown against its old peak would re-halt on its very next
     order regardless of that order's own direction)."""
@@ -882,26 +956,17 @@ class TestResumeTrading:
         )
         account_id = uuid.UUID(account.id)
 
-        # Same halt-inducing trade as `TestDrawdownHalt`.
-        await service.place_order(
-            account_id,
-            PaperOrderRequest(symbol="PTRESUMEUSD", side="buy", quantity=Decimal("2")),
-        )
+        # Same halt-inducing loss as `TestDrawdownHalt`.
+        await induce_equity_halt(service, bus, "PTRESUMEUSD", account_id)
         halted_account = await service.get_account(account_id)
         assert halted_account.trading_halted is True
 
-        with pytest.raises(TradingHaltedError):
-            await service.place_order(
-                account_id,
-                PaperOrderRequest(symbol="PTRESUMEUSD", side="buy", quantity=Decimal("0.001")),
-            )
-
         resumed = await service.resume_trading(account_id)
         assert resumed.trading_halted is False
-        # peak_balance resets to the current (post-halt) balance, not the
+        # peak_balance resets to the current (post-halt) *equity*, not the
         # original $10,000 — otherwise the next order below would
         # immediately re-halt regardless of its own direction.
-        assert float(resumed.peak_balance) == pytest.approx(7996.999)
+        assert float(resumed.peak_balance) == pytest.approx(7492.4975)
 
         # A valid, small order now succeeds — the halt is genuinely
         # cleared, not merely bypassed for one call.
@@ -935,10 +1000,7 @@ class TestResumeTrading:
             )
         )
         account_id = uuid.UUID(account.id)
-        await service.place_order(
-            account_id,
-            PaperOrderRequest(symbol="PTRESUMELOGUSD", side="buy", quantity=Decimal("2")),
-        )
+        await induce_equity_halt(service, bus, "PTRESUMELOGUSD", account_id)
         halted_account = await service.get_account(account_id)
         assert halted_account.trading_halted is True
 
@@ -1188,13 +1250,44 @@ class TestStopLossTakeProfitValidation:
                 ),
             )
 
-    async def test_a_sell_can_never_carry_thresholds(self) -> None:
-        with pytest.raises(ValueError, match="only apply to a buy"):
+    async def test_a_reduce_only_order_can_never_carry_thresholds(self) -> None:
+        with pytest.raises(ValueError, match="only apply to an order that opens or adds"):
             PaperOrderRequest(
                 symbol="PTVALSELLUSD",
                 side="sell",
                 quantity=Decimal("1"),
+                reduce_only=True,
                 stop_loss_price=Decimal("900"),
+            )
+
+    async def test_an_order_that_reduces_a_position_can_never_carry_thresholds(
+        self, session_factory: SessionFactory
+    ) -> None:
+        """A sell against an existing long only reduces it — there is nothing
+        left to protect, so naming a stop-loss on it is rejected by the
+        service (the schema can no longer know: a sell may also open a short)."""
+        await seed_market(session_factory, symbol="PTVALREDUCEUSD")
+        bus = EventBus()
+        state_manager = MarketStateManager().attach(bus)
+        await publish_ticker(bus, "PTVALREDUCEUSD", "1000")
+        service = await build_service(session_factory, state_manager)
+        account = await service.create_account(
+            PaperAccountCreateRequest(starting_balance=Decimal("100000"))
+        )
+        account_id = uuid.UUID(account.id)
+        await service.place_order(
+            account_id,
+            PaperOrderRequest(symbol="PTVALREDUCEUSD", side="buy", quantity=Decimal("2")),
+        )
+        with pytest.raises(ThresholdsOnReducingOrderError):
+            await service.place_order(
+                account_id,
+                PaperOrderRequest(
+                    symbol="PTVALREDUCEUSD",
+                    side="sell",
+                    quantity=Decimal("1"),
+                    stop_loss_price=Decimal("900"),
+                ),
             )
 
     async def test_valid_thresholds_are_set_at_order_open_time(

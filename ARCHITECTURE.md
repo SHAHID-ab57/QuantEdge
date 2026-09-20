@@ -3051,13 +3051,17 @@ was written:**
 
 A virtual trading account: place simulated market orders against real
 prices, track positions, and compute PnL. Milestone 3 (Paper Trading &
-Risk) — deliberately narrow in scope throughout: long-only, market
-orders only, no margin, no shorting, no leverage. Its one automated
-order path (see "Automated Strategy" below) is opt-in, off by default,
-and reuses this same order-placement machinery rather than a second one
-— everything else about "no automation" still holds: there is still no
-margin, no shorting, no leverage, and still nothing here that touches
-live trading (see Milestone 6's own gate, unaffected by any of this).
+Risk) — market orders only. Orders placed **manually** may go long or
+short and may use isolated-margin leverage (Epic 3.5, M3-E5-T2: see
+"Margin, Shorts, Leverage, Liquidation and Funding" at the end of this
+section); the sections below describe the engine's original long-only,
+cash-only accounting, which is exactly what a 1x long still is. Its one
+automated order path (see "Automated Strategy" below) is opt-in, off by
+default, reuses this same order-placement machinery rather than a second
+one, and is **structurally limited to unleveraged longs**: it can open
+no short and use no leverage, and its own module was not touched by
+Epic 3.5. Nothing here touches live trading (see Milestone 6's own gate,
+unaffected by any of this).
 
 **Realistic execution is the one thing this feature exists to guarantee.**
 A market order never fills at a perfect, cost-free price — that would be
@@ -3181,7 +3185,9 @@ every fill so far has genuinely used the `candle_close` fallback — the
 real, unstaged behavior this feature will actually run under until live
 market data is enabled.
 
-**Long-only accounting, stated plainly** (`app/services/paper_trading.py`):
+**Long-only accounting, stated plainly** (`app/services/paper_trading.py`;
+this is the 1x-long case of the margin model described at the end of this
+section, which reproduces it exactly):
 `average_entry_price` (on the materialized `PaperPosition`) is the VWAP of
 _fill_ prices only — fees are never blended into cost basis. A **buy**
 immediately realizes its own fee as a certain, already-paid cost
@@ -3202,8 +3208,11 @@ slippage-adjusted hypothetical exit).
 that would exceed the account's currently-held quantity, is rejected
 outright** — `InsufficientBalanceError`/`InsufficientPositionError` (both
 400), never a partial fill and never a negative balance or a short
-position. No margin, no leverage, no shorting exists anywhere in this
-feature to make either possible in the first place.
+position. (Since M3-E5-T2 a manual _sell_ against nothing opens a short
+and an over-sized reducing order is rejected as `PositionFlipError`, a
+subclass of `InsufficientPositionError` with the same API code; the
+automated strategy still gets `InsufficientPositionError` for a sell with
+nothing to close.)
 
 **Persistence** — three new tables (migration `7a3254fe72af`), extended
 once (migration `c1e00878df40`) with the risk-limit columns above:
@@ -3794,6 +3803,146 @@ cases in `TestUpdatePositionThresholds`/`TestUpdateStrategyConfig`/
 `TestResumeTrading`), including a case proving a no-op field change still
 logs the general summary line without the dedicated `ENABLED`/`DISABLED`
 one, which is reserved for an actual flip.
+
+#### Margin, Shorts, Leverage, Liquidation and Funding (M3-E5-T2)
+
+Built from `docs/research/FUTURES_MECHANICS_AND_LEVERAGE_DESIGN.md` (M3-E5-T1,
+which documents Delta Exchange India's real perpetual-futures mechanics and
+designs this). **Manual orders only.** Locked decisions, none re-opened: D1
+automated trades get no leverage; D2 the automated strategy may not short;
+D3 the drawdown limit measures equity, not cash; D4 a halt blocks new risk and
+alerts; D5 isolated margin only; D6 a liquidation forfeits the whole margin;
+D7 the existing exposure caps are **not raised**.
+
+**The automated strategy was not touched.**
+`app/services/paper_trading_strategy.py` has no diff in this change. The guard
+is structural, on the one order path it shares with manual orders:
+`PaperTradingService.place_order` treats `user_id is None` (its own long-standing
+contract for "the automated strategy": a human caller always has one) as
+automated and refuses anything but opening/adding to an **unleveraged long** or
+reducing a long (`_enforce_automated_restrictions`). That matters beyond
+leverage: an account can hold a manually opened short in the very market the
+strategy trades, and its "close what I hold" sell would otherwise have _added_
+to that short. The refusal surfaces as a logged `no_action` in the strategy's own
+decision log. A test reads the strategy's source and asserts it names no
+`leverage`/`margin`/`reduce_only`/`liquidation` and builds `PaperOrderRequest`
+only from the original four fields; it cannot reach either capability.
+
+**Model.** One net position per `(account, symbol)`, `side` long or short.
+`PaperAccount.balance` is _available cash_; opening posts `notional / leverage`
+of it as the position's isolated `margin` (the whole notional at 1x, i.e. the
+old cash accounting exactly). **Equity** = cash + every position's margin + its
+unrealized PnL at the live price (never stored). Short PnL is the mirror image
+of long: `(entry - fill) * quantity - fee`. The fill model needed no change: it
+was already direction-symmetric (a buy fills higher, a sell lower). A reducing
+order returns the released margin plus PnL to cash, floored at zero (isolated
+margin never loses more than was posted); funding is part of `realized_pnl`, so
+once flat `balance == starting_balance + realized_pnl` still holds. Leverage is
+fixed when a position opens, capped by the account's `max_leverage` (default 5,
+configurable to Delta's 200), and any short or leveraged position above Delta's
+`max_leverage_notional` (100,000 USD, where Delta's margin scaling starts) is
+rejected rather than approximated. An order larger than the position it reduces
+is rejected (`PositionFlipError`); `reduce_only` refuses to open or add.
+**Closing from the UI sends a reduce-only order**: a plain opposite-side order
+that lost a race to a stop-loss or liquidation would find the account flat and
+_open a short_ instead of failing.
+
+**Liquidation formula: derived, not verified.** Delta gives no closed form. The
+engine uses the algebra of Delta's documented condition ("Position Margin minus
+Unrealized PnL equals the Maintenance Margin"): long `E(1-IM)/(1-MM)`, short
+`E(1+IM)/(1+MM)`, generalized to the position's actual margin so funding taken
+from margin moves it (`app/paper_trading/margin.py`). It was **not** confirmed
+against a linear-contract liquidation price from Delta: the only worked examples
+on Delta's page are for an _inverse_ contract (reproduced in
+`tests/paper_trading/test_margin.py`, where the inverse form matches them and
+the linear form does not, so they cannot verify it), and no authenticated
+Delta account was available. One further ambiguity remains, whether the
+maintenance margin is taken on the liquidation price (used) or the entry price;
+the two differ by under 0.05% of entry at 5x and above (bounded in tests).
+`TestVerifiedLinearReference` is the empty, skipped slot for one real figure from
+Delta's calculator; adding it changes one function and one table.
+
+**Liquidation.** The existing `StopLossTakeProfitMonitor` gains a third trigger,
+checked first: liquidation on the **mark price**, then stop-loss, then
+take-profit on the last price. It is only evaluated on a ticker event (the only
+event carrying a mark price); with no mark the last price stands in and the order
+records `trigger_price_basis='last_fallback'`. The fill uses the wider triggered
+slippage; the whole remaining margin is forfeited (cash returned: zero); the loss
+is never charged beyond the margin, and `gapped_through_bankruptcy` records a
+mark price already past the bankruptcy price. A stop-loss must lie on the safe
+side of the position's liquidation price (one beyond it can never fire) and is
+direction-aware by side. A halted account is still liquidated and still stops
+out (D4).
+
+**Funding** (`app/services/funding_rates.py`, `app/services/paper_funding.py`).
+Delta publishes `funding_rate` **in percent** (`0.01` = 0.01%; established from
+its own formula against 17 real funding times, embedded in
+`tests/paper_trading/test_funding_rates.py`); it is converted to a fraction
+exactly once, at ingestion. History (the rate, the index price, the mark price at
+each funding time) comes from Delta's public candles endpoint (`FUNDING:<sym>`,
+`MARK:<sym>`, and the product's own `spot_index` symbol, which differs per market:
+`.DEETHUSD` but `.DEXBTUSD`, so it is read from the product, never guessed) into
+the `funding_rates` table. A scheduler ingests it for markets with an open
+position and settles every funding time exactly once
+(`paper_funding_settlements`, unique on `(account, symbol, funding_time)`):
+`position value at the index price * rate`, longs pay when positive, charged to
+cash first and only the shortfall taken from the position's margin (which moves
+its liquidation price). Limits: a 48-hour catch-up window, and the quantity
+charged is the position's current size; a position opened after a funding time
+owes nothing for it.
+
+**Risk limits, re-derived (D3, D7).** Position size and exposure are **notional
+at the live price as a % of equity**, not cash; `max_exposure_pct` is not raised,
+so leverage changes margin efficiency and the liquidation distance, not the
+account's risk ceiling (a test shows a $6,000 notional order is rejected against
+a 50% limit on $10,000 equity even though its margin is only 12%). They are
+checked only on orders that open or add. **Drawdown is equity against peak
+equity** (`peak_balance` keeps its name and now holds peak _equity_): an
+announced behaviour change. The old rule halted an account for merely _spending_
+more than the limit's share of its cash on a position, with no price movement at
+all (the old test asserted exactly that), and could not see unrealized losses.
+The migration raises each account's stored peak to its cost-basis equity so no
+account is halted by the change. It is evaluated after every fill, trigger,
+liquidation and funding payment, and before any order that would add risk, so an
+unrealized loss stops new risk even when nothing has traded since. **A halt
+blocks new risk only** (reduce-only orders and triggered exits still work) and
+raises an alert (`capture_trading_halted`). Flattening on a halt, which D4 calls
+opt-in, is **not built**.
+
+**Concurrency, and a real bug found by running it on Postgres.** The atomic guard
+now also matches on `paper_accounts.state_version`, bumped by every guarded update:
+a liquidation returns no cash, so a guard on `balance` alone cannot see it. More
+importantly, the guarded update is now the _first write of one transaction_ that
+also writes the position and the order, and commits once
+(`try_apply_trade_effects(commit=False)`), so the account row lock is held until
+everything it gates is written. The old order (commit the guard, then write the
+position) left a window in which a second actor could read the committed account
+with a not-yet-updated position and close a position that had just been closed;
+it was invisible to the SQLite suite (one shared connection: no row locks, no
+isolation) and showed up only when the liquidation-versus-manual-close race was run
+against real Postgres. Two related read-freshness fixes came with it: the account
+and position reads now bypass the session's identity map (`populate_existing`),
+because these sessions do not expire on commit and a retry after a lost race would
+otherwise re-read the stale row and exhaust its attempts. The racing tests moved to
+`tests/paper_trading/test_concurrency_postgres.py` (marked `postgres`, separate
+connections, auto-skipped without `TEST_DATABASE_URL`).
+
+**Persistence.** Migration `a7c41e9b3d52` adds `side`/`leverage`/`margin`/
+`liquidation_price`/`opened_at` to `paper_positions`; `max_leverage`/
+`state_version` to `paper_accounts`; `position_side`/`leverage`/`margin_applied`/
+`reduce_only`/`gapped_through_bankruptcy`/`trigger_price_basis` (and the
+`liquidation` trigger reason) to `paper_orders`; and the `funding_rates` and
+`paper_funding_settlements` tables. Every new column defaults to the old
+long-only, unleveraged meaning, and existing positions are backfilled to
+`margin = quantity * average_entry_price`. Tested up, down and up again on a
+scratch Postgres with rows in place.
+
+**Not built.** A funding-payments table in the UI (the API lists them:
+`GET .../funding`; they are inside realized PnL); cross margin (D5); flattening
+on a halt; Delta's margin scaling beyond `max_leverage_notional`; per-market
+initial/maintenance margin (0.25% maintenance is a setting); changing leverage or
+adding margin to an open position; and any automated-strategy integration, which
+stays a separate, later, separately-scrutinized task (D1/D2 are unrevisited).
 
 ### External Data Connectors
 
@@ -5340,8 +5489,8 @@ admin/member distinction). This is a scope decision, not an oversight —
 building role-based access control now, before this platform has more
 than a handful of real users, would be exactly the kind of premature
 infrastructure this project has otherwise been careful to defer (see
-the Paper Trading section's own "no margin, no shorting, no leverage"
-posture for the same discipline applied elsewhere).
+the Paper Trading section's own deliberately-narrow-scope posture for
+the same discipline applied elsewhere).
 
 **`users`** (`app/models/user.py`): `id`, `email` (unique, indexed),
 `hashed_password`, `created_at`/`updated_at`. Passwords are hashed with

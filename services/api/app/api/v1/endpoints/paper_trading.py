@@ -3,10 +3,14 @@
 A virtual trading account: place simulated market orders against a real,
 realistic fill (modeled slippage and fee, always applied — see
 `app/paper_trading/pricing.py`'s own module docstring), track positions,
-and compute PnL. Long-only, market orders only. An account may also opt
+and compute PnL. Market orders only; a manual order may go long or short,
+optionally with isolated-margin leverage. An account may also opt
 into a single automated strategy (`PATCH .../strategy`, off by default)
 that places orders through this exact same service — see
 `ARCHITECTURE.md` § "Paper Trading" for the full design.
+
+Manually placed orders may also short and use isolated-margin leverage; the
+automated strategy never can.
 """
 
 import uuid
@@ -22,6 +26,7 @@ from app.schemas.paper_trading import (
     PaperAccountCreateRequest,
     PaperAccountListResponse,
     PaperAccountResponse,
+    PaperFundingSettlementListResponse,
     PaperOrderListResponse,
     PaperOrderRequest,
     PaperOrderResponse,
@@ -44,32 +49,59 @@ _ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
             "application/json": {
                 "examples": {
                     "insufficient_balance": {
-                        "summary": "A buy would take the account balance negative",
+                        "summary": "Opening/adding would take the account's cash negative",
                         "value": {
                             "code": "insufficient_balance",
-                            "detail": "Order requires 1001.00 (notional + fee) but the account "
-                            "only has 500.00 available — this account has no margin, so the "
-                            "order is rejected rather than partially filled or allowed to go "
-                            "negative",
+                            "detail": "Order requires 1001.00 (margin + fee; the whole notional "
+                            "at 1x leverage) but the account only has 500.00 available cash, "
+                            "so the order is rejected rather than partially filled or allowed "
+                            "to go negative",
                         },
                     },
                     "insufficient_position": {
-                        "summary": "A sell would exceed the held quantity (no shorting)",
+                        "summary": "An order would reduce a position by more than it holds",
                         "value": {
                             "code": "insufficient_position",
-                            "detail": "Cannot sell 5 of 'ETHUSD': this account holds only 2 — "
-                            "this platform is long-only, so a sell can never exceed the held "
-                            "quantity (no shorting)",
+                            "detail": "Cannot reduce 'ETHUSD' by 5: this account holds only 2. "
+                            "An order can never carry a position through zero into the "
+                            "opposite side in one step — close it first, then open the other "
+                            "side with a separate order",
+                        },
+                    },
+                    "leverage_limit_exceeded": {
+                        "summary": "Requested leverage is above the account's max_leverage",
+                        "value": {
+                            "code": "leverage_limit_exceeded",
+                            "detail": "Leverage 10x exceeds this account's maximum of 5x",
+                        },
+                    },
+                    "automated_order_restricted": {
+                        "summary": "The automated strategy asked for a short or leverage",
+                        "value": {
+                            "code": "automated_order_restricted",
+                            "detail": "Automated orders are limited to unleveraged (1x) long "
+                            "positions: it may not open, add to, or trade against a short "
+                            "position",
+                        },
+                    },
+                    "stop_beyond_liquidation": {
+                        "summary": "A stop-loss beyond the liquidation price could never fire",
+                        "value": {
+                            "code": "stop_beyond_liquidation",
+                            "detail": "stop_loss_price 1900 for a long position must be above "
+                            "its liquidation price 1950; a stop beyond it can never trigger, "
+                            "because the position is liquidated first",
                         },
                     },
                     "trading_halted": {
                         "summary": "This account's trading is halted by the drawdown limit",
                         "value": {
                             "code": "trading_halted",
-                            "detail": "Trading is halted for this account: balance 7800.00 has "
-                            "fallen more than 20 % below its peak of 10000.00. Resume trading "
-                            "explicitly before placing another order — a halt never clears "
-                            "itself on balance recovery.",
+                            "detail": "Trading is halted for this account: equity 7800.00 has "
+                            "fallen more than 20 % below its peak of 10000.00. Only orders "
+                            "that reduce an existing position are accepted while halted. "
+                            "Resume trading explicitly before opening or adding to a "
+                            "position — a halt never clears itself on recovery.",
                         },
                     },
                     "max_position_size_exceeded": {
@@ -77,7 +109,7 @@ _ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
                         "value": {
                             "code": "max_position_size_exceeded",
                             "detail": "This order would bring the 'ETHUSD' position to a value "
-                            "of 15000.00 — 15 % of the current balance of 100000.00 — exceeding "
+                            "of 15000.00 — 15 % of the current equity of 100000.00 — exceeding "
                             "the 10 % max position size limit for this account",
                         },
                     },
@@ -86,7 +118,7 @@ _ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
                         "value": {
                             "code": "max_exposure_exceeded",
                             "detail": "This order would bring total exposure to 60000.00 — 60 % "
-                            "of the current balance of 100000.00 — exceeding the 50 % max "
+                            "of the current equity of 100000.00 — exceeding the 50 % max "
                             "exposure limit for this account",
                         },
                     },
@@ -262,8 +294,13 @@ async def get_paper_account(
         "Fills immediately and completely against a real, realistic price: the current "
         "ticker/trade if live data is flowing, otherwise the latest stored candle's own "
         "close — with a modeled slippage and fee always applied, never a perfect, "
-        "cost-free fill. Long-only: a buy opens/adds to a position; a sell reduces/closes "
-        "one and can never exceed the held quantity (no shorting, no margin)."
+        "cost-free fill. One net position per market: a buy opens/adds to a long or "
+        "reduces a short; a sell opens/adds to a short or reduces a long, and an order "
+        "larger than the position it reduces is rejected rather than flipped through "
+        "zero. Optional isolated-margin leverage (fixed when a position opens, capped at "
+        "the account's max_leverage) posts notional/leverage of available cash as margin; "
+        "reduce_only refuses to open or add. Shorts and leverage are for manual orders — "
+        "the automated strategy is limited to unleveraged longs."
     ),
     responses=_ERROR_RESPONSES,
 )
@@ -346,15 +383,43 @@ async def get_paper_risk_summary(
     return await service.risk_summary(account_id)
 
 
+@router.get(
+    "/paper-trading/accounts/{account_id}/funding",
+    response_model=PaperFundingSettlementListResponse,
+    summary="An account's own funding payments",
+    description=(
+        "Every funding payment charged to (or received by) this account's open positions at "
+        "a real funding time, most recent first, with the rate and index price each used."
+    ),
+    responses=_ERROR_RESPONSES,
+)
+async def list_paper_funding_settlements(
+    account_id: AccountIdPath,
+    service: PaperTradingServiceDep,
+    limit: Annotated[
+        int,
+        Query(
+            ge=1,
+            le=get_settings().paper_trading_orders_max_limit,
+            description="Maximum settlements per page",
+        ),
+    ] = get_settings().paper_trading_orders_default_limit,
+    offset: Annotated[int, Query(ge=0, description="Number of settlements to skip")] = 0,
+) -> PaperFundingSettlementListResponse:
+    """Return a page of this account's own funding settlements."""
+    return await service.list_funding_settlements(account_id, limit=limit, offset=offset)
+
+
 @router.post(
     "/paper-trading/accounts/{account_id}/resume-trading",
     response_model=PaperAccountResponse,
     summary="Explicitly clear a drawdown halt",
     description=(
-        "The only way a drawdown halt ever clears — it does not self-heal on balance "
-        "recovery. Also resets peak_balance to the account's current balance, so the account "
-        "is measured for drawdown fresh from this point rather than immediately re-halting "
-        "against its old, untouched peak on the very next order."
+        "The only way a drawdown halt ever clears — it does not self-heal on recovery. A halt "
+        "blocks orders that open or add to a position; reduce-only orders and triggered exits "
+        "still go through. Also resets peak_balance (the peak equity) to the account's current "
+        "equity, so the account is measured for drawdown fresh from this point rather than "
+        "immediately re-halting against its old, untouched peak on the very next order."
     ),
     responses=_ERROR_RESPONSES,
 )
@@ -373,8 +438,9 @@ async def resume_paper_trading(
         "Only fields present in the request body are changed — send an explicit null to "
         "clear stop_loss_price/take_profit_price, omit a field to leave it unchanged. A long "
         "position's stop-loss must sit below the current price and its take-profit above it "
-        "(and, when both are set, the stop-loss must be strictly below the take-profit) — a "
-        "value that would trigger immediately is rejected."
+        "(a short's, the reverse); when both are set the stop-loss must be on the far side of "
+        "the take-profit, and a stop-loss must lie on the safe side of the position's "
+        "liquidation price. A value that would trigger immediately is rejected."
     ),
     responses=_ERROR_RESPONSES,
 )

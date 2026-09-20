@@ -57,7 +57,11 @@ export interface PaperOrderBody {
   symbol: string;
   side: PaperOrderSide;
   quantity: string;
-  /** Buy only — sets the resulting position's stop-loss/take-profit. */
+  /** Isolated-margin leverage for a position this order opens; omit for 1x. */
+  leverage?: string;
+  /** Refuse to open or add to a position — it may only shrink one. */
+  reduce_only?: boolean;
+  /** Only on an order that opens or adds — sets the position's stop-loss/take-profit. */
   stop_loss_price?: string;
   take_profit_price?: string;
 }

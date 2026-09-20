@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field, field_serializer, model_validator
 if TYPE_CHECKING:
     from app.models.paper_trading import (
         PaperAccount,
+        PaperFundingSettlement,
         PaperOrder,
         PaperPosition,
         PaperStrategyDecision,
@@ -55,8 +56,16 @@ class PaperAccountCreateRequest(BaseModel):
         default=None,
         gt=0,
         le=100,
-        description="Max % balance may fall below its peak before trading halts. "
+        description="Max % account equity may fall below its peak before trading halts. "
         "Defaults to this platform's configured threshold when omitted.",
+    )
+    max_leverage: Decimal | None = Field(
+        default=None,
+        ge=1,
+        le=200,
+        description="The highest leverage a manually-placed order may use on this account "
+        "(Delta's own ceiling is 200x). Defaults to this platform's configured, deliberately "
+        "conservative value when omitted. The automated strategy is limited to 1x regardless.",
     )
 
 
@@ -71,7 +80,10 @@ class PaperAccountResponse(BaseModel):
     max_position_size_pct: Decimal
     max_exposure_pct: Decimal
     max_drawdown_pct: Decimal
-    peak_balance: Decimal
+    max_leverage: Decimal
+    peak_balance: Decimal = Field(
+        description="The highest account equity ever reached (the drawdown limit's reference)"
+    )
     trading_halted: bool
     strategy_enabled: bool = Field(
         description="Opt-in automated strategy — off by default, per-account"
@@ -105,6 +117,7 @@ class PaperAccountResponse(BaseModel):
             max_position_size_pct=account.max_position_size_pct,
             max_exposure_pct=account.max_exposure_pct,
             max_drawdown_pct=account.max_drawdown_pct,
+            max_leverage=account.max_leverage,
             peak_balance=account.peak_balance,
             trading_halted=account.trading_halted,
             strategy_enabled=account.strategy_enabled,
@@ -129,39 +142,61 @@ class PaperAccountListResponse(BaseModel):
 
 
 class PaperOrderRequest(BaseModel):
-    """Place one market order — long-only: a buy opens/adds to a position,
-    a sell reduces/closes one; there is no short side.
+    """Place one market order.
 
-    `stop_loss_price`/`take_profit_price` are optional and only ever
-    meaningful on a **buy** (a sell only ever reduces/closes a position —
-    there is nothing left to protect once it's flat, and a partial sell
-    doesn't change what protects the remainder). Provide a value to set
-    it on the resulting position; omit it to leave that position's
-    existing threshold (if any) unchanged — omitting is *not* the same
-    as clearing, which is only possible via
-    `PATCH .../positions/{symbol}`'s explicit `null`. Both are validated
-    against the current price (and each other) the instant this order
-    fills, using whatever price the fill itself resolved.
+    In a single net position per market, a **buy** opens or adds to a long,
+    or reduces a short; a **sell** opens or adds to a short, or reduces a
+    long. An order larger than the position it reduces is rejected rather
+    than carried through zero into the opposite side.
+
+    `leverage` (isolated margin) is fixed when a position opens: omit it
+    to open at 1x, or to add to / reduce an existing position. It may not
+    exceed the account's `max_leverage`. Shorts, leverage and `reduce_only`
+    are for manually placed orders; the automated strategy is refused
+    anything but an unleveraged long.
+
+    `stop_loss_price`/`take_profit_price` are optional and only meaningful
+    on an order that opens or adds to a position (a reducing order has
+    nothing left to protect). Provide a value to set it on the resulting
+    position; omit it to leave that position's existing threshold (if any)
+    unchanged — omitting is *not* the same as clearing, which is only
+    possible via `PATCH .../positions/{symbol}`'s explicit `null`. A long's
+    stop-loss sits below the current price and its take-profit above; a
+    short's are the reverse, and a stop-loss must lie on the safe side of the
+    position's liquidation price. Both are validated against the current
+    price (and each other) the instant this order fills.
     """
 
     symbol: str = Field(..., description="Market to trade")
     side: Literal["buy", "sell"]
     quantity: Decimal = Field(..., gt=0, description="Order quantity, in the base asset")
+    leverage: Decimal | None = Field(
+        default=None,
+        ge=1,
+        le=200,
+        description="Leverage for a position this order opens; omit to use 1x (or to keep "
+        "an existing position's own)",
+    )
+    reduce_only: bool = Field(
+        default=False,
+        description="If true, the order may only shrink an existing position; it is rejected "
+        "rather than opening or adding to one",
+    )
     stop_loss_price: Decimal | None = Field(
-        default=None, gt=0, description="Set on the resulting position — buy only"
+        default=None, gt=0, description="Set on the resulting position — opening/adding only"
     )
     take_profit_price: Decimal | None = Field(
-        default=None, gt=0, description="Set on the resulting position — buy only"
+        default=None, gt=0, description="Set on the resulting position — opening/adding only"
     )
 
     @model_validator(mode="after")
-    def _reject_thresholds_on_a_sell(self) -> "PaperOrderRequest":
-        if self.side == "sell" and (
+    def _reject_thresholds_on_a_reduce_only_order(self) -> "PaperOrderRequest":
+        if self.reduce_only and (
             self.stop_loss_price is not None or self.take_profit_price is not None
         ):
             raise ValueError(
-                "stop_loss_price/take_profit_price only apply to a buy — a sell only reduces "
-                "or closes a position, which has nothing left to protect"
+                "stop_loss_price/take_profit_price only apply to an order that opens or adds "
+                "to a position — a reduce-only order has nothing left to protect"
             )
         return self
 
@@ -174,6 +209,15 @@ class PaperOrderResponse(BaseModel):
     account_id: str
     symbol: str
     side: Literal["buy", "sell"]
+    position_side: Literal["long", "short"] = Field(
+        description="The kind of position this order opened, added to or reduced"
+    )
+    leverage: Decimal = Field(description="The leverage of the position this order acted on")
+    margin_applied: Decimal = Field(
+        description="Margin this order posted (opening/adding) or released (reducing/closing); "
+        "for a liquidation, the margin forfeited"
+    )
+    reduce_only: bool
     quantity: Decimal
     raw_price: Decimal = Field(description="The resolved quote, before slippage")
     fill_price: Decimal = Field(description="What the account was actually charged/credited")
@@ -192,10 +236,20 @@ class PaperOrderResponse(BaseModel):
     realized_pnl: Decimal | None = Field(
         default=None, description="This order's own contribution to realized PnL; null for a buy"
     )
-    trigger_reason: Literal["stop_loss", "take_profit"] | None = Field(
+    trigger_reason: Literal["stop_loss", "take_profit", "liquidation"] | None = Field(
         default=None,
         description="Set when this order was a market-triggered auto-close, not a manually "
         "placed one; null for every ordinary order",
+    )
+    gapped_through_bankruptcy: bool = Field(
+        default=False,
+        description="Liquidation only: the mark price had already passed the bankruptcy "
+        "price. The paper account's loss stays capped at the margin it posted",
+    )
+    trigger_price_basis: Literal["mark", "last_fallback"] | None = Field(
+        default=None,
+        description="Liquidation only: 'mark' (the intended basis), or 'last_fallback' if no "
+        "mark price was available and the last traded price stood in",
     )
     created_at: datetime
 
@@ -210,6 +264,10 @@ class PaperOrderResponse(BaseModel):
             account_id=str(order.account_id),
             symbol=order.symbol,
             side=order.side,  # type: ignore[arg-type]
+            position_side=order.position_side,  # type: ignore[arg-type]
+            leverage=order.leverage,
+            margin_applied=order.margin_applied,
+            reduce_only=order.reduce_only,
             quantity=order.quantity,
             raw_price=order.raw_price,
             fill_price=order.fill_price,
@@ -222,6 +280,8 @@ class PaperOrderResponse(BaseModel):
             notional=order.notional,
             realized_pnl=order.realized_pnl,
             trigger_reason=order.trigger_reason,  # type: ignore[arg-type]
+            gapped_through_bankruptcy=order.gapped_through_bankruptcy,
+            trigger_price_basis=order.trigger_price_basis,  # type: ignore[arg-type]
             created_at=order.created_at,
         )
 
@@ -239,35 +299,72 @@ class PaperPositionDTO(BaseModel):
     """One currently-open holding, marked to the same live price a fill would use."""
 
     symbol: str
-    quantity: Decimal
+    side: Literal["long", "short"]
+    quantity: Decimal = Field(description="Position size (always positive; `side` gives direction)")
     average_entry_price: Decimal
+    leverage: Decimal
+    margin: Decimal = Field(description="Isolated margin posted against this position")
+    liquidation_price: Decimal | None = Field(
+        default=None,
+        description="The mark price at which the position is liquidated; null if it cannot be "
+        "(an unleveraged long)",
+    )
+    liquidation_distance_pct: Decimal | None = Field(
+        default=None,
+        description="How far the live price is from the liquidation price, as a % of the "
+        "live price; null when there is no liquidation price",
+    )
     current_price: Decimal
     price_source: Literal["ticker", "trade", "candle_close"]
     unrealized_pnl: Decimal = Field(
-        description="(current_price - average_entry_price) * quantity — no slippage/fee applied; "
-        "a mark-to-market valuation, not a hypothetical exit fill"
+        description="A long: (current_price - average_entry_price) * quantity. A short: "
+        "(average_entry_price - current_price) * quantity. No slippage/fee applied; a "
+        "mark-to-market valuation, not a hypothetical exit fill"
     )
     stop_loss_price: Decimal | None = Field(
-        default=None, description="Auto-closes the position at or below this price; null if unset"
+        default=None,
+        description="Auto-closes the position when the price falls to (long) or rises to "
+        "(short) this level; null if unset",
     )
     take_profit_price: Decimal | None = Field(
-        default=None, description="Auto-closes the position at or above this price; null if unset"
+        default=None,
+        description="Auto-closes the position when the price rises to (long) or falls to "
+        "(short) this level; null if unset",
     )
 
     @classmethod
     def from_model(
         cls, position: "PaperPosition", *, current_price: Decimal, price_source: str
     ) -> "PaperPositionDTO":
-        unrealized_pnl = (current_price - Decimal(position.average_entry_price)) * Decimal(
-            position.quantity
+        from app.paper_trading.margin import unrealized_pnl
+
+        side = position.side
+        pnl = unrealized_pnl(
+            side=side,  # type: ignore[arg-type]
+            entry_price=Decimal(position.average_entry_price),
+            price=current_price,
+            quantity=Decimal(position.quantity),
+        )
+        liquidation = (
+            Decimal(position.liquidation_price) if position.liquidation_price is not None else None
+        )
+        distance = (
+            abs(current_price - liquidation) / current_price * Decimal(100)
+            if liquidation is not None and current_price > 0
+            else None
         )
         return cls(
             symbol=position.symbol,
+            side=side,  # type: ignore[arg-type]
             quantity=position.quantity,
             average_entry_price=position.average_entry_price,
+            leverage=position.leverage,
+            margin=position.margin,
+            liquidation_price=liquidation,
+            liquidation_distance_pct=distance,
             current_price=current_price,
             price_source=price_source,  # type: ignore[arg-type]
-            unrealized_pnl=unrealized_pnl,
+            unrealized_pnl=pnl,
             stop_loss_price=position.stop_loss_price,
             take_profit_price=position.take_profit_price,
         )
@@ -295,16 +392,22 @@ class PaperPositionListResponse(BaseModel):
 
 
 class PortfolioSummaryResponse(BaseModel):
-    """An account's own balance, realized PnL, and live unrealized PnL —
+    """An account's own available cash, realized PnL, and live unrealized PnL —
     the account summary card's data source."""
 
     account_id: str
-    balance: Decimal
-    realized_pnl: Decimal
+    balance: Decimal = Field(description="Available cash (margin already posted is not included)")
+    realized_pnl: Decimal = Field(description="Realized trading PnL, net of fees and funding")
     unrealized_pnl: Decimal = Field(description="Summed across every currently-open position")
+    margin_in_use: Decimal = Field(description="Isolated margin posted across every open position")
     total_equity: Decimal = Field(
-        description="balance + the live mark-to-market value of every open position"
+        description="balance + margin in use + unrealized PnL: cash plus the live "
+        "mark-to-market value of every open position"
     )
+    total_notional: Decimal = Field(
+        description="Sum of every open position's notional at the live price"
+    )
+    effective_leverage: Decimal = Field(description="total_notional / total_equity")
     open_position_count: int
 
 
@@ -312,6 +415,11 @@ class RiskSummaryResponse(BaseModel):
     """An account's own pre-trade risk state — current exposure and
     drawdown against their configured limits, and whether trading is
     halted. The Risk Summary panel's data source.
+
+    Exposure and drawdown are measured on **equity** (cash + margin +
+    unrealized PnL at live prices), and exposure on **notional** at live
+    prices, never on cash: cash falls whenever margin is posted, with no
+    loss at all.
 
     `current_position_size_pct`/distance is deliberately not included:
     the position-sizing limit is checked per order against one symbol's
@@ -322,24 +430,75 @@ class RiskSummaryResponse(BaseModel):
     """
 
     account_id: str
-    balance: Decimal
-    peak_balance: Decimal
+    balance: Decimal = Field(description="Available cash")
+    equity: Decimal = Field(description="Cash + margin in use + unrealized PnL at live prices")
+    margin_in_use: Decimal
+    peak_balance: Decimal = Field(description="The highest account equity ever reached")
+    total_notional: Decimal = Field(description="Sum of open positions' notional at live prices")
+    effective_leverage: Decimal = Field(description="total_notional / equity")
     current_exposure_pct: Decimal = Field(
-        description="Total open-position value (current prices) as a % of current balance"
+        description="Total open notional (live prices) as a % of current equity"
     )
     max_exposure_pct: Decimal
     exposure_headroom_pct: Decimal = Field(
         description="max_exposure_pct - current_exposure_pct; how much % room remains"
     )
     current_drawdown_pct: Decimal = Field(
-        description="How far current balance has fallen below peak_balance, as a %"
+        description="How far current equity has fallen below its peak, as a %"
     )
     max_drawdown_pct: Decimal
     drawdown_headroom_pct: Decimal = Field(
         description="max_drawdown_pct - current_drawdown_pct; how much % room remains"
     )
     max_position_size_pct: Decimal
+    max_leverage: Decimal
     trading_halted: bool
+
+
+class PaperFundingSettlementResponse(BaseModel):
+    """One funding payment charged to, or received by, an open position."""
+
+    id: str
+    account_id: str
+    symbol: str
+    funding_time: datetime
+    position_side: Literal["long", "short"]
+    quantity: Decimal
+    index_price: Decimal
+    funding_rate: Decimal = Field(description="A fraction per interval (0.0001 = 0.01%)")
+    payment: Decimal = Field(description="What the position paid; negative when it received")
+    charged_to_margin: Decimal = Field(
+        description="The part of the payment available cash could not cover, taken from the "
+        "position's margin (which moves its liquidation price)"
+    )
+
+    @field_serializer("funding_time")
+    def _serialize_funding_time(self, value: datetime) -> str:
+        return _iso(value)
+
+    @classmethod
+    def from_model(cls, row: "PaperFundingSettlement") -> "PaperFundingSettlementResponse":
+        return cls(
+            id=str(row.id),
+            account_id=str(row.account_id),
+            symbol=row.symbol,
+            funding_time=row.funding_time,
+            position_side=row.position_side,  # type: ignore[arg-type]
+            quantity=row.quantity,
+            index_price=row.index_price,
+            funding_rate=row.funding_rate,
+            payment=row.payment,
+            charged_to_margin=row.charged_to_margin,
+        )
+
+
+class PaperFundingSettlementListResponse(BaseModel):
+    """One page of an account's funding settlements, most recent first."""
+
+    settlements: list[PaperFundingSettlementResponse]
+    total: int
+    limit: int
+    offset: int
 
 
 class PaperStrategyConfigUpdateRequest(BaseModel):
@@ -465,6 +624,8 @@ __all__ = [
     "PaperAccountCreateRequest",
     "PaperAccountListResponse",
     "PaperAccountResponse",
+    "PaperFundingSettlementListResponse",
+    "PaperFundingSettlementResponse",
     "PaperOrderListResponse",
     "PaperOrderRequest",
     "PaperOrderResponse",

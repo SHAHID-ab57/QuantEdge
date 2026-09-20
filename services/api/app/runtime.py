@@ -51,6 +51,7 @@ import logging
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 from app.core.config import get_settings
 from app.events.bus import EventBus
@@ -70,6 +71,7 @@ from app.services.external_data_sync import ExternalDataSyncScheduler
 from app.services.grading_scheduler import PredictionGradingScheduler
 from app.services.news_sync import NewsSyncScheduler
 from app.services.order_flow_capture import OrderFlowCapture
+from app.services.paper_funding import PaperFundingScheduler
 from app.services.paper_trading_strategy import PaperTradingStrategyScheduler
 from app.state import MarketStateManager
 from app.ws.models import WSEvent
@@ -141,6 +143,9 @@ class Runtime:
             default_strategy_default_stop_loss_pct=(
                 settings.paper_trading_strategy_default_stop_loss_pct
             ),
+            default_max_leverage=settings.paper_trading_default_max_leverage,
+            maintenance_margin_rate=settings.paper_trading_maintenance_margin_pct / Decimal(100),
+            max_leverage_notional=settings.paper_trading_max_leverage_notional,
         ).attach(self.bus)
         # Order-flow capture only makes sense with the live pipeline publishing
         # bus events; attaching (and thus buffering trades) is pointless
@@ -162,6 +167,7 @@ class Runtime:
         self.candle_sync: CandleSyncScheduler | None = None
         self.prediction_grading: PredictionGradingScheduler | None = None
         self.paper_trading_strategy: PaperTradingStrategyScheduler | None = None
+        self.paper_funding: PaperFundingScheduler | None = None
         self.external_data_sync: ExternalDataSyncScheduler | None = None
         self.news_sync: NewsSyncScheduler | None = None
         self.last_ws_message_at: datetime | None = None
@@ -220,6 +226,13 @@ class Runtime:
                 interval_seconds=settings.paper_trading_strategy_interval_seconds,
             )
             await self.paper_trading_strategy.start()
+        if settings.paper_trading_funding_enabled:
+            self.paper_funding = PaperFundingScheduler(
+                state_manager=self.state_manager,
+                interval_seconds=settings.paper_trading_funding_interval_seconds,
+                lookback_hours=settings.paper_trading_funding_lookback_hours,
+            )
+            await self.paper_funding.start()
         if settings.external_data_sync_enabled:
             configured_sources = [
                 part.strip()
@@ -253,6 +266,10 @@ class Runtime:
         if paper_trading_strategy is not None:
             await paper_trading_strategy.stop()
             self.paper_trading_strategy = None
+        paper_funding = self.paper_funding
+        if paper_funding is not None:
+            await paper_funding.stop()
+            self.paper_funding = None
         external_data_sync = self.external_data_sync
         if external_data_sync is not None:
             await external_data_sync.stop()

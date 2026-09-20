@@ -3,6 +3,11 @@
 **Status:** research and design spike. No application code was written or
 changed. Date of all external checks: 2026-09-20.
 
+**Build outcome (M3-E5-T2):** the manual-order mechanics in Part 4 were built; see
+`ARCHITECTURE.md` § "Paper Trading" for what was built, what differs from this
+design, and what remains unverified. Finding 1 (the funding display) was fixed
+separately. This document is otherwise left as written.
+
 **What this document is for.** Paper trading today is long-only, cash-only,
 with no margin and no leverage, a deferral recorded when it was first built.
 This document (1) records how Delta Exchange India's perpetual futures

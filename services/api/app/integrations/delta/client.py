@@ -28,7 +28,13 @@ from app.integrations.delta.exceptions import (
     NetworkError,
     RateLimitError,
 )
-from app.integrations.delta.models import CandleResponse, DeltaResponse, DeltaTicker
+from app.integrations.delta.models import (
+    CandleResponse,
+    DeltaResponse,
+    DeltaTicker,
+    Product,
+    SeriesCandle,
+)
 
 logger = logging.getLogger("app.integrations.delta")
 
@@ -41,6 +47,7 @@ _USER_AGENT = "eth-ai-platform/0.1.0"
 
 CANDLES_PATH = "/v2/history/candles"
 TICKER_PATH = "/v2/tickers/{symbol}"
+PRODUCT_PATH = "/v2/products/{symbol}"
 
 T = TypeVar("T")
 
@@ -196,6 +203,43 @@ class DeltaClient:
                 f"Delta candles response for {symbol} does not match CandleResponse",
                 detail=exc.errors(include_url=False),
             ) from exc
+
+    async def get_series(
+        self,
+        *,
+        symbol: str,
+        resolution: str,
+        start: int,
+        end: int,
+    ) -> list[SeriesCandle]:
+        """Fetch a derived price series over the same public candles endpoint.
+
+        ``symbol`` is a ``FUNDING:<market>`` (the funding rate Delta applied,
+        **published in percent**), a ``MARK:<market>`` (mark price), or a spot
+        index symbol such as ``.DEETHUSD``. Unlike :meth:`get_candles` these
+        series carry no volume, so they validate against
+        :class:`SeriesCandle`. Returns Delta's order (newest first).
+        """
+        result = await self.get(
+            CANDLES_PATH,
+            params={"symbol": symbol, "resolution": resolution, "start": start, "end": end},
+        )
+        if not isinstance(result, list):
+            raise APIError(f"Delta series response for {symbol} is not a list", detail=result)
+        try:
+            return [SeriesCandle.model_validate(record) for record in result]
+        except ValidationError as exc:
+            raise APIError(
+                f"Delta series response for {symbol} does not match SeriesCandle",
+                detail=exc.errors(include_url=False),
+            ) from exc
+
+    async def get_product(self, symbol: str) -> Product:
+        """Fetch one product (its ``spot_index`` names the index a funding
+        payment is priced on)."""
+        result = await self.get(PRODUCT_PATH.format(symbol=symbol), response_model=Product)
+        assert isinstance(result, Product)
+        return result
 
     async def get_ticker(self, symbol: str) -> DeltaTicker:
         """Fetch the current ticker snapshot for one market.

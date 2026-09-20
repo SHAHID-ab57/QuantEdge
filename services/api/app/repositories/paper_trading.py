@@ -7,7 +7,9 @@ on this platform already follows.
 """
 
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
@@ -18,6 +20,7 @@ from sqlalchemy.orm import InstrumentedAttribute
 
 from app.models.paper_trading import (
     PaperAccount,
+    PaperFundingSettlement,
     PaperOrder,
     PaperPosition,
     PaperStrategyDecision,
@@ -44,7 +47,14 @@ class PaperAccountRepository:
         return account
 
     async def get_by_id(self, account_id: uuid.UUID) -> PaperAccount | None:
-        return await self.session.get(PaperAccount, account_id)
+        """Read the account fresh from the database, never from the session's
+        identity map. `Session.get` returns an already-loaded instance without
+        emitting SQL, and these sessions do not expire on commit, so a retry
+        after a lost race would otherwise re-read the *stale* row (and its
+        stale `state_version`), fail the guard again, and exhaust its
+        attempts. The guard is only as good as the freshness of what it
+        compares against."""
+        return await self.session.get(PaperAccount, account_id, populate_existing=True)
 
     async def list_all(self, *, limit: int, offset: int) -> tuple[list[PaperAccount], int]:
         """Every account, most recently created first — the frontend's
@@ -85,10 +95,12 @@ class PaperAccountRepository:
         *,
         expected_balance: Decimal,
         expected_trading_halted: bool,
+        expected_state_version: int,
         new_balance: Decimal,
         new_realized_pnl: Decimal,
         new_peak_balance: Decimal,
         new_trading_halted: bool,
+        commit: bool = True,
     ) -> PaperAccount | None:
         """Atomically apply one order's balance/realized-PnL/peak-balance/
         halt effects, or fail closed if the account changed since the
@@ -105,6 +117,28 @@ class PaperAccountRepository:
         `'pending'` can: it's whatever the caller most recently read, and
         those checks themselves depend on live prices and every other open
         position, not just this row.
+
+        **`expected_state_version` is what makes this guard cover margin.**
+        Comparing `balance` alone cannot see a change that leaves cash
+        untouched: a liquidation forfeits a position's margin (cash
+        returned: zero) and a funding payment taken from margin changes no
+        cash either. Every guarded update therefore also bumps
+        `state_version`, and the `WHERE` clause matches on it, so any two
+        updates to the same account, whatever they touch, are serialized
+        exactly as two balance changes always were.
+
+        **`commit=False` makes the guard the first write of one transaction.**
+        `PaperTradingService` runs the guarded `UPDATE` first, then writes the
+        position and the order in the *same* transaction and commits once, so
+        the account row lock the `UPDATE` takes is held until everything it
+        gates has been written. Without that, a second actor could read the
+        already-committed account (new version) but the not-yet-updated
+        position, pass the guard on that stale read, and close a position that
+        was already closed — a window real Postgres opens (found by running the
+        liquidation-versus-manual-close race against it, which two sessions
+        sharing one SQLite connection can never reproduce). When the guard
+        loses, the transaction is simply ended: the guard must be the first
+        write of it, so there is nothing else to undo.
 
         Two concurrent orders against the same account can never both
         still match an unmodified row: Postgres serializes the two
@@ -124,19 +158,29 @@ class PaperAccountRepository:
                 PaperAccount.id == account_id,
                 PaperAccount.balance == expected_balance,
                 PaperAccount.trading_halted == expected_trading_halted,
+                PaperAccount.state_version == expected_state_version,
             )
             .values(
                 balance=new_balance,
                 realized_pnl=new_realized_pnl,
                 peak_balance=new_peak_balance,
                 trading_halted=new_trading_halted,
+                state_version=expected_state_version + 1,
             )
         )
-        await self.session.commit()
         assert isinstance(result, CursorResult)
         if result.rowcount == 0:
+            # Lost the race. The guard is the first write of its transaction,
+            # so nothing else is pending: just end it. (Not a rollback: that
+            # would expire every ORM object the caller still holds — the
+            # market row it resolved before its retry loop — and a lazy
+            # reload in async code raises `MissingGreenlet`.)
+            await self.session.commit()
             return None
-        return await self.get_by_id(account_id)
+        if commit:
+            await self.session.commit()
+        # The core UPDATE bypasses the ORM, so re-read past any cached instance.
+        return await self.session.get(PaperAccount, account_id, populate_existing=True)
 
 
 class PaperOrderRepository:
@@ -145,10 +189,15 @@ class PaperOrderRepository:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
 
-    async def create(self, order: PaperOrder) -> PaperOrder:
+    async def create(self, order: PaperOrder, *, commit: bool = True) -> PaperOrder:
+        """Add `order`. With `commit=False` it is only flushed, so it joins the
+        caller's still-open transaction (see `try_apply_trade_effects`)."""
         self.session.add(order)
-        await self.session.commit()
-        await self.session.refresh(order)
+        if commit:
+            await self.session.commit()
+            await self.session.refresh(order)
+        else:
+            await self.session.flush()
         return order
 
     async def search(
@@ -179,6 +228,12 @@ class PaperOrderRepository:
         return list(result.scalars().all()), total
 
 
+#: `(entry_price, quantity, margin) -> liquidation price or None`, supplied by
+#: the service layer (which owns the maintenance-margin rate) so the
+#: repository never needs to know it.
+LiquidationPriceFn = Callable[[Decimal, Decimal, Decimal], Decimal | None]
+
+
 @dataclass
 class PositionUpsertResult:
     """The position row after applying one order, plus what it was
@@ -201,10 +256,14 @@ class PaperPositionRepository:
     async def get_by_account_and_symbol(
         self, account_id: uuid.UUID, symbol: str
     ) -> PaperPosition | None:
+        # `populate_existing`: a row already loaded in this session (the
+        # monitor lists positions first, then re-reads each to act on it) must
+        # be refreshed from the database, not served from the identity map,
+        # or a position another session has just closed still looks open.
         result = await self.session.execute(
-            select(PaperPosition).where(
-                PaperPosition.account_id == account_id, PaperPosition.symbol == symbol
-            )
+            select(PaperPosition)
+            .where(PaperPosition.account_id == account_id, PaperPosition.symbol == symbol)
+            .execution_options(populate_existing=True)
         )
         return result.scalar_one_or_none()
 
@@ -217,13 +276,16 @@ class PaperPositionRepository:
             select(PaperPosition)
             .where(PaperPosition.account_id == account_id, PaperPosition.quantity > 0)
             .order_by(PaperPosition.symbol.asc())
+            .execution_options(populate_existing=True)
         )
         return list(result.scalars().all())
 
-    async def list_open_with_thresholds(self, symbol: str) -> list[PaperPosition]:
+    async def list_open_monitored(self, symbol: str) -> list[PaperPosition]:
         """Every open position (across *every* account) in `symbol` that
-        has a stop-loss and/or take-profit set — `StopLossTakeProfitMonitor`'s
-        own query, run once per relevant price event for that symbol."""
+        the price monitor has anything to watch for: a stop-loss and/or
+        take-profit, or a liquidation price (every short, and every
+        leveraged long). `StopLossTakeProfitMonitor`'s own query, run once
+        per relevant price event for that symbol."""
         result = await self.session.execute(
             select(PaperPosition).where(
                 PaperPosition.symbol == symbol,
@@ -231,10 +293,29 @@ class PaperPositionRepository:
                 or_(
                     PaperPosition.stop_loss_price.is_not(None),
                     PaperPosition.take_profit_price.is_not(None),
+                    PaperPosition.liquidation_price.is_not(None),
                 ),
             )
         )
         return list(result.scalars().all())
+
+    async def list_open_for_symbols(self, symbols: list[str]) -> list[PaperPosition]:
+        """Every open position, across every account, in any of `symbols`."""
+        if not symbols:
+            return []
+        result = await self.session.execute(
+            select(PaperPosition).where(
+                PaperPosition.symbol.in_(symbols), PaperPosition.quantity > 0
+            )
+        )
+        return list(result.scalars().all())
+
+    async def list_open_symbols(self) -> list[str]:
+        """The distinct symbols any account currently holds an open position in."""
+        result = await self.session.execute(
+            select(PaperPosition.symbol).where(PaperPosition.quantity > 0).distinct()
+        )
+        return sorted(result.scalars().all())
 
     async def update(self, position: PaperPosition, fields: dict[str, Any]) -> PaperPosition:
         """Apply a partial update — the same "every key applied
@@ -250,38 +331,53 @@ class PaperPositionRepository:
         await self.session.refresh(position)
         return position
 
-    async def apply_buy(
+    async def apply_open(
         self,
         account_id: uuid.UUID,
         symbol: str,
+        *,
+        side: str,
         quantity: Decimal,
         fill_price: Decimal,
-        *,
+        leverage: Decimal,
+        margin_added: Decimal,
+        liquidation_price_for: "LiquidationPriceFn",
+        opened_at: datetime,
         stop_loss_price: Decimal | None = None,
         take_profit_price: Decimal | None = None,
         thresholds_provided: bool = False,
+        commit: bool = True,
     ) -> PositionUpsertResult:
-        """Add `quantity` at `fill_price` to this account's position in
-        `symbol`, VWAP-averaging into any existing holding — creating the
-        row on a symbol held for the first time.
+        """Open, or add to, a position of `quantity` at `fill_price`,
+        VWAP-averaging into any existing holding of the same side — creating
+        the row on a symbol held for the first time, or re-opening a flat
+        one. `margin_added` is the margin this order posts; the resulting
+        liquidation price is recomputed from the *resulting* entry price,
+        quantity and total margin (`liquidation_price_for`).
 
-        `stop_loss_price`/`take_profit_price` are set on the position
-        only when `thresholds_provided` is true (the caller — an order
-        that explicitly named at least one of them — already validated
-        both against the current price and each other); otherwise any
-        existing thresholds on the position are left completely
-        untouched, so an unrelated buy that doesn't mention them can
-        never silently clear a stop-loss someone set earlier.
+        `stop_loss_price`/`take_profit_price` are set on the position only
+        when `thresholds_provided` is true (the caller — an order that
+        explicitly named at least one of them — already validated both
+        against the current price and each other); otherwise any existing
+        thresholds on the position are left completely untouched, so an
+        unrelated order that doesn't mention them can never silently clear a
+        stop-loss someone set earlier.
         """
         position = await self.get_by_account_and_symbol(account_id, symbol)
         if position is None:
             previous_quantity = Decimal(0)
             previous_average = Decimal(0)
+            new_margin = margin_added
             position = PaperPosition(
                 account_id=account_id,
                 symbol=symbol,
+                side=side,
+                leverage=leverage,
+                margin=new_margin,
                 quantity=quantity,
                 average_entry_price=fill_price,
+                liquidation_price=liquidation_price_for(fill_price, quantity, new_margin),
+                opened_at=opened_at,
                 stop_loss_price=stop_loss_price if thresholds_provided else None,
                 take_profit_price=take_profit_price if thresholds_provided else None,
             )
@@ -289,36 +385,138 @@ class PaperPositionRepository:
         else:
             previous_quantity = Decimal(position.quantity)
             previous_average = Decimal(position.average_entry_price)
-            new_quantity = previous_quantity + quantity
-            position.average_entry_price = (
-                previous_quantity * previous_average + quantity * fill_price
-            ) / new_quantity
+            if previous_quantity == 0:
+                # A re-opened, previously-flat row: nothing carries over.
+                new_quantity = quantity
+                new_average = fill_price
+                new_margin = margin_added
+                position.opened_at = opened_at
+            else:
+                new_quantity = previous_quantity + quantity
+                new_average = (
+                    previous_quantity * previous_average + quantity * fill_price
+                ) / new_quantity
+                new_margin = Decimal(position.margin) + margin_added
+            position.side = side
+            position.leverage = leverage
             position.quantity = new_quantity
+            position.average_entry_price = new_average
+            position.margin = new_margin
+            position.liquidation_price = liquidation_price_for(
+                new_average, new_quantity, new_margin
+            )
             if thresholds_provided:
                 position.stop_loss_price = stop_loss_price
                 position.take_profit_price = take_profit_price
-        await self.session.commit()
-        await self.session.refresh(position)
+        await self._persist(position, commit)
         return PositionUpsertResult(position, previous_quantity, previous_average)
 
-    async def apply_sell(self, position: PaperPosition, quantity: Decimal) -> PositionUpsertResult:
-        """Reduce `position` by `quantity` — the caller (`PaperTradingService
-        .place_order`/`.trigger_close`) has already verified `quantity <=
-        position.quantity` (no shorting); `average_entry_price` is left
-        unchanged by a sell (it only ever moves via a *buy*'s own VWAP
-        average). Reaching exactly `0` also clears
-        `stop_loss_price`/`take_profit_price` — a flat position has
-        nothing left to protect, and either would be meaningless against
-        whatever price a later re-buy happens to open at."""
+    async def _persist(self, position: PaperPosition, commit: bool) -> None:
+        """Commit (and reload) the position, or just flush it into the
+        caller's still-open transaction when `commit` is false."""
+        if commit:
+            await self.session.commit()
+            await self.session.refresh(position)
+        else:
+            await self.session.flush()
+
+    async def apply_reduce(
+        self,
+        position: PaperPosition,
+        quantity: Decimal,
+        *,
+        margin_released: Decimal,
+        commit: bool = True,
+    ) -> PositionUpsertResult:
+        """Reduce `position` by `quantity`, releasing `margin_released` of
+        its margin — the caller (`PaperTradingService.place_order`/
+        `.trigger_close`) has already verified `quantity <=
+        position.quantity` (an order that would flip through zero is
+        rejected before it gets here). `average_entry_price` and `leverage`
+        are left unchanged by a reduction, and because margin is released
+        pro rata the liquidation price is unchanged too. Reaching exactly
+        `0` also clears every threshold, the liquidation price and the
+        margin — a flat position has nothing left to protect, and either
+        threshold would be meaningless against whatever price a later
+        re-open happens to fill at."""
         previous_quantity = Decimal(position.quantity)
         previous_average = Decimal(position.average_entry_price)
         position.quantity = previous_quantity - quantity
         if position.quantity == 0:
             position.stop_loss_price = None
             position.take_profit_price = None
-        await self.session.commit()
-        await self.session.refresh(position)
+            position.liquidation_price = None
+            position.margin = Decimal(0)
+        else:
+            position.margin = Decimal(position.margin) - margin_released
+        await self._persist(position, commit)
         return PositionUpsertResult(position, previous_quantity, previous_average)
+
+    async def apply_margin_change(
+        self,
+        position: PaperPosition,
+        *,
+        margin: Decimal,
+        liquidation_price: Decimal | None,
+        commit: bool = True,
+    ) -> PaperPosition:
+        """Set a position's margin and liquidation price — used when a
+        funding payment the account's cash could not cover is taken from
+        the position's own margin (which moves its liquidation price)."""
+        position.margin = margin
+        position.liquidation_price = liquidation_price
+        await self._persist(position, commit)
+        return position
+
+
+class PaperFundingSettlementRepository:
+    """Create/lookup access to funding settlements, the idempotency record
+    for `app.services.paper_funding`."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+
+    async def exists(self, account_id: uuid.UUID, symbol: str, funding_time: datetime) -> bool:
+        result = await self.session.execute(
+            select(func.count())
+            .select_from(PaperFundingSettlement)
+            .where(
+                PaperFundingSettlement.account_id == account_id,
+                PaperFundingSettlement.symbol == symbol,
+                PaperFundingSettlement.funding_time == funding_time,
+            )
+        )
+        return result.scalar_one() > 0
+
+    async def create(
+        self, settlement: PaperFundingSettlement, *, commit: bool = True
+    ) -> PaperFundingSettlement:
+        self.session.add(settlement)
+        if commit:
+            await self.session.commit()
+            await self.session.refresh(settlement)
+        else:
+            await self.session.flush()
+        return settlement
+
+    async def list_for_account(
+        self, account_id: uuid.UUID, *, limit: int, offset: int
+    ) -> tuple[list[PaperFundingSettlement], int]:
+        total = (
+            await self.session.execute(
+                select(func.count())
+                .select_from(PaperFundingSettlement)
+                .where(PaperFundingSettlement.account_id == account_id)
+            )
+        ).scalar_one()
+        result = await self.session.execute(
+            select(PaperFundingSettlement)
+            .where(PaperFundingSettlement.account_id == account_id)
+            .order_by(PaperFundingSettlement.funding_time.desc(), PaperFundingSettlement.id.asc())
+            .limit(limit)
+            .offset(offset)
+        )
+        return list(result.scalars().all()), total
 
 
 class PaperStrategyDecisionRepository:

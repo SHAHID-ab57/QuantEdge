@@ -1807,26 +1807,43 @@ the list endpoint) round out the rest.
 | GET    | `/api/v1/paper-trading/accounts/{id}/positions`          |      | List an account's currently-open positions                           |
 | GET    | `/api/v1/paper-trading/accounts/{id}/summary`            |      | Balance, realized PnL, and live unrealized PnL                       |
 | GET    | `/api/v1/paper-trading/accounts/{id}/risk`               |      | Current exposure %/drawdown %, distance to each limit, halted status |
-| POST   | `/api/v1/paper-trading/accounts/{id}/resume-trading`     | 🔒   | Clear a drawdown halt, resetting peak_balance to the current balance |
+| GET    | `/api/v1/paper-trading/accounts/{id}/funding`            |      | An account's funding payments (rate, index price, amount), paginated |
+| POST   | `/api/v1/paper-trading/accounts/{id}/resume-trading`     | 🔒   | Clear a drawdown halt, resetting peak_balance to the current equity  |
 | PATCH  | `/api/v1/paper-trading/accounts/{id}/positions/{symbol}` | 🔒   | Set, update, or clear a position's stop-loss/take-profit             |
 | PATCH  | `/api/v1/paper-trading/accounts/{id}/strategy`           | 🔒   | Enable/disable the automated strategy, tune threshold/stop-loss      |
 | GET    | `/api/v1/paper-trading/accounts/{id}/strategy/decisions` |      | An account's own automated-strategy decision log, paginated          |
 
 Full design in `ARCHITECTURE.md` § "Paper Trading". A virtual trading
 account: place simulated market orders against real prices, track
-positions, and compute PnL. Long-only, market orders only, no automation
-— no margin, no shorting, no leverage, and no prediction-driven trading
-exist anywhere in this surface.
+positions, and compute PnL. Market orders only. A manual order may go
+long or short and use isolated-margin leverage (M3-E5-T2); the automated
+strategy is limited to unleveraged longs and can open no short and use no
+leverage.
+
+**Shorts, leverage and margin.** One net position per market: a buy
+opens/adds to a long or reduces a short; a sell opens/adds to a short or
+reduces a long. An order larger than the position it reduces is rejected
+(400 `insufficient_position`, never carried through zero). `leverage` (1 to
+the account's `max_leverage`, default 5) is fixed when a position opens and
+posts `notional / leverage` of available cash as isolated margin;
+`reduce_only: true` refuses to open or add (use it to close: a plain
+opposite-side order that lost a race to a stop-loss would open a short).
+A short or leveraged position is liquidated when the **mark price** reaches its
+`liquidation_price` (whole margin forfeited, never more); its notional above
+100,000 USD is rejected (Delta's margin scaling is not modelled).
 
 **Place an order** (`POST /paper-trading/accounts/{id}/orders`):
 
 ```jsonc
-// Request — stop_loss_price/take_profit_price are optional and buy-only
-// (rejected outright on a sell)
+// Request — leverage/reduce_only/stop_loss_price/take_profit_price are optional.
+// Thresholds only apply to an order that opens or adds (a long's stop is below the
+// price, a short's above; a stop beyond the liquidation price is rejected).
 {
   "symbol": "ETHUSD",
   "side": "buy",
   "quantity": "10",
+  "leverage": "5", // optional; omit for 1x, or to add to / reduce an existing position
+  "reduce_only": false, // optional; true = may only shrink an existing position
   "stop_loss_price": "900", // optional — sets the resulting position's stop-loss
   "take_profit_price": "1100", // optional — sets the resulting position's take-profit
 }
@@ -1838,6 +1855,10 @@ exist anywhere in this surface.
   "account_id": "2cff34d9-...",
   "symbol": "ETHUSD",
   "side": "buy",
+  "position_side": "long", // "long" | "short": the kind of position this order opened/added to/reduced
+  "leverage": "1.000000000000000000", // the leverage of that position
+  "margin_applied": "10005.000000000000000000", // margin posted (open/add) or released (reduce); forfeited on a liquidation
+  "reduce_only": false,
   "quantity": "10.000000000000000000",
   "raw_price": "1000.000000000000000000", // the resolved quote, before slippage
   "fill_price": "1000.500000000000000000", // what the account was actually charged — never a perfect fill
@@ -1848,8 +1869,10 @@ exist anywhere in this surface.
   "slippage_applied": "0.500000000000000000", // always visible, never folded into fill_price
   "fee_applied": "10.005000000000000000",
   "notional": "10005.000000000000000000", // fill_price * quantity
-  "realized_pnl": null, // set only for a sell; null for a buy
-  "trigger_reason": null, // "stop_loss" | "take_profit" for a market-triggered auto-close; null for a manual order
+  "realized_pnl": null, // set only for an order that reduces a position; null when opening/adding
+  "trigger_reason": null, // "stop_loss" | "take_profit" | "liquidation" for a market-triggered close; null for a manual order
+  "gapped_through_bankruptcy": false, // liquidation only: mark was already past the bankruptcy price (loss still capped at the margin)
+  "trigger_price_basis": null, // liquidation only: "mark", or "last_fallback" if no mark price was available
   "created_at": "2026-01-05T12:00:03Z",
 }
 ```
@@ -1871,48 +1894,70 @@ used and how fresh it was; a fallback price older than
 `paper_trading_stale_price_threshold_seconds` (default 300s) is marked
 `is_stale_price: true` rather than presented as current.
 
-**Long-only, no margin**: a buy that would take the account's cash
-balance negative, or a sell that would exceed the account's currently-held
-quantity, is rejected outright — never a partial fill.
+**Cash and margin**: an order that opens or adds needs its margin
+(`notional / leverage`, the whole notional at 1x) plus fee in available
+cash; if it can't be covered, or a reducing order exceeds the held quantity,
+it is rejected outright — never a partial fill.
+
+**Positions** (`GET .../positions`) carry `side`, `leverage`, `margin`,
+`liquidation_price` (null for an unleveraged long, which cannot be
+liquidated) and `liquidation_distance_pct`; `unrealized_pnl` is
+`(price - entry) * quantity` for a long and `(entry - price) * quantity`
+for a short. **Funding** for a short/leveraged position is settled at each
+real Delta funding time (`GET .../funding`): `position value at the index price
+
+- funding rate`, longs pay when the rate is positive, charged to cash first
+  and to the position's margin only for the shortfall.
 
 **PnL**: `GET .../positions` marks every open position to a live price
 (`unrealized_pnl`, mark-to-market — no slippage/fee applied, since
 nothing has actually been sold); `GET .../summary` reports the account's
-own cash `balance`, cumulative `realized_pnl` (updated the instant a
-trade closes or reduces a position), the summed `unrealized_pnl` across
-every open position, and `total_equity` (`balance` plus every open
-position's own live mark-to-market value).
+own available cash `balance`, cumulative `realized_pnl` (net of fees and
+funding; updated the instant a trade closes or reduces a position), the
+summed `unrealized_pnl`, `margin_in_use`, `total_equity` (`balance` plus
+every position's margin plus its unrealized PnL), `total_notional` and
+`effective_leverage` (notional over equity).
 
 **Pre-trade risk limits** — every account carries `max_position_size_pct`
 (default 10%), `max_exposure_pct` (default 50%), and `max_drawdown_pct`
 (default 20%), settable per account at creation (`PaperAccountCreateRequest`)
 or left to fall back to this platform's configured defaults. Every order
-is checked, in order: halted (`trading_halted`, 400 `trading_halted`) →
-position sizing (this order's own resulting position value vs. current
-balance, 400 `max_position_size_exceeded`) → exposure (every open
-position's _current_ value, live-priced, plus this order's own resulting
-value, vs. current balance, 400 `max_exposure_exceeded`). After the trade
-completes, `peak_balance` and `trading_halted` are re-evaluated — a
-balance drop of more than `max_drawdown_pct` below the (possibly
-just-raised) peak halts the account. A halt never self-clears; only
-`POST .../resume-trading` clears it (and resets `peak_balance` to the
-current balance). Every rejection's `detail` names the specific limit and
-the actual numbers involved — never a generic message.
+is checked, in order (limits apply to orders that open or add): halted
+(`trading_halted`, 400 `trading_halted`; reduce-only orders and triggered
+exits still go through) → position sizing (this order's own resulting
+position **notional** vs. current **equity**, 400 `max_position_size_exceeded`)
+→ exposure (every open position's live notional plus this order's own, vs.
+current equity, 400 `max_exposure_exceeded`; leverage does not raise it).
+**Drawdown is measured on equity** (cash + margin + unrealized PnL) against its
+peak, re-evaluated after every fill, triggered close, liquidation and funding
+payment and before any order that adds risk: a fall of more than
+`max_drawdown_pct` below the (possibly just-raised) peak halts the account and
+raises an alert. (**Behaviour change in M3-E5-T2:** it used to be measured on
+cash, so spending cash on a position could halt an account with no price
+movement at all.) A halt never self-clears; only `POST .../resume-trading`
+clears it (and resets `peak_balance`, now the peak equity, to the current
+equity). Every rejection's `detail` names the specific limit and the actual
+numbers involved — never a generic message.
 
 **Risk summary** (`GET /paper-trading/accounts/{id}/risk`):
 
 ```jsonc
 {
   "account_id": "2cff34d9-...",
-  "balance": "89984.995000000000000000",
-  "peak_balance": "100000.000000000000000000",
-  "current_exposure_pct": "11.116944...", // total open-position value, current prices, as a % of balance
+  "balance": "89984.995000000000000000", // available cash
+  "equity": "99989.995000000000000000", // cash + margin in use + unrealized PnL
+  "margin_in_use": "10005.000000000000000000",
+  "peak_balance": "100000.000000000000000000", // the highest equity ever reached
+  "total_notional": "11000.000000000000000000",
+  "effective_leverage": "0.110001...", // total_notional / equity
+  "current_exposure_pct": "11.000...", // total open notional, current prices, as a % of equity
   "max_exposure_pct": "50.000000000000000000",
   "exposure_headroom_pct": "38.883055...", // max_exposure_pct - current_exposure_pct
-  "current_drawdown_pct": "10.015000000000000000", // how far below peak_balance, as a %
+  "current_drawdown_pct": "10.015000000000000000", // how far equity is below peak_balance, as a %
   "max_drawdown_pct": "20.000000000000000000",
   "drawdown_headroom_pct": "9.985000000000000000",
   "max_position_size_pct": "10.000000000000000000", // threshold only — checked per order, per symbol, not as one account-wide "current" figure
+  "max_leverage": "5.000000000000000000",
   "trading_halted": false,
 }
 ```
@@ -1920,7 +1965,7 @@ the actual numbers involved — never a generic message.
 **Resume trading** (`POST /paper-trading/accounts/{id}/resume-trading`,
 no request body) returns the updated `PaperAccountResponse` with
 `trading_halted: false` and `peak_balance` reset to the account's current
-balance.
+equity.
 
 **Stop-loss / take-profit** — set at order-open time (above) or via the
 dedicated update endpoint:
@@ -1945,18 +1990,22 @@ dedicated update endpoint:
 ```
 
 A long position's stop-loss must sit below the current price and its
-take-profit above it — a value that would trigger immediately is
-rejected (`invalid_stop_loss_price`/`invalid_take_profit_price`, 400).
-Whenever both are set, the stop-loss must also be strictly below the
-take-profit (`stop_loss_not_below_take_profit`, 400) — this is what
+take-profit above it (a short's, the reverse) — a value that would trigger
+immediately is rejected (`invalid_stop_loss_price`/`invalid_take_profit_price`,
+400), and so is a stop-loss beyond the position's liquidation price
+(`stop_beyond_liquidation`, 400: it could never fire, the position is
+liquidated first). Whenever both are set, the stop-loss must also sit on the
+far side of the take-profit (`stop_loss_not_below_take_profit`, 400) — this is what
 keeps a single price from ever satisfying both trigger conditions at
 once. Once either is crossed by a live price event, the position closes
 automatically through the exact same fill logic a manual sell uses, at a
 _wider_ modeled slippage than a manual order
 (`paper_trading_triggered_slippage_bps`, default 25bps) — a triggered
 exit during a fast price move is not a perfect fill either. The
-resulting order's `trigger_reason` (`"stop_loss"`/`"take_profit"`) marks
-it as distinct from a manually-placed order. Full design — including the
+resulting order's `trigger_reason` (`"stop_loss"`/`"take_profit"`/
+`"liquidation"`) marks it as distinct from a manually-placed order. A
+liquidation runs on the mark price, is checked before either threshold, and
+forfeits the whole margin. Full design — including the
 concurrency guard against a triggered close racing a concurrent manual
 one, and why a single tick can never satisfy both conditions at once —
 in `ARCHITECTURE.md` § "Paper Trading".

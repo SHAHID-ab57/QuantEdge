@@ -2,15 +2,19 @@
 materialized open positions, and its optional automated strategy's own
 decision log.
 
-Long-only, market-orders-only — there is deliberately no `side="short"`
-and no leverage/margin column anywhere here. The one automated order
-path this feature supports (`strategy_enabled` on `PaperAccount`, see
-its own field comments, and `app.services.paper_trading_strategy
-.PaperTradingStrategyScheduler`) is not a second order-placement path:
-it is "just another caller" of the exact same
-`PaperTradingService.place_order` every manual order already goes
-through, off by default, and never able to open a position without a
-stop-loss attached.
+Market-orders-only. A position is **long or short**, optionally
+**leveraged** (isolated margin only): `PaperPosition.side`/`leverage`/
+`margin`/`liquidation_price` carry that state, and `PaperOrder.side` stays
+the plain exchange verb (`buy`/`sell`) with `position_side` naming which
+kind of position it acted on. Shorts and leverage are for **manually
+placed orders only**. The one automated order path this feature supports
+(`strategy_enabled` on `PaperAccount`, see its own field comments, and
+`app.services.paper_trading_strategy.PaperTradingStrategyScheduler`) is not
+a second order-placement path: it is "just another caller" of the exact
+same `PaperTradingService.place_order` every manual order already goes
+through, off by default, never able to open a position without a stop-loss
+attached, and refused by that method for anything but an unleveraged long
+(see `PaperTradingService._enforce_automated_restrictions`).
 
 `PaperPosition` is **materialized**, not recomputed from `PaperOrder`
 history on every read — the same "store the whole answer, never
@@ -36,6 +40,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Integer,
     Numeric,
     String,
     UniqueConstraint,
@@ -49,18 +54,27 @@ SCALE = 18
 
 ORDER_SIDES = ("buy", "sell")
 PRICE_SOURCES = ("ticker", "trade", "candle_close")
-TRIGGER_REASONS = ("stop_loss", "take_profit")
+POSITION_SIDES = ("long", "short")
+TRIGGER_REASONS = ("stop_loss", "take_profit", "liquidation")
+TRIGGER_PRICE_BASES = ("mark", "last_fallback")
 STRATEGY_DECISION_ACTIONS = ("opened", "closed", "no_action")
 
 
 class PaperAccount(BaseModel, TimestampMixin):
     """One virtual trading account: its cash balance and cumulative realized PnL.
 
-    `balance` is cash only — buying converts cash into a position (tracked
-    separately by `PaperPosition`, not blended into this row), and selling
-    converts it back. `realized_pnl` accumulates the *actual* outcome of
-    every order: a buy's own fee (an immediate, certain cost) and, for a
-    sell, `(fill_price - average_entry_price) * quantity - fee` — see
+    `balance` is **available cash** only — opening a position posts margin
+    out of it (tracked separately by `PaperPosition.margin`, not blended into
+    this row), and closing releases margin plus realized PnL back into it. At
+    1x leverage the margin is the whole notional, which is exactly the
+    long-only cash accounting this engine started with. **Equity** (cash plus
+    every position's margin plus its unrealized PnL at the live price) is
+    never stored, since it depends on live prices; it is what the position,
+    exposure and drawdown limits are measured against. `realized_pnl`
+    accumulates the *actual* outcome of every order: an opening order's own
+    fee (an immediate, certain cost) and, for a reducing order, its price PnL
+    (`(fill_price - average_entry_price) * quantity - fee` for a long, the
+    mirror image for a short), plus funding — see
     `app/services/paper_trading.py`'s own docstring for the full accounting
     model and why it reconciles exactly against `balance` once every
     position is flat. Unrealized PnL is never stored here — it depends on
@@ -101,12 +115,15 @@ class PaperAccount(BaseModel, TimestampMixin):
         Numeric(PRECISION, SCALE),
         nullable=False,
         default=Decimal("20"),
-        comment="If balance falls below peak_balance * (1 - this / 100), trading_halted is set.",
+        comment="If account equity falls below peak_balance * (1 - this / 100), trading_halted "
+        "is set.",
     )
     peak_balance: Mapped[Any] = mapped_column(
         Numeric(PRECISION, SCALE),
         nullable=False,
-        comment="The highest balance this account has ever reached — never decreases.",
+        comment="The highest account EQUITY (cash + margin + unrealized PnL) ever reached — "
+        "never decreases. The column keeps its original name for API compatibility; it was a "
+        "cash high-water mark before the drawdown limit moved to equity.",
     )
     trading_halted: Mapped[bool] = mapped_column(
         Boolean,
@@ -114,6 +131,24 @@ class PaperAccount(BaseModel, TimestampMixin):
         default=False,
         comment="Set once balance breaches the drawdown limit; does not clear itself on balance "
         "recovery — only an explicit resume-trading action clears it.",
+    )
+    max_leverage: Mapped[Any] = mapped_column(
+        Numeric(PRECISION, SCALE),
+        nullable=False,
+        default=Decimal("5"),
+        server_default="5",
+        comment="The highest leverage a manually-placed order on this account may use. The "
+        "automated strategy is limited to 1x regardless of this value.",
+    )
+    state_version: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+        comment="Bumped by every guarded trade-effect update. The optimistic-concurrency guard "
+        "matches on it, so it covers state (margin, positions, funding) that a balance "
+        "comparison alone cannot see, e.g. a liquidation that forfeits margin without "
+        "changing cash.",
     )
     strategy_enabled: Mapped[bool] = mapped_column(
         Boolean,
@@ -156,6 +191,7 @@ class PaperAccount(BaseModel, TimestampMixin):
         CheckConstraint("starting_balance >= 0", name="starting_balance_non_negative"),
         CheckConstraint("balance >= 0", name="balance_non_negative"),
         CheckConstraint("peak_balance >= 0", name="peak_balance_non_negative"),
+        CheckConstraint("max_leverage >= 1 AND max_leverage <= 200", name="max_leverage_valid"),
         CheckConstraint(
             "max_position_size_pct > 0 AND max_position_size_pct <= 100",
             name="max_position_size_pct_valid",
@@ -248,8 +284,53 @@ class PaperOrder(BaseModel, TimestampMixin):
     trigger_reason: Mapped[str | None] = mapped_column(
         String(20),
         nullable=True,
-        comment="'stop_loss' | 'take_profit' for a market-triggered auto-close; NULL for a "
-        "manually-placed order.",
+        comment="'stop_loss' | 'take_profit' | 'liquidation' for a market-triggered auto-close; "
+        "NULL for a manually-placed order.",
+    )
+    position_side: Mapped[str] = mapped_column(
+        String(5),
+        nullable=False,
+        default="long",
+        server_default="long",
+        comment="'long' | 'short' — the kind of position this order opened, added to or reduced.",
+    )
+    leverage: Mapped[Any] = mapped_column(
+        Numeric(PRECISION, SCALE),
+        nullable=False,
+        default=Decimal("1"),
+        server_default="1",
+        comment="The leverage of the position this order acted on.",
+    )
+    margin_applied: Mapped[Any] = mapped_column(
+        Numeric(PRECISION, SCALE),
+        nullable=False,
+        default=Decimal("0"),
+        server_default="0",
+        comment="Margin this order posted (opening/adding) or released (reducing/closing, "
+        "before realized PnL); for a liquidation, the margin forfeited.",
+    )
+    reduce_only: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="false",
+        comment="The order was placed reduce-only: it could only shrink an existing position.",
+    )
+    gapped_through_bankruptcy: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="false",
+        comment="Liquidation only: the mark price had already passed the bankruptcy price, so "
+        "the real loss would have exceeded the margin. The paper account's loss stays capped "
+        "at the margin actually posted.",
+    )
+    trigger_price_basis: Mapped[str | None] = mapped_column(
+        String(15),
+        nullable=True,
+        comment="'mark' | 'last_fallback' for a liquidation: the price the trigger used. A "
+        "liquidation is meant to run on the mark price; 'last_fallback' records that no mark "
+        "price was available and the last traded price stood in.",
     )
 
     __table_args__ = (
@@ -259,6 +340,12 @@ class PaperOrder(BaseModel, TimestampMixin):
             f"trigger_reason IS NULL OR trigger_reason IN {TRIGGER_REASONS!r}",
             name="trigger_reason_valid",
         ),
+        CheckConstraint(f"position_side IN {POSITION_SIDES!r}", name="position_side_valid"),
+        CheckConstraint(
+            f"trigger_price_basis IS NULL OR trigger_price_basis IN {TRIGGER_PRICE_BASES!r}",
+            name="trigger_price_basis_valid",
+        ),
+        CheckConstraint("leverage >= 1", name="order_leverage_valid"),
         CheckConstraint("quantity > 0", name="quantity_positive"),
     )
 
@@ -266,18 +353,27 @@ class PaperOrder(BaseModel, TimestampMixin):
 class PaperPosition(BaseModel, TimestampMixin):
     """One account's materialized, currently-open holding in one symbol.
 
-    Updated in place by every buy/sell against this symbol — never
+    Updated in place by every order against this symbol — never
     recomputed from `PaperOrder` history on read. A position that's fully
     closed (`quantity` reaches exactly `0`) is left in place at `quantity
     = 0` rather than deleted, so re-buying the same symbol later doesn't
     need to reinvent an identity; `PaperTradingService.list_positions`
     filters to `quantity > 0` (this platform's own "open positions" view).
 
+    `quantity` is always the *magnitude* (never negative); `side` says
+    whether it is a long or a short. One row per `(account, symbol)`: a
+    single net position, never a long and a short at once. `leverage` is
+    fixed when the position opens, `margin` is the isolated margin posted
+    against it (whole notional at 1x), and `liquidation_price` is the mark
+    price at which the exchange would liquidate it (`NULL` for a long that
+    cannot be, i.e. an unleveraged one) — recomputed whenever entry price,
+    quantity or margin changes.
+
     `stop_loss_price`/`take_profit_price` are optional, nullable
-    thresholds a researcher can set (long-only, so a stop-loss sits below
-    the current price and a take-profit above it — validated at set-time
-    in `PaperTradingService`, never here, since "below/above current
-    price" needs a live quote no DB constraint can see). Watched by
+    thresholds a researcher can set. For a long a stop-loss sits below the
+    current price and a take-profit above it; for a short, the reverse —
+    validated at set-time in `PaperTradingService`, never here, since
+    "below/above current price" needs a live quote no DB constraint can see. Watched by
     `app.paper_trading.monitor.StopLossTakeProfitMonitor`, which closes
     the position automatically through the same fill logic a manual sell
     uses the instant either is crossed. Both are cleared back to `NULL`
@@ -297,20 +393,55 @@ class PaperPosition(BaseModel, TimestampMixin):
     average_entry_price: Mapped[Any] = mapped_column(
         Numeric(PRECISION, SCALE), nullable=False, default=0
     )
+    side: Mapped[str] = mapped_column(
+        String(5),
+        nullable=False,
+        default="long",
+        server_default="long",
+        comment="'long' | 'short'. Meaningful only while quantity > 0.",
+    )
+    leverage: Mapped[Any] = mapped_column(
+        Numeric(PRECISION, SCALE),
+        nullable=False,
+        default=Decimal("1"),
+        server_default="1",
+        comment="Fixed when the position was opened; 1 for an unleveraged position.",
+    )
+    margin: Mapped[Any] = mapped_column(
+        Numeric(PRECISION, SCALE),
+        nullable=False,
+        default=Decimal("0"),
+        server_default="0",
+        comment="Isolated margin posted against this position (its whole notional at 1x).",
+    )
+    liquidation_price: Mapped[Any] = mapped_column(
+        Numeric(PRECISION, SCALE),
+        nullable=True,
+        comment="The mark price at which this position is liquidated; NULL if it cannot be.",
+    )
+    opened_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="When this position last went from flat to open — funding is only owed for "
+        "funding times after it.",
+    )
     stop_loss_price: Mapped[Any] = mapped_column(
         Numeric(PRECISION, SCALE),
         nullable=True,
-        comment="Auto-closes the position when the live price falls to or below this level.",
+        comment="A long's stop-loss: closes at or below this price. A short's: at or above.",
     )
     take_profit_price: Mapped[Any] = mapped_column(
         Numeric(PRECISION, SCALE),
         nullable=True,
-        comment="Auto-closes the position when the live price rises to or above this level.",
+        comment="A long's take-profit: closes at or above this price. A short's: at or below.",
     )
 
     __table_args__ = (
         UniqueConstraint("account_id", "symbol", name="uq_paper_positions_account_symbol"),
         CheckConstraint("quantity >= 0", name="quantity_non_negative"),
+        CheckConstraint(f"side IN {POSITION_SIDES!r}", name="position_side_valid"),
+        CheckConstraint("leverage >= 1", name="position_leverage_valid"),
+        CheckConstraint("margin >= 0", name="margin_non_negative"),
         CheckConstraint(
             "stop_loss_price IS NULL OR stop_loss_price >= 0", name="stop_loss_price_non_negative"
         ),
@@ -403,4 +534,49 @@ class PaperStrategyDecision(BaseModel, TimestampMixin):
         CheckConstraint(
             f"action IN {STRATEGY_DECISION_ACTIONS!r}", name="paper_strategy_decision_action_valid"
         ),
+    )
+
+
+class PaperFundingSettlement(BaseModel, TimestampMixin):
+    """One funding payment charged to (or credited to) one open position at
+    one real funding time.
+
+    Unique on `(account_id, symbol, funding_time)`: that key is what makes
+    settlement idempotent, so a repeated or catch-up run after downtime can
+    never charge the same position twice for the same funding time.
+    `payment` is what the position *paid* (positive = a cost, negative = it
+    received funding); `funding_rate` is stored as a **fraction** (the
+    converted value, see `app.services.funding_rates`), never Delta's raw
+    percent figure. `charged_to_margin` is the part of the payment the
+    account's available cash could not cover, taken from the position's own
+    margin instead (which moves its liquidation price).
+    """
+
+    __tablename__ = "paper_funding_settlements"
+
+    account_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("paper_accounts.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    symbol: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    funding_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    position_side: Mapped[str] = mapped_column(String(5), nullable=False)
+    quantity: Mapped[Any] = mapped_column(Numeric(PRECISION, SCALE), nullable=False)
+    index_price: Mapped[Any] = mapped_column(Numeric(PRECISION, SCALE), nullable=False)
+    funding_rate: Mapped[Any] = mapped_column(
+        Numeric(PRECISION, SCALE), nullable=False, comment="Fraction per interval (0.0001 = 0.01%)."
+    )
+    payment: Mapped[Any] = mapped_column(
+        Numeric(PRECISION, SCALE),
+        nullable=False,
+        comment="What the position paid; negative when it received funding.",
+    )
+    charged_to_margin: Mapped[Any] = mapped_column(
+        Numeric(PRECISION, SCALE), nullable=False, default=0, server_default="0"
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "account_id", "symbol", "funding_time", name="uq_paper_funding_account_symbol_time"
+        ),
+        CheckConstraint(f"position_side IN {POSITION_SIDES!r}", name="funding_position_side_valid"),
     )

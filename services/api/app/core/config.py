@@ -271,6 +271,30 @@ class Settings(BaseSettings):
     paper_trading_default_max_exposure_pct: Decimal = Decimal("50")
     paper_trading_default_max_drawdown_pct: Decimal = Decimal("20")
 
+    #: Margin/leverage for manually-placed orders (isolated margin only; the
+    #: automated strategy is structurally limited to unleveraged longs
+    #: regardless of these, see `PaperTradingService.place_order`).
+    #: `paper_trading_default_max_leverage` is a new account's own per-account
+    #: leverage ceiling (a deliberately conservative starting point, raisable
+    #: per account up to Delta's 200x). `paper_trading_maintenance_margin_pct`
+    #: is Delta's real minimum maintenance margin for ETHUSD/BTCUSD (0.25%);
+    #: margin scaling beyond Delta's position threshold is not modelled, so an
+    #: order that is short or leveraged and whose notional exceeds
+    #: `paper_trading_max_leverage_notional` (Delta's `max_leverage_notional`,
+    #: 100,000 USD) is rejected rather than approximated.
+    paper_trading_default_max_leverage: Decimal = Decimal("5")
+    paper_trading_maintenance_margin_pct: Decimal = Decimal("0.25")
+    paper_trading_max_leverage_notional: Decimal = Decimal("100000")
+
+    #: Funding for open short/leveraged positions: periodically ingest Delta's
+    #: real `FUNDING:`/`MARK:`/index candle history for every market with an
+    #: open position, then settle each real funding time exactly once
+    #: (`app.services.paper_funding`). Only gates the *loop*; a market with no
+    #: open position is never fetched.
+    paper_trading_funding_enabled: bool = True
+    paper_trading_funding_interval_seconds: int = 300
+    paper_trading_funding_lookback_hours: int = 48
+
     #: Bounded retries for the optimistic-concurrency guard around placing
     #: an order (`PaperAccountRepository.try_apply_trade_effects`) — see
     #: that method's own docstring for why a single atomic `UPDATE` isn't

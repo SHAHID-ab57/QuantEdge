@@ -32,8 +32,9 @@ function Metric({ label, value, color }: { label: string; value: string; color?:
 }
 
 /**
- * Balance, realized PnL, unrealized PnL, and total equity — the account's
- * own headline numbers. Realized and unrealized PnL are colored green
+ * Available cash, realized PnL, unrealized PnL, margin in use, total equity
+ * (cash + margin + unrealized PnL) and effective leverage (open notional over
+ * equity) — the account's own headline numbers. Realized and unrealized PnL are colored green
  * (gain), red (loss), or neutral (exactly zero) so the sign is legible at
  * a glance, never just implied by a bare `-` prefix.
  */
@@ -41,7 +42,7 @@ export function AccountSummaryCard({ accountName, summary, isLoading }: AccountS
   if (isLoading || !summary) {
     return (
       <Stack direction="row" spacing={4} flexWrap="wrap" useFlexGap>
-        {Array.from({ length: 4 }, (_, index) => (
+        {Array.from({ length: 6 }, (_, index) => (
           <Skeleton key={index} variant="text" width={140} height={48} />
         ))}
       </Stack>
@@ -59,7 +60,7 @@ export function AccountSummaryCard({ accountName, summary, isLoading }: AccountS
         </Typography>
       ) : null}
       <Stack direction="row" spacing={4} flexWrap="wrap" useFlexGap>
-        <Metric label="Cash Balance" value={`$${Number(summary.balance).toFixed(2)}`} />
+        <Metric label="Available Cash" value={`$${Number(summary.balance).toFixed(2)}`} />
         <Metric
           label="Realized PnL"
           value={formatSignedCurrency(realizedPnl)}
@@ -70,7 +71,12 @@ export function AccountSummaryCard({ accountName, summary, isLoading }: AccountS
           value={formatSignedCurrency(unrealizedPnl)}
           color={pnlColor(unrealizedPnl)}
         />
+        <Metric label="Margin in Use" value={`$${Number(summary.margin_in_use).toFixed(2)}`} />
         <Metric label="Total Equity" value={`$${Number(summary.total_equity).toFixed(2)}`} />
+        <Metric
+          label="Effective Leverage"
+          value={`${Number(summary.effective_leverage).toFixed(2)}x`}
+        />
       </Stack>
     </Stack>
   );

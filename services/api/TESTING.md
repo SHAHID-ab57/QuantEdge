@@ -852,6 +852,26 @@ available. A real key, a real fetch, and a real scheduler tick all
 remain open verification items — see `ARCHITECTURE.md` § "Marketaux
 Connector".
 
+## Testing Short, Leverage and Margin Mechanics (M3-E5-T2)
+
+Covers `ARCHITECTURE.md` § "Paper Trading" → "Margin, Shorts, Leverage,
+Liquidation and Funding". Hand-computed expectations throughout.
+
+| File                                               | What it proves                                                                                                                                                                                                                                                                                                                                          |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tests/paper_trading/test_margin.py`               | Pure margin arithmetic; the liquidation formula against Delta's own stated condition; **Delta's documented examples are inverse-contract and do not verify the linear formula** (pinned); a skipped slot for a real linear figure                                                                                                                       |
+| `tests/paper_trading/test_short_and_leverage.py`   | Short/leveraged fills, PnL and cash accounting; order semantics (flip rejected, reduce-only); stop/take-profit by side; limits on equity and notional (exposure ceiling not raised); halt allows reductions; **1x long unchanged**; **automated caller has no path to leverage or shorts** (behavioral and source-level); guard matches `state_version` |
+| `tests/paper_trading/test_liquidation.py`          | Liquidation on the mark price, forfeiture, gap flag, last-price fallback, trigger order, halted accounts still liquidated/stopped out                                                                                                                                                                                                                   |
+| `tests/paper_trading/test_funding_rates.py`        | The percent-to-fraction conversion from 17 real funding times (first-principles); funding times; ingest from Delta-shaped series                                                                                                                                                                                                                        |
+| `tests/paper_trading/test_paper_funding.py`        | Funding amount and direction, idempotency, catch-up, cash-then-margin, scheduler                                                                                                                                                                                                                                                                        |
+| `tests/paper_trading/test_concurrency_postgres.py` | Liquidation vs manual close (8 rounds), stop vs manual close, exposure race and concurrent funding settlement, on **real Postgres with separate connections** (marked `postgres`; set `TEST_DATABASE_URL`)                                                                                                                                              |
+
+**Why the races are Postgres-only.** The default SQLite engine shares one
+connection across sessions, so two "concurrent" sessions are one transaction:
+no row lock, no isolation. It cannot exercise a race, and it passed while the
+code had a double-close window. `test_concurrency_postgres.py` uses a schema
+whose search path is set on every pooled connection.
+
 ## Testing Funding Rate, Open Interest & Order-Flow Capture (M4-E2-T1)
 
 Covers `ARCHITECTURE.md` § "Funding Rate, Open Interest & Order-Flow

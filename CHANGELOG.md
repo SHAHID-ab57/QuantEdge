@@ -8,6 +8,60 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Manual short, leverage and margin mechanics for paper trading
+  (M3-E5-T2).** Built from the M3-E5-T1 design; **manual orders only**.
+  - **What exists now:** short positions; isolated-margin leverage
+    (`leverage` on an order, capped by each account's new `max_leverage`,
+    default 5); `reduce_only`; liquidation on the **mark price** (a third
+    trigger in the existing stop-loss/take-profit monitor, checked first,
+    filled at the wider triggered slippage, the whole margin forfeited, loss
+    never beyond it, `gapped_through_bankruptcy` recorded); funding settled
+    from Delta's real `FUNDING:`/`MARK:`/index candle history, exactly once per
+    `(account, symbol, funding_time)`, charged to cash then to margin;
+    position size and exposure measured as notional over **equity**. New
+    endpoint `GET .../funding`. Paper Trading page: side/leverage/reduce-only
+    controls that say what an order will do, per-position side, leverage,
+    margin and liquidation price, a Close button (reduce-only), equity and
+    effective leverage.
+  - **The automated strategy is untouched** (no diff to its module) and can
+    reach neither shorts nor leverage: the shared `place_order` path refuses
+    anything but an unleveraged long for an automated caller, which also
+    keeps it from adding to a manually opened short in the same market.
+    D1/D2/D7 stay in force; the exposure caps are not raised.
+  - **Behaviour changes (announced):** the drawdown limit and halt now
+    measure **equity**, not cash. It used to halt an account for merely
+    spending more than the limit's share of its cash on a position, with no
+    price movement, and could not see unrealized losses. The migration raises
+    each account's stored peak to its cost-basis equity so nothing is halted by
+    the change. A halt now blocks only orders that open or add; reduce-only
+    orders and triggered exits (stop-loss, take-profit) go through, and a
+    liquidation cannot be blocked; a halt raises an alert. A manual sell against
+    nothing now opens a short (the automated strategy still cannot).
+  - **Not verified:** the linear liquidation formula is derived from Delta's
+    documented condition, not confirmed against a liquidation price Delta shows
+    for a linear contract (its only worked examples are for an inverse
+    contract, and cannot verify it). `test_margin.py` has an empty, skipped slot
+    for one real figure.
+  - **A real concurrency bug, found by running it on Postgres:** a liquidation
+    racing a manual close of the same position could both succeed. The old order
+    committed the guarded account update and only then wrote the position; the
+    SQLite suite (one shared connection) can never show that. The guarded update
+    is now the first write of one transaction that also writes the position and
+    order, the guard also matches a new `state_version`, and account/position
+    reads bypass the session identity map (a retry after a lost race used to
+    re-read the stale row). The racing tests now live in
+    `test_concurrency_postgres.py` (marked `postgres`, separate connections);
+    the two SQLite versions were removed because they passed while proving
+    nothing.
+  - **Not built:** a funding table in the UI, cross margin, flattening on a
+    halt, Delta's margin scaling above 100,000 USD notional, changing leverage
+    on an open position, and any automated-strategy integration.
+  - **Also fixed here:** Delta's `FUNDING:`/`MARK:`/index series carry
+    `volume: null`, which the OHLCV candle model rejects, so they use a new
+    `SeriesCandle` model and `DeltaClient.get_series`; `Product` gained
+    `spot_index` (the index symbol differs per market: `.DEETHUSD` vs
+    `.DEXBTUSD`).
+
 - **Structured logging and error tracking; connector `failing` now raises
   a real alert (M5-E5-T2).** The connector health task deferred making a
   person actually get told; this closes it.

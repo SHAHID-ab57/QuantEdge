@@ -39,6 +39,7 @@ from tests.conftest import SessionFactory
 from tests.paper_trading.test_service import (
     _TestPaperTradingService,
     build_service,
+    persisted_test_user_id,
     publish_ticker,
     seed_market,
 )
@@ -605,11 +606,14 @@ class TestLongAndBearishClosesThePosition:
     async def test_a_rejected_automated_close_is_logged_as_no_action(
         self, session_factory: SessionFactory, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A halted account rejects a triggered close exactly like a
-        manual one — proving the close path also shares the existing
-        guard, not a second, unguarded one."""
+        """The strategy's "close what I hold" sell would, against a *manually
+        opened short* in the same market, ADD to that short. The shared
+        order path refuses it (`_enforce_automated_restrictions`), and the
+        refusal is a logged `no_action`, never an order — proving the close
+        path shares the same structural guard as the open path, and that an
+        account mixing manual shorts with the strategy is safe."""
         job_id, _ = await train_completed_job(
-            session_factory, symbol="STRATCLOSEHALTUSD", model_type="logistic_regression"
+            session_factory, symbol="STRATCLOSESHORTUSD", model_type="logistic_regression"
         )
         state_manager = MarketStateManager()
         service = await build_service(session_factory, state_manager)
@@ -617,27 +621,25 @@ class TestLongAndBearishClosesThePosition:
             PaperAccountCreateRequest(
                 starting_balance=Decimal("100000"),
                 max_position_size_pct=Decimal("100"),
-                max_drawdown_pct=Decimal("1"),
+                max_exposure_pct=Decimal("100"),
             )
         )
         account_id = uuid.UUID(account.id)
-        # A single large-enough buy spends more than 1% of balance on its
-        # own, which already breaches the account's own 1% drawdown limit
-        # (see `PaperTradingService._apply_drawdown_tracking`) — halting
-        # it before the strategy ever gets a chance to close anything.
+        manual_user = await persisted_test_user_id(session_factory)
         await service.place_order(
             account_id,
-            PaperOrderRequest(symbol="STRATCLOSEHALTUSD", side="buy", quantity=Decimal("20")),
+            PaperOrderRequest(symbol="STRATCLOSESHORTUSD", side="sell", quantity=Decimal("1")),
+            user_id=manual_user,
         )
-        risk = await service.risk_summary(account_id)
-        assert risk.trading_halted is True
+        before = await service.list_positions(account_id)
+        assert before.positions[0].side == "short"
 
         await enable_strategy(service, account_id, job_id)
         stub_prediction(
             monkeypatch,
             build_prediction(
                 training_job_id=job_id,
-                symbol="STRATCLOSEHALTUSD",
+                symbol="STRATCLOSESHORTUSD",
                 predicted_value="down",
                 confidence=0.9,
             ),
@@ -653,6 +655,12 @@ class TestLongAndBearishClosesThePosition:
         decision = decisions.decisions[0]
         assert decision.action == "no_action"
         assert "rejected" in decision.reason.lower()
+        assert "short" in decision.reason.lower()
+
+        # The manual short is exactly as it was: untouched, not doubled.
+        after = await service.list_positions(account_id)
+        assert after.positions[0].side == "short"
+        assert after.positions[0].quantity == before.positions[0].quantity
 
 
 @pytest.mark.asyncio

@@ -190,6 +190,42 @@ def capture_connector_failing(source: str, *, recent_errors: Sequence[str], stre
         )
 
 
+def capture_trading_halted(
+    account_id: str, *, equity: object, peak_equity: object, max_drawdown_pct: object
+) -> None:
+    """Alert that a paper account's drawdown limit just halted its trading.
+
+    One event per halt, grouped per account by fingerprint, so an account
+    that stays halted is one issue, not one alert per later order. The
+    kill switch's alert (D4): the halt blocks new risk, this makes sure a
+    person finds out it happened.
+    """
+    logger.error(
+        "Paper trading halted for account %s: equity %s fell more than %s%% below its peak %s",
+        account_id,
+        equity,
+        max_drawdown_pct,
+        peak_equity,
+        extra={"paper_account_id": account_id},
+    )
+    with sentry_sdk.new_scope() as scope:
+        scope.set_tag("paper_account_id", account_id)
+        scope.set_context(
+            "paper_trading_halt",
+            {
+                "account_id": account_id,
+                "equity": str(equity),
+                "peak_equity": str(peak_equity),
+                "max_drawdown_pct": str(max_drawdown_pct),
+            },
+        )
+        scope.fingerprint = ["paper-trading-halted", account_id]
+        sentry_sdk.capture_message(
+            f"Paper trading halted for account {account_id}: drawdown limit breached",
+            level="error",
+        )
+
+
 def is_enabled() -> bool:
     """Whether events would actually be sent somewhere (a DSN is configured).
 
@@ -202,6 +238,7 @@ def is_enabled() -> bool:
 __all__ = [
     "REDACTED",
     "capture_connector_failing",
+    "capture_trading_halted",
     "init_error_tracking",
     "is_enabled",
     "redact_secrets",

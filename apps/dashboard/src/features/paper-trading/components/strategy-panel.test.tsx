@@ -15,6 +15,7 @@ const ACCOUNT: PaperAccount = {
   max_position_size_pct: '10',
   max_exposure_pct: '50',
   max_drawdown_pct: '20',
+  max_leverage: '5',
   peak_balance: '100000',
   trading_halted: false,
   strategy_enabled: false,

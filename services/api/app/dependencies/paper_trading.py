@@ -1,6 +1,7 @@
 """Dependency providers for the Paper Trading API."""
 
 from datetime import timedelta
+from decimal import Decimal
 from typing import Annotated
 
 from fastapi import Depends
@@ -13,6 +14,7 @@ from app.repositories.candles import CandleRepository
 from app.repositories.markets import MarketRepository
 from app.repositories.paper_trading import (
     PaperAccountRepository,
+    PaperFundingSettlementRepository,
     PaperOrderRepository,
     PaperPositionRepository,
     PaperStrategyDecisionRepository,
@@ -56,4 +58,8 @@ def get_paper_trading_service(
         default_strategy_default_stop_loss_pct=(
             settings.paper_trading_strategy_default_stop_loss_pct
         ),
+        default_max_leverage=settings.paper_trading_default_max_leverage,
+        maintenance_margin_rate=settings.paper_trading_maintenance_margin_pct / Decimal(100),
+        max_leverage_notional=settings.paper_trading_max_leverage_notional,
+        funding_settlement_repository=PaperFundingSettlementRepository(session),
     )

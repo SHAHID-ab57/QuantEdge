@@ -4,9 +4,12 @@
 
 **Feature:** Paper Trading — a virtual trading account that places simulated
 market orders against real prices, tracks positions, and computes PnL.
-Milestone 3, task `M3-E1-T1`. Long-only, market orders only — no margin, no
-shorting, no leverage, no automation, no prediction-driven trading (each is a
-separate, later task).
+Milestone 3, task `M3-E1-T1`. Market orders only. **Update (M3-E5-T2):**
+manually placed orders may now go short and use isolated-margin leverage; the
+sections below describe the original long-only, cash-only accounting, which is
+exactly what a 1x long still is. The automated strategy remains limited to
+unleveraged longs. See `ARCHITECTURE.md` § "Paper Trading" → "Margin, Shorts,
+Leverage, Liquidation and Funding" for the current mechanics.
 
 **Scope of this document:** everything that exists in the backend, everything
 that exists in the frontend (including every single field rendered on the
@@ -196,8 +199,9 @@ slippage, 10bps fee), a buy of 10 units at a $1000 quote (the exact fixture
 
 **Buy:** rejected with `InsufficientBalanceError` (400,
 `insufficient_balance`) if `notional + fee_applied` exceeds the account's
-current `balance` — there is no margin, so a buy is either fully affordable
-or rejected outright, never partially filled. Otherwise:
+current `balance` — at 1x leverage there is no margin beyond the whole notional,
+so a buy is either fully affordable or rejected outright, never partially
+filled. (With leverage the cash needed is `notional / leverage + fee`.) Otherwise:
 
 - `balance -= (notional + fee_applied)`
 - `realized_pnl -= fee_applied` (a buy's own fee is an immediate, certain
@@ -209,8 +213,9 @@ or rejected outright, never partially filled. Otherwise:
 
 **Sell:** rejected with `InsufficientPositionError` (400,
 `insufficient_position`) if the requested quantity exceeds the currently held
-quantity — long-only, so a sell can never exceed the held quantity (no
-shorting). Otherwise:
+quantity — a reducing order can never exceed the held quantity or flip the
+position through zero. (A manual sell against nothing now opens a short; the
+automated strategy still cannot.) Otherwise:
 
 - `realized_pnl_this_order = (fill_price − average_entry_price_before_this_sell) × quantity − fee_applied`
 - Account `balance += (notional − fee_applied)`; account `realized_pnl +=
@@ -1420,8 +1425,10 @@ curl -s "http://localhost:8000/api/v1/paper-trading/accounts/$ACCOUNT_ID/strateg
 
 Deliberately **not** built (each is a separate, later task, not a defect):
 
-- No margin, no leverage, no shorting — a sell can only reduce/close an
-  existing long position.
+- (Superseded by M3-E5-T2 for manual orders: shorts, isolated-margin leverage,
+  liquidation on the mark price and funding now exist. The automated strategy
+  still cannot short or use leverage. Cross margin and flattening on a halt
+  are not built.)
 - No limit/stop orders — market orders only, filled immediately and
   completely; there is no pending/partial-fill state anywhere in the schema.
 - Stop-loss/take-profit are built (§ 1.10), but only as a simple pair per

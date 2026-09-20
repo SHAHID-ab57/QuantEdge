@@ -7,6 +7,7 @@ import Button from '@mui/material/Button';
 import Stack from '@mui/material/Stack';
 import TextField from '@mui/material/TextField';
 import { useState } from 'react';
+import { ConfirmActionDialog } from '@/components/confirm-action-dialog';
 import { EmptyStateNotice } from '@/components/empty-state-notice';
 import { Section } from '@/components/section';
 import { useTrainingJobs } from '@/features/ml-training/hooks/use-training-jobs-data';
@@ -34,6 +35,7 @@ import {
   useUpdatePaperStrategyConfig,
   useUpdatePositionThresholds,
 } from './hooks/use-paper-trading-data';
+import type { PaperPosition } from '@/types/api/paper-trading';
 import { usePaperTradingAccountStore } from './store/use-paper-trading-account-store';
 
 const ORDERS_PAGE_SIZE = 10;
@@ -57,6 +59,7 @@ export function PaperTradingPage() {
   const [ordersPage, setOrdersPage] = useState(1);
   const [decisionsPage, setDecisionsPage] = useState(1);
   const [editingThresholdsFor, setEditingThresholdsFor] = useState<string | null>(null);
+  const [closingPosition, setClosingPosition] = useState<PaperPosition | null>(null);
 
   const account = usePaperAccount(accountId);
   const summary = usePaperPortfolioSummary(accountId);
@@ -102,9 +105,29 @@ export function PaperTradingPage() {
       symbol: values.symbol,
       side: values.side,
       quantity: values.quantity,
+      leverage: values.leverage,
+      reduce_only: values.reduceOnly,
       stop_loss_price: values.stopLossPrice,
       take_profit_price: values.takeProfitPrice,
     });
+  };
+
+  // Closing sends a REDUCE-ONLY order for the whole position, never a plain
+  // opposite-side order: if the position has already gone (a stop-loss or a
+  // liquidation got there first) a plain sell would open a short instead of
+  // failing, and a reduce-only order fails closed.
+  const handleClosePosition = () => {
+    if (!closingPosition) return;
+    setOrdersPage(1);
+    placeOrder.mutate(
+      {
+        symbol: closingPosition.symbol,
+        side: closingPosition.side === 'long' ? 'sell' : 'buy',
+        quantity: closingPosition.quantity,
+        reduce_only: true,
+      },
+      { onSettled: () => setClosingPosition(null) },
+    );
   };
 
   const handleSaveThresholds = (values: {
@@ -215,7 +238,7 @@ export function PaperTradingPage() {
       {hasAccount ? (
         <Section
           title="Risk"
-          subtitle="Current exposure and drawdown against this account's own configured limits"
+          subtitle="Exposure (notional) and drawdown (equity) against this account's own configured limits"
         >
           <RiskSummaryPanel
             data={risk.data}
@@ -229,13 +252,15 @@ export function PaperTradingPage() {
 
       <Section
         title="Place an Order"
-        subtitle="Market orders only — fills immediately at the current real price, with a modeled slippage and fee"
+        subtitle="Market orders only — long or short, optionally leveraged. Fills immediately at the current real price, with a modeled slippage and fee"
       >
         <Stack spacing={2}>
           <OrderForm
             onSubmit={handlePlaceOrder}
             submitting={placeOrder.isPending}
             hasAccount={hasAccount}
+            positions={positions.data?.positions}
+            maxLeverage={account.data ? Number(account.data.max_leverage) : undefined}
           />
           {placeOrder.isError ? (
             <Alert severity="error" role="alert">
@@ -253,6 +278,7 @@ export function PaperTradingPage() {
             data={positions.data}
             isLoading={positions.isLoading}
             onEditThresholds={setEditingThresholdsFor}
+            onClosePosition={setClosingPosition}
           />
           {updateThresholds.isError ? (
             <Alert severity="error" role="alert">
@@ -263,6 +289,18 @@ export function PaperTradingPage() {
           ) : null}
         </Stack>
       </Section>
+
+      <ConfirmActionDialog
+        open={closingPosition !== null}
+        title={`Close ${closingPosition?.symbol ?? ''} ${closingPosition?.side ?? ''}?`}
+        description="Closes the whole position at the current market price with a modeled slippage and fee (a reduce-only order, so it can never open the opposite side). Its margin is released back to cash with the realized PnL."
+        confirmLabel="Close Position"
+        busyLabel="Closing…"
+        color="primary"
+        busy={placeOrder.isPending}
+        onCancel={() => setClosingPosition(null)}
+        onConfirm={handleClosePosition}
+      />
 
       <Section
         title="Order History"

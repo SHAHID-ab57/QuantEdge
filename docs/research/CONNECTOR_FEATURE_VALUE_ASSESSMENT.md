@@ -1110,3 +1110,11 @@ the assumption that "retrained" alone meant "fine."
 - The Dataset Builder's own byte-identical 44-row parity across all 8
   variants was verified by diffing full `timestamps` arrays returned by
   `POST /markets/ETHUSD/ml/dataset`, not just comparing row counts.
+
+## Follow-up: the confidence score itself
+
+Whether the model's own confidence score carries any signal (as a strategy gate,
+or after Platt/isotonic recalibration) was measured separately in
+`CONFIDENCE_GATE_AUDIT.md`: it does not (AUC of confidence against correctness
+0.506, 95% interval 0.491 to 0.520), which is consistent with the no-skill findings
+above.

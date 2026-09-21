@@ -572,7 +572,9 @@ evidence, all from this project's own measurements:
   in a middle bin.
 - **Caveat that must not be dropped.** These predictions are sequential and
   heavily overlapping, so a per-row bootstrap **understates** uncertainty,
-  the same pseudo-replication problem the horizon sweep found. The live
+  the same pseudo-replication problem the horizon sweep found. **Update:** `CONFIDENCE_GATE_AUDIT.md` quantifies this: the live rows are only 134
+  distinct hourly bars, and the corrected live-only correlation is -0.032 (AUC 0.482,
+  interval 0.391 to 0.565), no signal in either direction. The live
   subset's "significantly negative" correlation must **not** be read as
   genuine inverse skill. The defensible reading is narrower and sufficient:
   there is **no evidence of the positive relationship** that confidence-sized

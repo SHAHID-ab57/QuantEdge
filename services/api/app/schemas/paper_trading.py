@@ -63,9 +63,9 @@ class PaperAccountCreateRequest(BaseModel):
         default=None,
         ge=1,
         le=200,
-        description="The highest leverage a manually-placed order may use on this account "
-        "(Delta's own ceiling is 200x). Defaults to this platform's configured, deliberately "
-        "conservative value when omitted. The automated strategy is limited to 1x regardless.",
+        description="The highest leverage any order may use on this account (Delta's own "
+        "ceiling is 200x), and the ceiling on the automated strategy's fixed leverage. "
+        "Defaults to this platform's configured, deliberately conservative value when omitted.",
     )
 
 
@@ -98,7 +98,12 @@ class PaperAccountResponse(BaseModel):
         "strategy acts"
     )
     strategy_default_stop_loss_pct: Decimal = Field(
-        description="Every automated buy attaches a stop-loss this % below its own fill price"
+        description="Every automated entry attaches a stop-loss this % on the losing side of "
+        "its own fill price (below a long's, above a short's)"
+    )
+    strategy_leverage: Decimal = Field(
+        description="The one fixed leverage every automated entry uses, long or short — never "
+        "derived from a prediction's confidence"
     )
     created_at: datetime
 
@@ -128,6 +133,7 @@ class PaperAccountResponse(BaseModel):
             ),
             strategy_confidence_threshold_pct=account.strategy_confidence_threshold_pct,
             strategy_default_stop_loss_pct=account.strategy_default_stop_loss_pct,
+            strategy_leverage=account.strategy_leverage,
             created_at=account.created_at,
         )
 
@@ -529,7 +535,16 @@ class PaperStrategyConfigUpdateRequest(BaseModel):
         default=None,
         gt=0,
         lt=100,
-        description="Every automated buy attaches a stop-loss this % below its own fill price",
+        description="Every automated entry attaches a stop-loss this % on the losing side of "
+        "its own fill price (below a long's, above a short's); must sit inside the liquidation "
+        "distance of the strategy's leverage",
+    )
+    leverage: Decimal | None = Field(
+        default=None,
+        ge=1,
+        le=200,
+        description="The one fixed leverage every automated entry uses, long or short. Never "
+        "derived from a prediction's confidence; must not exceed the account's max_leverage",
     )
 
     @model_validator(mode="after")
@@ -560,6 +575,11 @@ class PaperStrategyConfigUpdateRequest(BaseModel):
                 "default_stop_loss_pct cannot be explicitly cleared to null — omit it "
                 "entirely to leave it unchanged"
             )
+        if "leverage" in self.model_fields_set and self.leverage is None:
+            raise ValueError(
+                "leverage cannot be explicitly cleared to null — omit it entirely to leave "
+                "it unchanged"
+            )
         return self
 
 
@@ -580,6 +600,15 @@ class PaperStrategyDecisionResponse(BaseModel):
     )
     confidence_threshold_pct: Decimal = Field(
         description="The account's configured threshold at the moment of this cycle"
+    )
+    direction: Literal["long", "short"] | None = Field(
+        default=None,
+        description="The side this cycle concerned: the position it opened or closed, or, for a "
+        "no_action cycle, the side the model's call pointed at (up = long, down = short); null "
+        "only when there was no directional call",
+    )
+    strategy_leverage: Decimal = Field(
+        description="The account's fixed strategy leverage at the moment of this cycle"
     )
     prediction_id: str | None = None
     order_id: str | None = None
@@ -603,6 +632,8 @@ class PaperStrategyDecisionResponse(BaseModel):
             predicted_value=decision.predicted_value,
             confidence=decision.confidence,
             confidence_threshold_pct=decision.confidence_threshold_pct,
+            direction=decision.direction,  # type: ignore[arg-type]
+            strategy_leverage=decision.strategy_leverage,
             prediction_id=(
                 str(decision.prediction_id) if decision.prediction_id is not None else None
             ),

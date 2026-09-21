@@ -1797,28 +1797,29 @@ the list endpoint) round out the rest.
 
 ### Paper Trading
 
-| Method | Path                                                     | Auth | Purpose                                                              |
-| ------ | -------------------------------------------------------- | ---- | -------------------------------------------------------------------- |
-| POST   | `/api/v1/paper-trading/accounts`                         | 🔒   | Open a new virtual trading account                                   |
-| GET    | `/api/v1/paper-trading/accounts`                         |      | List every account, most recently created first                      |
-| GET    | `/api/v1/paper-trading/accounts/{id}`                    |      | Get one account                                                      |
-| POST   | `/api/v1/paper-trading/accounts/{id}/orders`             | 🔒   | Place and fill a market order                                        |
-| GET    | `/api/v1/paper-trading/accounts/{id}/orders`             |      | List an account's own order history                                  |
-| GET    | `/api/v1/paper-trading/accounts/{id}/positions`          |      | List an account's currently-open positions                           |
-| GET    | `/api/v1/paper-trading/accounts/{id}/summary`            |      | Balance, realized PnL, and live unrealized PnL                       |
-| GET    | `/api/v1/paper-trading/accounts/{id}/risk`               |      | Current exposure %/drawdown %, distance to each limit, halted status |
-| GET    | `/api/v1/paper-trading/accounts/{id}/funding`            |      | An account's funding payments (rate, index price, amount), paginated |
-| POST   | `/api/v1/paper-trading/accounts/{id}/resume-trading`     | 🔒   | Clear a drawdown halt, resetting peak_balance to the current equity  |
-| PATCH  | `/api/v1/paper-trading/accounts/{id}/positions/{symbol}` | 🔒   | Set, update, or clear a position's stop-loss/take-profit             |
-| PATCH  | `/api/v1/paper-trading/accounts/{id}/strategy`           | 🔒   | Enable/disable the automated strategy, tune threshold/stop-loss      |
-| GET    | `/api/v1/paper-trading/accounts/{id}/strategy/decisions` |      | An account's own automated-strategy decision log, paginated          |
+| Method | Path                                                     | Auth | Purpose                                                                  |
+| ------ | -------------------------------------------------------- | ---- | ------------------------------------------------------------------------ |
+| POST   | `/api/v1/paper-trading/accounts`                         | 🔒   | Open a new virtual trading account                                       |
+| GET    | `/api/v1/paper-trading/accounts`                         |      | List every account, most recently created first                          |
+| GET    | `/api/v1/paper-trading/accounts/{id}`                    |      | Get one account                                                          |
+| POST   | `/api/v1/paper-trading/accounts/{id}/orders`             | 🔒   | Place and fill a market order                                            |
+| GET    | `/api/v1/paper-trading/accounts/{id}/orders`             |      | List an account's own order history                                      |
+| GET    | `/api/v1/paper-trading/accounts/{id}/positions`          |      | List an account's currently-open positions                               |
+| GET    | `/api/v1/paper-trading/accounts/{id}/summary`            |      | Balance, realized PnL, and live unrealized PnL                           |
+| GET    | `/api/v1/paper-trading/accounts/{id}/risk`               |      | Current exposure %/drawdown %, distance to each limit, halted status     |
+| GET    | `/api/v1/paper-trading/accounts/{id}/funding`            |      | An account's funding payments (rate, index price, amount), paginated     |
+| POST   | `/api/v1/paper-trading/accounts/{id}/resume-trading`     | 🔒   | Clear a drawdown halt, resetting peak_balance to the current equity      |
+| PATCH  | `/api/v1/paper-trading/accounts/{id}/positions/{symbol}` | 🔒   | Set, update, or clear a position's stop-loss/take-profit                 |
+| PATCH  | `/api/v1/paper-trading/accounts/{id}/strategy`           | 🔒   | Enable/disable the automated strategy, tune threshold/stop-loss/leverage |
+| GET    | `/api/v1/paper-trading/accounts/{id}/strategy/decisions` |      | An account's own automated-strategy decision log, paginated              |
 
 Full design in `ARCHITECTURE.md` § "Paper Trading". A virtual trading
 account: place simulated market orders against real prices, track
 positions, and compute PnL. Market orders only. A manual order may go
 long or short and use isolated-margin leverage (M3-E5-T2); the automated
-strategy is limited to unleveraged longs and can open no short and use no
-leverage.
+strategy also places its orders here (M3-E5-T3): long or short at its account's
+one fixed `strategy_leverage`, always with a stop-loss, never scaled by
+confidence.
 
 **Shorts, leverage and margin.** One net position per market: a buy
 opens/adds to a long or reduces a short; a sell opens/adds to a short or
@@ -2039,7 +2040,8 @@ Milestone 6's live-trading gate) in `ARCHITECTURE.md` § "Paper Trading"
   "enabled": true,
   "training_job_id": "b3c1a2e4-...", // a completed job trained on real market data
   "confidence_threshold_pct": "70", // 0-100, matching every other risk/threshold field on this account
-  "default_stop_loss_pct": "7", // (0, 100) — every automated buy attaches a stop-loss this far below its fill price
+  "default_stop_loss_pct": "7", // (0, 100) — every automated entry attaches a stop-loss this far on the losing side of its fill price (below a long's, above a short's)
+  "leverage": "2", // [1, the account's max_leverage] — the ONE fixed leverage for every automated entry, long or short
 }
 
 // Response (200) — the full PaperAccountResponse, now including:
@@ -2048,6 +2050,7 @@ Milestone 6's live-trading gate) in `ARCHITECTURE.md` § "Paper Trading"
   "strategy_training_job_id": "b3c1a2e4-...",
   "strategy_confidence_threshold_pct": "70.000000000000000000",
   "strategy_default_stop_loss_pct": "7.000000000000000000",
+  "strategy_leverage": "2.000000000000000000", // default 2; never derived from a prediction's confidence
   // ...every other existing PaperAccountResponse field, unchanged
 }
 ```
@@ -2063,7 +2066,9 @@ Milestone 6's live-trading gate) in `ARCHITECTURE.md` § "Paper Trading"
       "training_job_id": "b3c1a2e4-...",
       "symbol": "ETHUSD",
       "action": "opened", // "opened" | "closed" | "no_action"
-      "reason": "Confidence 91.00% >= 70% threshold; signal 'up' while flat — opened 4.2 ETHUSD with a stop-loss at 976.50.",
+      "reason": "Confidence 91.00% >= 70% threshold; signal 'up' while flat — opened a long of 4.2 ETHUSD at 2.000x leverage with a stop-loss at 976.50.",
+      "direction": "long", // "long" | "short" | null: the side this cycle concerned (opened/closed), or for a no_action the side the call pointed at (up = long, down = short); null only with no directional call
+      "strategy_leverage": "2.000000000000000000", // the fixed leverage in force at this cycle, snapshotted
       "predicted_value": "up",
       "confidence": 0.91, // 0-1, the raw prediction confidence — not a percentage
       "confidence_threshold_pct": "70.000000000000000000", // snapshotted at the moment of this cycle
@@ -2077,6 +2082,19 @@ Milestone 6's live-trading gate) in `ARCHITECTURE.md` § "Paper Trading"
   "offset": 0,
 }
 ```
+
+**The strategy trades both directions** (M3-E5-T3): a confident `"up"` call opens
+a long, a confident `"down"` call opens a short, and a call against the held
+side closes it (`reduce_only`, one action per cycle). Every entry uses the
+account's fixed `strategy_leverage` (`PATCH .../strategy` `leverage`, default 2,
+never above `max_leverage`, never derived from confidence) and carries a
+mandatory, direction-aware stop-loss; the position-size, exposure and drawdown
+limits and the halt apply to a short exactly as to a long, and a halt blocks new
+entries in both directions while still allowing closes. New error codes:
+`strategy_leverage_exceeds_maximum` and `strategy_stop_beyond_liquidation` (a
+stop-loss that could not fire before the strategy's leverage liquidates the
+position), both 400. The live model calls "down" in over 99% of cases, so expect
+an almost-always-short strategy; the decision log's `direction` column shows it.
 
 Every cycle for every strategy-enabled account is logged exactly once,
 acted on or not — a below-threshold prediction, a non-directional

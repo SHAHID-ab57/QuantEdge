@@ -107,6 +107,26 @@ def liquidation_price(
     return (notional + margin) / (quantity * (_ONE + maintenance_margin_rate))
 
 
+def liquidation_distance_fraction(
+    *, side: PositionSide, leverage: Decimal, maintenance_margin_rate: Decimal
+) -> Decimal | None:
+    """How far, as a fraction of the entry price, the mark price must move
+    against a position opened at `leverage` before it is liquidated (`None`
+    when it cannot be: an unleveraged long). Independent of the entry price, so
+    it is what a percentage stop-loss must be compared against."""
+    entry = Decimal(1)
+    price = liquidation_price(
+        side=side,
+        entry_price=entry,
+        quantity=Decimal(1),
+        margin=initial_margin(notional=entry, leverage=leverage),
+        maintenance_margin_rate=maintenance_margin_rate,
+    )
+    if price is None:
+        return None
+    return abs(entry - price)
+
+
 def bankruptcy_price(
     *, side: PositionSide, entry_price: Decimal, quantity: Decimal, margin: Decimal
 ) -> Decimal | None:

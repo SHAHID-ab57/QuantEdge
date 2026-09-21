@@ -39,6 +39,8 @@ export const PaperAccountSchema = z.object({
   strategy_training_job_id: z.string().nullable(),
   strategy_confidence_threshold_pct: z.string(),
   strategy_default_stop_loss_pct: z.string(),
+  /** The one fixed leverage every automated entry uses, long or short. */
+  strategy_leverage: z.string(),
   created_at: z.string().datetime(),
 });
 
@@ -176,6 +178,10 @@ export const PaperStrategyDecisionSchema = z.object({
   predicted_value: z.unknown().nullable(),
   confidence: z.number().nullable(),
   confidence_threshold_pct: z.string(),
+  /** The side this cycle concerned (see the API docs); null with no directional call. */
+  direction: PaperPositionSideSchema.nullable(),
+  /** The fixed strategy leverage in force at that moment. */
+  strategy_leverage: z.string(),
   prediction_id: z.string().nullable(),
   order_id: z.string().nullable(),
   created_at: z.string().datetime(),

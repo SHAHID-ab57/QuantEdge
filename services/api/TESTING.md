@@ -872,6 +872,28 @@ no row lock, no isolation. It cannot exercise a race, and it passed while the
 code had a double-close window. `test_concurrency_postgres.py` uses a schema
 whose search path is set on every pooled connection.
 
+## Testing the Automated Strategy's Long/Short and Fixed Leverage (M3-E5-T3)
+
+All in `tests/paper_trading/test_strategy_scheduler.py` (end to end through the
+scheduler) and `test_short_and_leverage.py` (the shared order path).
+
+- **Shorting is now reachable, and correct:** `test_flat_and_bearish_opens_a_short`
+  replaces the old `..._never_a_short` test, deliberately; plus short+bullish
+  closes the short, short+bearish is a no-op, and a close that loses a race is
+  logged and never opens the other side.
+- **Leverage is fixed:** same leverage at 66%/80%/99% confidence; the configured
+  leverage is what the order gets; an AST scan of the strategy and of every
+  application module finds no expression that sets a leverage from confidence.
+- **Mandatory, direction-aware stop-loss:** 7% below a long's quote, 7% above a
+  short's; the monitor closes an automated short when price rises to it.
+- **Limits and kill switch, both directions:** exposure and position-size
+  rejections parametrized long/short; a halted account takes no automated entry
+  either way but can still close.
+- **Every cycle logged with direction and leverage,** including skipped and
+  crashed ones.
+- **Config validation:** leverage within `max_leverage`, and the stop-loss inside
+  the liquidation distance.
+
 ## Testing Funding Rate, Open Interest & Order-Flow Capture (M4-E2-T1)
 
 Covers `ARCHITECTURE.md` § "Funding Rate, Open Interest & Order-Flow

@@ -42,6 +42,7 @@ from app.paper_trading.errors import (
     MaxPositionSizeExceededError,
     PaperAccountNotFoundError,
     PositionNotFoundError,
+    ReduceOnlyViolationError,
     StopLossNotBelowTakeProfitError,
     StrategyMissingTrainingJobError,
     StrategyTrainingJobMissingSymbolError,
@@ -62,6 +63,7 @@ from app.schemas.paper_trading import (
     PaperAccountCreateRequest,
     PaperAccountResponse,
     PaperOrderRequest,
+    PaperOrderResponse,
     PaperPositionDTO,
     PaperStrategyConfigUpdateRequest,
     PositionThresholdsUpdateRequest,
@@ -162,6 +164,25 @@ class _TestPaperTradingService(PaperTradingService):
         self, request: PaperAccountCreateRequest, *, user_id: uuid.UUID | None = None
     ) -> PaperAccountResponse:
         return await super().create_account(request, user_id=user_id or self._default_user_id)
+
+    async def place_order(
+        self,
+        account_id: uuid.UUID,
+        request: PaperOrderRequest,
+        *,
+        user_id: uuid.UUID | None = None,
+        automated: bool = False,
+    ) -> PaperOrderResponse:
+        """A test order is a manual one unless it says `automated=True`.
+
+        `PaperTradingService.place_order` deliberately REQUIRES one of the two
+        (an order naming neither is refused, see `TestOrderActorIsRequired`), so
+        the ~80 pre-existing call sites that never named a user are attributed to
+        the bound test user here, exactly like every other mutating method above.
+        The guard itself is tested against the base class directly."""
+        if not automated and user_id is None:
+            user_id = self._default_user_id
+        return await super().place_order(account_id, request, user_id=user_id, automated=automated)
 
     async def update_strategy_config(
         self,
@@ -504,9 +525,12 @@ class TestBalanceAndPositionRejection:
                 PaperOrderRequest(symbol="PTSHORTUSD", side="sell", quantity=Decimal("2")),
             )
 
-    async def test_rejects_a_sell_with_no_position_at_all(
+    async def test_a_manual_sell_with_no_position_opens_a_short_but_a_reduce_only_one_is_rejected(
         self, session_factory: SessionFactory
     ) -> None:
+        """A sell against nothing used to be rejected (long-only). Since
+        M3-E5-T2 it opens a short; `reduce_only` is how a caller says "only
+        ever close", and that is still rejected with nothing to close."""
         await seed_market(session_factory, symbol="PTNOPOSUSD")
         bus = EventBus()
         state_manager = MarketStateManager().attach(bus)
@@ -516,11 +540,18 @@ class TestBalanceAndPositionRejection:
             PaperAccountCreateRequest(starting_balance=Decimal("100000"))
         )
 
-        with pytest.raises(InsufficientPositionError):
+        with pytest.raises(ReduceOnlyViolationError):
             await service.place_order(
                 uuid.UUID(account.id),
-                PaperOrderRequest(symbol="PTNOPOSUSD", side="sell", quantity=Decimal("1")),
+                PaperOrderRequest(
+                    symbol="PTNOPOSUSD", side="sell", quantity=Decimal("1"), reduce_only=True
+                ),
             )
+        opened = await service.place_order(
+            uuid.UUID(account.id),
+            PaperOrderRequest(symbol="PTNOPOSUSD", side="sell", quantity=Decimal("1")),
+        )
+        assert opened.position_side == "short"
 
     async def test_raises_for_an_unknown_account(self, session_factory: SessionFactory) -> None:
         service = await build_service(session_factory, MarketStateManager())

@@ -3057,10 +3057,11 @@ short and may use isolated-margin leverage (Epic 3.5, M3-E5-T2: see
 section); the sections below describe the engine's original long-only,
 cash-only accounting, which is exactly what a 1x long still is. Its one
 automated order path (see "Automated Strategy" below) is opt-in, off by
-default, reuses this same order-placement machinery rather than a second
-one, and is **structurally limited to unleveraged longs**: it can open
-no short and use no leverage, and its own module was not touched by
-Epic 3.5. Nothing here touches live trading (see Milestone 6's own gate,
+default, and reuses this same order-placement machinery rather than a
+second one. It was **long-only and unleveraged through M3-E5-T2**; M3-E5-T3
+then deliberately extended it to trade long and short at one fixed,
+per-account leverage that is never derived from the model's confidence (see
+"Automated Strategy"). Nothing here touches live trading (see Milestone 6's own gate,
 unaffected by any of this).
 
 **Realistic execution is the one thing this feature exists to guarantee.**
@@ -3569,20 +3570,75 @@ is unavailable (an unsupported model kind) or below
 `strategy_confidence_threshold_pct`, do nothing; otherwise interpret
 `predicted_value` — `"up"` is bullish, `"down"` is bearish, anything else
 (`"flat"`, a regressor's own number) is not a directional call and does
-nothing either. Flat + bullish opens a buy, sized at half the account's
-own `max_position_size_pct` of current balance (there is no separate
-strategy-specific position-sizing config — this is a deliberately
-conservative default, leaving headroom for slippage/fee and any other
-open exposure) with a stop-loss attached at
-`strategy_default_stop_loss_pct` below the resolved price. Long +
-bearish closes the full held quantity. Long + bullish and flat + bearish
-are both "already consistent with the signal" — no shorting, ever, for
-an automated order exactly as for a manual one.
+nothing either. **Since M3-E5-T3 the strategy trades both directions:**
+`"up"` is a long and `"down"` is a short. Flat + bullish opens a long and
+flat + bearish opens a short, each sized at half the account's own
+`max_position_size_pct` of its cash (notional; there is no separate
+strategy-specific position-sizing config — a deliberately conservative
+default, leaving headroom for slippage/fee and any other open exposure),
+placed at the account's fixed `strategy_leverage`, with a mandatory
+stop-loss at `strategy_default_stop_loss_pct` on the losing side of the
+resolved price (below a long's, above a short's). A signal against the
+held side closes it (a sell for a long, a buy for a short); a signal
+matching the held side is "already consistent" and does nothing. One action
+per cycle, so a reversal closes now and, if the call still stands, opens the
+other side on a later cycle: no order is ever larger than the position it
+reduces. A close is `reduce_only`, so one that loses a race to a stop-loss or
+a liquidation fails instead of opening the opposite side.
+
+**Leverage is one fixed number, and is never derived from the prediction.**
+`PaperAccount.strategy_leverage` (migration `b3d95f10c7e4`, default 2,
+per-account, validated `1 <= x <= max_leverage`) is the only source of an
+automated order's leverage. The model's confidence is used for exactly one
+thing, the yes/no threshold gate. That is deliberate: confidence was measured
+to carry no reliable relationship to being right (mean 0.889 against accuracy
+0.460 over 8,126 graded predictions, Spearman -0.020, and no horizon, model
+class or regime showed skill: `docs/research/`), so scaling leverage by it
+would put the largest bets on the least trustworthy signal. 2x was chosen from
+the research's liquidation-frequency table (near-zero liquidations at 2-3x
+even over a 72-hour hold). Enforced three ways, so it does not rest on the
+strategy module's own good behaviour: `PaperTradingService` refuses an
+automated entry at any leverage but the account's `strategy_leverage`; a test
+reads the strategy's syntax tree and asserts the `leverage=` it passes contains
+only that one name, and another scans every application module for any
+expression that sets a leverage from something mentioning confidence; and a
+behavioural test runs the same account at 66%, 80% and 99% confidence and gets
+the same leverage. `PATCH .../strategy` also refuses a leverage whose
+liquidation distance is not wider than the mandatory stop-loss (at 20x a 5%
+stop could never fire before liquidation).
+
+**The shared order path, not a new one.** `place_order(..., automated=True)`
+is the strategy's explicit declaration (nothing is inferred from a missing
+`user_id`, which the earlier version did). **`place_order` requires exactly one
+of `user_id` (manual) or `automated=True`** and raises before reading or writing
+anything if given neither or both, so a forgotten argument can never become the
+lenient manual path; a test scans every `place_order` call in `app/` and pins the
+classification (one manual: the HTTP endpoint; two automated: the strategy's
+open and close). It subjects an automated order to
+`_enforce_automated_restrictions`: an entry must use exactly
+`strategy_leverage`, must carry a stop-loss, and an automated order never adds
+to a position. Everything else (the halt, position size, exposure, drawdown,
+the stop-loss's validity against the price and the liquidation price) is the
+same code as a manual order, and the same atomic guard M3-E5-T2 proved under
+real concurrency.
+
+**Disclosed consequence.** The live model calls "down" in over 99% of cases
+across every regime tested, so with shorts enabled this strategy will very
+likely be short almost all the time. That is the model's own measured
+behaviour becoming visible, not something this change introduces; every
+decision-log row records its direction so it can be seen. Deploy note: an
+account whose strategy was already enabled trades at 2x and may open shorts on
+its next tick (the migration's default), where before it opened only
+unleveraged longs. The old "the automated strategy can never short" guard and
+the test proving it were removed on purpose and replaced by positive tests
+that shorting is reachable and correct
+(`test_flat_and_bearish_opens_a_short`).
 
 **Every automated position carries a stop-loss — structurally, not by
-convention.** The buy request `place_order` receives always names
-`stop_loss_price`; there is no code path that opens an automated position
-without one. If the price has moved enough by fill time that the
+convention.** The entry request `place_order` receives always names
+`stop_loss_price` (a long's below the price, a short's above it), and since
+M3-E5-T3 the shared path itself refuses an automated entry without one; there
+is no code path that opens an automated position without one. If the price has moved enough by fill time that the
 precomputed stop-loss would no longer be valid,
 `place_order`'s own `InvalidStopLossPriceError` is the backstop — caught
 generically alongside every other order-placement failure (see below)
@@ -3590,7 +3646,9 @@ and logged as a `no_action` decision, self-healing on the next tick,
 never silently opening an unprotected position.
 `tests/paper_trading/test_strategy_scheduler.py::TestAutomatedPositionsAlwaysCarryAStopLoss`
 proves the resulting position's `stop_loss_price` is set, and matches
-the configured percentage below the order's own `raw_price` exactly.
+the configured percentage on the losing side of the order's own `raw_price`
+exactly, for a long and for a short (a further test shows the monitor closes
+an automated short when the price rises to its stop).
 
 **"Just another caller," proven, not merely asserted.**
 `TestSharesExistingRiskLimits::test_a_strategy_order_that_would_breach_max_exposure_is_rejected`
@@ -3598,10 +3656,13 @@ configures a tight `max_exposure_pct`, pre-fills most of that budget with
 an ordinary _manual_ buy in a different symbol, and shows the automated
 buy is rejected by the identical `MaxExposureExceededError` a manual
 order would hit in the same situation — no order placed, no position
-opened, one `no_action` decision logged naming the rejection. A halted
-account rejects an automated close exactly like a manual one too
-(`TestLongAndBearishClosesThePosition
-::test_a_rejected_automated_close_is_logged_as_no_action`).
+opened, one `no_action` decision logged naming the rejection; the test is
+parametrized so an automated short is rejected exactly as a long is, and a
+position-size counterpart shows leverage buys no extra size (the limits are on
+notional over equity). A halted account takes no new automated entry in either
+direction but can still close what it holds (D4;
+`TestKillSwitchHaltsEntriesInBothDirectionsButNotExits`), and a liquidation is
+never blockable.
 
 **Every cycle is logged — acted on or not, and why.** A new table,
 `paper_strategy_decisions` (migration `9a50eaff41a2`): `account_id`,
@@ -3612,7 +3673,11 @@ prediction was ever obtained this cycle), `confidence_threshold_pct` (a
 snapshot of the account's own threshold _at the moment of this cycle_ —
 never re-read from a possibly-since-changed account),
 `prediction_id`/`order_id` (independently nullable — a logged `no_action`
-after a real prediction names the former without the latter). Exactly
+after a real prediction names the former without the latter), and, since
+M3-E5-T3, `direction` (`long`/`short`: the side the cycle concerned, or for a
+`no_action` the side the model's call pointed at; null only with no
+directional call) and `strategy_leverage` (a snapshot of the leverage in force,
+like the threshold). A cycle that crashes is logged too. Exactly
 one row is written per strategy-enabled account per tick, unconditionally
 — proven by
 `TestEveryCycleIsLogged::test_every_tick_is_logged_whether_it_acted_or_not`
@@ -3625,7 +3690,7 @@ paginated read, the Strategy panel's decision log data source.
 
 **API**: `PaperAccountResponse` gains `strategy_enabled`/
 `strategy_training_job_id`/`strategy_confidence_threshold_pct`/
-`strategy_default_stop_loss_pct`; `PATCH .../strategy`
+`strategy_default_stop_loss_pct`/`strategy_leverage`; `PATCH .../strategy`
 (`PaperStrategyConfigUpdateRequest`) sets them; `GET .../strategy/decisions`
 (`PaperStrategyDecisionListResponse`) lists the decision log.
 
@@ -3814,8 +3879,11 @@ D3 the drawdown limit measures equity, not cash; D4 a halt blocks new risk and
 alerts; D5 isolated margin only; D6 a liquidation forfeits the whole margin;
 D7 the existing exposure caps are **not raised**.
 
-**The automated strategy was not touched.**
-`app/services/paper_trading_strategy.py` has no diff in this change. The guard
+**The automated strategy was not touched by M3-E5-T2** (superseded by
+M3-E5-T3, which extended it on purpose; see "Automated Strategy"; the guard
+described here, `_enforce_automated_restrictions`, was rewritten then, and now
+allows a fixed-leverage entry with a stop-loss in either direction).
+`app/services/paper_trading_strategy.py` had no diff in that change. The guard
 is structural, on the one order path it shares with manual orders:
 `PaperTradingService.place_order` treats `user_id is None` (its own long-standing
 contract for "the automated strategy": a human caller always has one) as
@@ -3941,8 +4009,10 @@ scratch Postgres with rows in place.
 `GET .../funding`; they are inside realized PnL); cross margin (D5); flattening
 on a halt; Delta's margin scaling beyond `max_leverage_notional`; per-market
 initial/maintenance margin (0.25% maintenance is a setting); changing leverage or
-adding margin to an open position; and any automated-strategy integration, which
-stays a separate, later, separately-scrutinized task (D1/D2 are unrevisited).
+adding margin to an open position. (Automated-strategy integration was
+deliberately a separate, later task; it was done in M3-E5-T3, where the user
+explicitly revisited D1/D2: long and short, one fixed leverage, never from
+confidence.)
 
 ### External Data Connectors
 

@@ -126,13 +126,43 @@ class LeverageNotionalLimitError(AppError):
 
 
 class AutomatedOrderRestrictedError(AppError):
-    """The automated strategy asked for something other than an unleveraged
-    long. Shorts and leverage are for manually placed orders only."""
+    """The automated strategy asked for something outside what it is allowed
+    to do: an entry at any leverage but its own fixed `strategy_leverage`, an
+    entry with no stop-loss, or adding to a position."""
 
     def __init__(self, detail: str) -> None:
         super().__init__(
-            f"Automated orders are limited to unleveraged (1x) long positions: {detail}",
+            f"Automated order refused: {detail}",
             code="automated_order_restricted",
+        )
+
+
+class StrategyLeverageExceedsMaximumError(AppError):
+    """The automated strategy's fixed leverage is above the account's own
+    `max_leverage`."""
+
+    def __init__(self, strategy_leverage: object, max_leverage: object) -> None:
+        super().__init__(
+            f"strategy_leverage {strategy_leverage}x exceeds this account's max_leverage of "
+            f"{max_leverage}x",
+            code="strategy_leverage_exceeds_maximum",
+        )
+
+
+class StrategyStopBeyondLiquidationError(AppError):
+    """The strategy's percentage stop-loss would sit at or beyond where a
+    position at its fixed leverage is liquidated, so the mandatory stop-loss
+    every automated entry carries could never fire."""
+
+    def __init__(
+        self, stop_loss_pct: object, leverage: object, liquidation_distance_pct: object
+    ) -> None:
+        super().__init__(
+            f"default_stop_loss_pct {stop_loss_pct}% is not inside the liquidation distance of "
+            f"{liquidation_distance_pct}% at {leverage}x leverage: an automated position "
+            "would be liquidated before its stop-loss could ever trigger. Lower the stop-loss "
+            "or the leverage.",
+            code="strategy_stop_beyond_liquidation",
         )
 
 

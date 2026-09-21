@@ -271,9 +271,9 @@ class Settings(BaseSettings):
     paper_trading_default_max_exposure_pct: Decimal = Decimal("50")
     paper_trading_default_max_drawdown_pct: Decimal = Decimal("20")
 
-    #: Margin/leverage for manually-placed orders (isolated margin only; the
-    #: automated strategy is structurally limited to unleveraged longs
-    #: regardless of these, see `PaperTradingService.place_order`).
+    #: Margin/leverage (isolated margin only). The automated strategy uses one
+    #: fixed per-account `strategy_leverage` (below), refused by
+    #: `PaperTradingService.place_order` if it is anything else.
     #: `paper_trading_default_max_leverage` is a new account's own per-account
     #: leverage ceiling (a deliberately conservative starting point, raisable
     #: per account up to Delta's 200x). `paper_trading_maintenance_margin_pct`
@@ -317,6 +317,17 @@ class Settings(BaseSettings):
     #: trading default already follows.
     paper_trading_strategy_default_confidence_threshold_pct: Decimal = Decimal("65")
     paper_trading_strategy_default_stop_loss_pct: Decimal = Decimal("5")
+
+    #: The one, fixed leverage a new account's automated strategy uses for every
+    #: entry, long or short (`PaperAccount.strategy_leverage`, tunable per
+    #: account). Deliberately a plain setting and never a function of a
+    #: prediction: the model's confidence has been measured to carry no reliable
+    #: relationship to being right (mean confidence 0.889 against accuracy 0.460),
+    #: so scaling risk by it would size the largest bets on the least
+    #: trustworthy signal. 2x is chosen from the liquidation-frequency table in
+    #: `docs/research/FUTURES_MECHANICS_AND_LEVERAGE_DESIGN.md` (near-zero
+    #: liquidations at 2-3x even over a 72-hour hold).
+    paper_trading_strategy_default_leverage: Decimal = Decimal("2")
 
     #: Strategy decision log pagination (`GET .../strategy/decisions`).
     paper_trading_strategy_decisions_default_limit: int = 20

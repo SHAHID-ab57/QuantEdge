@@ -435,6 +435,42 @@ class TestUpdateStrategyConfig:
         assert float(body["strategy_confidence_threshold_pct"]) == pytest.approx(70.0)
         assert float(body["strategy_default_stop_loss_pct"]) == pytest.approx(8.0)
 
+    async def test_leverage_is_a_fixed_validated_setting_that_defaults_to_2x(
+        self, client: httpx.AsyncClient
+    ) -> None:
+        account = (
+            await client.post("/api/v1/paper-trading/accounts", json={"starting_balance": "100000"})
+        ).json()
+        assert float(account["strategy_leverage"]) == pytest.approx(2.0)
+
+        url = f"/api/v1/paper-trading/accounts/{account['id']}/strategy"
+        ok = await client.patch(url, json={"leverage": "3"})
+        assert ok.status_code == 200
+        assert float(ok.json()["strategy_leverage"]) == pytest.approx(3.0)
+
+        # Above the account's own max_leverage (default 5).
+        too_high = await client.patch(url, json={"leverage": "8"})
+        assert too_high.status_code == 400
+        assert too_high.json()["code"] == "strategy_leverage_exceeds_maximum"
+
+        # A 5% stop-loss cannot fire before liquidation at 20x (~4.7% away): needs a
+        # bigger account ceiling first, so raise both in one account created for it.
+        big = (
+            await client.post(
+                "/api/v1/paper-trading/accounts",
+                json={"starting_balance": "100000", "max_leverage": "50"},
+            )
+        ).json()
+        beyond = await client.patch(
+            f"/api/v1/paper-trading/accounts/{big['id']}/strategy", json={"leverage": "20"}
+        )
+        assert beyond.status_code == 400
+        assert beyond.json()["code"] == "strategy_stop_beyond_liquidation"
+
+        # Below 1, above 200 and an explicit null are schema errors.
+        for bad in ({"leverage": "0.5"}, {"leverage": "201"}, {"leverage": None}):
+            assert (await client.patch(url, json=bad)).status_code == 422
+
     async def test_returns_404_for_an_unknown_training_job(self, client: httpx.AsyncClient) -> None:
         account = (
             await client.post("/api/v1/paper-trading/accounts", json={"starting_balance": "100000"})

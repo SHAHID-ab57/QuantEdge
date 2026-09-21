@@ -58,6 +58,7 @@ def get_paper_trading_service(
         default_strategy_default_stop_loss_pct=(
             settings.paper_trading_strategy_default_stop_loss_pct
         ),
+        default_strategy_leverage=settings.paper_trading_strategy_default_leverage,
         default_max_leverage=settings.paper_trading_default_max_leverage,
         maintenance_margin_rate=settings.paper_trading_maintenance_margin_pct / Decimal(100),
         max_leverage_notional=settings.paper_trading_max_leverage_notional,

@@ -8,6 +8,46 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **The automated strategy now trades long and short, at one fixed leverage
+  (M3-E5-T3).** An explicit decision that revisits M3-E5-T2's D1/D2.
+  - **What changed:** a confident `"up"` call opens a long, a confident
+    `"down"` call opens a short, and a call against the held side closes it (one
+    action per cycle, `reduce_only`, so a close that loses a race to a stop-loss
+    or liquidation fails instead of opening the other side). Every entry uses the
+    account's new `strategy_leverage` (default 2, `PATCH .../strategy` `leverage`,
+    never above `max_leverage`) and carries a mandatory, direction-aware stop-loss
+    (a long's below the price, a short's above). The decision log gains `direction`
+    and `strategy_leverage` on every cycle, acted or skipped, and a cycle that
+    crashes is now logged too.
+  - **Leverage is never derived from the prediction.** Confidence was measured to
+    carry no reliable relationship to being right (mean 0.889 against accuracy
+    0.460, Spearman -0.020), so it decides only _whether_ to act. Proven by
+    behaviour (66%, 80% and 99% confidence give the same leverage), by a
+    syntax-tree scan of the strategy, and by a scan of every application module
+    for any expression that sets a leverage from confidence. `PATCH .../strategy`
+    refuses a leverage whose liquidation distance is not wider than the mandatory
+    stop-loss (`strategy_stop_beyond_liquidation`).
+  - **The shared order path enforces it.** `place_order(..., automated=True)` is
+    now an explicit declaration (it used to be inferred from a missing `user_id`),
+    and the method refuses an order naming neither a user nor `automated=True`, or
+    both, so a forgotten argument cannot become the lenient path; an automated entry must use exactly `strategy_leverage`, must carry a
+    stop-loss, and an automated order never adds to a position. Position size,
+    exposure, drawdown and the halt apply to a short exactly as to a long, and a
+    halt blocks new entries in both directions while still allowing closes.
+  - **Disclosed consequence:** the live model calls "down" in over 99% of cases
+    across every regime tested, so this will very likely be an almost-always-short
+    strategy. That is the model's own measured behaviour becoming visible.
+    **Behaviour change on deploy: an account whose strategy is already enabled
+    starts trading at 2x and may open shorts on its next tick** (migration
+    `b3d95f10c7e4`'s default), where before it opened only unleveraged longs.
+  - **Replaced on purpose:** the old "the automated strategy never shorts" guard,
+    and `test_flat_and_bearish_is_a_no_op_never_a_short`, which proved it. They
+    are replaced by positive tests that shorting is reachable and correct
+    (`test_flat_and_bearish_opens_a_short` and the direction tests around it).
+  - **Not done:** adding to a position (the strategy still never does), sizing
+    from equity rather than cash, and grading the realized results against the
+    backtest/regime framework, which is the natural next step.
+
 - **Manual short, leverage and margin mechanics for paper trading
   (M3-E5-T2).** Built from the M3-E5-T1 design; **manual orders only**.
   - **What exists now:** short positions; isolated-margin leverage

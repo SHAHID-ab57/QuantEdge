@@ -137,7 +137,6 @@ from app.paper_trading.errors import (
     AccountUpdateConflictError,
     AutomatedOrderRestrictedError,
     InsufficientBalanceError,
-    InsufficientPositionError,
     InvalidPaperOrderSortError,
     InvalidStopLossPriceError,
     InvalidTakeProfitPriceError,
@@ -152,7 +151,9 @@ from app.paper_trading.errors import (
     ReduceOnlyViolationError,
     StopBeyondLiquidationError,
     StopLossNotBelowTakeProfitError,
+    StrategyLeverageExceedsMaximumError,
     StrategyMissingTrainingJobError,
+    StrategyStopBeyondLiquidationError,
     StrategyTrainingJobMissingSymbolError,
     ThresholdsOnReducingOrderError,
     TradingHaltedError,
@@ -165,6 +166,7 @@ from app.paper_trading.margin import (
     gapped_through_bankruptcy,
     initial_margin,
     is_liquidated,
+    liquidation_distance_fraction,
     liquidation_price,
     unrealized_pnl,
 )
@@ -258,6 +260,7 @@ class PaperTradingService:
         maintenance_margin_rate: Decimal = Decimal("0.0025"),
         max_leverage_notional: Decimal = Decimal("100000"),
         funding_settlement_repository: PaperFundingSettlementRepository | None = None,
+        default_strategy_leverage: Decimal = Decimal("2"),
     ) -> None:
         self.account_repository = account_repository
         self.order_repository = order_repository
@@ -288,6 +291,7 @@ class PaperTradingService:
         self.maintenance_margin_rate = maintenance_margin_rate
         self.max_leverage_notional = max_leverage_notional
         self.funding_settlement_repository = funding_settlement_repository
+        self.default_strategy_leverage = default_strategy_leverage
 
     async def create_account(
         self, request: PaperAccountCreateRequest, *, user_id: uuid.UUID
@@ -323,12 +327,19 @@ class PaperTradingService:
             strategy_training_job_id=None,
             strategy_confidence_threshold_pct=self.default_strategy_confidence_threshold_pct,
             strategy_default_stop_loss_pct=self.default_strategy_default_stop_loss_pct,
+            # Never above the account's own ceiling.
+            strategy_leverage=min(
+                self.default_strategy_leverage,
+                request.max_leverage
+                if request.max_leverage is not None
+                else self.default_max_leverage,
+            ),
         )
         created = await self.account_repository.create(account)
         logger.info(
             "Paper account created (account_id=%s name=%s starting_balance=%s "
             "max_position_size_pct=%s max_exposure_pct=%s max_drawdown_pct=%s "
-            "max_leverage=%s strategy_enabled=%s)",
+            "max_leverage=%s strategy_leverage=%s strategy_enabled=%s)",
             created.id,
             created.name,
             created.starting_balance,
@@ -336,6 +347,7 @@ class PaperTradingService:
             created.max_exposure_pct,
             created.max_drawdown_pct,
             created.max_leverage,
+            created.strategy_leverage,
             created.strategy_enabled,
         )
         await self._record_audit(
@@ -373,6 +385,7 @@ class PaperTradingService:
         request: PaperOrderRequest,
         *,
         user_id: uuid.UUID | None = None,
+        automated: bool = False,
     ) -> PaperOrderResponse:
         """Fill one market order immediately, completely, and realistically
         — guarded by pre-trade risk checks, with a drawdown/halt check
@@ -411,18 +424,36 @@ class PaperTradingService:
         two-way race (one retry is always enough) but never assumed away.
 
         `user_id` names the authenticated caller for the audit trail
-        (`app.services.audit`) — `None` only for
+        (`app.services.audit`) — `None` for
         `PaperTradingStrategyScheduler`'s own automated orders, which have
         no human behind them to attribute and are already tracked in full
         via `PaperStrategyDecision` (`list_strategy_decisions`); no
-        `audit_log` row is written for those. It is also what marks an order
-        as automated for `_enforce_automated_restrictions`.
+        `audit_log` row is written for those.
+
+        `automated=True` is the strategy's own explicit declaration (nothing
+        is inferred from a missing `user_id`), and subjects the order to
+        `_enforce_automated_restrictions`: an entry must use the account's
+        fixed `strategy_leverage` and carry a stop-loss, and an automated
+        order never adds to a position.
+
+        **Exactly one of `user_id` and `automated=True` must be given.** An
+        order that names neither would otherwise be treated as manual and
+        escape every automated-order rule (the old inference gave it the
+        strict rules by accident; an explicit flag must not turn a forgotten
+        argument into the *lenient* path). Naming both is just as meaningless (a
+        human and the strategy at once). Either raises before anything is read
+        or written.
         """
+        if (user_id is None) == (not automated):
+            raise ValueError(
+                "place_order needs exactly one of user_id (a manual, human-initiated order) "
+                "or automated=True (the automated strategy); got "
+                + ("both" if automated else "neither")
+            )
         market = await self.market_repository.get_by_symbol(request.symbol)
         if market is None:
             raise MarketNotFoundError(request.symbol)
 
-        automated = user_id is None
         for _attempt in range(self.max_order_attempts):
             account = await self._get_account_or_404(account_id)
             quote = await resolve_current_price(
@@ -443,17 +474,14 @@ class PaperTradingService:
             kind, side = self._classify_order(request, held, held_side)
             increases = kind != "reduce"
 
-            if automated:
-                self._enforce_automated_restrictions(
-                    symbol=request.symbol,
-                    quantity=request.quantity,
-                    kind=kind,
-                    side=side,
-                    requested_leverage=request.leverage,
-                    position_leverage=Decimal(position.leverage) if position is not None else None,
-                )
             if request.reduce_only and increases:
                 raise ReduceOnlyViolationError(request.symbol)
+            if automated:
+                self._enforce_automated_restrictions(
+                    request=request,
+                    kind=kind,
+                    strategy_leverage=Decimal(account.strategy_leverage),
+                )
             thresholds_named = (
                 request.stop_loss_price is not None or request.take_profit_price is not None
             )
@@ -1189,6 +1217,24 @@ class PaperTradingService:
         new_default_stop_loss_pct = Decimal(
             fields.get("default_stop_loss_pct", account.strategy_default_stop_loss_pct)
         )
+        new_leverage = Decimal(fields.get("leverage", account.strategy_leverage))
+
+        # The strategy's leverage is one fixed number, and its mandatory
+        # stop-loss must be able to fire before the exchange would liquidate
+        # the position it protects — checked on the final, merged values so a
+        # leverage change can't quietly invalidate an existing stop-loss.
+        if new_leverage > Decimal(account.max_leverage):
+            raise StrategyLeverageExceedsMaximumError(new_leverage, account.max_leverage)
+        for side in ("long", "short"):
+            distance = liquidation_distance_fraction(
+                side=side,
+                leverage=new_leverage,
+                maintenance_margin_rate=self.maintenance_margin_rate,
+            )
+            if distance is not None and new_default_stop_loss_pct >= distance * Decimal(100):
+                raise StrategyStopBeyondLiquidationError(
+                    new_default_stop_loss_pct, new_leverage, distance * Decimal(100)
+                )
 
         if new_enabled:
             if new_training_job_id is None:
@@ -1203,6 +1249,7 @@ class PaperTradingService:
         old_training_job_id = account.strategy_training_job_id
         old_confidence_threshold_pct = account.strategy_confidence_threshold_pct
         old_default_stop_loss_pct = account.strategy_default_stop_loss_pct
+        old_leverage = account.strategy_leverage
 
         updated = await self.account_repository.update(
             account,
@@ -1211,6 +1258,7 @@ class PaperTradingService:
                 "strategy_training_job_id": new_training_job_id,
                 "strategy_confidence_threshold_pct": new_confidence_threshold_pct,
                 "strategy_default_stop_loss_pct": new_default_stop_loss_pct,
+                "strategy_leverage": new_leverage,
             },
         )
         # `strategy_enabled` gets its own line, not just a field in the
@@ -1224,12 +1272,14 @@ class PaperTradingService:
         if new_enabled != old_enabled:
             logger.info(
                 "Paper trading strategy %s (account_id=%s training_job_id=%s "
-                "confidence_threshold_pct=%s default_stop_loss_pct=%s)",
+                "confidence_threshold_pct=%s default_stop_loss_pct=%s leverage=%sx "
+                "directions=long+short)",
                 "ENABLED" if new_enabled else "DISABLED",
                 account_id,
                 new_training_job_id,
                 new_confidence_threshold_pct,
                 new_default_stop_loss_pct,
+                new_leverage,
             )
             # Its own dedicated audit action too, mirroring the log line
             # above — the exact fact ("who enabled/disabled it, pointed at
@@ -1251,7 +1301,7 @@ class PaperTradingService:
         logger.info(
             "Paper trading strategy config updated (account_id=%s "
             "enabled=%s->%s training_job_id=%s->%s "
-            "confidence_threshold_pct=%s->%s default_stop_loss_pct=%s->%s)",
+            "confidence_threshold_pct=%s->%s default_stop_loss_pct=%s->%s leverage=%s->%s)",
             account_id,
             old_enabled,
             new_enabled,
@@ -1261,6 +1311,8 @@ class PaperTradingService:
             new_confidence_threshold_pct,
             old_default_stop_loss_pct,
             new_default_stop_loss_pct,
+            old_leverage,
+            new_leverage,
         )
         await self._record_audit(
             user_id=user_id,
@@ -1271,12 +1323,14 @@ class PaperTradingService:
                 "training_job_id": str(old_training_job_id) if old_training_job_id else None,
                 "confidence_threshold_pct": str(old_confidence_threshold_pct),
                 "default_stop_loss_pct": str(old_default_stop_loss_pct),
+                "leverage": str(old_leverage),
             },
             new_value={
                 "enabled": new_enabled,
                 "training_job_id": str(new_training_job_id) if new_training_job_id else None,
                 "confidence_threshold_pct": str(new_confidence_threshold_pct),
                 "default_stop_loss_pct": str(new_default_stop_loss_pct),
+                "leverage": str(new_leverage),
             },
         )
         return PaperAccountResponse.from_model(updated)
@@ -1627,41 +1681,44 @@ class PaperTradingService:
 
     @staticmethod
     def _enforce_automated_restrictions(
-        *,
-        symbol: str,
-        quantity: Decimal,
-        kind: OrderKind,
-        side: PositionSide,
-        requested_leverage: Decimal | None,
-        position_leverage: Decimal | None,
+        *, request: PaperOrderRequest, kind: OrderKind, strategy_leverage: Decimal
     ) -> None:
-        """The automated strategy can only ever open/add to an unleveraged
-        long, or reduce a long.
+        """What the automated strategy may do on the one order path it shares
+        with manual orders, whichever direction it trades.
 
-        This is a *structural* guard on the one order path the strategy
-        shares with manual orders, not a flag the strategy honours: the
-        strategy module itself is untouched and knows nothing of shorts,
-        leverage or margin, and an account can hold a manually opened short
-        or leveraged long in the very symbol the strategy trades. Without
-        this, the strategy's "close what I hold" sell would *add* to a
-        manual short, and its "already long" no-op would misread one. A
-        refusal here is a logged `no_action` in the strategy's own decision
-        log, never an order.
+        - It **opens** a position (long or short) or **closes** one. It never
+          adds to one, which its own logic never does either.
+        - An entry must use **exactly the account's `strategy_leverage`**: the
+          single fixed number this feature allows, never anything else, and
+          never something the caller worked out from a prediction. A request
+          that names no leverage means 1x and is refused unless 1x is what is
+          configured.
+        - An entry must carry a **stop-loss**. The strategy always passes one;
+          this makes it non-optional at the shared path too, so an automated
+          position without a stop-loss cannot be created by any caller.
+        - A close (a reduction) is always allowed: it only lowers risk. The
+          strategy sends it `reduce_only`, so a close that loses a race to a
+          stop-loss or liquidation fails instead of opening the opposite side.
+
+        Everything else (the halt, position size, exposure, drawdown, the
+        stop-loss's own validity against the price and the liquidation price)
+        is applied to an automated order by the same code as a manual one. A
+        refusal here is a logged `no_action` in the strategy's decision log.
         """
-        if kind == "open" and side == "short":
-            # A sell with nothing held: for a long-only caller there is
-            # nothing to sell, exactly as it has always been rejected.
-            raise InsufficientPositionError(symbol, quantity, Decimal(0))
-        if side == "short":
-            raise AutomatedOrderRestrictedError(
-                "it may not open, add to, or trade against a short position"
-            )
         if kind == "reduce":
-            return  # reducing a long (at any leverage) only ever lowers risk
-        if requested_leverage is not None and requested_leverage != 1:
-            raise AutomatedOrderRestrictedError("leverage is not available to it")
-        if position_leverage is not None and position_leverage != 1:
-            raise AutomatedOrderRestrictedError("it may not add to a leveraged position")
+            return
+        if kind == "increase":
+            raise AutomatedOrderRestrictedError(
+                "it opens a position or closes one; it never adds to one"
+            )
+        requested = request.leverage if request.leverage is not None else Decimal(1)
+        if requested != strategy_leverage:
+            raise AutomatedOrderRestrictedError(
+                f"entries use the account's fixed strategy_leverage ({strategy_leverage}x), "
+                f"not {requested}x"
+            )
+        if request.stop_loss_price is None:
+            raise AutomatedOrderRestrictedError("every automated entry must carry a stop-loss")
 
     def _resolve_leverage(
         self,

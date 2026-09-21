@@ -5,11 +5,10 @@ on equity and notional.
 
 All expected numbers are worked out by hand from the modeled costs
 (`SLIPPAGE_BPS=5`, `FEE_BPS=10`), never read back from the code under test.
-Manual orders pass a `user_id`; an order with no `user_id` is, by this
-service's contract, the automated strategy's (see `TestAutomatedCaller`).
+Manual orders pass a `user_id`; the automated strategy's orders are declared
+`automated=True` (see `TestAutomatedCaller`).
 """
 
-import ast
 import uuid
 from decimal import Decimal
 from pathlib import Path
@@ -32,12 +31,15 @@ from app.paper_trading.errors import (
     ReduceOnlyViolationError,
     StopBeyondLiquidationError,
     StopLossNotBelowTakeProfitError,
+    StrategyLeverageExceedsMaximumError,
+    StrategyStopBeyondLiquidationError,
     TradingHaltedError,
 )
 from app.schemas.paper_trading import (
     PaperAccountCreateRequest,
     PaperOrderRequest,
     PaperOrderResponse,
+    PaperStrategyConfigUpdateRequest,
     PositionThresholdsUpdateRequest,
 )
 from app.services.paper_trading import PaperTradingService
@@ -85,15 +87,17 @@ class Env:
         )
 
     async def automated(self, side: str, quantity: str, **extra: object) -> PaperOrderResponse:
-        """The same order, but as the automated strategy places it: no user."""
+        """The same order, but as the automated strategy places it: no user, and
+        declared `automated=True`."""
         return await self.service.place_order(
             self.account_id,
             PaperOrderRequest(
-                symbol=self.symbol,
+                symbol=extra.pop("symbol", self.symbol),  # type: ignore[arg-type]
                 side=side,  # type: ignore[arg-type]
                 quantity=D(quantity),
                 **extra,  # type: ignore[arg-type]
             ),
+            automated=True,
         )
 
     async def price(self, value: str, symbol: str | None = None) -> None:
@@ -722,92 +726,381 @@ class TestUnleveragedLongIsUnchanged:
 
 @pytest.mark.asyncio
 class TestAutomatedCaller:
-    """D1/D2: the automated strategy gets no leverage and no shorts. An order
-    with no `user_id` is the strategy's by this service's own contract, and the
-    strategy module itself is never touched (checked at the source level below)."""
+    """What an order declared `automated=True` may do (M3-E5-T3). The automated
+    strategy now trades both directions, so the shared order path no longer
+    refuses shorts; it instead enforces the two things that must always hold
+    for an automated entry: exactly the account's fixed `strategy_leverage`, and
+    a stop-loss. Everything else (halt, limits) is the same code as a manual
+    order, checked in `test_strategy_scheduler.py` end to end."""
 
-    async def test_an_automated_order_can_open_add_to_and_close_an_unleveraged_long(
+    async def test_an_automated_entry_at_the_fixed_leverage_with_a_stop_opens_a_long_or_a_short(
         self, session_factory: SessionFactory
     ) -> None:
-        env = await make_env(session_factory, "PTAUTOLONGUSD")
-        opened = await env.automated("buy", "2", stop_loss_price="1900")
-        assert opened.position_side == "long"
-        assert num(opened.leverage) == 1
-        await env.automated("buy", "1")
-        closed = await env.automated("sell", "3")
-        assert closed.realized_pnl is not None
+        env = await make_env(session_factory, "PTAUTOENTRYUSD", max_leverage="5")
+        long_order = await env.automated("buy", "2", leverage="2", stop_loss_price="1900")
+        assert long_order.position_side == "long"
+        assert num(long_order.leverage) == 2
+        await env.automated("sell", "2", reduce_only=True)
         assert await env.position() is None
 
-    async def test_an_automated_order_cannot_request_leverage(
-        self, session_factory: SessionFactory
-    ) -> None:
-        env = await make_env(session_factory, "PTAUTOLEVUSD", max_leverage="10")
-        with pytest.raises(AutomatedOrderRestrictedError):
-            await env.automated("buy", "1", leverage="5")
-        assert await env.position() is None
-        # Naming 1x is the same as naming nothing.
-        await env.automated("buy", "1", leverage="1")
-
-    async def test_an_automated_sell_with_nothing_to_sell_is_still_rejected_never_a_short(
-        self, session_factory: SessionFactory
-    ) -> None:
-        env = await make_env(session_factory, "PTAUTOSHORTUSD")
-        with pytest.raises(InsufficientPositionError):
-            await env.automated("sell", "1")
-        assert await env.position() is None
-
-    async def test_an_automated_order_cannot_trade_against_or_add_to_a_manual_short(
-        self, session_factory: SessionFactory
-    ) -> None:
-        env = await make_env(session_factory, "PTAUTOVSSHORTUSD")
-        await env.order("sell", "2")  # a manual short
-        with pytest.raises(AutomatedOrderRestrictedError):
-            await env.automated("sell", "2")  # the strategy's "close what I hold": would DOUBLE it
-        with pytest.raises(AutomatedOrderRestrictedError):
-            await env.automated("buy", "1")  # would reduce it: not the strategy's business
+        short_order = await env.automated("sell", "2", leverage="2", stop_loss_price="2100")
+        assert short_order.position_side == "short"  # shorting IS reachable now
+        assert num(short_order.leverage) == 2
         position = await env.position()
         assert position is not None
         assert position.side == "short"
-        assert num(position.quantity) == 2
+        assert num(position.stop_loss_price or 0) == 2100
 
-    async def test_an_automated_order_cannot_add_to_a_manual_leveraged_long_but_can_reduce_it(
+    async def test_an_automated_entry_at_any_other_leverage_is_refused(
         self, session_factory: SessionFactory
     ) -> None:
-        env = await make_env(session_factory, "PTAUTOLEVLONGUSD", max_leverage="10")
-        await env.order("buy", "2", leverage="5")
+        env = await make_env(session_factory, "PTAUTOLEVUSD", max_leverage="10")
+        for leverage in ("5", "3", "1"):  # the account's strategy_leverage is the default 2
+            with pytest.raises(AutomatedOrderRestrictedError) as error:
+                await env.automated("buy", "1", leverage=leverage, stop_loss_price="1900")
+            assert "strategy_leverage" in str(error.value)
         with pytest.raises(AutomatedOrderRestrictedError):
-            await env.automated("buy", "1")
-        await env.automated("sell", "1")  # reducing only ever lowers risk
+            await env.automated("sell", "1", stop_loss_price="2100")  # none named = 1x
+        assert await env.position() is None
+
+    async def test_an_automated_entry_without_a_stop_loss_is_refused_in_both_directions(
+        self, session_factory: SessionFactory
+    ) -> None:
+        env = await make_env(session_factory, "PTAUTONOSTOPUSD", max_leverage="5")
+        for side in ("buy", "sell"):
+            with pytest.raises(AutomatedOrderRestrictedError) as error:
+                await env.automated(side, "1", leverage="2")
+            assert "stop-loss" in str(error.value)
+        assert await env.position() is None
+
+    async def test_the_stop_loss_must_still_be_valid_for_the_side(
+        self, session_factory: SessionFactory
+    ) -> None:
+        """Direction-aware validation is the shared path's own: a short's stop
+        below the price is rejected exactly as for a manual short."""
+        env = await make_env(session_factory, "PTAUTOSTOPSIDEUSD", max_leverage="5")
+        with pytest.raises(InvalidStopLossPriceError):
+            await env.automated("sell", "1", leverage="2", stop_loss_price="1900")
+        with pytest.raises(InvalidStopLossPriceError):
+            await env.automated("buy", "1", leverage="2", stop_loss_price="2100")
+
+    async def test_an_automated_order_never_adds_to_a_position(
+        self, session_factory: SessionFactory
+    ) -> None:
+        env = await make_env(session_factory, "PTAUTOADDUSD", max_leverage="5")
+        await env.automated("buy", "1", leverage="2", stop_loss_price="1900")
+        with pytest.raises(AutomatedOrderRestrictedError) as error:
+            await env.automated("buy", "1", leverage="2", stop_loss_price="1900")
+        assert "never adds" in str(error.value)
         position = await env.position()
         assert position is not None
         assert num(position.quantity) == 1
-        assert num(position.leverage) == 5
 
-    async def test_the_strategy_module_has_no_way_to_ask_for_leverage_or_a_short(self) -> None:
-        """The strategy is untouched: it does not name leverage, margin,
-        reduce-only or liquidation at all, and every `PaperOrderRequest` it
-        builds uses only the original four fields."""
-        source = STRATEGY_MODULE.read_text()
-        for token in ("leverage", "reduce_only", "margin", "liquidat", "max_leverage"):
-            assert token not in source.lower(), token
+    async def test_an_automated_order_can_close_a_manual_position_of_either_side(
+        self, session_factory: SessionFactory
+    ) -> None:
+        env = await make_env(session_factory, "PTAUTOCLOSEUSD", max_leverage="10")
+        await env.order("buy", "2", leverage="5")  # a manual leveraged long
+        await env.automated("sell", "2", reduce_only=True)
+        assert await env.position() is None
+        await env.order("sell", "2", leverage="5")  # a manual leveraged short
+        await env.automated("buy", "2", reduce_only=True)
+        assert await env.position() is None
 
-        tree = ast.parse(source)
-        allowed = {"symbol", "side", "quantity", "stop_loss_price"}
-        request_calls = [
-            node
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id == "PaperOrderRequest"
-        ]
-        assert request_calls, "expected the strategy to build PaperOrderRequest orders"
-        for call in request_calls:
-            assert {kw.arg for kw in call.keywords} <= allowed
+    async def test_an_automated_close_that_finds_nothing_open_fails_instead_of_opening_a_short(
+        self, session_factory: SessionFactory
+    ) -> None:
+        """The race a stop-loss or a liquidation creates: the position is
+        already gone. A reduce-only close must fail closed, never open the
+        opposite side."""
+        env = await make_env(session_factory, "PTAUTORACEUSD", max_leverage="5")
+        with pytest.raises(ReduceOnlyViolationError):
+            await env.automated("sell", "1", reduce_only=True)
+        with pytest.raises(ReduceOnlyViolationError):
+            await env.automated("buy", "1", reduce_only=True)
+        assert await env.position() is None
 
     async def test_a_default_order_request_carries_no_leverage_and_is_not_reduce_only(self) -> None:
         request = PaperOrderRequest(symbol="ETHUSD", side="buy", quantity=D("1"))
         assert request.leverage is None
         assert request.reduce_only is False
+
+
+@pytest.mark.asyncio
+class TestOrderActorIsRequired:
+    """`place_order` must be told who is placing the order: a real `user_id`
+    (manual) or `automated=True` (the strategy), and exactly one. Naming neither
+    used to be classified as automated by inference; under an explicit flag it
+    would silently have become the *lenient* manual path, so it is refused."""
+
+    async def test_an_order_naming_neither_a_user_nor_automated_is_refused_before_anything_happens(
+        self, session_factory: SessionFactory
+    ) -> None:
+        env = await make_env(session_factory, "PTACTORNONEUSD")
+        cash_before = num((await env.account()).balance)
+        with pytest.raises(ValueError, match="neither"):
+            # The base-class method itself (the test service defaults a user in).
+            await PaperTradingService.place_order(
+                env.service,
+                env.account_id,
+                PaperOrderRequest(symbol=env.symbol, side="buy", quantity=D("1")),
+            )
+        assert await env.position() is None
+        assert num((await env.account()).balance) == cash_before
+        orders = await env.service.list_orders(
+            env.account_id, sort="created_at", direction="asc", limit=5, offset=0
+        )
+        assert orders.total == 0
+
+    async def test_an_order_that_is_both_manual_and_automated_is_refused(
+        self, session_factory: SessionFactory
+    ) -> None:
+        env = await make_env(session_factory, "PTACTORBOTHUSD")
+        with pytest.raises(ValueError, match="both"):
+            await PaperTradingService.place_order(
+                env.service,
+                env.account_id,
+                PaperOrderRequest(symbol=env.symbol, side="buy", quantity=D("1")),
+                user_id=env.user_id,
+                automated=True,
+            )
+        assert await env.position() is None
+
+    async def test_exactly_one_actor_works_either_way(
+        self, session_factory: SessionFactory
+    ) -> None:
+        env = await make_env(session_factory, "PTACTORONEUSD")
+        await PaperTradingService.place_order(
+            env.service,
+            env.account_id,
+            PaperOrderRequest(symbol=env.symbol, side="buy", quantity=D("1")),
+            user_id=env.user_id,
+        )
+        await PaperTradingService.place_order(
+            env.service,
+            env.account_id,
+            PaperOrderRequest(symbol=env.symbol, side="sell", quantity=D("1"), reduce_only=True),
+            automated=True,
+        )
+        assert await env.position() is None
+
+    def test_every_place_order_call_in_the_application_names_its_actor(self) -> None:
+        """Grep-verifiable: each `.place_order(` call in `app/` passes `user_id=`
+        (manual) or `automated=True` (the strategy), and `automated=True` appears
+        only in the strategy module. The classification the review asked for."""
+        import ast
+        from pathlib import Path
+
+        app_dir = Path(__file__).parents[2] / "app"
+        manual: list[str] = []
+        automated: list[str] = []
+        unclassified: list[str] = []
+        for path in app_dir.rglob("*.py"):
+            for node in ast.walk(ast.parse(path.read_text())):
+                if not (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "place_order"
+                ):
+                    continue
+                where = f"{path.relative_to(app_dir)}:{node.lineno}"
+                keywords = {kw.arg: kw.value for kw in node.keywords}
+                is_auto = isinstance(keywords.get("automated"), ast.Constant) and (
+                    keywords["automated"].value is True  # type: ignore[union-attr]
+                )
+                if is_auto and "user_id" not in keywords:
+                    automated.append(where)
+                elif "user_id" in keywords and "automated" not in keywords:
+                    manual.append(where)
+                else:
+                    unclassified.append(where)
+        assert unclassified == []
+        assert manual == ["api/v1/endpoints/paper_trading.py:327"]
+        assert sorted(automated) == [
+            "services/paper_trading_strategy.py:465",
+            "services/paper_trading_strategy.py:539",
+        ]
+
+
+@pytest.mark.asyncio
+class TestAutomatedShortHitsTheSameLimitsAsAnAutomatedLong:
+    """Short-specific proof, not inherited from the long-side tests: each risk
+    limit is forced with an automated SHORT and the identical automated LONG, and
+    the two must be rejected by the same error, with the same numbers, and accepted
+    at the same size just under the limit. (Scheduler-level counterparts are in
+    `test_strategy_scheduler.py::TestSharesExistingRiskLimits`.)"""
+
+    SIDES = (("buy", "1900", "long"), ("sell", "2100", "short"))
+
+    @pytest.mark.parametrize(("side", "stop", "label"), SIDES)
+    async def test_position_size_limit(
+        self, session_factory: SessionFactory, side: str, stop: str, label: str
+    ) -> None:
+        env = await make_env(
+            session_factory,
+            f"PTAUTOPOS{label.upper()}USD",
+            starting_balance="10000",
+            max_leverage="5",
+            max_position=D("10"),  # $1,000 of notional on $10,000 of equity
+        )
+        # 1 unit is ~$2,000 of notional (only ~$1,000 of margin at the strategy's 2x):
+        # over the 10% limit in BOTH directions, because the limit is on notional.
+        with pytest.raises(MaxPositionSizeExceededError) as error:
+            await env.automated(side, "1", leverage="2", stop_loss_price=stop)
+        assert error.value.code == "max_position_size_exceeded"
+        assert "max position size" in str(error.value)
+        assert await env.position() is None
+        # 0.4 unit (~$800 notional) is under it, in both directions.
+        order = await env.automated(side, "0.4", leverage="2", stop_loss_price=stop)
+        assert order.position_side == label
+
+    @pytest.mark.parametrize(("side", "stop", "label"), SIDES)
+    async def test_exposure_limit(
+        self, session_factory: SessionFactory, side: str, stop: str, label: str
+    ) -> None:
+        env = await make_env(
+            session_factory,
+            f"PTAUTOEXP{label.upper()}USD",
+            starting_balance="10000",
+            max_leverage="5",
+            max_exposure=D("50"),  # $5,000 of notional on $10,000 of equity
+        )
+        # ~$6,000 of notional (3 units) is only ~$3,000 of margin at 2x, but the
+        # ceiling is on notional: rejected for the short exactly as for the long.
+        with pytest.raises(MaxExposureExceededError) as error:
+            await env.automated(side, "3", leverage="2", stop_loss_price=stop)
+        assert error.value.code == "max_exposure_exceeded"
+        assert await env.position() is None
+        # ~$4,000 (2 units) fits.
+        order = await env.automated(side, "2", leverage="2", stop_loss_price=stop)
+        assert order.position_side == label
+
+    @pytest.mark.parametrize(("side", "stop", "label"), SIDES)
+    async def test_drawdown_limit_halts_and_rejects_the_entry(
+        self, session_factory: SessionFactory, side: str, stop: str, label: str
+    ) -> None:
+        """An account already 25% below its equity peak (limit 20%) takes no new
+        automated entry in either direction, and the halt is persisted."""
+        env = await make_env(
+            session_factory,
+            f"PTAUTODD{label.upper()}USD",
+            starting_balance="10000",
+            price="500",
+            max_leverage="5",
+            max_drawdown=D("20"),
+        )
+        other = f"PTAUTODD{label.upper()}OTHERUSD"  # the strategy's market is a different one
+        await seed_market(session_factory, symbol=other)
+        await env.price("500", other)
+        await env.order("buy", "10")  # a manual long: ~$5,000, equity ~$9,995
+        await env.price("250")  # loses ~$2,500 -> equity ~7,490, a ~25% drawdown
+        with pytest.raises(TradingHaltedError) as error:
+            await env.automated(
+                side,
+                "1",
+                symbol=other,
+                leverage="2",
+                stop_loss_price="450" if side == "buy" else "550",
+            )
+        assert error.value.code == "trading_halted"
+        assert (await env.account()).trading_halted is True
+        positions = (await env.service.list_positions(env.account_id)).positions
+        assert [(p.symbol, p.side) for p in positions] == [
+            (env.symbol, "long")
+        ]  # only the manual long
+
+    async def test_long_and_short_are_rejected_with_the_same_error_type_and_numbers(
+        self, session_factory: SessionFactory
+    ) -> None:
+        errors = {}
+        for side, stop, label in self.SIDES:
+            env = await make_env(
+                session_factory,
+                f"PTAUTOSAME{label.upper()}USD",
+                starting_balance="10000",
+                max_leverage="5",
+                max_exposure=D("50"),
+            )
+            with pytest.raises(MaxExposureExceededError) as error:
+                await env.automated(side, "3", leverage="2", stop_loss_price=stop)
+            errors[label] = error.value
+        assert type(errors["long"]) is type(errors["short"])
+        assert errors["long"].code == errors["short"].code
+        # Same resulting exposure and percentage in the message, to the cent.
+        assert (
+            str(errors["long"]).split("total exposure to ")[1].split(" ")[0][:5]
+            == str(errors["short"]).split("total exposure to ")[1].split(" ")[0][:5]
+        )
+
+
+@pytest.mark.asyncio
+class TestStrategyLeverageConfig:
+    """`strategy_leverage` is one fixed, validated, per-account number."""
+
+    async def test_a_new_account_defaults_to_2x_within_its_own_ceiling(
+        self, session_factory: SessionFactory
+    ) -> None:
+        env = await make_env(session_factory, "PTSLDEFUSD")
+        assert num((await env.account()).strategy_leverage) == 2
+        capped = await make_env(session_factory, "PTSLDEF2USD", max_leverage="1")
+        assert num((await capped.account()).strategy_leverage) == 1  # never above max_leverage
+
+    async def test_it_can_be_configured_within_the_accounts_maximum(
+        self, session_factory: SessionFactory
+    ) -> None:
+        env = await make_env(session_factory, "PTSLCFGUSD", max_leverage="5")
+        updated = await env.service.update_strategy_config(
+            env.account_id,
+            PaperStrategyConfigUpdateRequest(leverage=D("3")),
+            user_id=env.user_id,
+        )
+        assert num(updated.strategy_leverage) == 3
+
+    async def test_it_cannot_exceed_the_accounts_max_leverage(
+        self, session_factory: SessionFactory
+    ) -> None:
+        env = await make_env(session_factory, "PTSLMAXUSD", max_leverage="3")
+        with pytest.raises(StrategyLeverageExceedsMaximumError):
+            await env.service.update_strategy_config(
+                env.account_id,
+                PaperStrategyConfigUpdateRequest(leverage=D("4")),
+                user_id=env.user_id,
+            )
+        assert num((await env.account()).strategy_leverage) == 2  # unchanged
+
+    async def test_the_mandatory_stop_loss_must_fit_inside_the_liquidation_distance(
+        self, session_factory: SessionFactory
+    ) -> None:
+        """At 20x a position is liquidated ~4.7% away, so the default 5%
+        stop-loss could never fire before liquidation: refused at config time,
+        not discovered as a rejected order later."""
+        env = await make_env(session_factory, "PTSLSTOPUSD", max_leverage="20")
+        with pytest.raises(StrategyStopBeyondLiquidationError) as error:
+            await env.service.update_strategy_config(
+                env.account_id,
+                PaperStrategyConfigUpdateRequest(leverage=D("20")),
+                user_id=env.user_id,
+            )
+        assert error.value.code == "strategy_stop_beyond_liquidation"
+        # A tighter stop, or a lower leverage, is fine.
+        await env.service.update_strategy_config(
+            env.account_id,
+            PaperStrategyConfigUpdateRequest(leverage=D("20"), default_stop_loss_pct=D("3")),
+            user_id=env.user_id,
+        )
+        await env.service.update_strategy_config(
+            env.account_id,
+            PaperStrategyConfigUpdateRequest(leverage=D("10"), default_stop_loss_pct=D("5")),
+            user_id=env.user_id,
+        )
+
+    async def test_an_explicit_null_leverage_is_rejected_at_the_schema(self) -> None:
+        with pytest.raises(ValueError, match="cannot be explicitly cleared"):
+            PaperStrategyConfigUpdateRequest.model_validate({"leverage": None})
+        with pytest.raises(ValueError):
+            PaperStrategyConfigUpdateRequest(leverage=D("0.5"))
+        with pytest.raises(ValueError):
+            PaperStrategyConfigUpdateRequest(leverage=D("201"))
 
 
 @pytest.mark.asyncio

@@ -68,6 +68,7 @@ function account(overrides: Partial<PaperAccount> = {}): PaperAccount {
     strategy_training_job_id: null,
     strategy_confidence_threshold_pct: '65',
     strategy_default_stop_loss_pct: '5',
+    strategy_leverage: '2',
     created_at: '2026-01-01T00:00:00Z',
     ...overrides,
   };
@@ -464,6 +465,7 @@ describe('PaperTradingPage', () => {
         training_job_id: 'job-1',
         confidence_threshold_pct: '75',
         default_stop_loss_pct: '5',
+        leverage: '2',
       }),
     );
   });

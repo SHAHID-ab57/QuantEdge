@@ -33,6 +33,7 @@ from app.schemas.paper_trading import (
 )
 from app.schemas.prediction import PredictionResponse
 from app.services import paper_trading_strategy as strategy_module
+from app.services.paper_trading import PaperTradingService
 from app.services.paper_trading_strategy import PaperTradingStrategyScheduler, run_strategy_once
 from app.state.manager import MarketStateManager
 from tests.conftest import SessionFactory
@@ -199,6 +200,11 @@ class TestAboveThresholdWithAFlatPositionOpensAnOrder:
         assert decisions.decisions[0].symbol == "STRATUPUSD"
         assert decisions.decisions[0].predicted_value == "up"
         assert decisions.decisions[0].order_id is not None
+        # Direction and leverage are on the log row, and on the position.
+        assert decisions.decisions[0].direction == "long"
+        assert float(decisions.decisions[0].strategy_leverage) == pytest.approx(2.0)
+        assert positions.positions[0].side == "long"
+        assert float(positions.positions[0].leverage) == pytest.approx(2.0)
 
 
 @pytest.mark.asyncio
@@ -315,9 +321,14 @@ class TestAllFourPositionConsistencyCases:
     explicit tests here rather than being left to an incidental byproduct
     of some other test."""
 
-    async def test_flat_and_bearish_is_a_no_op_never_a_short(
+    async def test_flat_and_bearish_opens_a_short(
         self, session_factory: SessionFactory, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Replaces `test_flat_and_bearish_is_a_no_op_never_a_short` (M3-E5-T3).
+        The old test proved the automated strategy could not short; that
+        restriction was removed on purpose, so the same situation now proves the
+        opposite: a confident "down" call on a flat account opens a short, at the
+        account's fixed leverage, with a stop-loss above the entry."""
         job_id, _ = await train_completed_job(
             session_factory, symbol="STRATFLATDOWNUSD", model_type="logistic_regression"
         )
@@ -341,19 +352,123 @@ class TestAllFourPositionConsistencyCases:
         scheduler = PaperTradingStrategyScheduler(state_manager=state_manager)
         summary = await scheduler.run_strategy_tick()
 
-        assert summary.opened == 0
+        assert summary.opened == 1
         assert summary.closed == 0
-        assert summary.no_action == 1
+        assert summary.no_action == 0
 
         positions = await service.list_positions(account_id)
-        assert positions.positions == []  # certainly never a short
+        assert len(positions.positions) == 1
+        position = positions.positions[0]
+        assert position.side == "short"
+        assert float(position.leverage) == pytest.approx(2.0)
+        assert position.liquidation_price is not None
+        assert position.stop_loss_price is not None
+        assert float(position.stop_loss_price) > float(position.average_entry_price)
 
         decisions = await service.list_strategy_decisions(account_id, limit=20, offset=0)
         decision = decisions.decisions[0]
-        assert decision.action == "no_action"
-        assert decision.order_id is None
-        assert "flat" in decision.reason.lower()
-        assert "no short is ever opened" in decision.reason.lower()
+        assert decision.action == "opened"
+        assert decision.order_id is not None
+        assert decision.direction == "short"
+        assert float(decision.strategy_leverage) == pytest.approx(2.0)
+        assert "short" in decision.reason.lower()
+        assert "2" in decision.reason and "leverage" in decision.reason.lower()
+
+    async def test_short_and_bullish_closes_the_short(
+        self, session_factory: SessionFactory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        job_id, _ = await train_completed_job(
+            session_factory, symbol="STRATSHORTUPUSD", model_type="logistic_regression"
+        )
+        state_manager = MarketStateManager()
+        service = await build_service(session_factory, state_manager)
+        account = await service.create_account(
+            PaperAccountCreateRequest(starting_balance=Decimal("100000"))
+        )
+        account_id = uuid.UUID(account.id)
+        await enable_strategy(service, account_id, job_id)
+        scheduler = PaperTradingStrategyScheduler(state_manager=state_manager)
+
+        stub_prediction(
+            monkeypatch,
+            build_prediction(
+                training_job_id=job_id,
+                symbol="STRATSHORTUPUSD",
+                predicted_value="down",
+                confidence=0.9,
+            ),
+        )
+        assert (await scheduler.run_strategy_tick()).opened == 1  # short
+
+        stub_prediction(
+            monkeypatch,
+            build_prediction(
+                training_job_id=job_id,
+                symbol="STRATSHORTUPUSD",
+                predicted_value="up",
+                confidence=0.9,
+            ),
+        )
+        summary = await scheduler.run_strategy_tick()
+
+        # Closes the short this cycle; it does not also open a long (one action
+        # per cycle: no order is ever larger than the position it reduces).
+        assert summary.closed == 1
+        assert summary.opened == 0
+        assert (await service.list_positions(account_id)).positions == []
+
+        decisions = (
+            await service.list_strategy_decisions(account_id, limit=20, offset=0)
+        ).decisions
+        closed = [d for d in decisions if d.action == "closed"]
+        assert len(closed) == 1
+        assert closed[0].direction == "short"  # the side of the position it closed
+        orders = await service.list_orders(
+            account_id, sort="created_at", direction="asc", limit=5, offset=0
+        )
+        [cover] = [o for o in orders.orders if o.reduce_only]
+        assert cover.side == "buy"
+        assert cover.position_side == "short"
+
+    async def test_short_and_bearish_is_a_no_op_already_consistent(
+        self, session_factory: SessionFactory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        job_id, _ = await train_completed_job(
+            session_factory, symbol="STRATSHORTDOWNUSD", model_type="logistic_regression"
+        )
+        state_manager = MarketStateManager()
+        service = await build_service(session_factory, state_manager)
+        account = await service.create_account(
+            PaperAccountCreateRequest(starting_balance=Decimal("100000"))
+        )
+        account_id = uuid.UUID(account.id)
+        await enable_strategy(service, account_id, job_id)
+        stub_prediction(
+            monkeypatch,
+            build_prediction(
+                training_job_id=job_id,
+                symbol="STRATSHORTDOWNUSD",
+                predicted_value="down",
+                confidence=0.9,
+            ),
+        )
+        scheduler = PaperTradingStrategyScheduler(state_manager=state_manager)
+        assert (await scheduler.run_strategy_tick()).opened == 1
+        before = (await service.list_positions(account_id)).positions[0]
+
+        summary = await scheduler.run_strategy_tick()  # the same call again
+
+        assert summary.opened == 0 and summary.closed == 0 and summary.no_action == 1
+        after = (await service.list_positions(account_id)).positions
+        assert len(after) == 1
+        assert after[0].quantity == before.quantity  # not a second short on top
+        decisions = (
+            await service.list_strategy_decisions(account_id, limit=20, offset=0)
+        ).decisions
+        assert sorted(d.action for d in decisions) == ["no_action", "opened"]
+        [skipped] = [d for d in decisions if d.action == "no_action"]
+        assert "already short" in skipped.reason.lower()
+        assert skipped.direction == "short"
 
     async def test_long_and_bullish_is_a_no_op_already_consistent(
         self, session_factory: SessionFactory, monkeypatch: pytest.MonkeyPatch
@@ -397,6 +512,8 @@ class TestAllFourPositionConsistencyCases:
         assert decision.action == "no_action"
         assert decision.order_id is None
         assert "already long" in decision.reason.lower()
+        assert decision.direction == "long"
+        assert float(decision.strategy_leverage) == pytest.approx(2.0)
 
 
 def test_interpret_signal_never_matches_a_numeric_value() -> None:
@@ -515,11 +632,23 @@ class TestBelowThresholdResultsInNoOrder:
 
 @pytest.mark.asyncio
 class TestAutomatedPositionsAlwaysCarryAStopLoss:
-    async def test_an_automated_buy_always_attaches_a_stop_loss(
-        self, session_factory: SessionFactory, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize(
+        ("call", "side", "sign"),
+        [("up", "long", -1), ("down", "short", +1)],
+    )
+    async def test_every_automated_entry_carries_a_direction_aware_stop_loss(
+        self,
+        session_factory: SessionFactory,
+        monkeypatch: pytest.MonkeyPatch,
+        call: str,
+        side: str,
+        sign: int,
     ) -> None:
+        """A long's stop is 7% BELOW the resolved quote, a short's 7% ABOVE it —
+        never omitted, in either direction."""
+        symbol = f"STRATSL{call.upper()}USD"
         job_id, _ = await train_completed_job(
-            session_factory, symbol="STRATSLUSD", model_type="logistic_regression"
+            session_factory, symbol=symbol, model_type="logistic_regression"
         )
         state_manager = MarketStateManager()
         service = await build_service(session_factory, state_manager)
@@ -532,7 +661,7 @@ class TestAutomatedPositionsAlwaysCarryAStopLoss:
         stub_prediction(
             monkeypatch,
             build_prediction(
-                training_job_id=job_id, symbol="STRATSLUSD", predicted_value="up", confidence=0.9
+                training_job_id=job_id, symbol=symbol, predicted_value=call, confidence=0.9
             ),
         )
 
@@ -542,17 +671,78 @@ class TestAutomatedPositionsAlwaysCarryAStopLoss:
 
         positions = await service.list_positions(uuid.UUID(account.id))
         position = positions.positions[0]
+        assert position.side == side
         assert position.stop_loss_price is not None
 
         orders = await service.list_orders(
             uuid.UUID(account.id), sort="created_at", direction="desc", limit=20, offset=0
         )
         order = orders.orders[0]
-        # 7% below the *resolved quote* the buy priced from (raw_price,
-        # before slippage) — not the fill price itself, which already
-        # differs from raw_price by the modeled slippage.
-        expected = float(order.raw_price) * 0.93
+        # 7% on the losing side of the *resolved quote* the order priced from
+        # (raw_price, before slippage), not the fill price, which already
+        # differs from it by the modeled slippage.
+        expected = float(order.raw_price) * (1 + sign * 0.07)
         assert float(position.stop_loss_price) == pytest.approx(expected, rel=1e-6)
+
+    async def test_the_stop_loss_actually_closes_an_automated_short_when_price_rises(
+        self, session_factory: SessionFactory, monkeypatch: pytest.MonkeyPatch, engine: AsyncEngine
+    ) -> None:
+        """The stop is not decoration: the existing monitor, now direction-aware,
+        closes the automated short when the price rises to it."""
+        from datetime import UTC, datetime
+
+        from app.marketdata.bus_events import TickerUpdated
+        from app.marketdata.models import TickerEvent
+        from app.paper_trading import monitor as monitor_module
+        from tests.paper_trading.test_monitor import build_monitor
+
+        monkeypatch.setattr(monitor_module, "get_engine", lambda: engine)
+        job_id, _ = await train_completed_job(
+            session_factory, symbol="STRATSHORTSTOPUSD", model_type="logistic_regression"
+        )
+        bus = EventBus()
+        state_manager = MarketStateManager().attach(bus)
+        build_monitor(state_manager).attach(bus)
+        service = await build_service(session_factory, state_manager)
+        account = await service.create_account(
+            PaperAccountCreateRequest(starting_balance=Decimal("100000"))
+        )
+        account_id = uuid.UUID(account.id)
+        await enable_strategy(service, account_id, job_id, default_stop_loss_pct=Decimal("5"))
+        stub_prediction(
+            monkeypatch,
+            build_prediction(
+                training_job_id=job_id,
+                symbol="STRATSHORTSTOPUSD",
+                predicted_value="down",
+                confidence=0.9,
+            ),
+        )
+        scheduler = PaperTradingStrategyScheduler(state_manager=state_manager)
+        await scheduler.run_strategy_tick()
+        position = (await service.list_positions(account_id)).positions[0]
+        assert position.stop_loss_price is not None
+
+        await bus.publish(
+            TickerUpdated(
+                source="test",
+                ticker=TickerEvent(
+                    exchange="delta",
+                    symbol="STRATSHORTSTOPUSD",
+                    event_time=datetime.now(UTC),
+                    last_price=position.stop_loss_price,
+                ),
+            )
+        )
+        await bus.drain()
+
+        assert (await service.list_positions(account_id)).positions == []
+        orders = await service.list_orders(
+            account_id, sort="created_at", direction="asc", limit=5, offset=0
+        )
+        [triggered] = [o for o in orders.orders if o.trigger_reason is not None]
+        assert triggered.trigger_reason == "stop_loss"
+        assert triggered.side == "buy"
 
 
 @pytest.mark.asyncio
@@ -603,70 +793,84 @@ class TestLongAndBearishClosesThePosition:
         assert decision.action == "closed"
         assert decision.order_id is not None
 
-    async def test_a_rejected_automated_close_is_logged_as_no_action(
+    async def test_a_close_that_loses_a_race_is_logged_and_never_opens_the_other_side(
         self, session_factory: SessionFactory, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The strategy's "close what I hold" sell would, against a *manually
-        opened short* in the same market, ADD to that short. The shared
-        order path refuses it (`_enforce_automated_restrictions`), and the
-        refusal is a logged `no_action`, never an order — proving the close
-        path shares the same structural guard as the open path, and that an
-        account mixing manual shorts with the strategy is safe."""
+        """The race a stop-loss or a liquidation creates: between the strategy
+        deciding to close and its order arriving, the position is already gone.
+        With shorts reachable, a plain opposite-side order would now OPEN a
+        short there; the strategy's close is `reduce_only`, so it is rejected
+        and logged instead."""
         job_id, _ = await train_completed_job(
-            session_factory, symbol="STRATCLOSESHORTUSD", model_type="logistic_regression"
+            session_factory, symbol="STRATCLOSERACEUSD", model_type="logistic_regression"
         )
         state_manager = MarketStateManager()
         service = await build_service(session_factory, state_manager)
         account = await service.create_account(
-            PaperAccountCreateRequest(
-                starting_balance=Decimal("100000"),
-                max_position_size_pct=Decimal("100"),
-                max_exposure_pct=Decimal("100"),
-            )
+            PaperAccountCreateRequest(starting_balance=Decimal("100000"))
         )
         account_id = uuid.UUID(account.id)
         manual_user = await persisted_test_user_id(session_factory)
         await service.place_order(
             account_id,
-            PaperOrderRequest(symbol="STRATCLOSESHORTUSD", side="sell", quantity=Decimal("1")),
+            PaperOrderRequest(symbol="STRATCLOSERACEUSD", side="buy", quantity=Decimal("1")),
             user_id=manual_user,
         )
-        before = await service.list_positions(account_id)
-        assert before.positions[0].side == "short"
-
         await enable_strategy(service, account_id, job_id)
         stub_prediction(
             monkeypatch,
             build_prediction(
                 training_job_id=job_id,
-                symbol="STRATCLOSESHORTUSD",
+                symbol="STRATCLOSERACEUSD",
                 predicted_value="down",
                 confidence=0.9,
             ),
         )
+
+        original = PaperTradingService.place_order
+
+        async def position_vanishes_first(self, account_id_, request, **kwargs):  # noqa: ANN001, ANN202
+            if kwargs.get("automated") and request.reduce_only:
+                # Something else (a stop-loss, a liquidation) closes it first.
+                await original(
+                    service,
+                    account_id_,
+                    PaperOrderRequest(
+                        symbol=request.symbol,
+                        side="sell",
+                        quantity=request.quantity,
+                        reduce_only=True,
+                    ),
+                    user_id=manual_user,
+                )
+            return await original(self, account_id_, request, **kwargs)
+
+        monkeypatch.setattr(PaperTradingService, "place_order", position_vanishes_first)
 
         scheduler = PaperTradingStrategyScheduler(state_manager=state_manager)
         summary = await scheduler.run_strategy_tick()
 
         assert summary.closed == 0
         assert summary.no_action == 1
+        assert (await service.list_positions(account_id)).positions == []  # no short opened
 
-        decisions = await service.list_strategy_decisions(account_id, limit=20, offset=0)
-        decision = decisions.decisions[0]
+        decision = (
+            await service.list_strategy_decisions(account_id, limit=20, offset=0)
+        ).decisions[0]
         assert decision.action == "no_action"
         assert "rejected" in decision.reason.lower()
-        assert "short" in decision.reason.lower()
-
-        # The manual short is exactly as it was: untouched, not doubled.
-        after = await service.list_positions(account_id)
-        assert after.positions[0].side == "short"
-        assert after.positions[0].quantity == before.positions[0].quantity
+        assert decision.direction == "long"
 
 
 @pytest.mark.asyncio
 class TestSharesExistingRiskLimits:
+    @pytest.mark.parametrize(("call", "direction"), [("up", "long"), ("down", "short")])
     async def test_a_strategy_order_that_would_breach_max_exposure_is_rejected(
-        self, session_factory: SessionFactory, monkeypatch: pytest.MonkeyPatch
+        self,
+        session_factory: SessionFactory,
+        monkeypatch: pytest.MonkeyPatch,
+        call: str,
+        direction: str,
     ) -> None:
         """The strategy is 'just another caller' of `place_order` — proven
         here by configuring a tight `max_exposure_pct`, pre-filling most
@@ -674,8 +878,9 @@ class TestSharesExistingRiskLimits:
         symbol, and showing the automated buy is rejected by the exact
         same `MaxExposureExceededError` a manual order would hit in the
         same situation, never a second, unguarded path."""
+        risk_symbol = f"STRATRISK{call.upper()}USD"
         job_id, _ = await train_completed_job(
-            session_factory, symbol="STRATRISKUSD", model_type="logistic_regression"
+            session_factory, symbol=risk_symbol, model_type="logistic_regression"
         )
         await seed_market(session_factory, symbol="STRATOTHERUSD")
         bus = EventBus()
@@ -703,8 +908,8 @@ class TestSharesExistingRiskLimits:
             monkeypatch,
             build_prediction(
                 training_job_id=job_id,
-                symbol="STRATRISKUSD",
-                predicted_value="up",
+                symbol=risk_symbol,
+                predicted_value=call,
                 confidence=0.9,
             ),
         )
@@ -724,6 +929,54 @@ class TestSharesExistingRiskLimits:
         assert decision.order_id is None
         assert "rejected" in decision.reason.lower()
         assert "exposure" in decision.reason.lower()
+        assert decision.direction == direction  # a short is rejected exactly as a long is
+
+    @pytest.mark.parametrize(("call", "direction"), [("up", "long"), ("down", "short")])
+    async def test_leverage_does_not_get_a_strategy_order_past_the_position_size_limit(
+        self,
+        session_factory: SessionFactory,
+        monkeypatch: pytest.MonkeyPatch,
+        call: str,
+        direction: str,
+    ) -> None:
+        """The position-size limit is on notional over equity, so the strategy's
+        2x leverage buys no extra size: an order whose notional exceeds the limit
+        is rejected in both directions exactly as a manual one would be."""
+        symbol = f"STRATPOS{call.upper()}USD"
+        job_id, _ = await train_completed_job(
+            session_factory, symbol=symbol, model_type="logistic_regression"
+        )
+        state_manager = MarketStateManager()
+        service = await build_service(session_factory, state_manager)
+        account = await service.create_account(
+            PaperAccountCreateRequest(
+                starting_balance=Decimal("100000"),
+                max_position_size_pct=Decimal("0.0001"),
+                max_exposure_pct=Decimal("100"),
+                max_drawdown_pct=Decimal("100"),
+            )
+        )
+        account_id = uuid.UUID(account.id)
+        await enable_strategy(service, account_id, job_id)
+        stub_prediction(
+            monkeypatch,
+            build_prediction(
+                training_job_id=job_id, symbol=symbol, predicted_value=call, confidence=0.9
+            ),
+        )
+        # Force a sizing far above the (tiny) limit.
+        monkeypatch.setattr(strategy_module, "_TARGET_POSITION_SIZE_FRACTION", Decimal("5000"))
+
+        summary = await PaperTradingStrategyScheduler(
+            state_manager=state_manager
+        ).run_strategy_tick()
+
+        assert summary.opened == 0 and summary.no_action == 1
+        decision = (await service.list_strategy_decisions(account_id, limit=5, offset=0)).decisions[
+            0
+        ]
+        assert "max position size" in decision.reason.lower()
+        assert decision.direction == direction
 
 
 @pytest.mark.asyncio
@@ -961,3 +1214,380 @@ class TestRealPredictionWiring:
         assert summary.attempted == 1
         decisions = await service.list_strategy_decisions(uuid.UUID(account.id), limit=20, offset=0)
         assert decisions.total == 1
+
+
+@pytest.mark.asyncio
+class TestKillSwitchHaltsEntriesInBothDirectionsButNotExits:
+    """D4 for the automated strategy: a halted account takes no new automated
+    risk, long or short; it can still close what it holds; and a liquidation
+    can never be blocked (proven at the monitor level in `test_liquidation.py`)."""
+
+    async def _halted_account(
+        self, session_factory: SessionFactory, symbol: str
+    ) -> tuple[uuid.UUID, uuid.UUID, MarketStateManager, _TestPaperTradingService]:
+        job_id, _ = await train_completed_job(
+            session_factory, symbol=symbol, model_type="logistic_regression"
+        )
+        state_manager = MarketStateManager()
+        service = await build_service(session_factory, state_manager)
+        account = await service.create_account(
+            PaperAccountCreateRequest(starting_balance=Decimal("100000"))
+        )
+        account_id = uuid.UUID(account.id)
+        await enable_strategy(service, account_id, uuid.UUID(str(job_id)) and job_id)
+        return account_id, uuid.UUID(str(job_id)), state_manager, service
+
+    @pytest.mark.parametrize("call", ["up", "down"])
+    async def test_a_halted_account_takes_no_new_automated_entry(
+        self, session_factory: SessionFactory, monkeypatch: pytest.MonkeyPatch, call: str
+    ) -> None:
+        symbol = f"STRATHALT{call.upper()}USD"
+        account_id, job_id, state_manager, service = await self._halted_account(
+            session_factory, symbol
+        )
+        account = await service.account_repository.get_by_id(account_id)
+        assert account is not None
+        await service.account_repository.update(account, {"trading_halted": True})
+        stub_prediction(
+            monkeypatch,
+            build_prediction(
+                training_job_id=str(job_id), symbol=symbol, predicted_value=call, confidence=0.9
+            ),
+        )
+
+        summary = await PaperTradingStrategyScheduler(
+            state_manager=state_manager
+        ).run_strategy_tick()
+
+        assert summary.opened == 0 and summary.no_action == 1
+        assert (await service.list_positions(account_id)).positions == []
+        decision = (await service.list_strategy_decisions(account_id, limit=5, offset=0)).decisions[
+            0
+        ]
+        assert "halted" in decision.reason.lower()
+        assert decision.direction == ("long" if call == "up" else "short")
+
+    @pytest.mark.parametrize(
+        ("held", "call"), [("buy", "down"), ("sell", "up")], ids=["close-long", "close-short"]
+    )
+    async def test_a_halted_account_can_still_close_what_it_holds(
+        self,
+        session_factory: SessionFactory,
+        monkeypatch: pytest.MonkeyPatch,
+        held: str,
+        call: str,
+    ) -> None:
+        symbol = f"STRATHALTEXIT{held.upper()}USD"
+        account_id, job_id, state_manager, service = await self._halted_account(
+            session_factory, symbol
+        )
+        manual_user = await persisted_test_user_id(session_factory)
+        await service.place_order(
+            account_id,
+            PaperOrderRequest(symbol=symbol, side=held, quantity=Decimal("1")),  # type: ignore[arg-type]
+            user_id=manual_user,
+        )
+        account = await service.account_repository.get_by_id(account_id)
+        assert account is not None
+        await service.account_repository.update(account, {"trading_halted": True})
+        stub_prediction(
+            monkeypatch,
+            build_prediction(
+                training_job_id=str(job_id), symbol=symbol, predicted_value=call, confidence=0.9
+            ),
+        )
+
+        summary = await PaperTradingStrategyScheduler(
+            state_manager=state_manager
+        ).run_strategy_tick()
+
+        assert summary.closed == 1
+        assert (await service.list_positions(account_id)).positions == []
+        assert (
+            await service.get_account(account_id)
+        ).trading_halted is True  # closing didn't un-halt
+
+
+class TestLeverageIsFixedNeverDerivedFromConfidence:
+    """`strategy_leverage` is one configured number. Confidence has been measured
+    to carry no reliable relationship to being right (mean 0.889 against accuracy
+    0.460, correlation -0.020), so it must never scale risk. Proven three ways:
+    by behaviour, by a syntax-level scan of the strategy, and by a scan of every
+    place in the application that sets a leverage."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("call", ["up", "down"])
+    async def test_every_confidence_produces_the_same_configured_leverage(
+        self, session_factory: SessionFactory, monkeypatch: pytest.MonkeyPatch, call: str
+    ) -> None:
+        symbol = f"STRATFIX{call.upper()}USD"
+        job_id, _ = await train_completed_job(
+            session_factory, symbol=symbol, model_type="logistic_regression"
+        )
+        state_manager = MarketStateManager()
+        service = await build_service(session_factory, state_manager)
+        leverages: dict[float, float] = {}
+        for confidence in (0.66, 0.80, 0.99):
+            account = await service.create_account(
+                PaperAccountCreateRequest(
+                    starting_balance=Decimal("100000"), max_leverage=Decimal("5")
+                )
+            )
+            account_id = uuid.UUID(account.id)
+            await service.update_strategy_config(
+                account_id,
+                PaperStrategyConfigUpdateRequest(
+                    enabled=True,
+                    training_job_id=uuid.UUID(job_id),
+                    confidence_threshold_pct=Decimal("50"),
+                    leverage=Decimal("3"),
+                ),
+            )
+            stub_prediction(
+                monkeypatch,
+                build_prediction(
+                    training_job_id=job_id,
+                    symbol=symbol,
+                    predicted_value=call,
+                    confidence=confidence,
+                ),
+            )
+            summary = await PaperTradingStrategyScheduler(
+                state_manager=state_manager
+            ).run_strategy_tick()
+            assert summary.opened == 1
+            position = (await service.list_positions(account_id)).positions[0]
+            leverages[confidence] = float(position.leverage)
+            decision = (
+                await service.list_strategy_decisions(account_id, limit=5, offset=0)
+            ).decisions[0]
+            assert float(decision.strategy_leverage) == pytest.approx(3.0)
+            # Done with this account: only the next one should act on the next tick.
+            await service.update_strategy_config(
+                account_id, PaperStrategyConfigUpdateRequest(enabled=False)
+            )
+
+        # 66%, 80% and 99% confidence: identical leverage, exactly the configured 3.
+        assert set(leverages.values()) == {3.0}
+
+    @pytest.mark.asyncio
+    async def test_changing_the_configured_leverage_changes_the_orders_leverage(
+        self, session_factory: SessionFactory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        job_id, _ = await train_completed_job(
+            session_factory, symbol="STRATCFGUSD", model_type="logistic_regression"
+        )
+        state_manager = MarketStateManager()
+        service = await build_service(session_factory, state_manager)
+        seen = []
+        for configured in ("1", "2", "4"):
+            account = await service.create_account(
+                PaperAccountCreateRequest(
+                    starting_balance=Decimal("100000"), max_leverage=Decimal("5")
+                )
+            )
+            account_id = uuid.UUID(account.id)
+            await service.update_strategy_config(
+                account_id,
+                PaperStrategyConfigUpdateRequest(
+                    enabled=True,
+                    training_job_id=uuid.UUID(job_id),
+                    confidence_threshold_pct=Decimal("50"),
+                    leverage=Decimal(configured),
+                ),
+            )
+            stub_prediction(
+                monkeypatch,
+                build_prediction(
+                    training_job_id=job_id,
+                    symbol="STRATCFGUSD",
+                    predicted_value="down",
+                    confidence=0.9,
+                ),
+            )
+            await PaperTradingStrategyScheduler(state_manager=state_manager).run_strategy_tick()
+            seen.append(float((await service.list_positions(account_id)).positions[0].leverage))
+            await service.update_strategy_config(
+                account_id, PaperStrategyConfigUpdateRequest(enabled=False)
+            )
+        assert seen == [1.0, 2.0, 4.0]
+
+    def test_the_strategy_module_takes_leverage_from_the_account_setting_and_nothing_else(
+        self,
+    ) -> None:
+        import ast
+        from pathlib import Path
+
+        source = Path(strategy_module.__file__).read_text()
+        tree = ast.parse(source)
+
+        leverage_values: list[ast.expr] = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                for keyword in node.keywords:
+                    if keyword.arg == "leverage" and keyword.value is not None:
+                        leverage_values.append(keyword.value)
+        assert leverage_values, "expected the strategy to pass leverage to its orders"
+        for value in leverage_values:
+            names = {n.id for n in ast.walk(value) if isinstance(n, ast.Name)}
+            attrs = {n.attr for n in ast.walk(value) if isinstance(n, ast.Attribute)}
+            assert names == {"strategy_leverage"}, ast.dump(value)
+            assert not any("confidence" in name for name in names | attrs)
+
+        # ...and that name is assigned from the account's setting alone.
+        assignments = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Assign)
+            and any(isinstance(t, ast.Name) and t.id == "strategy_leverage" for t in node.targets)
+        ]
+        assert assignments
+        for assignment in assignments:
+            attrs = {n.attr for n in ast.walk(assignment.value) if isinstance(n, ast.Attribute)}
+            names = {n.id for n in ast.walk(assignment.value) if isinstance(n, ast.Name)}
+            assert attrs == {"strategy_leverage"}, ast.dump(assignment.value)
+            assert not any("confidence" in x or "prediction" in x for x in names | attrs)
+
+    def test_no_code_in_the_application_connects_confidence_to_a_leverage(self) -> None:
+        """Grep-verifiable, as the task asked: in every application module, no
+        expression that sets or computes a `leverage`/`strategy_leverage` refers
+        to a confidence."""
+        import ast
+        from pathlib import Path
+
+        app_dir = Path(strategy_module.__file__).parents[1]
+        offenders: list[str] = []
+        for path in app_dir.rglob("*.py"):
+            tree = ast.parse(path.read_text())
+            for node in ast.walk(tree):
+                targets: list[tuple[str, ast.AST]] = []
+                if isinstance(node, ast.Assign):
+                    for target in node.targets:
+                        name = (
+                            target.id
+                            if isinstance(target, ast.Name)
+                            else target.attr
+                            if isinstance(target, ast.Attribute)
+                            else ""
+                        )
+                        targets.append((name, node.value))
+                elif isinstance(node, ast.AnnAssign) and node.value is not None:
+                    if isinstance(node.target, ast.Name):
+                        targets.append((node.target.id, node.value))
+                elif isinstance(node, ast.keyword) and node.arg:
+                    targets.append((node.arg, node.value))
+                for name, value in targets:
+                    if "leverage" not in name:
+                        continue
+                    referenced = {
+                        n.id.lower() for n in ast.walk(value) if isinstance(n, ast.Name)
+                    } | {n.attr.lower() for n in ast.walk(value) if isinstance(n, ast.Attribute)}
+                    if any("confidence" in r for r in referenced):
+                        offenders.append(
+                            f"{path.relative_to(app_dir)}:{getattr(node, 'lineno', 0)}"
+                        )
+        assert offenders == []
+
+
+@pytest.mark.asyncio
+class TestEveryCycleRecordsDirectionAndLeverage:
+    async def test_every_kind_of_cycle_is_logged_with_its_direction_and_the_leverage_in_force(
+        self, session_factory: SessionFactory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        job_id, _ = await train_completed_job(
+            session_factory, symbol="STRATDIRLOGUSD", model_type="logistic_regression"
+        )
+        state_manager = MarketStateManager()
+        service = await build_service(session_factory, state_manager)
+        account = await service.create_account(
+            PaperAccountCreateRequest(starting_balance=Decimal("100000"))
+        )
+        account_id = uuid.UUID(account.id)
+        await service.update_strategy_config(
+            account_id,
+            PaperStrategyConfigUpdateRequest(
+                enabled=True,
+                training_job_id=uuid.UUID(job_id),
+                confidence_threshold_pct=Decimal("80"),
+                leverage=Decimal("3"),
+            ),
+        )
+        scheduler = PaperTradingStrategyScheduler(state_manager=state_manager)
+
+        async def tick(value: object, confidence: float) -> None:
+            stub_prediction(
+                monkeypatch,
+                build_prediction(
+                    training_job_id=job_id,
+                    symbol="STRATDIRLOGUSD",
+                    predicted_value=value,
+                    confidence=confidence,
+                ),
+            )
+            await scheduler.run_strategy_tick()
+
+        await tick("down", 0.5)  # below threshold: skipped, but for a SHORT
+        await tick("up", 0.5)  # below threshold: skipped, for a LONG
+        await tick("flat", 0.95)  # no directional call at all
+        await tick("down", 0.95)  # opens a short
+        await tick("down", 0.95)  # already short: no change
+        await tick("up", 0.95)  # closes the short
+
+        decisions = (
+            await service.list_strategy_decisions(account_id, limit=20, offset=0)
+        ).decisions
+        assert len(decisions) == 6
+        by_reason = {d.reason: d for d in decisions}
+        rows = sorted(decisions, key=lambda d: (d.action, d.direction or ""))
+        summary = [(d.action, d.direction) for d in rows]
+        assert summary == sorted(
+            [
+                ("no_action", "short"),  # below threshold, down
+                ("no_action", "long"),  # below threshold, up
+                ("no_action", None),  # not directional
+                ("opened", "short"),
+                ("no_action", "short"),  # already short
+                ("closed", "short"),
+            ],
+            key=lambda pair: (pair[0], pair[1] or ""),
+        )
+        # Every row, acted or skipped, snapshots the leverage in force.
+        assert {float(d.strategy_leverage) for d in decisions} == {3.0}
+        assert by_reason  # every row also carries its reasoning
+        assert all(d.reason for d in decisions)
+
+    async def test_a_cycle_that_crashes_is_still_logged(
+        self, session_factory: SessionFactory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        job_id, _ = await train_completed_job(
+            session_factory, symbol="STRATCRASHUSD", model_type="logistic_regression"
+        )
+        state_manager = MarketStateManager()
+        service = await build_service(session_factory, state_manager)
+        account = await service.create_account(
+            PaperAccountCreateRequest(starting_balance=Decimal("100000"))
+        )
+        account_id = uuid.UUID(account.id)
+        await enable_strategy(service, account_id, job_id)
+        stub_prediction(
+            monkeypatch,
+            build_prediction(
+                training_job_id=job_id, symbol="STRATCRASHUSD", predicted_value="up", confidence=0.9
+            ),
+        )
+
+        async def explode(*args: object, **kwargs: object) -> None:
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(PaperTradingStrategyScheduler, "_open_position", explode)
+        summary = await PaperTradingStrategyScheduler(
+            state_manager=state_manager
+        ).run_strategy_tick()
+
+        assert summary.no_action == 1
+        decision = (await service.list_strategy_decisions(account_id, limit=5, offset=0)).decisions[
+            0
+        ]
+        assert decision.action == "no_action"
+        assert "boom" in decision.reason
+        assert float(decision.strategy_leverage) == pytest.approx(2.0)

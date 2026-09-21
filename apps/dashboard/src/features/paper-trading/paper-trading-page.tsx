@@ -149,12 +149,14 @@ export function PaperTradingPage() {
     trainingJobId: string | null;
     confidenceThresholdPct: string;
     defaultStopLossPct: string;
+    leverage: string;
   }) => {
     updateStrategyConfig.mutate({
       enabled: values.enabled,
       training_job_id: values.trainingJobId,
       confidence_threshold_pct: values.confidenceThresholdPct,
       default_stop_loss_pct: values.defaultStopLossPct,
+      leverage: values.leverage,
     });
   };
 

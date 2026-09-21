@@ -634,13 +634,19 @@ its very next tick.
    logged `no_action`.
 4. `predicted_value == "up"` is bullish, `"down"` is bearish, anything
    else (`"flat"`, a regressor's own number) is not directional — logged
-   `no_action`. Flat + bullish opens a buy (sized at half the account's
-   own `max_position_size_pct` of current balance — there is no separate
-   strategy position-sizing config; this is a deliberately conservative
-   default) with a stop-loss at `strategy_default_stop_loss_pct` below
-   the resolved price. Long + bearish closes the full held quantity.
-   Long + bullish / flat + bearish are both "already consistent" —
-   `no_action`, never a short.
+   `no_action`. **Since M3-E5-T3 it trades both directions:** flat +
+   bullish opens a long and flat + bearish opens a short, each sized at
+   half the account's own `max_position_size_pct` of current cash (there
+   is no separate strategy position-sizing config), placed at the
+   account's one fixed `strategy_leverage` (default 2, never derived from
+   the prediction's confidence, which has been measured to carry no
+   reliable relationship to being right), with a mandatory stop-loss at
+   `strategy_default_stop_loss_pct` on the losing side of the resolved
+   price (below a long's, above a short's). A signal against the held
+   side closes it (reduce-only, one action per cycle); a signal matching
+   the held side is "already consistent" — `no_action`. The live model
+   calls "down" in over 99% of cases, so expect it to be short almost all
+   the time; the decision log shows each cycle's direction and leverage.
 
 **"Just another caller," not a second order-placement path.** Every
 order goes through the exact same `PaperTradingService.place_order` a

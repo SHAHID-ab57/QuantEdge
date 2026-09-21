@@ -76,12 +76,24 @@ _ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
                         },
                     },
                     "automated_order_restricted": {
-                        "summary": "The automated strategy asked for a short or leverage",
+                        "summary": "An automated order used a leverage other than the "
+                        "account's fixed strategy_leverage, had no stop-loss, or added to a "
+                        "position",
                         "value": {
                             "code": "automated_order_restricted",
-                            "detail": "Automated orders are limited to unleveraged (1x) long "
-                            "positions: it may not open, add to, or trade against a short "
-                            "position",
+                            "detail": "Automated order refused: entries use the account's fixed "
+                            "strategy_leverage (2x), not 5x",
+                        },
+                    },
+                    "strategy_stop_beyond_liquidation": {
+                        "summary": "The strategy's stop-loss could not fire before its "
+                        "leverage liquidates the position",
+                        "value": {
+                            "code": "strategy_stop_beyond_liquidation",
+                            "detail": "default_stop_loss_pct 5% is not inside the liquidation "
+                            "distance of 4.76% at 20x leverage: an automated position would be "
+                            "liquidated before its stop-loss could ever trigger. Lower the "
+                            "stop-loss or the leverage.",
                         },
                     },
                     "stop_beyond_liquidation": {
@@ -299,8 +311,9 @@ async def get_paper_account(
         "larger than the position it reduces is rejected rather than flipped through "
         "zero. Optional isolated-margin leverage (fixed when a position opens, capped at "
         "the account's max_leverage) posts notional/leverage of available cash as margin; "
-        "reduce_only refuses to open or add. Shorts and leverage are for manual orders — "
-        "the automated strategy is limited to unleveraged longs."
+        "reduce_only refuses to open or add. The automated strategy places its orders here "
+        "too (long or short, at its account's one fixed strategy_leverage, always with a "
+        "stop-loss)."
     ),
     responses=_ERROR_RESPONSES,
 )

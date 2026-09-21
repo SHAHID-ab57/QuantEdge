@@ -155,6 +155,8 @@ export interface PaperStrategyConfigBody {
   training_job_id?: string | null;
   confidence_threshold_pct?: string;
   default_stop_loss_pct?: string;
+  /** The one fixed leverage for every automated entry — never derived from confidence. */
+  leverage?: string;
 }
 
 /**

@@ -137,8 +137,9 @@ class PaperAccount(BaseModel, TimestampMixin):
         nullable=False,
         default=Decimal("5"),
         server_default="5",
-        comment="The highest leverage a manually-placed order on this account may use. The "
-        "automated strategy is limited to 1x regardless of this value.",
+        comment="The highest leverage any order on this account may use, manual or "
+        "automated: the ceiling on a manual order's leverage and on the automated "
+        "strategy's fixed strategy_leverage.",
     )
     state_version: Mapped[int] = mapped_column(
         Integer,
@@ -182,9 +183,20 @@ class PaperAccount(BaseModel, TimestampMixin):
         nullable=False,
         default=Decimal("5"),
         server_default="5",
-        comment="Every automated buy attaches a stop-loss this % below its own fill price — "
-        "tunable per account, but never omittable: an automated position without one is not "
-        "a configuration this feature can express.",
+        comment="Every automated entry attaches a stop-loss this % on the losing side of its "
+        "own fill price (below a long's, above a short's) — tunable per account, but never "
+        "omittable: an automated position without one is not a configuration this feature "
+        "can express.",
+    )
+    strategy_leverage: Mapped[Any] = mapped_column(
+        Numeric(PRECISION, SCALE),
+        nullable=False,
+        default=Decimal("2"),
+        server_default="2",
+        comment="The ONE leverage every automated entry uses, long or short. A fixed, "
+        "per-account setting: it is never read from, scaled by, or derived from a "
+        "prediction's confidence (which has been measured to carry no reliable relationship "
+        "to being right). Must not exceed max_leverage.",
     )
 
     __table_args__ = (
@@ -192,6 +204,9 @@ class PaperAccount(BaseModel, TimestampMixin):
         CheckConstraint("balance >= 0", name="balance_non_negative"),
         CheckConstraint("peak_balance >= 0", name="peak_balance_non_negative"),
         CheckConstraint("max_leverage >= 1 AND max_leverage <= 200", name="max_leverage_valid"),
+        CheckConstraint(
+            "strategy_leverage >= 1 AND strategy_leverage <= 200", name="strategy_leverage_valid"
+        ),
         CheckConstraint(
             "max_position_size_pct > 0 AND max_position_size_pct <= 100",
             name="max_position_size_pct_valid",
@@ -466,7 +481,8 @@ class PaperStrategyDecision(BaseModel, TimestampMixin):
     cycle never got a prediction to reason about at all (the configured
     training job doesn't exist/isn't completed/has no recorded symbol,
     or the live prediction call itself raised) — `reason` always
-    explains which. `confidence_threshold_pct` is always recorded even
+    explains which. `direction` and `strategy_leverage` are recorded for
+    every cycle too, acted on or not. `confidence_threshold_pct` is always recorded even
     then, snapshotting the account's own configured threshold *at the
     moment of this cycle*, so a later threshold change never rewrites
     the meaning of a past decision.
@@ -523,6 +539,22 @@ class PaperStrategyDecision(BaseModel, TimestampMixin):
         comment="A snapshot of the account's own strategy_confidence_threshold_pct at the "
         "moment of this cycle — never re-read from the (possibly since-changed) account.",
     )
+    direction: Mapped[str | None] = mapped_column(
+        String(5),
+        nullable=True,
+        comment="'long' | 'short' — the side this cycle concerned: the position it opened or "
+        "closed, or, for a no_action cycle, the side the model's call pointed at (up = long, "
+        "down = short). NULL only when there was no directional call at all.",
+    )
+    strategy_leverage: Mapped[Any] = mapped_column(
+        Numeric(PRECISION, SCALE),
+        nullable=False,
+        default=Decimal("1"),
+        server_default="1",
+        comment="A snapshot of the account's own strategy_leverage at the moment of this "
+        "cycle (rows from before leverage existed were 1x), never re-read from the "
+        "possibly-since-changed account.",
+    )
     prediction_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("predictions.id", ondelete="SET NULL"), nullable=True
     )
@@ -533,6 +565,10 @@ class PaperStrategyDecision(BaseModel, TimestampMixin):
     __table_args__ = (
         CheckConstraint(
             f"action IN {STRATEGY_DECISION_ACTIONS!r}", name="paper_strategy_decision_action_valid"
+        ),
+        CheckConstraint(
+            f"direction IS NULL OR direction IN {POSITION_SIDES!r}",
+            name="decision_direction_valid",
         ),
     )
 

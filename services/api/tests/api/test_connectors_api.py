@@ -232,6 +232,122 @@ class TestConnectorCatalogueEndpoint:
         assert (await client.get("/connectors")).status_code == 200
 
 
+class TestSyncTimingFields:
+    """`total_points`/`expected_interval_seconds`/`last_attempt_at`/
+    `last_attempt_success`/`next_sync_at` — added so the Data Sources page can
+    explain *why* a connector is stale (an overdue scheduler tick) instead of
+    only naming the fact, and so a value's own precision is never confused
+    with how long ago it was fetched."""
+
+    async def test_total_points_counts_every_stored_row_for_that_source_only(
+        self, client: httpx.AsyncClient, session_factory: SessionFactory
+    ) -> None:
+        for day in range(3):
+            await seed_point(
+                session_factory, value=float(day), timestamp=datetime(2026, 1, 1 + day, tzinfo=UTC)
+            )
+        await seed_point(
+            session_factory, value=1.0, timestamp=datetime(2026, 1, 1, tzinfo=UTC), source="eth_tvl"
+        )
+
+        body = (await client.get("/api/v1/connectors")).json()
+        entry = next(e for e in body["connectors"] if e["source"] == "fear_greed")
+        assert entry["total_points"] == 3
+        eth_tvl = next(e for e in body["connectors"] if e["source"] == "eth_tvl")
+        assert eth_tvl["total_points"] == 1
+
+    async def test_expected_interval_seconds_matches_the_connectors_own_metadata(
+        self, client: httpx.AsyncClient
+    ) -> None:
+        """Fear & Greed publishes daily — 86,400 seconds."""
+        body = (await client.get("/api/v1/connectors")).json()
+        entry = next(e for e in body["connectors"] if e["source"] == "fear_greed")
+        assert entry["expected_interval_seconds"] == 86_400
+
+    async def test_no_recorded_attempt_reports_null_timing_fields(
+        self, client: httpx.AsyncClient
+    ) -> None:
+        body = (await client.get("/api/v1/connectors")).json()
+        entry = next(e for e in body["connectors"] if e["source"] == "fear_greed")
+        assert entry["last_attempt_at"] is None
+        assert entry["last_attempt_success"] is None
+        assert entry["next_sync_at"] is None
+
+    async def test_last_attempt_is_the_newest_recorded_run_regardless_of_outcome(
+        self, client: httpx.AsyncClient, session_factory: SessionFactory
+    ) -> None:
+        """Newest first: a failed attempt more recent than an older success
+        is still the one reported, exactly like the health-status streak
+        check reads the same rows."""
+        await seed_runs(session_factory, [False, True, True])
+
+        body = (await client.get("/api/v1/connectors")).json()
+        entry = next(e for e in body["connectors"] if e["source"] == "fear_greed")
+        assert entry["last_attempt_at"] is not None
+        assert entry["last_attempt_success"] is False
+
+    async def test_next_sync_at_projects_the_generic_schedulers_own_interval(
+        self, client: httpx.AsyncClient, session_factory: SessionFactory
+    ) -> None:
+        """Fear & Greed is `auto_synced=True` — the generic
+        `ExternalDataSyncScheduler`'s own interval applies, never Marketaux's
+        dedicated `NewsSyncScheduler` interval."""
+        from app.core.config import get_settings
+
+        started = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+        async with session_factory() as session:
+            session.add(
+                ConnectorSyncRun(
+                    source="fear_greed",
+                    started_at=started,
+                    completed_at=started,
+                    success=True,
+                    received=1,
+                    inserted=1,
+                )
+            )
+            await session.commit()
+
+        body = (await client.get("/api/v1/connectors")).json()
+        entry = next(e for e in body["connectors"] if e["source"] == "fear_greed")
+        expected = started + timedelta(seconds=get_settings().external_data_sync_interval_seconds)
+        assert entry["last_attempt_at"] == started.isoformat().replace("+00:00", "Z")
+        assert entry["next_sync_at"] == expected.isoformat().replace("+00:00", "Z")
+
+    async def test_next_sync_at_projects_the_dedicated_news_scheduler_interval_for_marketaux(
+        self, client: httpx.AsyncClient, session_factory: SessionFactory
+    ) -> None:
+        """`news_sentiment` is `auto_synced=False` — its own `NewsSyncScheduler`
+        interval must be used, not the generic scheduler's, or the projected
+        next-sync time would be wrong for the one source that differs."""
+        from app.core.config import get_settings
+
+        started = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+        async with session_factory() as session:
+            session.add(
+                ConnectorSyncRun(
+                    source="news_sentiment",
+                    started_at=started,
+                    completed_at=started,
+                    success=True,
+                    received=1,
+                    inserted=1,
+                )
+            )
+            await session.commit()
+
+        body = (await client.get("/api/v1/connectors")).json()
+        entry = next(e for e in body["connectors"] if e["source"] == "news_sentiment")
+        expected = started + timedelta(seconds=get_settings().news_sync_interval_seconds)
+        assert entry["next_sync_at"] == expected.isoformat().replace("+00:00", "Z")
+        # Sanity: the two scheduler intervals actually differ in this
+        # codebase's real config, or this test would pass by accident.
+        assert (
+            get_settings().news_sync_interval_seconds
+            != get_settings().external_data_sync_interval_seconds
+        )
+
+
 class TestConnectorHistoryEndpoint:
     async def test_returns_points_in_the_requested_inclusive_range(
         self, client: httpx.AsyncClient, session_factory: SessionFactory

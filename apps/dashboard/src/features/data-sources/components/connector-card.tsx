@@ -1,15 +1,29 @@
 'use client';
 
+import CheckCircleIcon from '@mui/icons-material/CheckCircle';
+import ErrorIcon from '@mui/icons-material/Error';
+import ScheduleIcon from '@mui/icons-material/Schedule';
 import Chip from '@mui/material/Chip';
+import Divider from '@mui/material/Divider';
 import Paper from '@mui/material/Paper';
 import Stack from '@mui/material/Stack';
+import Tooltip from '@mui/material/Tooltip';
 import Typography from '@mui/material/Typography';
 import { alpha, type SxProps, type Theme } from '@mui/material/styles';
+import type { ReactNode } from 'react';
 import { StatTile } from '@/components/stat-tile';
 import { Sparkline } from '@/features/trades/components/sparkline';
 import type { Connector, ConnectorHealthStatus } from '@/types/api/connectors';
 import { HISTORY_SPARKLINE_LIMIT, useConnectorHistory } from '../hooks/use-connector-data';
-import { formatConnectorValue, formatLastUpdated } from '../lib/format';
+import {
+  formatAbsoluteTimestamp,
+  formatConnectorValue,
+  formatConnectorValueExact,
+  formatInterval,
+  formatLastAttempt,
+  formatLastUpdated,
+  formatNextSync,
+} from '../lib/format';
 
 const HEALTH_COLOR: Record<ConnectorHealthStatus, 'success' | 'warning' | 'error' | 'default'> = {
   healthy: 'success',
@@ -74,16 +88,53 @@ function HealthPill({ status }: Readonly<{ status: ConnectorHealthStatus }>) {
   );
 }
 
+/**
+ * One line of the sync-status footer: an icon, a relative-time label, and a
+ * tooltip carrying the exact instant — the same "relative on the surface,
+ * exact one hover away" split `StatTile`'s own `hint` uses for the value
+ * above it.
+ */
+function SyncStatusLine({
+  icon,
+  label,
+  color,
+  tooltip,
+}: Readonly<{
+  icon: ReactNode;
+  label: string;
+  color?: 'success.main' | 'warning.main' | 'error.main' | 'text.secondary';
+  tooltip: string;
+}>) {
+  return (
+    <Tooltip title={tooltip}>
+      <Stack direction="row" spacing={0.75} alignItems="center">
+        {icon}
+        <Typography variant="caption" color={color ?? 'text.secondary'}>
+          {label}
+        </Typography>
+      </Stack>
+    </Tooltip>
+  );
+}
+
 export interface ConnectorCardProps {
   connector: Connector;
 }
 
 /**
  * One registered connector's card — current value, a trend sparkline over
- * its own recent history, and a last-updated caption. Fetches its own
- * history independently (rather than the page fetching every connector's
- * history up front) so a slow or failing history request for one source
- * never blocks another card from rendering its current value.
+ * its own recent history, and a sync-status footer explaining *why* its
+ * health pill reads what it reads: when it was last fetched (success or
+ * failure, distinct from the value's own age — an attempt can run and find
+ * nothing new), and when it's projected to be checked again. A `stale` pill
+ * with no further context used to require opening the network tab to
+ * understand; an overdue "Next sync" line names the actual cause (a missed
+ * scheduler tick) right on the card.
+ *
+ * Fetches its own history independently (rather than the page fetching
+ * every connector's history up front) so a slow or failing history request
+ * for one source never blocks another card from rendering its current
+ * value.
  *
  * Reuses `Sparkline` (`features/trades/components/sparkline.tsx`) — the
  * same tiny, dependency-free SVG line the Trade Analytics dashboard uses
@@ -98,12 +149,25 @@ export function ConnectorCard({ connector }: ConnectorCardProps) {
   const titleId = `connector-${connector.source}-title`;
   const healthSx = healthCardSx(connector.health_status);
 
+  const attempt = formatLastAttempt(connector.last_attempt_at, connector.last_attempt_success);
+  const next = formatNextSync(connector.next_sync_at);
+  const attemptColor = attempt.success === false ? 'error.main' : undefined;
+  const attemptTooltip = connector.last_attempt_at
+    ? formatAbsoluteTimestamp(connector.last_attempt_at)
+    : 'The owning scheduler has not attempted this source yet';
+  const nextTooltip = connector.next_sync_at
+    ? formatAbsoluteTimestamp(connector.next_sync_at)
+    : 'No prior attempt to project from';
+
   return (
     <Paper
       component="section"
       aria-labelledby={titleId}
       data-health-status={connector.health_status}
-      sx={[{ p: 2, height: '100%' }, ...(Array.isArray(healthSx) ? healthSx : [healthSx])]}
+      sx={[
+        { p: 2, height: '100%', display: 'flex', flexDirection: 'column' },
+        ...(Array.isArray(healthSx) ? healthSx : [healthSx]),
+      ]}
     >
       <Stack spacing={0.5}>
         <Stack direction="row" spacing={1} alignItems="center" justifyContent="space-between">
@@ -127,6 +191,11 @@ export function ConnectorCard({ connector }: ConnectorCardProps) {
           label="Current value"
           value={formatConnectorValue(connector.latest_value)}
           caption={formatLastUpdated(connector.latest_timestamp)}
+          hint={
+            connector.latest_value !== null
+              ? `Exact stored value: ${formatConnectorValueExact(connector.latest_value)}`
+              : undefined
+          }
           emphasis
         />
         <Sparkline
@@ -136,6 +205,37 @@ export function ConnectorCard({ connector }: ConnectorCardProps) {
           width={140}
           height={40}
         />
+      </Stack>
+      <Divider sx={{ my: 1.5 }} />
+      <Stack spacing={0.5} sx={{ mt: 'auto' }}>
+        <SyncStatusLine
+          icon={
+            attempt.success === false ? (
+              <ErrorIcon sx={{ fontSize: 14 }} color="error" />
+            ) : (
+              <CheckCircleIcon
+                sx={{ fontSize: 14 }}
+                color={attempt.success === true ? 'success' : 'disabled'}
+              />
+            )
+          }
+          label={attempt.label}
+          color={attemptColor}
+          tooltip={attemptTooltip}
+        />
+        <SyncStatusLine
+          icon={
+            <ScheduleIcon sx={{ fontSize: 14 }} color={next.overdue ? 'warning' : 'disabled'} />
+          }
+          label={next.label}
+          color={next.overdue ? 'warning.main' : undefined}
+          tooltip={nextTooltip}
+        />
+        <Typography variant="caption" color="text.secondary">
+          {new Intl.NumberFormat().format(connector.total_points)}{' '}
+          {connector.total_points === 1 ? 'point' : 'points'} stored ·{' '}
+          {formatInterval(connector.expected_interval_seconds)}
+        </Typography>
       </Stack>
     </Paper>
   );

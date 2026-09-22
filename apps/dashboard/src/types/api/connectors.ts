@@ -33,6 +33,20 @@ export const ConnectorSchema = z.object({
   latest_value: z.number().nullable(),
   latest_timestamp: z.string().datetime().nullable(),
   health_status: ConnectorHealthStatusSchema,
+  /** This source's own real cadence — what 'stale' is measured against. */
+  expected_interval_seconds: z.number().int().positive(),
+  /** Every point ever stored for this source. */
+  total_points: z.number().int().nonnegative(),
+  /** When the owning scheduler last actually tried this source — success or
+   * failure, and distinct from `latest_timestamp` (an attempt can find
+   * nothing new to store). Null if no attempt has ever been recorded. */
+  last_attempt_at: z.string().datetime().nullable(),
+  /** Null exactly when `last_attempt_at` is null. */
+  last_attempt_success: z.boolean().nullable(),
+  /** `last_attempt_at` plus the owning scheduler's tick interval — an
+   * estimate. In the past means a tick is overdue. Null with no attempt on
+   * record yet. */
+  next_sync_at: z.string().datetime().nullable(),
 });
 
 export type Connector = z.infer<typeof ConnectorSchema>;

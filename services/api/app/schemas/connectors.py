@@ -63,10 +63,47 @@ class ConnectorDTO(BaseModel):
             "ARCHITECTURE.md § 'Connector Health Monitoring'."
         )
     )
+    expected_interval_seconds: int = Field(
+        description=(
+            "This source's own real publication/sampling cadence "
+            "(`ConnectorMetadata.expected_interval_seconds`) — what 'stale' is measured "
+            "against, absent an explicit `stale_after_seconds` override."
+        )
+    )
+    total_points: int = Field(
+        description="Every point ever stored for this source, ignoring symbol/date filters."
+    )
+    last_attempt_at: datetime | None = Field(
+        default=None,
+        description=(
+            "When the owning scheduler (the generic `ExternalDataSyncScheduler`, or "
+            "`NewsSyncScheduler` for a source with `auto_synced=False`) last actually "
+            "tried to sync this source — success or failure, and not the same thing as "
+            "`latest_timestamp`: an attempt can run and find nothing new (every point "
+            "already stored) without moving the latest value forward at all. Null if no "
+            "attempt has ever been recorded."
+        ),
+    )
+    last_attempt_success: bool | None = Field(
+        default=None,
+        description="Whether `last_attempt_at`'s attempt succeeded. Null alongside a null "
+        "`last_attempt_at`.",
+    )
+    next_sync_at: datetime | None = Field(
+        default=None,
+        description=(
+            "`last_attempt_at` plus the owning scheduler's own tick interval — an "
+            "estimate, not a guarantee (a slow tick, a restart, or a database outage can "
+            "push the real next attempt later). A value in the past means a tick is "
+            "overdue, which is itself informative: it means the scheduler stopped ticking "
+            "on schedule, not that this connector's data is fine and just hasn't been "
+            "asked for lately. Null when no attempt has ever been recorded."
+        ),
+    )
 
-    @field_validator("latest_timestamp", mode="before")
+    @field_validator("latest_timestamp", "last_attempt_at", "next_sync_at", mode="before")
     @classmethod
-    def _validate_latest_timestamp(cls, value: datetime | None) -> datetime | None:
+    def _validate_optional_timestamp(cls, value: datetime | None) -> datetime | None:
         return _ensure_utc(value) if value is not None else None
 
 

@@ -27,6 +27,11 @@ const baseConnector: Connector = {
   latest_value: 42,
   latest_timestamp: '2026-01-02T00:00:00Z',
   health_status: 'healthy',
+  expected_interval_seconds: 86_400,
+  total_points: 120,
+  last_attempt_at: '2030-01-02T00:05:00Z',
+  last_attempt_success: true,
+  next_sync_at: '2030-01-03T00:05:00Z',
 };
 
 function renderCard(connector: Connector) {
@@ -140,5 +145,53 @@ describe('ConnectorCard — card treatment by health', () => {
     expect(neverIngested.background).toBe(healthy.background);
     expect(neverIngested.ring).toBe(healthy.ring);
     expect(healthy.ring).not.toContain(RING);
+  });
+});
+
+describe('ConnectorCard — value precision', () => {
+  it('does not round a small nonzero value down to a misleading zero', () => {
+    // The real ETHUSD Funding Rate bug: 0.0001 (0.01% per 8h) used to
+    // render as a bare "0", indistinguishable from a genuinely zero rate.
+    renderCard({ ...baseConnector, latest_value: 0.0001 });
+    expect(screen.getByText('0.0001')).toBeInTheDocument();
+  });
+});
+
+describe('ConnectorCard — sync status', () => {
+  it('shows when the source was last fetched, distinct from the value date', () => {
+    renderCard({
+      ...baseConnector,
+      last_attempt_at: '2030-01-02T00:03:00Z',
+      last_attempt_success: true,
+    });
+    expect(screen.getByText(/^Fetched/)).toBeInTheDocument();
+  });
+
+  it('shows a failed fetch attempt distinctly from a successful one', () => {
+    renderCard({ ...baseConnector, last_attempt_success: false });
+    expect(screen.getByText(/^Fetch failed/)).toBeInTheDocument();
+  });
+
+  it('shows no sync attempted yet when the scheduler has never touched this source', () => {
+    renderCard({ ...baseConnector, last_attempt_at: null, last_attempt_success: null });
+    expect(screen.getByText('No sync attempted yet')).toBeInTheDocument();
+  });
+
+  it('flags an overdue next sync — the real Open Interest staleness cause', () => {
+    // `next_sync_at` in the past means the scheduler missed its own tick,
+    // which is what actually explained a `stale` pill with no other context.
+    renderCard({ ...baseConnector, next_sync_at: '2000-01-01T00:00:00Z' });
+    expect(screen.getByText(/^Next sync overdue by/)).toBeInTheDocument();
+  });
+
+  it('counts down to a future projected sync when on schedule', () => {
+    const soon = new Date(Date.now() + 5 * 60_000).toISOString();
+    renderCard({ ...baseConnector, next_sync_at: soon });
+    expect(screen.getByText(/^Next sync in/)).toBeInTheDocument();
+  });
+
+  it('shows the total stored points and the expected cadence', () => {
+    renderCard({ ...baseConnector, total_points: 2_880, expected_interval_seconds: 28_800 });
+    expect(screen.getByText('2,880 points stored · every 8h')).toBeInTheDocument();
   });
 });

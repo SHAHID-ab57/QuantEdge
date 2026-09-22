@@ -4,6 +4,41 @@ Cross-linked from
 [`HORIZON_SWEEP_ASSESSMENT.md`](./HORIZON_SWEEP_ASSESSMENT.md) and, through
 it, [`CONNECTOR_FEATURE_VALUE_ASSESSMENT.md`](./CONNECTOR_FEATURE_VALUE_ASSESSMENT.md).
 
+> ## Correction (2026-09-22, [`FEATURE_DRIFT_INVESTIGATION.md`](./FEATURE_DRIFT_INVESTIGATION.md))
+>
+> **The model this document evaluated (`733082cc`) turned out to have a
+> `volume`-normalization drift problem — mean z = +49 to +64 across all
+> three regime windows below, confirmed causal for the exact behavior this
+> document reports ("predicts 'down' almost every step... mean P(up) ≈
+> 0.09–0.12") by the same kind of ablation M4-E3-T5 used, re-run on these
+> identical three windows.**
+>
+> **What this corrects: the _mechanism_, not the _verdict_.** This
+> document's own explanation — "trained on the 2024 window, it learned a
+> 'down' prior and carries it, unchanged, into an uptrend, a downtrend, and
+> a flat range alike" — is a plausible-sounding story for what is actually a
+> normalization artifact, not a learned directional bias. Removing `volume`
+> and re-running the identical windows drops "down" calls from 99.6–99.9% to
+> 7.5–44.5% (no longer near-constant) and eliminates every >99%-confidence
+> prediction outright.
+>
+> **What survives unchanged: "no regime shows discrimination distinguishable
+> from chance."** ROC-AUC ≈ 0.5 holds in 5 of 6 cases after removing the
+> saturating feature on these exact windows (the sixth, downtrend, clears
+> 0.5 by 0.001 at the interval boundary — not a meaningful exception), and
+> is independently corroborated by `HORIZON_SWEEP_ASSESSMENT.md`'s own
+> freshly-trained, far-less-drifted h=1 baseline reaching the same
+> conclusion. **The regime-invariant "no skill" verdict below, and the A/B
+> fork it fed, both stand.** The precision-varies-by-regime observation
+> below was already correctly read as "an artifact, not skill" — that
+> reading is now mechanically confirmed rather than merely inferred.
+>
+> Full investigation, numbers, and a general-fix design (not yet
+> implemented): [`FEATURE_DRIFT_INVESTIGATION.md`](./FEATURE_DRIFT_INVESTIGATION.md).
+> This document's own tables and verdict below are left exactly as
+> originally published — this is a correction note, not a retraction or a
+> silent edit.
+
 Every experiment in this thread — M4-E3-T1 through the horizon sweep —
 rested on a single chronological train/val/test split, evaluated against
 exactly one test-period market regime. The horizon sweep's own diagnosis

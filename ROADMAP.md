@@ -463,6 +463,23 @@ redefinition** (volatility or triple-barrier), preceded by fixing how
 scale-drifting inputs are handled. The live strategy's feature set is
 unchanged. `docs/research/CONNECTOR_FEATURE_VALUE_ASSESSMENT.md` § "M4-E3-T5".
 
+**That "fixing how scale-drifting inputs are handled" step was then scoped
+directly, and it found the live model already needs it (M4-E3-T6).** Checked
+first, before anything else: both currently strategy-enabled training jobs are
+already drifted and already producing saturated live predictions — `733082cc`
+through `volume` (z=+89 today) and `6e7fb4ed`, retrained only 13 days earlier,
+through price/SMA(20) instead, because its own 100-candle training window's
+std was too tight for an ordinary two-week move. Re-running
+`REGIME_WALKFORWARD_ASSESSMENT.md`'s exact regime windows with and without
+`volume` confirmed the near-constant-"down" behavior is the same artifact
+again, while its ROC-AUC ~0.5 "no skill" verdict survives removing that
+artifact and is independently corroborated by the horizon sweep — a precise
+correction, not a retraction, was added to that document. A general fix (a
+connector-health-style monitoring check, recommended first; rolling
+retraining with an enforced minimum window; rolling normalization as
+defense-in-depth) was designed, not implemented. Both live accounts are
+unchanged pending a follow-up task. `docs/research/FEATURE_DRIFT_INVESTIGATION.md`.
+
 **Milestone 5 — Production Hardening (COMPLETE, against the scope
 below).** Delivered: authentication and an audit trail, inbound rate
 limiting and login lockout, Redis (rate limiting, lockout, token

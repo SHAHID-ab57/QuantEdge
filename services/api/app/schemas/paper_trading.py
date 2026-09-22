@@ -105,11 +105,24 @@ class PaperAccountResponse(BaseModel):
         description="The one fixed leverage every automated entry uses, long or short — never "
         "derived from a prediction's confidence"
     )
+    strategy_paused_reason: Literal["feature_drift"] | None = Field(
+        default=None,
+        description="Set only when the scheduler itself — never a human — disabled the "
+        "strategy (today: only 'feature_drift'). Null when strategy_enabled is false because "
+        "a human turned it off, or when the strategy has never been auto-paused.",
+    )
+    strategy_paused_at: datetime | None = Field(
+        default=None, description="When strategy_paused_reason was set; null exactly when it is"
+    )
     created_at: datetime
 
     @field_serializer("created_at")
     def _serialize_created_at(self, value: datetime) -> str:
         return _iso(value)
+
+    @field_serializer("strategy_paused_at")
+    def _serialize_strategy_paused_at(self, value: datetime | None) -> str | None:
+        return _iso(value) if value is not None else None
 
     @classmethod
     def from_model(cls, account: "PaperAccount") -> "PaperAccountResponse":
@@ -134,6 +147,8 @@ class PaperAccountResponse(BaseModel):
             strategy_confidence_threshold_pct=account.strategy_confidence_threshold_pct,
             strategy_default_stop_loss_pct=account.strategy_default_stop_loss_pct,
             strategy_leverage=account.strategy_leverage,
+            strategy_paused_reason=account.strategy_paused_reason,  # type: ignore[arg-type]
+            strategy_paused_at=account.strategy_paused_at,
             created_at=account.created_at,
         )
 

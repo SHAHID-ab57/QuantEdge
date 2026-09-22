@@ -98,7 +98,7 @@ import contextlib
 import logging
 import uuid
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from time import perf_counter
 
@@ -108,8 +108,10 @@ from app.core.config import Settings, get_settings
 from app.db.engine import get_engine
 from app.dependencies.prediction import get_prediction_service
 from app.models.paper_trading import PaperAccount, PaperStrategyDecision
+from app.monitoring.error_tracking import capture_feature_drift
 from app.paper_trading.errors import NoPriceAvailableError
 from app.paper_trading.pricing import resolve_current_price
+from app.prediction.feature_drift import DRIFT_Z_THRESHOLD
 from app.repositories.audit_log import AuditLogRepository
 from app.repositories.candles import CandleRepository
 from app.repositories.markets import MarketRepository
@@ -320,6 +322,40 @@ class PaperTradingStrategyScheduler:
                 return await log_no_action(symbol=symbol, reason=f"Prediction unavailable: {exc}")
 
             prediction_id = uuid.UUID(prediction.id)
+
+            # Checked before every other gate, including confidence: a
+            # feature-drifted model's saturated confidence is exactly the
+            # failure mode this guards against (both real incidents behind
+            # this check were >99% confident "down" — see
+            # docs/research/FEATURE_DRIFT_INVESTIGATION.md), so a drifted
+            # prediction must never reach the confidence/signal logic below
+            # at all, however confident it claims to be.
+            if prediction.feature_drift_status == "drifted":
+                # `compute_feature_drift`'s own contract: `worst_feature`/`worst_z` are set
+                # whenever status is "drifted" — never both None together.
+                assert prediction.feature_drift_worst_feature is not None
+                assert prediction.feature_drift_worst_z is not None
+                await _pause_for_drift(
+                    session,
+                    account,
+                    training_job_id=job_id,
+                    worst_feature=prediction.feature_drift_worst_feature,
+                    worst_z=prediction.feature_drift_worst_z,
+                )
+                return await log_no_action(
+                    symbol=symbol,
+                    reason=(
+                        f"Auto-paused: feature drift detected "
+                        f"({prediction.feature_drift_worst_feature} "
+                        f"z={prediction.feature_drift_worst_z:.2f}, "
+                        f"threshold {DRIFT_Z_THRESHOLD:.1f}). Strategy disabled; "
+                        "re-enable via PATCH .../strategy once reviewed."
+                    ),
+                    predicted_value=prediction.predicted_value,
+                    confidence=prediction.confidence,
+                    prediction_id=prediction_id,
+                )
+
             # The side the model's call points at, known before any gate, so
             # even a cycle skipped for low confidence records what it was
             # skipped *for*. ("up" is a long, "down" is a short.) Confidence
@@ -584,6 +620,56 @@ class PaperTradingStrategyScheduler:
             )
         )
         return "closed"
+
+
+async def _pause_for_drift(
+    session: AsyncSession,
+    account: PaperAccount,
+    *,
+    training_job_id: uuid.UUID,
+    worst_feature: str,
+    worst_z: float,
+) -> None:
+    """Disable an account's strategy because its own fresh prediction just
+    came back feature-drifted (FEATURE-DRIFT-MONITOR, Option C, "auto-pause"
+    — the chosen response policy; see
+    `docs/research/FEATURE_DRIFT_INVESTIGATION.md`).
+
+    Deliberately **not** routed through `PaperTradingService
+    .update_strategy_config` (the human-facing `PATCH .../strategy` path):
+    that method requires a real `user_id` for its audit-trail write, and
+    there is no human here — the same reason a fully-automated state change
+    already on this platform, the drawdown kill switch's own
+    `PaperTradingService._alert_halted`, writes a structured log line plus a
+    Sentry alert and never an `audit_log` row. This mutates the exact same
+    `strategy_enabled` field `PATCH .../strategy` controls, through the same
+    `PaperAccountRepository.update`, so it is recognizable as the same kind
+    of state change even though it reaches the database differently.
+    """
+    now = datetime.now(UTC)
+    await PaperAccountRepository(session).update(
+        account,
+        {
+            "strategy_enabled": False,
+            "strategy_paused_reason": "feature_drift",
+            "strategy_paused_at": now,
+        },
+    )
+    logger.error(
+        "Paper trading strategy auto-paused for account=%s: feature drift detected "
+        "(job=%s, %s z=%.2f)",
+        account.id,
+        training_job_id,
+        worst_feature,
+        worst_z,
+    )
+    capture_feature_drift(
+        str(account.id),
+        training_job_id=str(training_job_id),
+        worst_feature=worst_feature,
+        worst_z=worst_z,
+        threshold=DRIFT_Z_THRESHOLD,
+    )
 
 
 def _interpret_signal(predicted_value: object) -> str | None:

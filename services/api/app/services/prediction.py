@@ -45,6 +45,7 @@ from app.prediction.errors import (
     PredictionRunNotFoundError,
     TrainingFeatureSetMismatchError,
 )
+from app.prediction.feature_drift import compute_feature_drift
 from app.prediction.grading import GradingOutcome, grade_one
 from app.prediction.registry import get_model_adapter_registry
 from app.repositories.candles import CandleRepository
@@ -194,6 +195,17 @@ class PredictionService:
                 raise UndefinedFeatureValueError(name)
             row.append(float(value))
 
+        # Drift is checked against the same raw `row`/`feature_columns` the
+        # model itself is about to predict from — never a second,
+        # separately-reconstructed feature vector — and against the job's
+        # own already-stored fit (`summary["normalization"]`), so this can
+        # never itself look ahead or re-estimate anything. See
+        # `app.prediction.feature_drift`'s own module docstring for why this
+        # exists and where its threshold comes from.
+        drift = compute_feature_drift(
+            live_values=dict(zip(feature_columns, row, strict=True)),
+            normalization=summary.get("normalization"),
+        )
         predict_response = await self.training_job_service.predict(request.training_job_id, [row])
         outcome = self.engine.assemble(
             target_column=target_column,
@@ -225,6 +237,9 @@ class PredictionService:
             model_type=job.model_type,
             model_kind=model_kind,
             actual_outcome=None,
+            feature_drift_status=drift.status,
+            feature_drift_worst_feature=drift.worst_feature,
+            feature_drift_worst_z=drift.worst_z,
         )
         created = await self.repository.create(prediction)
         logger.info(
@@ -236,6 +251,14 @@ class PredictionService:
             as_of.isoformat(),
             request.training_job_id,
         )
+        if drift.status == "drifted":
+            logger.warning(
+                "Prediction %s (job=%s) is feature-drifted: %s z=%.2f",
+                created.id,
+                request.training_job_id,
+                drift.worst_feature,
+                drift.worst_z,
+            )
         return PredictionResponse.from_model(created)
 
     async def get(self, prediction_id: uuid.UUID) -> PredictionResponse:

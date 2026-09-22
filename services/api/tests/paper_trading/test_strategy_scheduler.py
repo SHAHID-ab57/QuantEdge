@@ -26,6 +26,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.events.bus import EventBus
+from app.prediction.feature_drift import FeatureDriftStatus
 from app.schemas.paper_trading import (
     PaperAccountCreateRequest,
     PaperOrderRequest,
@@ -58,6 +59,9 @@ def build_prediction(
     symbol: str,
     predicted_value: object,
     confidence: float | None,
+    feature_drift_status: FeatureDriftStatus = "healthy",
+    feature_drift_worst_feature: str | None = None,
+    feature_drift_worst_z: float | None = None,
 ) -> PredictionResponse:
     now = datetime.now(UTC)
     return PredictionResponse(
@@ -74,6 +78,9 @@ def build_prediction(
         predicted_value=predicted_value,
         confidence=confidence,
         feature_columns=["open", "high", "low", "close", "volume"],
+        feature_drift_status=feature_drift_status,
+        feature_drift_worst_feature=feature_drift_worst_feature,
+        feature_drift_worst_z=feature_drift_worst_z,
         created_at=now,
     )
 
@@ -628,6 +635,187 @@ class TestBelowThresholdResultsInNoOrder:
         assert decision.order_id is None
         assert "below" in decision.reason.lower()
         assert "threshold" in decision.reason.lower()
+
+
+@pytest.mark.asyncio
+class TestFeatureDriftAutoPause:
+    """FEATURE-DRIFT-MONITOR (Option C, the chosen response policy is
+    auto-pause — `docs/research/FEATURE_DRIFT_INVESTIGATION.md`). A drifted
+    prediction must never reach the confidence/signal logic, however
+    confident it claims to be — both real incidents this guards against
+    were >99% confident "down" — so this checks the pause happens *before*
+    any order could be placed on it, not merely that no order results."""
+
+    async def test_a_drifted_prediction_pauses_the_strategy_and_places_no_order(
+        self, session_factory: SessionFactory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        alerts: list[dict[str, object]] = []
+        monkeypatch.setattr(
+            "app.services.paper_trading_strategy.capture_feature_drift",
+            lambda account_id, **kwargs: alerts.append({"account_id": account_id, **kwargs}),
+        )
+        job_id, _ = await train_completed_job(
+            session_factory, symbol="STRATDRIFTUSD", model_type="logistic_regression"
+        )
+        state_manager = MarketStateManager()
+        service = await build_service(session_factory, state_manager)
+        account = await service.create_account(
+            PaperAccountCreateRequest(starting_balance=Decimal("100000"))
+        )
+        await enable_strategy(service, uuid.UUID(account.id), job_id)
+        stub_prediction(
+            monkeypatch,
+            build_prediction(
+                training_job_id=job_id,
+                symbol="STRATDRIFTUSD",
+                predicted_value="down",
+                # The exact shape both real incidents showed: saturated
+                # confidence on a drifted model, not a weak or borderline one.
+                confidence=0.999,
+                feature_drift_status="drifted",
+                feature_drift_worst_feature="volume",
+                feature_drift_worst_z=88.96,
+            ),
+        )
+
+        scheduler = PaperTradingStrategyScheduler(state_manager=state_manager)
+        summary = await scheduler.run_strategy_tick()
+
+        assert summary.attempted == 1
+        assert summary.opened == 0
+        assert summary.no_action == 1
+
+        positions = await service.list_positions(uuid.UUID(account.id))
+        assert positions.positions == []
+
+        paused = await service.get_account(uuid.UUID(account.id))
+        assert paused.strategy_enabled is False
+        assert paused.strategy_paused_reason == "feature_drift"
+        assert paused.strategy_paused_at is not None
+
+        decisions = await service.list_strategy_decisions(uuid.UUID(account.id), limit=20, offset=0)
+        assert decisions.total == 1
+        decision = decisions.decisions[0]
+        assert decision.action == "no_action"
+        assert decision.order_id is None
+        assert "drift" in decision.reason.lower()
+        assert "volume" in decision.reason.lower()
+
+        assert len(alerts) == 1
+        assert alerts[0]["account_id"] == account.id
+        assert alerts[0]["worst_feature"] == "volume"
+        assert alerts[0]["worst_z"] == pytest.approx(88.96)
+        assert alerts[0]["training_job_id"] == job_id
+
+    async def test_a_drifted_prediction_stops_future_ticks_until_a_human_re_enables(
+        self, session_factory: SessionFactory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The auto-pause is not self-healing on its own — mirrors the
+        drawdown kill switch's own 'does not clear itself' contract exactly
+        (`PaperAccount.trading_halted`'s own docstring) — until a human
+        explicitly re-enables it, the disabled account is simply absent
+        from every later tick's own query, the same "disabling takes effect
+        before the next cycle" guarantee `TestDisablingStopsFutureCycles`
+        already established for a human's own disable."""
+        job_id, _ = await train_completed_job(
+            session_factory, symbol="STRATDRIFTOFFUSD", model_type="logistic_regression"
+        )
+        state_manager = MarketStateManager()
+        service = await build_service(session_factory, state_manager)
+        account = await service.create_account(
+            PaperAccountCreateRequest(starting_balance=Decimal("100000"))
+        )
+        await enable_strategy(service, uuid.UUID(account.id), job_id)
+        stub_prediction(
+            monkeypatch,
+            build_prediction(
+                training_job_id=job_id,
+                symbol="STRATDRIFTOFFUSD",
+                predicted_value="down",
+                confidence=0.999,
+                feature_drift_status="drifted",
+                feature_drift_worst_feature="close",
+                feature_drift_worst_z=-17.0,
+            ),
+        )
+        scheduler = PaperTradingStrategyScheduler(state_manager=state_manager)
+        first = await scheduler.run_strategy_tick()
+        assert first.attempted == 1
+
+        second = await scheduler.run_strategy_tick()
+        assert second.attempted == 0
+
+    async def test_re_enabling_after_a_drift_pause_clears_the_paused_reason(
+        self, session_factory: SessionFactory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A human explicitly naming `enabled` always supersedes the
+        automated reason — the one behaviour `update_strategy_config` itself
+        needed to gain for this feature."""
+        job_id, _ = await train_completed_job(
+            session_factory, symbol="STRATDRIFTCLEARUSD", model_type="logistic_regression"
+        )
+        state_manager = MarketStateManager()
+        service = await build_service(session_factory, state_manager)
+        account = await service.create_account(
+            PaperAccountCreateRequest(starting_balance=Decimal("100000"))
+        )
+        await enable_strategy(service, uuid.UUID(account.id), job_id)
+        stub_prediction(
+            monkeypatch,
+            build_prediction(
+                training_job_id=job_id,
+                symbol="STRATDRIFTCLEARUSD",
+                predicted_value="down",
+                confidence=0.999,
+                feature_drift_status="drifted",
+                feature_drift_worst_feature="close",
+                feature_drift_worst_z=-17.0,
+            ),
+        )
+        scheduler = PaperTradingStrategyScheduler(state_manager=state_manager)
+        await scheduler.run_strategy_tick()
+        paused = await service.get_account(uuid.UUID(account.id))
+        assert paused.strategy_paused_reason == "feature_drift"
+
+        await service.update_strategy_config(
+            uuid.UUID(account.id), PaperStrategyConfigUpdateRequest(enabled=True)
+        )
+        resumed = await service.get_account(uuid.UUID(account.id))
+        assert resumed.strategy_enabled is True
+        assert resumed.strategy_paused_reason is None
+        assert resumed.strategy_paused_at is None
+
+    async def test_a_healthy_prediction_is_not_paused_and_acts_normally(
+        self, session_factory: SessionFactory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`build_prediction`'s own default (`feature_drift_status="healthy"`)
+        must not itself introduce a false-positive pause into every other
+        test in this file — checked directly here, not just assumed."""
+        job_id, _ = await train_completed_job(
+            session_factory, symbol="STRATDRIFTOKUSD", model_type="logistic_regression"
+        )
+        state_manager = MarketStateManager()
+        service = await build_service(session_factory, state_manager)
+        account = await service.create_account(
+            PaperAccountCreateRequest(starting_balance=Decimal("100000"))
+        )
+        await enable_strategy(service, uuid.UUID(account.id), job_id)
+        stub_prediction(
+            monkeypatch,
+            build_prediction(
+                training_job_id=job_id,
+                symbol="STRATDRIFTOKUSD",
+                predicted_value="up",
+                confidence=0.9,
+            ),
+        )
+        scheduler = PaperTradingStrategyScheduler(state_manager=state_manager)
+        summary = await scheduler.run_strategy_tick()
+        assert summary.opened == 1
+
+        account_after = await service.get_account(uuid.UUID(account.id))
+        assert account_after.strategy_enabled is True
+        assert account_after.strategy_paused_reason is None
 
 
 @pytest.mark.asyncio

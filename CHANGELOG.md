@@ -8,6 +8,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Feature drift monitoring for live predictions (FEATURE-DRIFT-MONITOR),
+  and auto-pause when one is detected.** Investigation
+  (`docs/research/FEATURE_DRIFT_INVESTIGATION.md`) found both currently
+  strategy-enabled training jobs already severely drifted and producing
+  saturated (>99% confidence) live predictions, unflagged anywhere.
+  - **Detection** (`app/prediction/feature_drift.py`): every live prediction
+    (`PredictionService.run`) is now z-scored against its own job's already-
+    stored normalization and persisted as `feature_drift_status` (`"healthy"`
+    / `"drifted"` / `"unavailable"`) plus `feature_drift_worst_feature`/
+    `_worst_z` — mirrors `app/connectors/health.py`'s exact pattern.
+    `DRIFT_Z_THRESHOLD = 10.0` is derived from real data: a genuinely healthy
+    reading never exceeds 9.32, both real incidents measured 15.4-89.
+  - **Response policy: auto-pause**, chosen explicitly. A `"drifted"`
+    prediction is checked _before_ the confidence/signal gate (a drifted
+    model's saturated confidence is exactly the failure mode this guards
+    against) and immediately sets `strategy_enabled: false` +
+    `strategy_paused_reason: "feature_drift"` on that account, logs a
+    `no_action` decision naming the feature/z-score, and alerts via Sentry
+    (`capture_feature_drift`, mirrors `capture_trading_halted`) — no order is
+    placed. Not self-healing: stays paused until a human explicitly names
+    `enabled` in `PATCH .../strategy` (either value), which clears the
+    reason; a field-only update leaves an existing pause untouched.
+  - **Frontend**: the Strategy panel on `/paper-trading` shows a distinct
+    error banner when `strategy_paused_reason === "feature_drift"`, so an
+    auto-pause reads as categorically different from a human's own disable.
+  - Migration `51ad89f7cadb` adds the new `predictions`/`paper_accounts`
+    columns. Full design: `ARCHITECTURE.md` § "Feature Drift Monitoring".
+
 - **Funding rate and open interest history, as connectors and features
   (M4-E3-T5), and a fourth negative feature-value result.** Delta serves real
   hourly history for both (`FUNDING:ETHUSD` from 2024-02-05, percent, a step

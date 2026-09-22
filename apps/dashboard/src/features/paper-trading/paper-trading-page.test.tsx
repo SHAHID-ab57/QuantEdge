@@ -69,6 +69,8 @@ function account(overrides: Partial<PaperAccount> = {}): PaperAccount {
     strategy_confidence_threshold_pct: '65',
     strategy_default_stop_loss_pct: '5',
     strategy_leverage: '2',
+    strategy_paused_reason: null,
+    strategy_paused_at: null,
     created_at: '2026-01-01T00:00:00Z',
     ...overrides,
   };

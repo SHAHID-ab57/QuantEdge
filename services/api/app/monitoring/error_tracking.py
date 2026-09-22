@@ -226,6 +226,55 @@ def capture_trading_halted(
         )
 
 
+def capture_feature_drift(
+    account_id: str,
+    *,
+    training_job_id: str,
+    worst_feature: str,
+    worst_z: float,
+    threshold: float,
+) -> None:
+    """Alert that a paper account's strategy was just auto-paused for feature drift.
+
+    One event per pause, grouped per account by fingerprint — mirrors
+    `capture_trading_halted` exactly (the drawdown kill switch's own
+    alert): a halt/pause blocks new risk on its own, this makes sure a
+    person finds out it happened. See
+    `docs/research/FEATURE_DRIFT_INVESTIGATION.md` for the two real
+    incidents that motivated this (both discovered only by directly
+    checking the live system, with nothing having flagged either).
+    """
+    logger.error(
+        "Paper trading strategy auto-paused for account %s: feature drift detected "
+        "(job=%s, %s z=%.2f, threshold=%.1f)",
+        account_id,
+        training_job_id,
+        worst_feature,
+        worst_z,
+        threshold,
+        extra={"paper_account_id": account_id, "training_job_id": training_job_id},
+    )
+    with sentry_sdk.new_scope() as scope:
+        scope.set_tag("paper_account_id", account_id)
+        scope.set_tag("training_job_id", training_job_id)
+        scope.set_context(
+            "feature_drift",
+            {
+                "account_id": account_id,
+                "training_job_id": training_job_id,
+                "worst_feature": worst_feature,
+                "worst_z": worst_z,
+                "threshold": threshold,
+            },
+        )
+        scope.fingerprint = ["feature-drift-paused", account_id]
+        sentry_sdk.capture_message(
+            f"Paper trading strategy auto-paused for account {account_id}: "
+            f"feature drift detected ({worst_feature} z={worst_z:.2f})",
+            level="error",
+        )
+
+
 def is_enabled() -> bool:
     """Whether events would actually be sent somewhere (a DSN is configured).
 

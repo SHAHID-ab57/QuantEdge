@@ -1251,6 +1251,14 @@ class PaperTradingService:
         old_default_stop_loss_pct = account.strategy_default_stop_loss_pct
         old_leverage = account.strategy_leverage
 
+        # A human explicitly naming `enabled` here — whichever way they set
+        # it — is a real decision about this field, and always supersedes
+        # whatever automated reason (today: only PaperTradingStrategyScheduler's
+        # own feature-drift auto-pause, app.prediction.feature_drift) put the
+        # account in its current state. Any other field-only update (e.g. just
+        # tuning leverage) leaves an existing auto-pause exactly as it was.
+        clear_paused_reason = "enabled" in fields
+
         updated = await self.account_repository.update(
             account,
             {
@@ -1258,6 +1266,11 @@ class PaperTradingService:
                 "strategy_training_job_id": new_training_job_id,
                 "strategy_confidence_threshold_pct": new_confidence_threshold_pct,
                 "strategy_default_stop_loss_pct": new_default_stop_loss_pct,
+                **(
+                    {"strategy_paused_reason": None, "strategy_paused_at": None}
+                    if clear_paused_reason
+                    else {}
+                ),
                 "strategy_leverage": new_leverage,
             },
         )

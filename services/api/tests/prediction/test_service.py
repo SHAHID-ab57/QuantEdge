@@ -13,6 +13,7 @@ thing here, one step further downstream.
 import logging
 import uuid
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 import pytest
 
@@ -21,6 +22,7 @@ from app.dependencies.features import get_dataset_builder
 from app.dependencies.ml_datasets import get_target_pipeline
 from app.evaluation.metrics import load_builtin_metrics
 from app.evaluation.registry import default_registry as default_metric_registry
+from app.models import Candle
 from app.models.exchange import Exchange
 from app.models.market import Market
 from app.prediction.engine import default_engine
@@ -318,6 +320,120 @@ class TestNormalizationReuse:
         # for two different (and, per `seed_real_candles`, genuinely
         # different-valued) candles.
         assert result_latest.probabilities != result_earlier.probabilities
+
+
+@pytest.mark.asyncio
+class TestFeatureDrift:
+    """FEATURE-DRIFT-MONITOR: `PredictionService.run` computes and persists
+    `feature_drift_status`/`_worst_feature`/`_worst_z` for every prediction,
+    against the job's own already-stored normalization
+    (`app.prediction.feature_drift.compute_feature_drift`) — real unit
+    coverage of that pure function, with the real measured incident numbers,
+    lives in `tests/prediction/test_feature_drift.py`; this proves the
+    wiring end to end through the real service and the real database row,
+    not just the returned response object.
+    """
+
+    async def test_a_reading_from_the_same_training_distribution_reads_healthy(
+        self, session_factory: SessionFactory
+    ) -> None:
+        """The real latest candle a freshly-trained job predicts from is, by
+        construction, drawn from the exact series its own normalization was
+        fit on — the cleanest possible 'not drifted' case."""
+        job_id, _ = await train_completed_job(
+            session_factory,
+            symbol="DRIFTOKUSD",
+            model_type="logistic_regression",
+            normalize_features=True,
+        )
+        service = build_prediction_service(session_factory)
+
+        result = await service.run(
+            PredictionRunRequest(training_job_id=uuid.UUID(job_id), symbol="DRIFTOKUSD")
+        )
+
+        assert result.feature_drift_status == "healthy"
+        assert result.feature_drift_worst_feature is not None
+        assert result.feature_drift_worst_z is not None
+
+        # Persisted on the real database row, not only returned in the response.
+        repository = PredictionRepository(session_factory())
+        stored = await repository.get_by_id(uuid.UUID(result.id))
+        assert stored is not None
+        assert stored.feature_drift_status == "healthy"
+        assert stored.feature_drift_worst_feature == result.feature_drift_worst_feature
+        assert stored.feature_drift_worst_z == pytest.approx(result.feature_drift_worst_z)
+
+    async def test_a_reading_far_outside_the_training_distribution_reads_drifted(
+        self, session_factory: SessionFactory
+    ) -> None:
+        """Mirrors the real incidents directly: a live candle whose values sit
+        nowhere near what the job was normalized on."""
+        job_id, _ = await train_completed_job(
+            session_factory,
+            symbol="DRIFTBADUSD",
+            model_type="logistic_regression",
+            normalize_features=True,
+        )
+        market_repository = MarketRepository(session_factory())
+        market = await market_repository.get_by_symbol("DRIFTBADUSD")
+        assert market is not None
+        candle_repository = CandleRepository(session_factory())
+        latest = await candle_repository.get_latest_candle(market.id, "1h")
+        assert latest is not None
+
+        async with session_factory() as session:
+            session.add(
+                Candle(
+                    market_id=market.id,
+                    timeframe="1h",
+                    open_time=latest.open_time + timedelta(hours=1),
+                    close_time=latest.open_time + timedelta(hours=2),
+                    open=Decimal("1000000"),
+                    high=Decimal("1000002"),
+                    low=Decimal("999998"),
+                    close=Decimal("1000000"),
+                    volume=Decimal("100"),
+                    quote_volume=None,
+                    trade_count=None,
+                    source="delta",
+                )
+            )
+            await session.commit()
+
+        service = build_prediction_service(session_factory)
+        result = await service.run(
+            PredictionRunRequest(training_job_id=uuid.UUID(job_id), symbol="DRIFTBADUSD")
+        )
+
+        assert result.feature_drift_status == "drifted"
+        assert result.feature_drift_worst_feature in {"open", "high", "low", "close"}
+        assert result.feature_drift_worst_z is not None
+        assert abs(result.feature_drift_worst_z) >= 10.0
+
+        repository = PredictionRepository(session_factory())
+        stored = await repository.get_by_id(uuid.UUID(result.id))
+        assert stored is not None
+        assert stored.feature_drift_status == "drifted"
+
+    async def test_a_job_with_no_normalization_reads_unavailable_not_healthy(
+        self, session_factory: SessionFactory
+    ) -> None:
+        job_id, _ = await train_completed_job(
+            session_factory,
+            symbol="DRIFTUNAVUSD",
+            model_type="logistic_regression",
+            normalize_features=False,
+        )
+        service = build_prediction_service(session_factory)
+
+        result = await service.run(
+            PredictionRunRequest(training_job_id=uuid.UUID(job_id), symbol="DRIFTUNAVUSD")
+        )
+
+        assert result.feature_drift_status == "unavailable"
+        assert result.feature_drift_worst_feature is None
+        assert result.feature_drift_worst_z is None
 
 
 @pytest.mark.asyncio

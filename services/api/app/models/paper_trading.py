@@ -198,6 +198,22 @@ class PaperAccount(BaseModel, TimestampMixin):
         "prediction's confidence (which has been measured to carry no reliable relationship "
         "to being right). Must not exceed max_leverage.",
     )
+    strategy_paused_reason: Mapped[str | None] = mapped_column(
+        String(50),
+        nullable=True,
+        comment="Set only when PaperTradingStrategyScheduler itself flipped "
+        "strategy_enabled to false (today: only 'feature_drift') — distinguishes an "
+        "automated safety pause from a human's own PATCH .../strategy decision, which is "
+        "otherwise indistinguishable from the outside. Cleared automatically the next time "
+        "a human explicitly names `enabled` in a PATCH .../strategy request, whichever way "
+        "they set it: an explicit human decision about this field always supersedes an "
+        "automated one.",
+    )
+    strategy_paused_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="When strategy_paused_reason was set; NULL exactly when it is.",
+    )
 
     __table_args__ = (
         CheckConstraint("starting_balance >= 0", name="starting_balance_non_negative"),
@@ -224,6 +240,10 @@ class PaperAccount(BaseModel, TimestampMixin):
         CheckConstraint(
             "strategy_default_stop_loss_pct > 0 AND strategy_default_stop_loss_pct < 100",
             name="strategy_default_stop_loss_pct_valid",
+        ),
+        CheckConstraint(
+            "strategy_paused_reason IS NULL OR strategy_paused_reason IN ('feature_drift')",
+            name="strategy_paused_reason_valid",
         ),
     )
 

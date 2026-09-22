@@ -480,6 +480,22 @@ retraining with an enforced minimum window; rolling normalization as
 defense-in-depth) was designed, not implemented. Both live accounts are
 unchanged pending a follow-up task. `docs/research/FEATURE_DRIFT_INVESTIGATION.md`.
 
+**That recommended monitoring check was then built (M5-E5-T3), mirroring the
+connector-health pattern this platform had already proven once.** Every live
+prediction is now z-scored against its own job's stored normalization
+(`app/prediction/feature_drift.py`), with a threshold (10σ) derived from the
+same real data the investigation gathered — a healthy reading never exceeds
+9.32, both real incidents measured 15.4-89. The response policy was the one
+genuine judgment call the task carried, and it was put to the user rather
+than assumed: **auto-pause**. A drifted prediction is now checked before the
+confidence/signal gate — a drifted model's own saturated confidence is
+exactly the failure this exists to catch — and immediately disables that
+account's strategy, logs why, and alerts via Sentry, mirroring the drawdown
+kill switch's own no-audit-row-for-an-automated-action precedent exactly.
+Not self-healing: clearing it is a human's own explicit decision through
+`PATCH .../strategy`, surfaced as a distinct banner on the Strategy panel.
+`ARCHITECTURE.md` § "Feature Drift Monitoring".
+
 **Milestone 5 — Production Hardening (COMPLETE, against the scope
 below).** Delivered: authentication and an audit trail, inbound rate
 limiting and login lockout, Redis (rate limiting, lockout, token

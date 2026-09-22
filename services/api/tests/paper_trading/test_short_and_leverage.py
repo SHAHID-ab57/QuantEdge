@@ -917,8 +917,8 @@ class TestOrderActorIsRequired:
         assert unclassified == []
         assert manual == ["api/v1/endpoints/paper_trading.py:327"]
         assert sorted(automated) == [
-            "services/paper_trading_strategy.py:465",
-            "services/paper_trading_strategy.py:539",
+            "services/paper_trading_strategy.py:501",
+            "services/paper_trading_strategy.py:575",
         ]
 
 

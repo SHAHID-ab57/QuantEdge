@@ -27,6 +27,7 @@ from app.dependencies.auth import get_current_user
 from app.models import User
 from app.monitoring.error_tracking import (
     _before_send,
+    capture_feature_drift,
     init_error_tracking,
     is_enabled,
     redact_secrets,
@@ -358,6 +359,69 @@ class TestRedactSecrets:
     )
     def test_redacts_only_the_value_of_secret_looking_pairs(self, raw: str, expected: str) -> None:
         assert redact_secrets(raw) == expected
+
+
+class TestFeatureDriftCapture:
+    """FEATURE-DRIFT-MONITOR's own alert (`capture_feature_drift`) — mirrors
+    the drawdown kill switch's `capture_trading_halted` exactly, checked the
+    same real-wire-payload way every other capture in this file is."""
+
+    def test_a_pause_is_captured_as_a_real_error_event_with_full_context(
+        self, tracker: Tracker
+    ) -> None:
+        capture_feature_drift(
+            "acct-123",
+            training_job_id="job-456",
+            worst_feature="volume",
+            worst_z=88.96,
+            threshold=10.0,
+        )
+
+        assert len(tracker.events) == 1
+        event = tracker.events[0]
+        assert event["level"] == "error"
+        assert "acct-123" in event["message"]
+        assert "volume" in event["message"]
+        assert event["tags"]["paper_account_id"] == "acct-123"
+        assert event["tags"]["training_job_id"] == "job-456"
+        assert event["contexts"]["feature_drift"] == {
+            "account_id": "acct-123",
+            "training_job_id": "job-456",
+            "worst_feature": "volume",
+            "worst_z": 88.96,
+            "threshold": 10.0,
+        }
+        assert event["fingerprint"] == ["feature-drift-paused", "acct-123"]
+
+    def test_two_pauses_for_the_same_account_share_one_fingerprint(self, tracker: Tracker) -> None:
+        """Grouped per account, the same convention `capture_trading_halted`
+        and `capture_connector_failing` both use — a recurring pause for one
+        account is one issue to triage, not one alert per occurrence."""
+        capture_feature_drift(
+            "acct-999",
+            training_job_id="job-1",
+            worst_feature="close",
+            worst_z=-17.0,
+            threshold=10.0,
+        )
+        capture_feature_drift(
+            "acct-999",
+            training_job_id="job-2",
+            worst_feature="volume",
+            worst_z=50.0,
+            threshold=10.0,
+        )
+
+        assert len(tracker.events) == 2
+        assert tracker.events[0]["fingerprint"] == tracker.events[1]["fingerprint"]
+
+    def test_disabled_tracking_never_raises(self) -> None:
+        """No DSN configured — the exact `is_enabled()`-gated no-op every
+        other capture function in this module already guarantees."""
+        assert is_enabled() is False
+        capture_feature_drift(
+            "acct-1", training_job_id="job-1", worst_feature="close", worst_z=12.0, threshold=10.0
+        )
 
 
 @pytest.fixture(autouse=True)

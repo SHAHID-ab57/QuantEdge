@@ -65,6 +65,14 @@ function jobLabel(job: TrainingJobSummary): string {
  * predict from, so saving with one surfaces the backend's own rejection
  * as `submitError` rather than silently failing (see `ARCHITECTURE.md`
  * § "Automated Strategy").
+ *
+ * `account.strategy_paused_reason === 'feature_drift'` renders a distinct
+ * error banner above the enable switch — the scheduler's own auto-pause
+ * (FEATURE-DRIFT-MONITOR, `ARCHITECTURE.md` § "Feature Drift Monitoring")
+ * left `strategy_enabled` false the same way a human's own disable would,
+ * and without this the two are indistinguishable from the outside. Saving
+ * with the switch on again is what clears it — no separate "acknowledge"
+ * action exists.
  */
 export function StrategyPanel({
   account,
@@ -131,6 +139,20 @@ export function StrategyPanel({
         almost all the time. That is the model&rsquo;s own measured behavior, visible in the
         decision log below, not a bug.
       </Alert>
+
+      {account.strategy_paused_reason === 'feature_drift' ? (
+        <Alert severity="error" role="alert">
+          <strong>Automated strategy auto-paused — feature drift detected.</strong> A fresh
+          prediction&rsquo;s own input was an extreme outlier against this job&rsquo;s training data
+          (see the decision log below for which feature and by how much), so the strategy was
+          disabled before it could act on it
+          {account.strategy_paused_at
+            ? ` at ${new Date(account.strategy_paused_at).toLocaleString()}`
+            : ''}
+          . This does not clear itself — review the training job (it likely needs retraining on more
+          recent data) before turning the switch back on below.
+        </Alert>
+      ) : null}
 
       <FormControlLabel
         control={

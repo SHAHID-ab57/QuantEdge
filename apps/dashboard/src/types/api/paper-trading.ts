@@ -41,6 +41,11 @@ export const PaperAccountSchema = z.object({
   strategy_default_stop_loss_pct: z.string(),
   /** The one fixed leverage every automated entry uses, long or short. */
   strategy_leverage: z.string(),
+  /** Set only when the scheduler itself — never a human — disabled the
+   * strategy (today: only 'feature_drift'). Null when strategy_enabled is
+   * false because a human turned it off, or it was never auto-paused. */
+  strategy_paused_reason: z.enum(['feature_drift']).nullable(),
+  strategy_paused_at: z.string().datetime().nullable(),
   created_at: z.string().datetime(),
 });
 

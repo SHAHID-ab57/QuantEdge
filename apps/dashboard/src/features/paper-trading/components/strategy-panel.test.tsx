@@ -23,6 +23,8 @@ const ACCOUNT: PaperAccount = {
   strategy_confidence_threshold_pct: '65',
   strategy_default_stop_loss_pct: '5',
   strategy_leverage: '2',
+  strategy_paused_reason: null,
+  strategy_paused_at: null,
   created_at: '2026-01-01T00:00:00Z',
 };
 
@@ -163,5 +165,34 @@ describe('StrategyPanel', () => {
   it('renders skeletons while loading', () => {
     renderPanel({ account: undefined, isLoading: true });
     expect(screen.queryByText('Strategy disabled')).not.toBeInTheDocument();
+  });
+});
+
+describe('StrategyPanel — feature-drift auto-pause banner', () => {
+  it('shows a distinct error banner when the scheduler itself auto-paused for drift', () => {
+    renderPanel({
+      account: {
+        ...ACCOUNT,
+        strategy_enabled: false,
+        strategy_paused_reason: 'feature_drift',
+        strategy_paused_at: '2026-09-22T16:31:00Z',
+      },
+    });
+    expect(screen.getByText(/auto-paused/i)).toBeInTheDocument();
+    expect(screen.getByText(/feature drift detected/i)).toBeInTheDocument();
+  });
+
+  it('shows no drift banner for an ordinary human-disabled account', () => {
+    renderPanel({
+      account: { ...ACCOUNT, strategy_enabled: false, strategy_paused_reason: null },
+    });
+    expect(screen.queryByText(/feature drift detected/i)).not.toBeInTheDocument();
+  });
+
+  it('shows no drift banner for a healthy, enabled account', () => {
+    renderPanel({
+      account: { ...ACCOUNT, strategy_enabled: true, strategy_paused_reason: null },
+    });
+    expect(screen.queryByText(/feature drift detected/i)).not.toBeInTheDocument();
   });
 });

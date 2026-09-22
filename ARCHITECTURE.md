@@ -4014,6 +4014,117 @@ deliberately a separate, later task; it was done in M3-E5-T3, where the user
 explicitly revisited D1/D2: long and short, one fixed leverage, never from
 confidence.)
 
+### Feature Drift Monitoring (FEATURE-DRIFT-MONITOR)
+
+**The motivating evidence: two real, live incidents, found only by directly
+checking the running system.** `docs/research/FEATURE_DRIFT_INVESTIGATION.md`
+checked the two training jobs actually referenced by a strategy-enabled
+account's own `strategy_training_job_id` and found both already severely
+drifted, right now, producing near-saturated (>99% confidence) "down" live
+predictions with nothing on the platform flagging either:
+
+- `733082cc` (accounts `37b2d8da`, `d790e9ec`) — trained on
+  `2024-02-06 → 2024-11-01`, drifted through `volume` (live z = +89, worse
+  than the +58 that first surfaced this in M4-E3-T5).
+- `6e7fb4ed` (account `2cff34d9`) — retrained only 13 days before it was
+  checked, drifted through **price and SMA(20) instead**, because its
+  100-candle training window's own standard deviation (≈\$15) was too tight
+  to survive an ordinary two-week move (z = +15 to +18). A coefficient-
+  contribution breakdown confirmed price/SMA, not volume, drives this one.
+
+Mirrors `app.connectors.health`'s own opening reasoning almost exactly: "no
+error raised, no crash, no alert" was the connector epic's motivating
+problem, and it is the identical shape of gap for a live prediction — nothing
+on this platform ever asked "is what I'm about to act on anywhere near what
+this model was actually trained on?"
+
+**Detection (`app/prediction/feature_drift.py`).** `compute_feature_drift`
+z-scores every live feature against the job's own already-**stored**
+`result_summary.normalization` (never a re-estimated or recomputed fit — the
+same values `TrainingJobService.predict` already applies for normalization,
+just read a second time for this comparison) and reports `healthy` /
+`drifted` / `unavailable` (a job trained with `normalize_features=False`
+carries nothing to compare against — reported honestly, never guessed
+`healthy`). Wired into `PredictionService.run` itself — the one place a live
+feature vector is already assembled before a decision is made — so **every**
+prediction (live, manual, or backtest-generated) persists its own
+`feature_drift_status`/`feature_drift_worst_feature`/`feature_drift_worst_z`
+alongside it, not only the ones the automated strategy acts on.
+
+**The threshold is derived from real data, not chosen by feel.**
+`DRIFT_Z_THRESHOLD = 10.0`. A genuinely healthy reading — job `733082cc`'s own
+held-out test split, drawn from the identical window its normalization was
+fit on, so by construction not drifted — measured directly: price/SMA columns
+never exceed |z| = 2.6; `volume`'s own heavier right tail (real hourly volume
+is nowhere near normally distributed) tops out at |z| = 9.32. Both real
+incidents above measured 15.4 to 89 — one to two orders of magnitude past
+that. 10 sits with real headroom above the worst healthy reading and an
+enormous margin below the mildest real incident, so one threshold separates
+the two cleanly without a per-feature tuned value.
+
+**Response policy: auto-pause — chosen explicitly, not defaulted.** Detection
+alone does not stop a bad trade, and given two of three live accounts were
+already found saturated by chance, a log-only response risked the identical
+situation recurring silently. `PaperTradingStrategyScheduler` checks
+`feature_drift_status` immediately after requesting each cycle's fresh
+prediction, **before the confidence/signal gate** — a drifted model's
+saturated confidence is exactly the failure mode this guards against, so a
+drifted prediction must never reach that logic however confident it claims to
+be. A `drifted` result:
+
+1. Sets `strategy_enabled = false`, `strategy_paused_reason = 'feature_drift'`,
+   `strategy_paused_at = now` directly via `PaperAccountRepository.update` —
+   deliberately **not** routed through `PaperTradingService
+.update_strategy_config` (the human-facing `PATCH .../strategy` path):
+   that method requires a real `user_id` for its audit-trail write, and there
+   is no human here, the identical reason the drawdown kill switch's own
+   fully-automated `_alert_halted` writes a log line and a Sentry alert and
+   never an `audit_log` row. Mutates the exact same `strategy_enabled` field
+   `PATCH .../strategy` controls, through the same repository method, so it
+   is recognizable as the same kind of state change even though it reaches
+   the database differently.
+2. Logs a structured error line and calls `capture_feature_drift`
+   (`app/monitoring/error_tracking.py`) — mirrors `capture_trading_halted`
+   exactly: one Sentry event per pause, grouped per account by fingerprint,
+   so a recurring pause is one issue to triage, not one alert per tick.
+3. Records the cycle as a `no_action` `PaperStrategyDecision` naming the
+   worst feature, its z-score, and the threshold — visible in the existing
+   decision log, no new endpoint.
+4. Places no order. The account is simply absent from every later tick's own
+   `list_strategy_enabled` query — the identical "disabling takes effect
+   before the next cycle" guarantee a human's own disable already gives,
+   and, like `trading_halted`, **not self-healing**: it stays paused until a
+   human acts.
+
+**Clearing the pause is a human decision, not automatic.**
+`update_strategy_config` clears `strategy_paused_reason`/`_paused_at`
+whenever a request explicitly names `enabled` — whichever way it sets it —
+since that is a real decision about the field superseding whatever automated
+reason put the account in its current state; a field-only update (e.g. just
+retuning leverage) leaves an existing pause exactly as it was. Surfaced on
+`/paper-trading`'s Strategy panel as a distinct error banner (mirroring the
+drawdown kill switch's own halted-banner pattern) whenever
+`strategy_paused_reason === 'feature_drift'`, so an auto-pause reads as
+categorically different from a human's own earlier disable, not merely
+`strategy_enabled: false` with no further context.
+
+**What this does not do.** This closes the "silent failure" gap; it does not
+fix drift itself. `733082cc` and `6e7fb4ed` were left exactly as found —
+still capable of drifting again once re-enabled against fresh candles — this
+task was scoped to detect and respond, not to redesign training/normalization.
+Two further options were investigated and deliberately not built yet: rolling
+retraining on a window with an **enforced minimum length** (a naive "retrain
+more often" policy alone reproduces `6e7fb4ed`'s own too-narrow-window
+problem — it is itself a rolling-retrain outcome, 13 days old, already
+drifted) and rolling/online normalization as a defense-in-depth layer between
+retrains. Full tradeoffs: `docs/research/FEATURE_DRIFT_INVESTIGATION.md` § "Step
+3 — Designing a general fix."
+
+**Migration** `51ad89f7cadb` adds `feature_drift_status` /
+`_worst_feature` / `_worst_z` to `predictions` (existing rows default to
+`'unavailable'`, never a retroactively-guessed `'healthy'`) and
+`strategy_paused_reason` / `_paused_at` to `paper_accounts`.
+
 ### External Data Connectors
 
 Milestone 4 (Data Breadth) begins here — a reusable abstraction every

@@ -1638,6 +1638,9 @@ used (if any), runs the model, and persists the result.
   "probabilities": { "down": 0.19, "up": 0.81 }, // null for a regressor
   "classes": ["down", "up"], // null for a regressor
   "feature_columns": ["open", "high", "low", "close", "volume"],
+  "feature_drift_status": "healthy", // "healthy" | "drifted" | "unavailable" — see below
+  "feature_drift_worst_feature": "close", // the largest-magnitude z-score's own column
+  "feature_drift_worst_z": 1.12, // that column's own signed z-score
   "actual_outcome": null, // null until the target horizon has arrived and grading has run
   "is_correct": null, // classification only; null for a regressor or while ungraded
   "error": null, // regression only; null for a classifier or while ungraded
@@ -1649,10 +1652,25 @@ used (if any), runs the model, and persists the result.
 
 `target_column`, `horizon`, `as_of`, and `confidence` always accompany
 `predicted_value` — the response never presents a bare number as fact.
+
+**`feature_drift_status`** (FEATURE-DRIFT-MONITOR,
+`app/prediction/feature_drift.py`, full design in `ARCHITECTURE.md` §
+"Feature Drift Monitoring"): every live feature is z-scored against the
+job's own already-stored `result_summary.normalization` at the moment this
+prediction was made. `"drifted"` means at least one feature's |z| reached
+10 or more — real incidents this was built to catch measured 15 to 89;
+`"unavailable"` means the job carries no normalization to compare against
+(`normalize_features=False`). `feature_drift_worst_feature`/`_worst_z` are
+`null` exactly when the status is `"unavailable"`. `PaperTradingStrategyScheduler`
+acts on this directly: a `"drifted"` prediction auto-pauses that account's
+strategy (`PaperAccountResponse.strategy_paused_reason` becomes
+`"feature_drift"`, see "Paper Trading" below) before the confidence/signal
+gate is ever reached.
 `GET /predictions/{id}` returns the identical shape for a past run;
 `GET /predictions` returns the same fields minus `confidence_unavailable_reason`/
-`probabilities`/`classes`/`feature_columns` (kept out of the list view the
-same way `TrainingJobSummaryDTO` keeps a job's full log list out of
+`probabilities`/`classes`/`feature_columns`/`feature_drift_status`/
+`feature_drift_worst_feature`/`feature_drift_worst_z` (kept out of the list
+view the same way `TrainingJobSummaryDTO` keeps a job's full log list out of
 `GET /training-jobs`), plus `total`/`limit`/`offset`. It accepts
 `training_job_id`/`experiment_id`/`symbol` filters and
 `sort`/`dir`/`limit`/`offset` (one of `symbol`, `as_of`, `created_at`;
@@ -2053,6 +2071,8 @@ Milestone 6's live-trading gate) in `ARCHITECTURE.md` § "Paper Trading"
   "strategy_confidence_threshold_pct": "70.000000000000000000",
   "strategy_default_stop_loss_pct": "7.000000000000000000",
   "strategy_leverage": "2.000000000000000000", // default 2; never derived from a prediction's confidence
+  "strategy_paused_reason": null, // "feature_drift" | null — set only when the scheduler itself, not this endpoint, disabled the strategy
+  "strategy_paused_at": null, // when strategy_paused_reason was set; null exactly when it is
   // ...every other existing PaperAccountResponse field, unchanged
 }
 ```
@@ -2097,6 +2117,20 @@ entries in both directions while still allowing closes. New error codes:
 stop-loss that could not fire before the strategy's leverage liquidates the
 position), both 400. The live model calls "down" in over 99% of cases, so expect
 an almost-always-short strategy; the decision log's `direction` column shows it.
+
+**FEATURE-DRIFT-MONITOR can also disable the strategy, without this
+endpoint ever being called.** Each cycle, before the confidence/signal gate,
+the scheduler checks the fresh prediction's own `feature_drift_status`
+(above). A `"drifted"` result sets `strategy_enabled: false` and
+`strategy_paused_reason: "feature_drift"` directly (a decision-log
+`no_action` row names the feature and z-score), places no order, and
+alerts — see `ARCHITECTURE.md` § "Feature Drift Monitoring". This is the
+one way `strategy_enabled` can flip to `false` other than a `PATCH
+.../strategy` call; `strategy_paused_reason` is how a client tells the two
+apart. Calling `PATCH .../strategy` with `enabled` named — either value —
+always clears `strategy_paused_reason`/`_paused_at`, since a human decision
+about the field supersedes an automated one; a request that never names
+`enabled` (e.g. only retuning leverage) leaves an existing pause as is.
 
 Every cycle for every strategy-enabled account is logged exactly once,
 acted on or not — a below-threshold prediction, a non-directional

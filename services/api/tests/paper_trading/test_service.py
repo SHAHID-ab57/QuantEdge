@@ -1874,3 +1874,98 @@ class TestUpdateStrategyConfig:
         model.strategy_default_stop_loss_pct = Decimal("0")
         with pytest.raises(IntegrityError):
             await service.account_repository.session.commit()
+
+
+@pytest.mark.asyncio
+class TestUpdateStrategyConfigClearsAnAutomatedDriftPause:
+    """FEATURE-DRIFT-MONITOR: `PaperTradingStrategyScheduler`'s own
+    auto-pause (`app.services.paper_trading_strategy._pause_for_drift`,
+    covered end to end in `tests/paper_trading/test_strategy_scheduler.py`
+    ::TestFeatureDriftAutoPause) sets `strategy_paused_reason`/
+    `_paused_at` directly on the account row, bypassing this service's own
+    `update_strategy_config` entirely (there is no human to attribute an
+    audit row to). These tests set that same state up the identical way —
+    a direct repository write — and prove `update_strategy_config` is the
+    one place it gets cleared, and only when a human actually names
+    `enabled`.
+    """
+
+    async def _paused_account(
+        self, session_factory: SessionFactory, *, job_id: str
+    ) -> tuple[_TestPaperTradingService, str]:
+        state_manager = MarketStateManager()
+        service = await build_service(session_factory, state_manager)
+        account = await service.create_account(
+            PaperAccountCreateRequest(starting_balance=Decimal("100000"))
+        )
+        await service.update_strategy_config(
+            uuid.UUID(account.id),
+            PaperStrategyConfigUpdateRequest(enabled=True, training_job_id=uuid.UUID(job_id)),
+        )
+        model = await service.account_repository.get_by_id(uuid.UUID(account.id))
+        assert model is not None
+        await service.account_repository.update(
+            model,
+            {
+                "strategy_enabled": False,
+                "strategy_paused_reason": "feature_drift",
+                "strategy_paused_at": datetime.now(UTC),
+            },
+        )
+        paused = await service.get_account(uuid.UUID(account.id))
+        assert paused.strategy_paused_reason == "feature_drift"
+        assert paused.strategy_paused_at is not None
+        return service, account.id
+
+    async def test_re_enabling_clears_the_reason(self, session_factory: SessionFactory) -> None:
+        job_id, _ = await train_completed_job(
+            session_factory, symbol="PTDRIFTCLEARONUSD", model_type="logistic_regression"
+        )
+        service, account_id = await self._paused_account(session_factory, job_id=job_id)
+
+        resumed = await service.update_strategy_config(
+            uuid.UUID(account_id), PaperStrategyConfigUpdateRequest(enabled=True)
+        )
+
+        assert resumed.strategy_enabled is True
+        assert resumed.strategy_paused_reason is None
+        assert resumed.strategy_paused_at is None
+
+    async def test_explicitly_disabling_also_clears_the_reason(
+        self, session_factory: SessionFactory
+    ) -> None:
+        """A human choosing to *keep* it off is still an explicit decision
+        about `enabled` — it must not leave a stale 'feature_drift' reason
+        attributed to a state the human, not the scheduler, now owns."""
+        job_id, _ = await train_completed_job(
+            session_factory, symbol="PTDRIFTCLEAROFFUSD", model_type="logistic_regression"
+        )
+        service, account_id = await self._paused_account(session_factory, job_id=job_id)
+
+        still_off = await service.update_strategy_config(
+            uuid.UUID(account_id), PaperStrategyConfigUpdateRequest(enabled=False)
+        )
+
+        assert still_off.strategy_enabled is False
+        assert still_off.strategy_paused_reason is None
+        assert still_off.strategy_paused_at is None
+
+    async def test_a_field_only_update_leaves_the_reason_untouched(
+        self, session_factory: SessionFactory
+    ) -> None:
+        """Tuning leverage/threshold without ever naming `enabled` is not a
+        decision about the pause at all — the reason must survive it."""
+        job_id, _ = await train_completed_job(
+            session_factory, symbol="PTDRIFTKEEPUSD", model_type="logistic_regression"
+        )
+        service, account_id = await self._paused_account(session_factory, job_id=job_id)
+
+        still_paused = await service.update_strategy_config(
+            uuid.UUID(account_id),
+            PaperStrategyConfigUpdateRequest(confidence_threshold_pct=Decimal("80")),
+        )
+
+        assert still_paused.strategy_enabled is False
+        assert still_paused.strategy_paused_reason == "feature_drift"
+        assert still_paused.strategy_paused_at is not None
+        assert float(still_paused.strategy_confidence_threshold_pct) == pytest.approx(80.0)

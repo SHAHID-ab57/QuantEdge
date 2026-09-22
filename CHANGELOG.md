@@ -8,6 +8,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Funding rate and open interest history, as connectors and features
+  (M4-E3-T5), and a fourth negative feature-value result.** Delta serves real
+  hourly history for both (`FUNDING:ETHUSD` from 2024-02-05, percent, a step
+  function; `OI:ETHUSD` from 2024-02-06, ETH).
+  - **What was added:** connectors `delta_ethusd_funding_rate` and
+    `delta_ethusd_open_interest` (`app/connectors/delta_market_data.py`, auto-synced,
+    stored in `external_data_points`) and features `funding_rate` and
+    `open_interest` (category `derivatives`, ETHUSD only). A value attaches to a
+    candle only once knowable: funding is the rate set at or before it, open
+    interest is the OI candle's open, never its close.
+  - **Result:** under logistic regression, Random Forest and Gradient Boosting, on the
+    same window, split and noise band as every prior comparison, neither feature
+    adds measurable value (all nine cells inside +-1.68 pp). The live strategy's
+    feature set is unchanged.
+  - **Finding worth knowing:** the live model's near-constant "down" call and
+    saturated confidence are caused by its `volume` column's scale drift against
+    the 2024 training window, not by anything a new feature could fix; open interest
+    (a non-stationary level) makes it worse. See
+    `docs/research/CONNECTOR_FEATURE_VALUE_ASSESSMENT.md` § "M4-E3-T5".
+
 - **The automated strategy now trades long and short, at one fixed leverage
   (M3-E5-T3).** An explicit decision that revisits M3-E5-T2's D1/D2.
   - **What changed:** a confident `"up"` call opens a long, a confident

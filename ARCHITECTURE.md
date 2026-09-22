@@ -5388,6 +5388,58 @@ the service is temporarily made to ignore sync-run history.
   check-constraint name on `paper_strategy_decisions`) was deliberately
   left out of this migration; `alembic check` still reports it.
 
+#### Delta Market-Data Connectors: Funding Rate & Open Interest History (M4-E3-T5)
+
+Two connectors, `delta_ethusd_funding_rate` and `delta_ethusd_open_interest`
+(`app/connectors/delta_market_data.py`), record **history** of two signals the
+Delta REST/WS layers only ever cached live (see "Funding Rate, Open Interest &
+Order-Flow Capture" below). They were built to test, on the same footing as
+every other connector, whether either helps prediction; the answer was no
+(`docs/research/CONNECTOR_FEATURE_VALUE_ASSESSMENT.md` § "M4-E3-T5").
+
+**The history was investigated, not assumed.** Delta's public
+`GET /v2/history/candles` serves derived series under prefixed symbols, the same
+endpoint the candle ingester uses. `FUNDING:ETHUSD` runs from 2024-02-05 12:00
+UTC (22,997 hourly candles, in **percent**) and `OI:ETHUSD` from 2024-02-06
+08:00 UTC (23,001, in ETH, no gaps). Neither carries volume, so both go through
+`DeltaClient.get_series` and `SeriesCandle` rather than the OHLCV path.
+
+**Stamping is the no-look-ahead contract.** Features attach the latest point at
+or before a candle's `open_time`, so a stored point must be stamped with the
+moment its value was _observable_:
+
+- **Funding** is a step function set at funding times (multiples of 28,800 s)
+  and never revised. One point is stored per funding time, plus any off-boundary
+  change, never one per constant hour; the as-of lookup carries the value
+  forward, which is exactly what a step means. Percent becomes a fraction exactly
+  once, through the platform's single `funding_percent_to_fraction`.
+- **Open interest** stores the OI candle's **open** at the candle's open time.
+  Its close is not known until an hour later and is never used.
+
+**Storage is the generic `external_data_points` table**, not a dedicated one:
+the as-of lookup, sync scheduler, backfill, health monitor and Data Sources page
+all work on it, and both signals are one number per `(source, timestamp)`.
+Funding also lives in `funding_rates` (M3-E5-T2), which settlement uses because a
+payment needs the index and mark prices and is keyed per market; the duplication
+is deliberate, two consumers with two shapes. Both connectors declare their real
+cadence (`expected_interval_seconds` 28,800 and 3,600), so the health monitor
+flags them stale after 24 h and 3 h.
+
+**Both are ETHUSD only.** The lookups are global (`symbol=None`) like
+`eth_tvl`, so the `funding_rate` and `open_interest` features (category
+`derivatives`) must not build a dataset for another market; their descriptions
+say so. Open interest is also a **non-stationary level** (0.09 ETH in February
+2024, 15,000 to 26,000 through 2026) and funding sits on Delta's 0.01% floor
+69.5% of the time; both facts are documented in the module and drove the
+research findings, including that a model normalized on a 2024 window
+saturates on 2026 open interest exactly as it does on `volume`.
+
+Tests: `tests/connectors/test_delta_market_data.py` (stamping, unit conversion,
+step compression, chunking, error mapping) and
+`tests/features/test_delta_market_data_features.py`, which carries the same
+three-level no-look-ahead proof as every connector-backed feature (pure
+generator, poisoned future points, real database-backed path).
+
 ### Funding Rate, Open Interest & Order-Flow Capture (M4-E2-T1)
 
 Milestone 4's second epic — **Delta REST/WS completion** — is a different

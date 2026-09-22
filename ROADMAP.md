@@ -444,6 +444,25 @@ closed under two model classes, five horizons, and three regimes.
 `docs/research/CONNECTOR_FEATURE_VALUE_ASSESSMENT.md` § "Gradient
 Boosting spot-check".
 
+**Funding rate and open interest were then tested as features
+(M4-E3-T5, `TASKBOOK.md`), the one Delta-native signal pair the connector thread
+had never covered, and the result is the fourth negative confirmation.**
+Delta serves real hourly history for both (`FUNDING:ETHUSD` from 2024-02-05,
+`OI:ETHUSD` from 2024-02-06), so two connectors and two features were built and
+backfilled, and the identical primary comparison was run under logistic
+regression, Random Forest and Gradient Boosting. All nine model x variant cells
+sit inside the +-1.68 pp noise band on accuracy and ROC-AUC, and permutation
+importance is within noise. The live model's behavior was reproduced exactly
+(stored probabilities matched to 2e-15) and re-scored with the features:
+funding changes nothing, while open interest makes the near-constant "down" call
+_worse_ (99.7% to 100%, 27% to 77% of predictions above 0.99 confidence). The
+cause is not the features: it is the live model's `volume` column, which sits at
+a mean of 58 standard deviations from its 2024 training window on the backtest
+bars, and removing it ends the saturation. **The next step is target
+redefinition** (volatility or triple-barrier), preceded by fixing how
+scale-drifting inputs are handled. The live strategy's feature set is
+unchanged. `docs/research/CONNECTOR_FEATURE_VALUE_ASSESSMENT.md` § "M4-E3-T5".
+
 **Milestone 5 — Production Hardening (COMPLETE, against the scope
 below).** Delivered: authentication and an audit trail, inbound rate
 limiting and login lockout, Redis (rate limiting, lockout, token

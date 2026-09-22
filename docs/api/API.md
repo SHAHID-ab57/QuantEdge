@@ -282,8 +282,9 @@ unchanged.
 Registered today: `ohlcv` (`category: "raw"`), `candle_shape`
 (`price_action`), `sma`/`ema`/`wma` (`trend`), `fear_greed` (`sentiment`),
 `fed_funds_rate` (`macro`), `eth_gas_price` (`on-chain`), `eth_tvl`
-(`on-chain`), `btc_dominance` (`market`), and `news_sentiment`
-(`sentiment`). The set is queried from `GET /api/v1/features` at
+(`on-chain`), `btc_dominance` (`market`), `news_sentiment`
+(`sentiment`), and `funding_rate`/`open_interest` (`derivatives`, ETHUSD only,
+from `app/connectors/delta_market_data.py`). The set is queried from `GET /api/v1/features` at
 runtime, never hardcoded by a client; see `ARCHITECTURE.md` §
 "Feature Engineering Engine" for how a new generator joins this list
 with no API change, and § "External Data Connectors" for
@@ -339,8 +340,9 @@ of, or alongside, candle data — empty for every generator except
 `fear_greed` (`("fear_greed",)`), `fed_funds_rate`
 (`("fed_funds_rate",)`), `eth_gas_price` (`("eth_gas_price",)`),
 `eth_tvl` (`("eth_tvl",)`), `btc_dominance`
-(`("btc_dominance",)`), and `news_sentiment`
-(`("news_sentiment",)`). A feature declaring `external_sources` is
+(`("btc_dominance",)`), `news_sentiment`
+(`("news_sentiment",)`), `funding_rate` (`("delta_ethusd_funding_rate",)`), and
+`open_interest` (`("delta_ethusd_open_interest",)`). A feature declaring `external_sources` is
 never served from the feature cache (`cache_status` reports `"disabled"`,
 not `"miss"`, for that column), because the cache key fingerprints candles
 and parameters only, never a connector's own freshness. A feature declaring

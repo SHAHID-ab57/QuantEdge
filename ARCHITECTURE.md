@@ -1297,17 +1297,46 @@ actually fires.
 
 **Initial targets, one file each in `app/ml_datasets/targets/`:**
 
-| Target           | Category    | Column               | What it predicts                                 |
-| ---------------- | ----------- | -------------------- | ------------------------------------------------ |
-| `next_close`     | `price`     | `next_close_{h}`     | The raw close price `h` candles ahead            |
-| `next_return`    | `return`    | `next_return_{h}`    | Fractional change to the close `h` candles ahead |
-| `next_direction` | `direction` | `next_direction_{h}` | `"up"` / `"down"` / `"flat"` classification      |
+| Target              | Category     | Column                   | What it predicts                                                               |
+| ------------------- | ------------ | ------------------------ | ------------------------------------------------------------------------------ |
+| `next_close`        | `price`      | `next_close_{h}`         | The raw close price `h` candles ahead                                          |
+| `next_return`       | `return`     | `next_return_{h}`        | Fractional change to the close `h` candles ahead                               |
+| `next_direction`    | `direction`  | `next_direction_{h}`     | `"up"` / `"down"` / `"flat"` classification                                    |
+| `triple_barrier`    | `direction`  | `triple_barrier_{p}_{h}` | First-touch `"up"`/`"down"`/`"time_expired"` against a symmetric price barrier |
+| `volatility_regime` | `volatility` | `volatility_regime_{h}`  | `"expand"`/`"contract"` — next-`h`-hour realized vol vs. trailing-`h`-hour vol |
 
-Every target shares one parameter, `horizon` (default `1`, declared once in
-`targets/common.py` as `HORIZON_PARAMETER` and reused by all three rather
-than redeclared). `next_return` guards a zero-close division explicitly
-(returns `None` rather than `inf`/`NaN`), which is why it cannot reuse the
-generic `shifted_column` helper the other two share.
+Every `next_*` target shares one parameter, `horizon` (default `1`,
+declared once in `targets/common.py` as `HORIZON_PARAMETER` and reused by
+all three rather than redeclared). `next_return` guards a zero-close
+division explicitly (returns `None` rather than `inf`/`NaN`), which is why
+it cannot reuse the generic `shifted_column` helper the other two share.
+
+**`triple_barrier`/`volatility_regime`** (MODEL-QUALITY-T1) were added
+after `next_direction` failed five independent checks across this
+platform's own research thread
+(`docs/research/CONNECTOR_FEATURE_VALUE_ASSESSMENT.md`,
+`HORIZON_SWEEP_ASSESSMENT.md`, `REGIME_WALKFORWARD_ASSESSMENT.md`, the
+funding/open-interest assessment, `CONFIDENCE_RECHECK_POST_FIX.md`), and
+only after cheap diagnostics confirmed real structure on this platform's
+own stored data first — see
+`docs/research/TARGET_REDEFINITION_ASSESSMENT.md`. `triple_barrier` is a
+first-touch **walk** (not a fixed-horizon lookahead like the other four):
+it scans forward from each row, candle by candle, until price clears an
+upper or lower barrier or `max_hours` elapses; its default barrier (5%)
+is this platform's own real risk convention
+(`paper_trading_strategy_default_stop_loss_pct`), not a value chosen in
+isolation. `volatility_regime` is deliberately binary classification, not
+regression, so it fits the same three-classifier comparison
+(`logistic_regression`/`random_forest`/`gradient_boosting`) every other
+target in the research thread was checked against — this platform's only
+regression adapter (`linear_regression`) has no classifier counterpart to
+compare it against symmetrically. **The primary, properly-powered
+comparison found neither a real, tradable edge with the existing fixed
+feature set** (`ohlc`+`volume_log`+`sma(20)`) — full results in that
+document, including how its own permutation-importance check caught an
+inflated, non-generalizing result on a smaller cross-check window, the
+same failure mode `CONNECTOR_FEATURE_VALUE_ASSESSMENT.md` already caught
+once for DefiLlama TVL.
 
 **`MLDatasetBuilder.build()`** (`dataset.py`) is pure composition: the
 _existing_ `FeatureDatasetBuilder` builds features, the new `TargetPipeline`

@@ -115,6 +115,187 @@ class TestNextDirection:
         assert series.column.dtype == "categorical"
 
 
+def _flat_candle(open_time, price: float, *, high: float | None = None, low: float | None = None):
+    from app.features.base import OHLCVPoint
+
+    return OHLCVPoint(
+        open_time=open_time,
+        open=price,
+        high=high if high is not None else price,
+        low=low if low is not None else price,
+        close=price,
+        volume=10.0,
+    )
+
+
+class TestTripleBarrier:
+    def test_upper_barrier_touched_first_is_labeled_up(self) -> None:
+        from app.ml_datasets.base import TargetContext
+        from app.ml_datasets.targets.triple_barrier import TripleBarrier
+
+        base = candles(2, start_price=100.0)  # entry row: close=100
+        following = _flat_candle(
+            base[1].open_time, 100.0, high=106.0, low=99.0
+        )  # clears the +5% upper barrier, not the lower
+        series = (
+            TripleBarrier()
+            .generate(
+                TargetContext(
+                    candles=[base[0], following],
+                    params={"barrier_pct": 0.05, "max_hours": 1},
+                )
+            )
+            .series[0]
+        )
+        assert series.values[0] == "up"
+
+    def test_lower_barrier_touched_first_is_labeled_down(self) -> None:
+        from app.ml_datasets.base import TargetContext
+        from app.ml_datasets.targets.triple_barrier import TripleBarrier
+
+        base = candles(2, start_price=100.0)
+        following = _flat_candle(base[1].open_time, 100.0, high=101.0, low=94.0)
+        series = (
+            TripleBarrier()
+            .generate(
+                TargetContext(
+                    candles=[base[0], following],
+                    params={"barrier_pct": 0.05, "max_hours": 1},
+                )
+            )
+            .series[0]
+        )
+        assert series.values[0] == "down"
+
+    def test_neither_barrier_touched_within_max_hours_is_time_expired(self) -> None:
+        from app.ml_datasets.base import TargetContext
+        from app.ml_datasets.targets.triple_barrier import TripleBarrier
+
+        base = candles(1, start_price=100.0)
+        quiet = [
+            _flat_candle(base[0].open_time, 100.0),
+            _flat_candle(base[0].open_time, 101.0, high=102.0, low=99.5),
+            _flat_candle(base[0].open_time, 100.5, high=103.0, low=98.0),
+        ]
+        series = (
+            TripleBarrier()
+            .generate(
+                TargetContext(
+                    candles=quiet,
+                    params={"barrier_pct": 0.05, "max_hours": 2},
+                )
+            )
+            .series[0]
+        )
+        assert series.values[0] == "time_expired"
+
+    def test_trailing_max_hours_rows_are_none(self) -> None:
+        from app.ml_datasets.base import TargetContext
+        from app.ml_datasets.targets.triple_barrier import TripleBarrier
+
+        series = (
+            TripleBarrier()
+            .generate(
+                TargetContext(candles=candles(5), params={"barrier_pct": 0.05, "max_hours": 2})
+            )
+            .series[0]
+        )
+        # boundary = 5 - 2 = 3: rows 3 and 4 have no future candle to check.
+        assert series.values[3] is None
+        assert series.values[4] is None
+        assert series.values[0] is not None
+
+    def test_column_name_encodes_both_parameters(self) -> None:
+        from app.ml_datasets.base import TargetContext
+        from app.ml_datasets.targets.triple_barrier import TripleBarrier
+
+        series = (
+            TripleBarrier()
+            .generate(
+                TargetContext(candles=candles(5), params={"barrier_pct": 0.05, "max_hours": 72})
+            )
+            .series[0]
+        )
+        assert series.column.name == "triple_barrier_0.05_72"
+        assert series.column.dtype == "categorical"
+
+
+class TestVolatilityRegime:
+    def test_a_calmer_trailing_window_than_forward_is_labeled_expand(self) -> None:
+        from app.ml_datasets.base import TargetContext
+        from app.ml_datasets.targets.volatility_regime import VolatilityRegime
+
+        base = candles(1, start_price=100.0)[0].open_time
+        # Trailing window (rows 0-2): tiny, near-constant moves. Forward
+        # window (rows 3-5, evaluated from row 2): one large jump.
+        series_rows = [
+            _flat_candle(base, 100.0),
+            _flat_candle(base, 100.1),
+            _flat_candle(base, 100.0),
+            _flat_candle(base, 130.0),
+            _flat_candle(base, 100.0),
+            _flat_candle(base, 130.0),
+        ]
+        output = (
+            VolatilityRegime()
+            .generate(TargetContext(candles=series_rows, params={"window_hours": 2}))
+            .series[0]
+        )
+        # Row 2's trailing window is rows 1-2 (calm); its forward window is
+        # rows 3-4 (one huge jump) — real volatility increases.
+        assert output.values[2] == "expand"
+
+    def test_a_calmer_forward_window_than_trailing_is_labeled_contract(self) -> None:
+        from app.ml_datasets.base import TargetContext
+        from app.ml_datasets.targets.volatility_regime import VolatilityRegime
+
+        base = candles(1, start_price=100.0)[0].open_time
+        series_rows = [
+            _flat_candle(base, 100.0),
+            _flat_candle(base, 140.0),
+            _flat_candle(base, 100.0),
+            _flat_candle(base, 100.1),
+            _flat_candle(base, 100.0),
+            _flat_candle(base, 100.1),
+        ]
+        output = (
+            VolatilityRegime()
+            .generate(TargetContext(candles=series_rows, params={"window_hours": 2}))
+            .series[0]
+        )
+        assert output.values[2] == "contract"
+
+    def test_leading_and_trailing_windows_without_enough_data_are_none(self) -> None:
+        from app.ml_datasets.base import TargetContext
+        from app.ml_datasets.targets.volatility_regime import VolatilityRegime
+
+        output = (
+            VolatilityRegime()
+            .generate(TargetContext(candles=candles(6), params={"window_hours": 2}))
+            .series[0]
+        )
+        # Rows 0-1 have no full trailing window; boundary = 6 - 2 = 4, so
+        # rows 4-5 have no full forward window.
+        assert output.values[0] is None
+        assert output.values[1] is None
+        assert output.values[4] is None
+        assert output.values[5] is None
+        assert output.values[2] is not None
+        assert output.values[3] is not None
+
+    def test_column_name_encodes_the_window_and_is_categorical(self) -> None:
+        from app.ml_datasets.base import TargetContext
+        from app.ml_datasets.targets.volatility_regime import VolatilityRegime
+
+        output = (
+            VolatilityRegime()
+            .generate(TargetContext(candles=candles(10), params={"window_hours": 24}))
+            .series[0]
+        )
+        assert output.column.name == "volatility_regime_24"
+        assert output.column.dtype == "categorical"
+
+
 class TestForwardLookingContractIsEnforced:
     """A misbehaving generator is caught by the pipeline, not silently trusted."""
 

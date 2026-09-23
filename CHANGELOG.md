@@ -8,6 +8,48 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Scheduled retraining with an enforced minimum window, and the affected
+  drift-paused accounts retrained (RETRAIN-WITH-MINIMUM-WINDOW).** Closes
+  the loop FEATURE-DRIFT-MONITOR opened: detection and auto-pause existed,
+  nothing retrained a paused model. Full analysis:
+  `docs/research/RETRAIN_WINDOW_ANALYSIS.md`.
+  - **Window/cadence floors, derived from real data, not chosen by feel**
+    (`app/services/retraining.py`): `MIN_WINDOW_HOURS = 8,760` (365 days)
+    and `MAX_RETRAIN_INTERVAL_SECONDS = 168·3600` (weekly) — enforced at
+    construction (`ValueError` if violated), no warn-and-continue path. At
+    these values, price/SMA's 99th-percentile z stays ≈2.9-3.2 and
+    log-volume's ≈3.4, both well under the drift monitor's own
+    `DRIFT_Z_THRESHOLD = 10.0`. The first attempt at this same analysis
+    itself produced a window (`W=4320h`) that read drifted against itself
+    the moment it was checked (`sma_20` z=64.15) — the corrected
+    methodology and why are documented in full.
+  - **`volume` is never in the retrained feature set.** The same analysis
+    found raw volume cannot be kept safe at any practical window/cadence
+    (99th-percentile z in the teens-40s, worst case over 60); `log1p(volume)`
+    (`app/features/builtin/volume_log.py`) fixes this by a wide margin.
+    New `ohlc` feature (`app/features/builtin/ohlc.py`, price columns with
+    no volume) + `volume_log` + `sma(20)` replace `ohlcv` + `sma(20)` for
+    every job this scheduler creates.
+  - **`RetrainingScheduler`** (`app/services/retraining.py`, wired into
+    `app/runtime.py`): periodically retrains each configured model lineage
+    on a fresh rolling window, checks the fresh job against
+    `app.prediction.feature_drift` **before** any promotion (a drifted
+    retrain is never promoted, alerted via `capture_retrain_unhealthy`), and
+    on a healthy result auto-swaps every currently-`strategy_enabled`
+    account on that lineage onto it (`capture_model_promoted`) — chosen
+    explicitly by the user, the same way the drift monitor's own response
+    policy was. Never touches a disabled or still-paused account.
+  - **Platform bug found and fixed**: `TrainingJobCreateRequest` had no
+    `limit` field — a request naming an explicit wide `start`/`end` was
+    silently truncated to the platform default of 100 candles. Added
+    `limit`/`TrainingJobResponse.dataset_limit`
+    (`training_jobs.dataset_limit`, migration `20260923_57b6bdcad9da`) and
+    raised `candles_max_limit` from 1,000 to 10,000.
+  - The three accounts FEATURE-DRIFT-MONITOR had auto-paused
+    (`2cff34d9`, `37b2d8da`, `d790e9ec`) were retrained on the new
+    parameters/feature set, verified healthy, and re-enabled via the real,
+    audited `PATCH .../strategy` path.
+
 - **Feature drift monitoring for live predictions (FEATURE-DRIFT-MONITOR),
   and auto-pause when one is detected.** Investigation
   (`docs/research/FEATURE_DRIFT_INVESTIGATION.md`) found both currently

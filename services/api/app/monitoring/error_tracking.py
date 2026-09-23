@@ -275,6 +275,88 @@ def capture_feature_drift(
         )
 
 
+def capture_retrain_unhealthy(
+    *,
+    experiment_id: str,
+    job_id: str,
+    drift_status: str,
+    worst_feature: str | None,
+    worst_z: float | None,
+) -> None:
+    """Alert that a scheduled retrain came back drifted (or unavailable)
+    against its own fresh data, and was therefore never promoted
+    (RETRAIN-WITH-MINIMUM-WINDOW).
+
+    Grouped per experiment by fingerprint. This should be rare — the whole
+    point of `app.services.retraining`'s enforced window/cadence floors —
+    so a recurring one is itself worth investigating, not routine noise.
+    """
+    logger.error(
+        "Scheduled retrain for experiment %s (job %s) is itself %s (%s z=%s) — not promoted",
+        experiment_id,
+        job_id,
+        drift_status,
+        worst_feature,
+        worst_z,
+        extra={"experiment_id": experiment_id, "training_job_id": job_id},
+    )
+    with sentry_sdk.new_scope() as scope:
+        scope.set_tag("experiment_id", experiment_id)
+        scope.set_tag("training_job_id", job_id)
+        scope.set_context(
+            "retrain_unhealthy",
+            {
+                "experiment_id": experiment_id,
+                "job_id": job_id,
+                "drift_status": drift_status,
+                "worst_feature": worst_feature,
+                "worst_z": worst_z,
+            },
+        )
+        scope.fingerprint = ["retrain-unhealthy", experiment_id]
+        sentry_sdk.capture_message(
+            f"Scheduled retrain for experiment {experiment_id} is itself {drift_status} — "
+            "not promoted",
+            level="error",
+        )
+
+
+def capture_model_promoted(*, experiment_id: str, new_job_id: str, accounts_repointed: int) -> None:
+    """Report that a scheduled retrain was promoted: real accounts are now
+    trading on a different model than a moment ago (RETRAIN-WITH-MINIMUM-
+    WINDOW's own auto-swap promotion policy).
+
+    `info`, not `error` — a promotion is the system working as designed,
+    not a failure — but still worth a visible record given what it changes:
+    exactly the kind of live-account-configuration change
+    LOG-ACCOUNT-CONFIG-CHANGES was built because a silent one went
+    untraceable once already.
+    """
+    logger.info(
+        "Scheduled retrain promoted for experiment %s: job %s now serving %d account(s)",
+        experiment_id,
+        new_job_id,
+        accounts_repointed,
+        extra={"experiment_id": experiment_id, "training_job_id": new_job_id},
+    )
+    with sentry_sdk.new_scope() as scope:
+        scope.set_tag("experiment_id", experiment_id)
+        scope.set_tag("training_job_id", new_job_id)
+        scope.set_context(
+            "model_promoted",
+            {
+                "experiment_id": experiment_id,
+                "new_job_id": new_job_id,
+                "accounts_repointed": accounts_repointed,
+            },
+        )
+        sentry_sdk.capture_message(
+            f"Model promoted for experiment {experiment_id}: job {new_job_id} now serving "
+            f"{accounts_repointed} account(s)",
+            level="info",
+        )
+
+
 def is_enabled() -> bool:
     """Whether events would actually be sent somewhere (a DSN is configured).
 

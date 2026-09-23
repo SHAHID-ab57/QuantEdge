@@ -28,6 +28,8 @@ from app.models import User
 from app.monitoring.error_tracking import (
     _before_send,
     capture_feature_drift,
+    capture_model_promoted,
+    capture_retrain_unhealthy,
     init_error_tracking,
     is_enabled,
     redact_secrets,
@@ -422,6 +424,95 @@ class TestFeatureDriftCapture:
         capture_feature_drift(
             "acct-1", training_job_id="job-1", worst_feature="close", worst_z=12.0, threshold=10.0
         )
+
+
+class TestRetrainUnhealthyCapture:
+    """`capture_retrain_unhealthy` (RETRAIN-WITH-MINIMUM-WINDOW) — a
+    scheduled retrain that came back drifted against its own fresh data was
+    never promoted; mirrors `capture_feature_drift`'s own wire-payload
+    checks, grouped per experiment instead of per account."""
+
+    def test_captured_as_a_real_error_event_with_full_context(self, tracker: Tracker) -> None:
+        capture_retrain_unhealthy(
+            experiment_id="exp-123",
+            job_id="job-456",
+            drift_status="drifted",
+            worst_feature="close",
+            worst_z=8660.64,
+        )
+
+        assert len(tracker.events) == 1
+        event = tracker.events[0]
+        assert event["level"] == "error"
+        assert "exp-123" in event["message"]
+        assert event["tags"]["experiment_id"] == "exp-123"
+        assert event["tags"]["training_job_id"] == "job-456"
+        assert event["contexts"]["retrain_unhealthy"] == {
+            "experiment_id": "exp-123",
+            "job_id": "job-456",
+            "drift_status": "drifted",
+            "worst_feature": "close",
+            "worst_z": 8660.64,
+        }
+        assert event["fingerprint"] == ["retrain-unhealthy", "exp-123"]
+
+    def test_two_unhealthy_retrains_for_the_same_experiment_share_one_fingerprint(
+        self, tracker: Tracker
+    ) -> None:
+        capture_retrain_unhealthy(
+            experiment_id="exp-999",
+            job_id="job-1",
+            drift_status="drifted",
+            worst_feature="close",
+            worst_z=12.0,
+        )
+        capture_retrain_unhealthy(
+            experiment_id="exp-999",
+            job_id="job-2",
+            drift_status="drifted",
+            worst_feature="volume_log",
+            worst_z=15.0,
+        )
+
+        assert len(tracker.events) == 2
+        assert tracker.events[0]["fingerprint"] == tracker.events[1]["fingerprint"]
+
+    def test_disabled_tracking_never_raises(self) -> None:
+        assert is_enabled() is False
+        capture_retrain_unhealthy(
+            experiment_id="exp-1",
+            job_id="job-1",
+            drift_status="drifted",
+            worst_feature="close",
+            worst_z=12.0,
+        )
+
+
+class TestModelPromotedCapture:
+    """`capture_model_promoted` (RETRAIN-WITH-MINIMUM-WINDOW) — a scheduled
+    retrain's auto-swap promotion, reported `info` (the system working as
+    designed) rather than `error`, but still a real, visible record of a
+    live account-configuration change."""
+
+    def test_captured_as_a_real_info_event_with_full_context(self, tracker: Tracker) -> None:
+        capture_model_promoted(experiment_id="exp-123", new_job_id="job-789", accounts_repointed=3)
+
+        assert len(tracker.events) == 1
+        event = tracker.events[0]
+        assert event["level"] == "info"
+        assert "exp-123" in event["message"]
+        assert "job-789" in event["message"]
+        assert event["tags"]["experiment_id"] == "exp-123"
+        assert event["tags"]["training_job_id"] == "job-789"
+        assert event["contexts"]["model_promoted"] == {
+            "experiment_id": "exp-123",
+            "new_job_id": "job-789",
+            "accounts_repointed": 3,
+        }
+
+    def test_disabled_tracking_never_raises(self) -> None:
+        assert is_enabled() is False
+        capture_model_promoted(experiment_id="exp-1", new_job_id="job-1", accounts_repointed=1)
 
 
 @pytest.fixture(autouse=True)

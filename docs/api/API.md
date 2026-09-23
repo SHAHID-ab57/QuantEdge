@@ -1302,6 +1302,7 @@ method produced a given run's table).
   "timeframe": "1h", // required alongside symbol
   "start": null, // optional, must be given together with end — see below
   "end": null,
+  "limit": null, // optional candle-row ceiling — see below (RETRAIN-WITH-MINIMUM-WINDOW)
   "target_column": null, // optional — defaults to the first target column the dataset build produces
   "hyperparameters": { "max_iter": 200, "C": 1.0, "random_seed": 42 },
 }
@@ -1312,6 +1313,19 @@ against a real dataset (the ML Dataset Builder never persists one) — it is
 a citation, exactly as `Experiment.dataset_version` already is.
 `symbol`/`timeframe`/`target_column` are only meaningful for a
 `requires_real_data` adapter — the placeholder ignores them entirely.
+
+**`limit` — added by RETRAIN-WITH-MINIMUM-WINDOW, fixing a real bug: a
+request naming an explicit `start`/`end` used to be silently truncated to
+the platform's default 100-candle limit regardless of how wide a range was
+requested** (`docs/research/RETRAIN_WINDOW_ANALYSIS.md` § "A platform bug
+found along the way" has the full account). `limit` (when given) is passed
+straight through as the dataset build's own row ceiling, capped by
+`candles_max_limit` (10,000); omitted, the platform default (100) still
+applies as before. With no `start`/`end`, `limit` bounds how many of the
+most recent candles are used — this is how `RetrainingScheduler` requests
+its own enforced-minimum window (`limit=8760`, one year of hourly candles)
+without needing an explicit date range that would go stale the moment it
+was written.
 
 **`start`/`end` — added by FIX-TRAINING-DATE-RANGE, fixing a real bug: a
 job that omitted both used to silently train on a market's _oldest_
@@ -1337,6 +1351,7 @@ optional way to pin one.
   "timeframe": "1h",
   "dataset_start": null, // the explicit range this job trained on, if one was given
   "dataset_end": null,
+  "dataset_limit": null, // the candle-row ceiling this job trained on, if one was given
   "target_column": "next_direction_1",
   "model_type": "logistic_regression",
   "hyperparameters": { "max_iter": 200, "C": 1.0, "random_seed": 42 },
@@ -2131,6 +2146,18 @@ apart. Calling `PATCH .../strategy` with `enabled` named — either value —
 always clears `strategy_paused_reason`/`_paused_at`, since a human decision
 about the field supersedes an automated one; a request that never names
 `enabled` (e.g. only retuning leverage) leaves an existing pause as is.
+
+**RETRAIN-WITH-MINIMUM-WINDOW can also change `strategy_training_job_id`,
+without this endpoint ever being called.** `RetrainingScheduler` (see
+`ARCHITECTURE.md` § "Scheduled Retraining") periodically retrains each
+configured model lineage and, only once the fresh job itself reads
+`healthy` against the same drift check above, repoints every currently
+`strategy_enabled: true` account on that lineage onto it — never a disabled
+account, and never `strategy_enabled`/`strategy_paused_reason` themselves.
+A client that polls `GET /paper-trading/accounts/{id}` may see
+`strategy_training_job_id` change between polls with no corresponding
+`PATCH .../strategy` in the audit log — that is this, working as designed,
+not a bug.
 
 Every cycle for every strategy-enabled account is logged exactly once,
 acted on or not — a below-threshold prediction, a non-directional

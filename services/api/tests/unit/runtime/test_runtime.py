@@ -71,6 +71,14 @@ def _settings(**overrides: object) -> SimpleNamespace:
         "orderflow_trade_buffer_max": 500,
         "orderflow_retention_days": 60,
         "orderflow_prune_interval_seconds": 3600,
+        # Read by `RetrainingScheduler`'s own construction in `Runtime.start`
+        # (RETRAIN-WITH-MINIMUM-WINDOW) — mirrors `app/core/config.py`'s real
+        # defaults.
+        "retraining_scheduler_enabled": False,
+        "retraining_experiment_ids": "",
+        "retraining_tick_interval_seconds": 3600,
+        "retraining_min_interval_seconds": 168 * 3600,
+        "retraining_window_hours": 8760,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -351,6 +359,36 @@ async def test_runtime_shutdown_stops_external_data_sync(
     await runtime.shutdown()
     assert stopped == [True]
     assert runtime.external_data_sync is None
+
+
+async def test_runtime_shutdown_stops_retraining(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The scheduled retraining loop (RETRAIN-WITH-MINIMUM-WINDOW) is
+    stopped when configured — wired into start/shutdown the identical way
+    every other scheduler already is."""
+    stopped = []
+
+    class FakeRetraining:
+        async def start(self) -> None:
+            pass
+
+        async def stop(self) -> None:
+            stopped.append(True)
+
+    monkeypatch.setattr(
+        runtime_module,
+        "get_settings",
+        lambda: _settings(
+            retraining_scheduler_enabled=True,
+            retraining_experiment_ids="6f1e4a2c-3b8d-4c9a-9e2f-1a7c5d6b8e90",
+        ),
+    )
+    monkeypatch.setattr(runtime_module, "RetrainingScheduler", lambda **_: FakeRetraining())
+
+    runtime = _runtime()
+    await runtime.start()
+    assert runtime.retraining is not None
+    await runtime.shutdown()
+    assert stopped == [True]
 
 
 async def test_runtime_shutdown_stops_news_sync(monkeypatch: pytest.MonkeyPatch) -> None:

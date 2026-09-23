@@ -4125,6 +4125,89 @@ retrains. Full tradeoffs: `docs/research/FEATURE_DRIFT_INVESTIGATION.md` § "Ste
 `'unavailable'`, never a retroactively-guessed `'healthy'`) and
 `strategy_paused_reason` / `_paused_at` to `paper_accounts`.
 
+### Scheduled Retraining (RETRAIN-WITH-MINIMUM-WINDOW)
+
+Closes the loop FEATURE-DRIFT-MONITOR deliberately left open: that task
+could detect and auto-pause a drifted model but nothing retrained one.
+`app/services/retraining.py`'s `RetrainingScheduler` periodically retrains
+each configured model lineage on a fresh rolling window and, only if the
+fresh job itself reads `healthy` against `app.prediction.feature_drift`,
+auto-swaps every currently-enabled account on that lineage onto it.
+
+**The window width and retrain cadence are hard floors, derived from real
+data, not chosen by feel** — full analysis, including why the first attempt
+at this analysis itself produced a window that immediately drifted against
+itself, in `docs/research/RETRAIN_WINDOW_ANALYSIS.md`:
+
+- `MIN_WINDOW_HOURS = 8,760` (365 days). A dataset window's own fit split is
+  only its chronologically first 70% (`ColumnNormalizer.fit` fits on the
+  train split alone, never validation/test) — the exact mechanism that made
+  a too-narrow window (`6e7fb4ed`, 100 candles) read drifted against itself
+  within days. At 365 days and a weekly retrain, price/SMA's 99th-percentile
+  z stays ≈2.9–3.2 (worst case ≈3.1–3.4), an order of magnitude under the
+  drift monitor's own `DRIFT_Z_THRESHOLD = 10.0`.
+- `MAX_RETRAIN_INTERVAL_SECONDS = 168·3600` (7 days). Fixes the second,
+  independent failure mode the first FEATURE-DRIFT-MONITOR incident showed:
+  `733082cc` drifted through `volume` not because its window was narrow but
+  because it was old — volume's real-world absolute scale trends upward
+  over calendar time, so no fixed window stays representative forever,
+  however wide. A capped retrain age bounds how stale any lineage is allowed
+  to get.
+- Both are checked once, at construction (`RetrainingScheduler.__init__`),
+  and rejected outright (`ValueError`) if violated — no warn-and-continue
+  path, and not overridable narrower/longer even explicitly.
+
+**`volume` is deliberately never in the retrained feature set.** The same
+analysis found raw volume cannot be kept under the alarm threshold at any
+practical window/cadence combination (99th-percentile z in the teens to
+40s, worst case over 60) — the opposite of price/SMA, widening the window
+makes it _worse_, since a wider window's fit sits further in the past, at a
+systematically lower real-world volume scale than "now." `log1p(volume)`
+(`app/features/builtin/volume_log.py`) fixes this by a wide margin
+(99th-percentile stays ≈3–4, worst case under 10, across the same grid) —
+a measured finding, not an assumption. Every job this scheduler creates
+uses `ohlc` (`app/features/builtin/ohlc.py`, the four price columns with no
+volume) + `volume_log` + `sma(20, close)`, never the bundled `ohlcv`.
+
+**A lineage's own `symbol`/`timeframe`/`model_type`/`hyperparameters` are
+never separately configured** — `RetrainingTarget` names only an
+`experiment_id`; every retrain clones those fields from the lineage's own
+most recent _completed_ job, so they can never drift out of sync with what
+has actually been trained and verified working. A lineage with no completed
+job yet is skipped, logged, not an error — the same "bootstrap it once by
+hand, then let the scheduler keep it fresh" step this task's own manual
+retrain already did once for the very first job in each affected lineage.
+
+**Promotion is auto-swap, chosen explicitly** (the one real judgment call in
+this task, decided by the user rather than defaulted, the same way the
+drift monitor's own response policy was). A promotion never re-enables a
+disabled account (human-disabled or still drift-paused) — only an account
+already `strategy_enabled = true` and already pointed at the retrained
+lineage gets repointed, the exact same "an explicit human decision about
+`enabled` is never made for you" boundary `update_strategy_config`'s own
+drift-pause-clearing logic already draws. Like `PaperTradingStrategyScheduler`'s
+own auto-pause, a promotion is **not** routed through the human-audited
+`update_strategy_config` path — there is no human to attribute it to — it
+writes the account row directly and alerts via `capture_model_promoted`
+(`app/monitoring/error_tracking.py`), mirroring `capture_feature_drift`'s
+own precedent.
+
+**A retrain that reads drifted against itself is never promoted.** Every
+fresh job is checked against `app.prediction.feature_drift` before any
+promotion decision — without this, a scheduler like this could just as
+easily reproduce the original problem on a schedule instead of fixing it.
+`capture_retrain_unhealthy` alerts when this happens; it should be rare (the
+whole point of the enforced floors), and a recurring one is itself worth
+investigating.
+
+**Migration** `20260923_57b6bdcad9da` adds `training_jobs.dataset_limit`
+(the new `TrainingJobCreateRequest.limit` field this task also added —
+without it, a wide-date-range training request was silently truncated to
+the default 100-candle limit even with an explicit `start`/`end`; see
+`docs/research/RETRAIN_WINDOW_ANALYSIS.md` § "A platform bug found along the
+way"). `candles_max_limit` was also raised from 1,000 to 10,000, the
+previous ceiling being itself too low for an 8,760-hour window.
+
 ### External Data Connectors
 
 Milestone 4 (Data Breadth) begins here — a reusable abstraction every

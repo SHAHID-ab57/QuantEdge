@@ -74,7 +74,17 @@ class Settings(BaseSettings):
     redis_url: str = ""
 
     candles_default_limit: int = 100
-    candles_max_limit: int = 1000
+    #: Raised from 1,000 (RETRAIN-WITH-MINIMUM-WINDOW): the scheduled retraining
+    #: floor derived in docs/research/RETRAIN_WINDOW_ANALYSIS.md needs a real
+    #: ~7,200-candle (300-day) training window, plus this endpoint's own warmup
+    #: widening on top of whatever `limit` a caller passes — 1,000 silently
+    #: clamped any such request back down to a much narrower, dangerously
+    #: stale-normalization window (exactly the trap this whole task exists to
+    #: close), with no error raised. 10,000 leaves real headroom above every
+    #: window width considered there, while staying well under the full stored
+    #: ETHUSD/1h history (~23,000 candles), so a request still has to ask for a
+    #: genuinely large window on purpose, not receive one by accident.
+    candles_max_limit: int = 10_000
 
     experiments_default_limit: int = 50
     experiments_max_limit: int = 200
@@ -310,6 +320,29 @@ class Settings(BaseSettings):
     #: account that never enabled it.
     paper_trading_strategy_scheduler_enabled: bool = True
     paper_trading_strategy_interval_seconds: int = 300
+
+    #: RETRAIN-WITH-MINIMUM-WINDOW (`app/services/retraining.py`). The loop
+    #: itself defaults on, the same convention every other scheduler on this
+    #: platform already uses — real gating is `retraining_experiment_ids`
+    #: below, empty by default, so an unconfigured deployment retrains
+    #: nothing (mirrors `strategy_enabled=False` being the real per-account
+    #: gate for `paper_trading_strategy_scheduler_enabled=True` above).
+    retraining_scheduler_enabled: bool = True
+    #: Comma-separated experiment ids, each one model lineage to keep fresh.
+    #: `symbol`/`timeframe`/`model_type`/`hyperparameters` are always cloned
+    #: from that experiment's own most recent completed job, never
+    #: configured here — see `RetrainingTarget`'s own docstring for why.
+    retraining_experiment_ids: str = ""
+    #: How often the loop itself checks whether anything is due — cheap,
+    #: independent of how often a retrain actually happens.
+    retraining_tick_interval_seconds: int = 3600
+    #: The actual retrain cadence and dataset window width. Both default to,
+    #: and can never be configured past, `app.services.retraining`'s own
+    #: `MAX_RETRAIN_INTERVAL_SECONDS`/`MIN_WINDOW_HOURS` — real, hard floors
+    #: derived in `docs/research/RETRAIN_WINDOW_ANALYSIS.md`, enforced by
+    #: `RetrainingScheduler.__init__` itself, not just by these defaults.
+    retraining_min_interval_seconds: int = 168 * 3600
+    retraining_window_hours: int = 8760
 
     #: Defaults for a new account's own strategy configuration when its
     #: `PaperStrategyConfigUpdateRequest` doesn't override them — the same

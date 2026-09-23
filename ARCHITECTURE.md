@@ -1330,13 +1330,34 @@ regression, so it fits the same three-classifier comparison
 (`logistic_regression`/`random_forest`/`gradient_boosting`) every other
 target in the research thread was checked against — this platform's only
 regression adapter (`linear_regression`) has no classifier counterpart to
-compare it against symmetrically. **The primary, properly-powered
-comparison found neither a real, tradable edge with the existing fixed
-feature set** (`ohlc`+`volume_log`+`sma(20)`) — full results in that
-document, including how its own permutation-importance check caught an
-inflated, non-generalizing result on a smaller cross-check window, the
-same failure mode `CONNECTOR_FEATURE_VALUE_ASSESSMENT.md` already caught
-once for DefiLlama TVL.
+compare it against symmetrically. **MODEL-QUALITY-T1's own primary,
+properly-powered comparison found neither a real, tradable edge with the
+existing fixed feature set** (`ohlc`+`volume_log`+`sma(20)`) — including
+how its own permutation-importance check caught an inflated,
+non-generalizing result on a smaller cross-check window, the same
+failure mode `CONNECTOR_FEATURE_VALUE_ASSESSMENT.md` already caught once
+for DefiLlama TVL.
+
+**MODEL-QUALITY-T2 followed up on both leads, with two different
+answers.** `volatility_regime` was flat only because nothing in the fixed
+feature set directly measured volatility — adding `realized_volatility`
+(below) and re-running the identical comparison lifted ROC-AUC from
+~0.50 to 0.72-0.74 across all three classifiers, the first positive
+result this whole research thread has produced. `triple_barrier`'s own
+tree-model accuracy edge, walked forward across the same three real
+out-of-sample regimes `REGIME_WALKFORWARD_ASSESSMENT.md` used, did not
+survive (at or below its own majority baseline in every regime,
+`sma_20`'s own importance reversing sign or vanishing) — confirmed an
+artifact of the one test split it was found on, not a portable edge. A
+real platform bug surfaced doing this work: `app/prediction/engine.py`'s
+`resolve_horizon` assumed every target names its own look-ahead
+parameter `"horizon"`, which silently meant neither new target's
+predictions could ever be graded (fixed generally, via the target's own
+`horizon(params)`) — see `docs/research/TARGET_REDEFINITION_ASSESSMENT.md`
+for the full account of both follow-ups, including one further gap found
+and deliberately left open (`volatility_regime`'s own predictions still
+can't be graded, for a second, different reason: `_grade_one` never
+fetches the trailing context a backward-looking target needs).
 
 **`MLDatasetBuilder.build()`** (`dataset.py`) is pure composition: the
 _existing_ `FeatureDatasetBuilder` builds features, the new `TargetPipeline`

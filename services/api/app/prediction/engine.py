@@ -8,12 +8,35 @@ experiment's own recorded `target_config`, an as-of timestamp, and the
 `TrainingJobPredictResponse` `TrainingJobService.predict` already computed
 into one honestly-shaped `PredictionOutcome`. `app/services/prediction.py`
 is the one place that does the database/feature-reconstruction/model-run
-work and calls this.
+work and calls this. One narrow exception to "framework-light": the target
+registry (`app.ml_datasets.registry`) is a pure, stateless, already
+process-wide catalogue — no DB, no model run, the same shape
+`IndicatorFeature` already reuses `IndicatorEngine` for — so
+`resolve_horizon` reads a target generator's own `horizon(params)` from it,
+below.
+
+**`resolve_horizon` bug fixed here (MODEL-QUALITY-T2):** this function
+used to read `entry.params["horizon"]` directly, silently returning `None`
+for any target whose own horizon-equivalent parameter isn't literally
+named `"horizon"` — every built-in `next_*` target uses that name, but
+`triple_barrier` (`max_hours`) and `volatility_regime` (`window_hours`)
+don't. A `None` horizon means `_grade_one`
+(`app/services/prediction.py`) can never grade the prediction at all
+(its very first check), which silently broke both the periodic grading
+scheduler and the Backtesting Engine for both new targets — discovered
+when a real regime walk-forward backtest of `triple_barrier` graded 0 of
+1,920 predictions with no error, anywhere. Reading the horizon from the
+generator's own `horizon(params)` instead (the same method
+`app.ml_datasets.pipeline.TargetPipeline` already uses to plan a dataset
+build) fixes every target, present and future, with no per-target special
+case.
 """
 
 from datetime import datetime
 from typing import Any
 
+from app.ml_datasets.registry import default_registry as default_target_registry
+from app.ml_datasets.targets import load_builtin_targets
 from app.prediction.base import PredictionOutcome
 from app.schemas.experiments import TargetRequestDTO
 from app.schemas.training import TrainingJobPredictResponse
@@ -50,22 +73,28 @@ def resolve_target_entry(
 
 
 def resolve_horizon(target_config: list[TargetRequestDTO] | None, target_column: str) -> int | None:
-    """The configured target's own `horizon` parameter, matched by name.
+    """How many candles ahead this target column looks, via the target
+    generator's own `horizon(params)` — never a hardcoded `"horizon"` key.
 
     Read from the experiment's own recorded `target_config` (the
-    authoritative, as-configured value), never re-derived by parsing the
-    column name's own numeric suffix, which would silently drift the moment
-    a target generator's naming convention did.
+    authoritative, as-configured value) plus the registered generator's own
+    horizon rule, never re-derived by parsing the column name's own numeric
+    suffix (which would silently drift the moment a target generator's
+    naming convention did) and never assuming every target names its own
+    look-ahead parameter `"horizon"` (`next_close`/`next_return`/
+    `next_direction` do; `triple_barrier`/`volatility_regime` don't — see
+    this module's own docstring for the bug that assumption caused).
     """
     entry = resolve_target_entry(target_config, target_column)
     if entry is None:
         return None
-    horizon = entry.params.get("horizon")
-    if horizon is None:
+    load_builtin_targets()
+    if not default_target_registry.has(entry.target):
         return None
+    generator = default_target_registry.get(entry.target)
     try:
-        return int(horizon)
-    except (TypeError, ValueError):
+        return int(generator.horizon(entry.params))
+    except Exception:  # noqa: BLE001 - an unresolvable horizon is "unknown", not fatal here
         return None
 
 

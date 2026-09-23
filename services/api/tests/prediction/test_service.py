@@ -24,6 +24,7 @@ from app.evaluation.metrics import load_builtin_metrics
 from app.evaluation.registry import default_registry as default_metric_registry
 from app.models import Candle
 from app.models.exchange import Exchange
+from app.models.experiment import Experiment
 from app.models.market import Market
 from app.prediction.engine import default_engine
 from app.prediction.errors import (
@@ -864,3 +865,124 @@ class TestGradeNow:
         service = build_prediction_service(session_factory)
         with pytest.raises(PredictionRunNotFoundError):
             await service.grade_now(uuid.uuid4())
+
+
+async def train_completed_job_with_target_config(
+    session_factory: SessionFactory,
+    *,
+    symbol: str,
+    model_type: str,
+    target_config: list[dict[str, object]],
+) -> tuple[str, str]:
+    """`train_completed_job`'s own body, with a caller-supplied
+    `target_config` instead of `seed_experiment_with_real_config`'s
+    hardcoded `{"horizon": "1"}` — needed for a target whose own
+    look-ahead parameter isn't literally named `horizon`
+    (`triple_barrier`'s `max_hours`, `volatility_regime`'s
+    `window_hours`)."""
+    await seed_real_candles(session_factory, symbol=symbol)
+    async with session_factory() as session:
+        experiment = Experiment(
+            name="non-horizon-named target grading test",
+            dataset_version="ds-real",
+            feature_set=[{"feature": "ohlcv", "params": {}}],
+            target_config=target_config,
+            split_config={"train": 0.7, "validation": 0.15, "test": 0.15},
+        )
+        session.add(experiment)
+        await session.commit()
+        experiment_id = str(experiment.id)
+
+    training_service = build_training_service(session_factory)
+    try:
+        job = await training_service.create(
+            TrainingJobCreateRequest(
+                experiment_id=uuid.UUID(experiment_id),
+                model_type=model_type,
+                symbol=symbol,
+                timeframe="1h",
+                normalize_features=True,
+            )
+        )
+        completed = await training_service.run(uuid.UUID(job.id))
+        assert completed.status == "completed", completed.error_message
+        return completed.id, experiment_id
+    finally:
+        await training_service.repository.session.close()
+
+
+class TestGradeNowResolvesNonHorizonNamedTargets:
+    """MODEL-QUALITY-T2: `resolve_horizon` (`app/prediction/engine.py`) used
+    to read `entry.params["horizon"]` directly, silently returning `None`
+    for any target parameterizing its own look-ahead under a different
+    name — and `_grade_one`'s very first check is `if prediction.horizon is
+    None: return None`, so `triple_barrier`/`volatility_regime` predictions
+    could never be graded at all, with no error anywhere. Discovered when a
+    real regime-walkforward backtest graded 0 of 1,920 `triple_barrier`
+    predictions. These prove the fix: a real, end-to-end `grade_now` call
+    against each of the two new targets actually grades."""
+
+    _EARLY_AS_OF = EARLY_AS_OF_FOR_GRADING
+
+    async def test_grades_a_triple_barrier_prediction(
+        self, session_factory: SessionFactory
+    ) -> None:
+        job_id, _ = await train_completed_job_with_target_config(
+            session_factory,
+            symbol="TBGRADEUSD",
+            model_type="logistic_regression",
+            target_config=[
+                {"target": "triple_barrier", "params": {"barrier_pct": "0.05", "max_hours": "3"}}
+            ],
+        )
+        service = build_prediction_service(session_factory)
+        prediction = await service.run(
+            PredictionRunRequest(
+                training_job_id=uuid.UUID(job_id), symbol="TBGRADEUSD", as_of=self._EARLY_AS_OF
+            )
+        )
+        assert prediction.horizon == 3
+
+        outcome = await service.grade_now(uuid.UUID(prediction.id))
+
+        assert outcome is not None
+        assert outcome.actual_outcome in {"up", "down", "time_expired"}
+        graded = await service.get(uuid.UUID(prediction.id))
+        assert graded.graded_at is not None
+
+    async def test_horizon_resolves_but_grading_still_cannot_for_volatility_regime(
+        self, session_factory: SessionFactory
+    ) -> None:
+        """`resolve_horizon` itself is fully fixed — `prediction.horizon`
+        correctly resolves to `volatility_regime`'s own `window_hours`, not
+        `None` — but grading `volatility_regime` still can't complete, for a
+        second, separate, and *not* fixed here reason: `_grade_one` fetches
+        exactly `horizon + 1` candles starting *at* `as_of` (candle 0 of
+        that window) and hands them to the target generator unchanged —
+        correct for every target that only looks forward from its own row
+        (`next_close`/`next_return`/`next_direction`/`triple_barrier`), but
+        `volatility_regime` also needs `window_hours` candles *before*
+        `as_of` (its own trailing-volatility half), which this window never
+        includes — so its value at row 0 is always `None` by construction,
+        regardless of how the target is named or parameterized. Left as a
+        known, reported limitation: fixing it means teaching `_grade_one`
+        that a target can require backward context too, a real design
+        question (grading has never needed a trailing window before this
+        target), not a small patch alongside the `resolve_horizon` fix."""
+        job_id, _ = await train_completed_job_with_target_config(
+            session_factory,
+            symbol="VOLGRADEUSD",
+            model_type="logistic_regression",
+            target_config=[{"target": "volatility_regime", "params": {"window_hours": "5"}}],
+        )
+        service = build_prediction_service(session_factory)
+        prediction = await service.run(
+            PredictionRunRequest(
+                training_job_id=uuid.UUID(job_id), symbol="VOLGRADEUSD", as_of=self._EARLY_AS_OF
+            )
+        )
+        assert prediction.horizon == 5  # the resolve_horizon fix, confirmed
+
+        outcome = await service.grade_now(uuid.UUID(prediction.id))
+
+        assert outcome is None  # the separate, still-open limitation, confirmed

@@ -13,6 +13,28 @@ other candidate in this thread was held to? **No target was assumed to
 work because it is a reasonable hypothesis elsewhere.** Measured
 2026-09-24.
 
+> ## Update (2026-09-25, MODEL-QUALITY-T2)
+>
+> The two leads below — `volatility_regime`'s flat result and
+> `triple_barrier`'s ambiguous tree-model edge — were both followed up.
+> **One came back positive, the first in this entire research thread**:
+> adding a direct realized-volatility feature turns `volatility_regime`
+> from flat (ROC-AUC ~0.50) into genuinely predictive (ROC-AUC 0.72-0.74,
+> all three classifiers, `realized_volatility_24` dominating permutation
+> importance by an order of magnitude). **The other did not survive**:
+> walked forward across the same three real, out-of-sample regimes
+> `REGIME_WALKFORWARD_ASSESSMENT.md` used, `triple_barrier`'s tree-model
+> accuracy edge disappears entirely (at or below the majority baseline in
+> every regime, `sma_20`'s own importance reversing sign or vanishing) —
+> the T1 finding was an artifact of one test split, not a portable edge.
+> A real platform bug was also found and fixed along the way: predictions
+> from either new target could never be graded, anywhere, because
+> `resolve_horizon` assumed every target names its own look-ahead
+> parameter `"horizon"`. Full detail: [Step 4](#step-4-model-quality-t2-a-direct-volatility-feature-changes-the-answer),
+> [Step 5](#step-5-model-quality-t2-the-triple_barrier-lead-does-not-survive-a-regime-walk-forward).
+> Everything below this notice is the original MODEL-QUALITY-T1 record,
+> unchanged.
+
 ## TL;DR
 
 1. **Both cheap diagnostics came back real, on this platform's own stored
@@ -309,3 +331,240 @@ practice, not a second finding.
 - The fixed feature representation used throughout (`ohlc` +
   `volume_log` + `sma(20)`, never raw `volume`) and why:
   `RETRAIN_WINDOW_ANALYSIS.md`.
+
+---
+
+## Step 4 (MODEL-QUALITY-T2): a direct volatility feature changes the answer
+
+`volatility_regime`'s flat primary-comparison result came with a specific
+diagnosis: none of `ohlc`/`volume_log`/`sma(20)` directly measures
+volatility. `app/features/builtin/realized_volatility.py`
+(`realized_volatility_{window}`) closes that gap — the population stdev
+of hourly log returns over a trailing window, computed with the _exact
+same formula_ `volatility_regime`'s own target already uses on the
+forward side. Added to the fixed feature set and re-run through the
+identical primary comparison (full history, `limit=23,000`, 0.7/0.15/0.15
+split, all three classifiers, `window=24` matching the target's own
+`window_hours=24`):
+
+| Model                 | Test accuracy | Majority baseline | Test ROC-AUC | Top permutation importance                 |
+| --------------------- | ------------: | ----------------: | -----------: | ------------------------------------------ |
+| `logistic_regression` |         62.6% |             52.0% |        0.736 | `realized_volatility_24` **0.115 ± 0.007** |
+| `random_forest`       |         63.5% |             52.0% |        0.727 | `realized_volatility_24` **0.132 ± 0.007** |
+| `gradient_boosting`   |         64.5% |             52.0% |        0.717 | `realized_volatility_24` **0.148 ± 0.007** |
+
+**This changes the answer, plainly.** Every model gains **10-13
+percentage points of accuracy** (noise band ±1.67pp at this test size —
+not close) and **ROC-AUC jumps from 0.49-0.55 to 0.72-0.74** — a large,
+consistent, cross-model effect, not a marginal one. Permutation importance
+confirms _why_: `realized_volatility_24` is the dominant feature for all
+three models, by roughly an order of magnitude over every other column
+(0.115-0.148 vs. 0.00-0.07 for everything else) — for `random_forest`,
+every other feature's importance is at or below zero, meaning it is now
+using almost exclusively this one column. The diagnosis in Step 3 was
+correct: the target's own structure was real all along; the model simply
+never had the tool to see it.
+
+**Is this leakage?** No — worth stating explicitly given how closely the
+feature and target definitions match. `realized_volatility_24` at row `i`
+uses only `log_returns[i-23..i]` (strictly ≤ row `i`, already known at
+prediction time); `volatility_regime`'s own label at row `i` compares that
+same trailing window against `log_returns[i+1..i+24]` (strictly future).
+No future information crosses into the feature; the backtest/split
+boundaries that guarantee this elsewhere in this thread are unchanged.
+What _is_ true is that the feature hands the model the exact trailing
+quantity the label is defined relative to — the model's job reduces to
+learning whether trailing volatility tends to persist or mean-revert, and
+the answer (mean-reversion, evidently, since accuracy is well above chance
+either direction) is a genuine, previously-undocumented property of this
+platform's own real ETHUSD data, not an artifact of the setup. This is the
+same relationship an "average true range vs. next-bar range" feature would
+have to a volatility-breakout target — informative by construction, not
+leaked.
+
+**Verdict: `volatility_regime` is a real, working target once given the
+right input.** This is the first positive result in this entire research
+thread's eight prior checks (five on direction, `volatility_regime`'s own
+flat first pass, `triple_barrier`'s ambiguous tree-model lead, and now
+this). Not yet a production recommendation — see
+[After this](#after-this-model-quality-t2) for what would still need to
+happen before treating it as one — but a genuinely different answer from
+everything else in this thread.
+
+---
+
+## Step 5 (MODEL-QUALITY-T2): the triple_barrier lead does not survive a regime walk-forward
+
+`triple_barrier`'s own T1 finding was real but ambiguous: `random_forest`/
+`gradient_boosting` beat their majority baseline by 4-7pp on one large test
+split, `sma_20` carried genuine, non-trivial permutation importance — but
+ROC-AUC stayed barely above chance, and `logistic_regression` on the
+identical data collapsed outright. `REGIME_WALKFORWARD_ASSESSMENT.md`
+exists precisely to stress-test a finding shaped like this: trained fresh
+on the _identical_ window that document's own direction baseline used
+(`2024-02-06` → `2024-11-01`, strictly before all three regimes — the
+model's own primary-comparison training window was rejected for this
+purpose, since it runs through `2025-12` and overlaps two of the three
+regimes in-sample), walked forward via the real, unmodified Backtesting
+Engine (`PredictionService.run` + `grade_now` per step, never a
+second-guessed implementation) over the exact same uptrend/downtrend/
+choppy windows.
+
+| Model               | Regime    | Graded (of steps) | Accuracy | Majority baseline | ROC-AUC |
+| ------------------- | --------- | ----------------: | -------: | ----------------: | ------: |
+| `random_forest`     | Uptrend   |     1,920 / 1,920 |    31.3% |             33.8% |   0.442 |
+| `random_forest`     | Downtrend |     1,704 / 1,704 |    38.1% |             33.8% |   0.543 |
+| `random_forest`     | Choppy    |     1,920 / 1,920 |    34.2% |             33.8% |   0.527 |
+| `gradient_boosting` | Uptrend   |     1,920 / 1,920 |    29.1% |             33.8% |   0.457 |
+| `gradient_boosting` | Downtrend |     1,704 / 1,704 |    38.0% |             33.8% |   0.489 |
+| `gradient_boosting` | Choppy    |     1,920 / 1,920 |    34.2% |             33.8% |   0.485 |
+
+Noise bands at these sample sizes: ±2.12pp (uptrend/choppy, n=1,920),
+±2.25pp (downtrend, n=1,704).
+
+**The lead does not hold, in any regime, for either model.** Every
+accuracy figure sits at or below the majority-class baseline — the
+uptrend regime is actually **below chance for both models** — and every
+ROC-AUC sits in the same 0.44-0.54 range every other no-skill finding in
+this thread has landed in. Permutation importance, run against the same
+regime windows, resolves _why_: `sma_20` — the feature that carried
+T1's entire tree-model signal (0.071-0.105 importance there) — shows
+**negative or exactly-zero** importance in every regime here:
+
+| Model               | Regime    | `sma_20` importance | Top feature (if not `sma_20`)     |
+| ------------------- | --------- | ------------------: | --------------------------------- |
+| `random_forest`     | Uptrend   |             −0.0080 | `volume_log` +0.0001 (negligible) |
+| `random_forest`     | Downtrend |             −0.0013 | `volume_log` +0.0000 (negligible) |
+| `random_forest`     | Choppy    |             +0.0000 | every feature exactly 0           |
+| `gradient_boosting` | Uptrend   |             −0.0625 | `volume_log` +0.0000 (negligible) |
+| `gradient_boosting` | Downtrend |             +0.0448 | `open` +0.0311                    |
+| `gradient_boosting` | Choppy    |             +0.0000 | every feature exactly 0           |
+
+The choppy regime's own permutation importance is **exactly zero across
+every feature for both models** — the identical shape of a model that has
+collapsed onto a single constant class prediction, matching its own 34.2%
+accuracy landing exactly on the majority baseline in both rows. Where
+`sma_20` shows any real importance at all (`gradient_boosting`/downtrend,
++0.0448), it is an order of magnitude smaller than T1's own 0.071-0.105 —
+and that regime's accuracy (38.0%) is still inside its own noise band of
+the 33.8% baseline (±2.25pp).
+
+**Cross-checked two independent ways, in agreement.** Before the platform
+bug below was found and fixed, the real Backtesting Engine's own grading
+returned 0 graded predictions for all six regime/model combinations — the
+numbers in the table above are its _corrected_ output, but this document
+also independently reconstructed each regime's own accuracy/AUC directly
+(reloading the same saved model artifact, rebuilding the exact same
+regime-window feature matrix through `MLDatasetService`, applying the
+job's own frozen normalization by hand) without depending on grading at
+all. The two methods agree to within ~1-2pp on every cell (e.g.
+`random_forest`/uptrend: 31.3% via the fixed Backtesting Engine, 32.9% via
+the independent reconstruction) — the same conclusion, reached twice, by
+two different code paths.
+
+**Verdict: the T1 tree-model finding was an artifact of that one test
+split, not a real, portable edge.** This is exactly the outcome
+`REGIME_WALKFORWARD_ASSESSMENT.md`'s own methodology was built to catch —
+a model that looks like it has learned something on one contiguous window
+and has learned nothing generalizable at all. Combined with
+`logistic_regression`'s own outright collapse on the identical primary-
+comparison data (Step 3, T1), `triple_barrier` joins `next_direction`
+and — on this platform's existing feature set — `volatility_regime`
+(before Step 4's fix) as another negative confirmation, not a finding to
+build on.
+
+### A real platform bug found and fixed along the way
+
+Every one of the six regime backtests above initially graded **0 of**
+their real steps, with no error anywhere — the exact "no error raised, no
+crash, no alert" shape this whole research thread keeps finding. Root
+cause: `app/prediction/engine.py`'s `resolve_horizon` read
+`entry.params["horizon"]` directly, silently returning `None` for any
+target parameterizing its own look-ahead under a different name.
+`next_close`/`next_return`/`next_direction` all use `horizon`;
+`triple_barrier` uses `max_hours`; `volatility_regime` uses
+`window_hours`. A `None` horizon is `_grade_one`'s (`app/services
+/prediction.py`) very first check — no horizon, no grading, full stop —
+so **`triple_barrier` and `volatility_regime` predictions could never be
+graded at all**, anywhere on this platform (the periodic grading
+scheduler, the Backtesting Engine, `grade_now`), from the moment either
+target was built, until this task found it. **This is a real, live gap
+this thread's own new targets introduced and then discovered** — not a
+pre-existing bug, but a genuine one all the same.
+
+**Fixed generally, not with a per-target special case.** `resolve_horizon`
+now reads a target generator's own `horizon(params)` (the exact method
+`app.ml_datasets.pipeline.TargetPipeline` already uses to plan a dataset
+build) via the target registry, instead of assuming every target names
+its own parameter `"horizon"`. This fixes every target, present and
+future, with no target-specific branch. `tests/prediction/test_engine.py`
+gained a direct regression test (`resolve_horizon` on a `triple_barrier`/
+`volatility_regime` config, asserting the real resolved horizon, not
+`None`); `tests/prediction/test_service.py` gained a real, end-to-end
+`grade_now` test proving `triple_barrier` grades correctly now.
+
+**One separate limitation found, and deliberately not fixed here.**
+`volatility_regime`'s own predictions still cannot be graded, for a
+second, different reason: `_grade_one` fetches exactly `horizon + 1`
+candles starting _at_ `as_of` and hands them to the target generator
+unchanged — correct for every target that only looks forward from its own
+row (everything above), but `volatility_regime` also needs `window_hours`
+candles _before_ `as_of` (its own trailing-volatility half), which that
+window never includes. Its value at the graded row is `None` by
+construction regardless of parameter naming. Fixing this means teaching
+`_grade_one` that a target can require backward context too — a real
+design question (no target before this one ever needed it), not a small
+patch alongside the naming fix above. Documented directly in
+`tests/prediction/test_service.py`'s own
+`test_horizon_resolves_but_grading_still_cannot_for_volatility_regime`,
+and left open. **Practical consequence**: Step 4's positive
+`volatility_regime` finding stands (it never depended on grading — the
+primary comparison trains and evaluates on the ML Dataset Builder's own
+held-out split, a completely different code path), but a real deployed
+account running `volatility_regime` would not currently get its live
+predictions graded or its accuracy tracked — worth knowing before any
+future task considers deploying it.
+
+---
+
+## After this (MODEL-QUALITY-T2)
+
+Two follow-ups, two different answers — read plainly, per the task's own
+instruction not to let momentum push past a clear negative result:
+
+- **`triple_barrier` is done.** Two full checks now (T1's own
+  `logistic_regression` collapse plus the ambiguous tree-model edge;
+  T2's regime walk-forward showing that edge does not survive real,
+  distinct, out-of-sample market conditions) put it in the same category
+  as `next_direction`: a real, structurally different target that was
+  actually tested, not assumed, and did not hold up. No further work is
+  recommended on it with this feature set.
+- **`volatility_regime` is not done — it is the first real lead this
+  entire research thread has produced.** Before treating it as anything
+  more than that:
+  1. **A genuine out-of-sample check, the same way `triple_barrier` just
+     got one and `next_direction` got one twice.** Every number in Step 4
+     comes from one large chronological split; this thread's own standard
+     (established by `REGIME_WALKFORWARD_ASSESSMENT.md`, just applied
+     above) is that a single-window result is not yet trusted. The
+     natural next check is a walk-forward: train once, on data ending
+     well before the three known regime windows, and confirm
+     `realized_volatility_24`'s own predictive value holds across an
+     uptrend, a downtrend, and a choppy range, not just the one recent
+     stretch tested here.
+  2. **Understanding _what_ is being predicted, in trading terms.**
+     "Volatility will expand" is not itself a directional call — a real
+     strategy built on it needs a translation into position/risk actions
+     (e.g. reduce size ahead of predicted expansion, or a
+     volatility-targeting rule), which is a design question this
+     assessment did not investigate.
+  3. **Live grading, from the platform bug section above** — a real
+     account running this target cannot have its predictions graded
+     until `_grade_one`'s backward-context gap is addressed.
+- **If the out-of-sample check in (1) also holds**: this would be the
+  first target-plus-feature combination in this whole thread's history
+  (`CONNECTOR_FEATURE_VALUE_ASSESSMENT.md` through this document) to
+  survive both a large-sample primary comparison and a genuine regime
+  stress-test — worth exactly the weight the task's own framing gives it:
+  neither oversold nor waved off because eight of nine other checks in
+  this thread came back negative.

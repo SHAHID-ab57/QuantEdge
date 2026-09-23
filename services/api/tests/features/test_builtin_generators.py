@@ -186,6 +186,48 @@ class TestCandleShape:
         assert pipeline.warmup_for("candle_shape") == 0
 
 
+class TestRealizedVolatility:
+    """MODEL-QUALITY-T2: population stdev of trailing hourly log returns."""
+
+    def test_registered_and_discoverable(self, pipeline: FeaturePipeline) -> None:
+        assert pipeline.registry.has("realized_volatility")
+
+    def test_matches_a_direct_pstdev_computation(self, pipeline: FeaturePipeline) -> None:
+        import math
+        from statistics import pstdev
+
+        closes = [100.0, 101.0, 100.0, 103.0, 100.0]
+        bars = [candle(i, open_=c, high=c, low=c, close=c) for i, c in enumerate(closes)]
+        run = pipeline.run("realized_volatility", bars, {"window": "2"})
+        values = columns_of(run.output)["realized_volatility_2"]
+
+        log_returns = [math.log(closes[i] / closes[i - 1]) for i in range(1, len(closes))]
+        assert values[0] is None
+        assert values[1] is None
+        assert values[2] == pytest.approx(pstdev(log_returns[0:2]))
+        assert values[3] == pytest.approx(pstdev(log_returns[1:3]))
+        assert values[4] == pytest.approx(pstdev(log_returns[2:4]))
+
+    def test_warmup_equals_the_window(self, pipeline: FeaturePipeline) -> None:
+        assert pipeline.warmup_for("realized_volatility", {"window": "24"}) == 24
+        assert pipeline.warmup_for("realized_volatility") == 24  # default
+
+    def test_column_name_encodes_the_window(self, pipeline: FeaturePipeline) -> None:
+        bars = [candle(i, open_=100 + i, high=101 + i, low=99 + i, close=100 + i) for i in range(6)]
+        run = pipeline.run("realized_volatility", bars, {"window": "3"})
+        assert list(columns_of(run.output).keys()) == ["realized_volatility_3"]
+
+    def test_never_raises_on_a_zero_close(self, pipeline: FeaturePipeline) -> None:
+        bars = [
+            candle(0, open_=0, high=0, low=0, close=0),
+            candle(1, open_=1, high=1, low=1, close=1),
+            candle(2, open_=2, high=2, low=2, close=2),
+        ]
+        run = pipeline.run("realized_volatility", bars, {"window": "2"})
+        values = columns_of(run.output)["realized_volatility_2"]
+        assert values[2] is None  # the zero-close return is undefined, so its window can't be
+
+
 class TestIndicatorBackedFeatures:
     """SMA/EMA/WMA delegate to the indicator engine rather than reimplementing it."""
 

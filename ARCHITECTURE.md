@@ -5929,12 +5929,17 @@ and ~16 MB/day for `orderbook_snapshots`, ~31 MB/day combined** — about
 sweep**: every `orderflow_prune_interval_seconds` (default 3600s — a
 `DELETE … WHERE captured_at < cutoff` is cheap regardless of how often
 it's checked, so this doesn't need the 5–15s capture cadence) it deletes
-rows from both tables older than `orderflow_retention_days` (default 60),
-keyed on each row's own `captured_at` — not the exchange's `event_time` —
-via `OrderFlowRepository.prune_trades_older_than` /
-`prune_snapshots_older_than`. 60 days of history is enough for a first
-microstructure research pass without the tables growing forever
-unattended; both are configurable and the sweep is on by construction
+rows from both tables older than `orderflow_retention_days` (default
+**365**, raised from an initial 60 — ORDERFLOW-STATUS-CHECK/
+HOUSEKEEPING-1, `docs/research/ORDERFLOW_STATUS_CHECK.md`), keyed on
+each row's own `captured_at` — not the exchange's `event_time` — via
+`OrderFlowRepository.prune_trades_older_than` /
+`prune_snapshots_older_than`. This data has no backfill, so a day pruned
+past the cutoff is gone forever; 60 days would have permanently capped
+this platform below the "primary window" depth (365 days) every other
+analysis in this research thread has actually needed for real
+statistical power, for a real measured cost of only ~11 GB steady-state
+at 365 days — both are configurable and the sweep is on by construction
 whenever the capture itself is.
 
 **Execution path — confirmed from the actual code, not asserted.**

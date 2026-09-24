@@ -237,9 +237,18 @@ the first time). The case for deciding now rather than later:
   retention would have been unnecessary cost, not a large one, but not
   zero either.
 
-This is presented as a recommendation, not a decision — `orderflow_retention_days`
-has not been changed in this task, per the task's own explicit instruction
-not to change the policy unilaterally.
+This was presented as a recommendation, not a decision, in this task —
+`orderflow_retention_days` was not changed here, per the explicit
+instruction not to change the policy unilaterally. **Update
+(HOUSEKEEPING-1): accepted.** `orderflow_retention_days` was raised from
+60 to 365 in `app/core/config.py` (and the local `.env`/`.env.example`).
+**Not yet live in this environment**: the currently-running dev server
+was deliberately left running rather than restarted as part of this
+change — it holds the real, still-accumulating order-flow capture loop
+this whole document is about, and restarting it was judged a separate,
+riskier action than editing the versioned config default. The new value
+takes effect on this environment's next restart, whenever that happens
+for unrelated reasons.
 
 ## What this does not resolve
 

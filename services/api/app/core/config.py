@@ -167,10 +167,15 @@ class Settings(BaseSettings):
     #: tracked symbols, `trade_flow` grows on the order of tens of MB/day and
     #: `orderbook_snapshots` a similar amount (measured live — see
     #: `ARCHITECTURE.md` § "Funding Rate, Open Interest & Order-Flow Capture"
-    #: for the actual numbers), so this is deliberately finite. 60 days is
-    #: long enough for a first microstructure research pass without letting
-    #: the tables grow forever unattended.
-    orderflow_retention_days: int = 60
+    #: for the actual numbers), so this is deliberately finite. **365 days**
+    #: (raised from an initial 60, ORDERFLOW-STATUS-CHECK/HOUSEKEEPING-1,
+    #: `docs/research/ORDERFLOW_STATUS_CHECK.md`): this data has no backfill,
+    #: so a day pruned past the cutoff is gone forever, and 60 days would
+    #: have permanently capped this platform below the "primary window"
+    #: depth (365 days) every other analysis in this research thread has
+    #: actually needed for real statistical power. Real measured cost at
+    #: 365 days is ~11 GB steady-state — modest for what it buys.
+    orderflow_retention_days: int = 365
     #: How often the retention sweep runs — independent of, and far less
     #: frequent than, the snapshot/flush cadence above, since a DELETE over
     #: a day-old cutoff is cheap regardless of how often it's checked.

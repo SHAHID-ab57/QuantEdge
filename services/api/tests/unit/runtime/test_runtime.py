@@ -69,7 +69,7 @@ def _settings(**overrides: object) -> SimpleNamespace:
         "orderflow_snapshot_depth": 25,
         "orderflow_trade_flush_seconds": 5,
         "orderflow_trade_buffer_max": 500,
-        "orderflow_retention_days": 60,
+        "orderflow_retention_days": 365,
         "orderflow_prune_interval_seconds": 3600,
         # Read by `RetrainingScheduler`'s own construction in `Runtime.start`
         # (RETRAIN-WITH-MINIMUM-WINDOW) — mirrors `app/core/config.py`'s real

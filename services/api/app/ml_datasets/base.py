@@ -148,6 +148,25 @@ class TargetGenerator(ABC):
         """
         return int(params.get("horizon", self.metadata.default_horizon))
 
+    def leading_context(self, params: Mapping[str, Any]) -> int:
+        """Candles needed *before* the row being labeled, given resolved
+        parameters — the backward-looking counterpart to ``horizon``.
+
+        Every builtin target except `volatility_regime` only ever looks
+        forward from its own row (mirroring `FeatureGenerator.warmup`'s own
+        backward-only convention exactly), so the default here is `0`: no
+        leading context needed. `volatility_regime` is the first target
+        whose own label compares a *trailing* window against a forward
+        one, so it overrides this to declare that trailing requirement
+        explicitly — declared separately from ``generate`` for the same
+        reason ``horizon`` is: `app.prediction.grading`'s own
+        `_grade_one` (VOLATILITY-STOP-WIDTH) needs to know how many
+        candles to fetch *before* `as_of`, not just how many after it,
+        before it can grade a prediction from a target like this one at
+        all.
+        """
+        return 0
+
     @abstractmethod
     def generate(self, ctx: TargetContext) -> TargetOutput:
         """Compute this generator's target columns over ``ctx.candles``.

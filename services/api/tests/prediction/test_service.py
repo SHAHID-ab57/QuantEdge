@@ -950,30 +950,51 @@ class TestGradeNowResolvesNonHorizonNamedTargets:
         graded = await service.get(uuid.UUID(prediction.id))
         assert graded.graded_at is not None
 
-    async def test_horizon_resolves_but_grading_still_cannot_for_volatility_regime(
+    async def test_grades_a_volatility_regime_prediction_with_the_exact_correct_label(
         self, session_factory: SessionFactory
     ) -> None:
-        """`resolve_horizon` itself is fully fixed — `prediction.horizon`
-        correctly resolves to `volatility_regime`'s own `window_hours`, not
-        `None` — but grading `volatility_regime` still can't complete, for a
-        second, separate, and *not* fixed here reason: `_grade_one` fetches
-        exactly `horizon + 1` candles starting *at* `as_of` (candle 0 of
-        that window) and hands them to the target generator unchanged —
-        correct for every target that only looks forward from its own row
-        (`next_close`/`next_return`/`next_direction`/`triple_barrier`), but
-        `volatility_regime` also needs `window_hours` candles *before*
-        `as_of` (its own trailing-volatility half), which this window never
-        includes — so its value at row 0 is always `None` by construction,
-        regardless of how the target is named or parameterized. Left as a
-        known, reported limitation: fixing it means teaching `_grade_one`
-        that a target can require backward context too, a real design
-        question (grading has never needed a trailing window before this
-        target), not a small patch alongside the `resolve_horizon` fix."""
+        """VOLATILITY-STOP-WIDTH: `resolve_horizon` alone was not enough —
+        `_grade_one` used to fetch exactly `horizon + 1` candles starting
+        *at* `as_of`, correct for every target that only looks forward from
+        its own row, but `volatility_regime` also needs `window_hours`
+        candles *before* `as_of` (its own trailing-volatility half), which
+        that window never included, so its value at row 0 was always
+        `None` by construction — a real, previously-reported limitation,
+        now fixed generally via `TargetGenerator.leading_context`/
+        `resolve_leading_context`, not a `volatility_regime`-specific
+        patch.
+
+        This does not just check *that* grading completes — it computes
+        the expected label independently, in the test itself, from the
+        exact same deterministic wobble series `seed_real_candles` seeds
+        (`price += 3.0 if i % 3 != 0 else -4.0`, starting at 100.0), and
+        asserts grading returns *that exact value*, proving the trailing
+        window used for grading is the correct one, not merely a
+        non-`None` one."""
+        import math
+        from statistics import pstdev
+
+        window = 5
+        price = 100.0
+        closes = []
+        for i in range(80):
+            price += 3.0 if i % 3 != 0 else -4.0
+            closes.append(price)
+        log_returns = [None, *(math.log(closes[i] / closes[i - 1]) for i in range(1, 80))]
+        as_of_index = 70  # matches EARLY_AS_OF_FOR_GRADING (hour 70 of the 80-candle series)
+        trailing = log_returns[as_of_index - window + 1 : as_of_index + 1]
+        forward = log_returns[as_of_index + 1 : as_of_index + 1 + window]
+        expected_label = (
+            "expand" if pstdev(forward) > pstdev(trailing) else "contract"  # type: ignore[arg-type]
+        )
+
         job_id, _ = await train_completed_job_with_target_config(
             session_factory,
             symbol="VOLGRADEUSD",
             model_type="logistic_regression",
-            target_config=[{"target": "volatility_regime", "params": {"window_hours": "5"}}],
+            target_config=[
+                {"target": "volatility_regime", "params": {"window_hours": str(window)}}
+            ],
         )
         service = build_prediction_service(session_factory)
         prediction = await service.run(
@@ -981,8 +1002,72 @@ class TestGradeNowResolvesNonHorizonNamedTargets:
                 training_job_id=uuid.UUID(job_id), symbol="VOLGRADEUSD", as_of=self._EARLY_AS_OF
             )
         )
-        assert prediction.horizon == 5  # the resolve_horizon fix, confirmed
+        assert prediction.horizon == window  # the resolve_horizon fix, still holding
 
         outcome = await service.grade_now(uuid.UUID(prediction.id))
 
-        assert outcome is None  # the separate, still-open limitation, confirmed
+        assert outcome is not None  # the leading_context fix: grading completes at all now
+        assert outcome.actual_outcome == expected_label  # and reads the exact right window
+        graded = await service.get(uuid.UUID(prediction.id))
+        assert graded.graded_at is not None
+
+    async def test_grade_pending_also_grades_volatility_regime(
+        self, session_factory: SessionFactory
+    ) -> None:
+        """The identical fix through the *other* real caller —
+        `grade_pending` (the periodic scheduler's own path), not just the
+        Backtesting Engine's `grade_now` — since `_grade_one` is the one
+        shared implementation both call."""
+        job_id, _ = await train_completed_job_with_target_config(
+            session_factory,
+            symbol="VOLGRADEPENDUSD",
+            model_type="logistic_regression",
+            target_config=[{"target": "volatility_regime", "params": {"window_hours": "5"}}],
+        )
+        service = build_prediction_service(session_factory)
+        prediction = await service.run(
+            PredictionRunRequest(
+                training_job_id=uuid.UUID(job_id),
+                symbol="VOLGRADEPENDUSD",
+                as_of=self._EARLY_AS_OF,
+            )
+        )
+
+        summary = await service.grade_pending()
+
+        assert summary.attempted == 1
+        assert summary.graded == 1
+        assert summary.not_yet_knowable == 0
+        assert summary.failed == 0
+        graded = await service.get(uuid.UUID(prediction.id))
+        assert graded.actual_outcome in {"expand", "contract"}
+        assert graded.graded_at is not None
+
+    async def test_not_yet_gradeable_when_the_trailing_window_isnt_stored_yet(
+        self, session_factory: SessionFactory
+    ) -> None:
+        """The honest "not yet knowable" case on the *leading* side, not
+        just the trailing one `TestGradePending` already covers: predicting
+        at a very early `as_of` (hour 2 of an 80-candle series) with
+        `window_hours=5` needs candles from hour -3 onward, which do not
+        and never will exist — this must read as not-yet-gradeable, not
+        raise, and not silently grade against a wrong/shifted window."""
+        job_id, _ = await train_completed_job_with_target_config(
+            session_factory,
+            symbol="VOLNOLEADUSD",
+            model_type="logistic_regression",
+            target_config=[{"target": "volatility_regime", "params": {"window_hours": "5"}}],
+        )
+        service = build_prediction_service(session_factory)
+        too_early = datetime(2026, 1, 1, tzinfo=UTC) + timedelta(hours=2)
+        prediction = await service.run(
+            PredictionRunRequest(
+                training_job_id=uuid.UUID(job_id), symbol="VOLNOLEADUSD", as_of=too_early
+            )
+        )
+
+        outcome = await service.grade_now(uuid.UUID(prediction.id))
+
+        assert outcome is None
+        untouched = await service.get(uuid.UUID(prediction.id))
+        assert untouched.actual_outcome is None

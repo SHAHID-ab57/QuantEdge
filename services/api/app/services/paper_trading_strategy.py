@@ -86,6 +86,32 @@ likely be almost always short. That is the model's own measured behaviour
 becoming visible, not something this module introduces; the decision log shows
 each cycle's direction so it can be seen and audited.
 
+**Stop-loss width can be volatility-scaled, but direction never is
+(VOLATILITY-STOP-WIDTH, "Option B").** An account may optionally set
+`PaperAccount.strategy_volatility_training_job_id` to a *second*,
+`logistic_regression`-trained job — a distinct model lineage from the one
+above that decides direction — whose fresh `volatility_regime` forecast for
+the same symbol scales `strategy_default_stop_loss_pct` on a new entry:
+wider ahead of a forecast "expand", tighter ahead of "contract"
+(`_resolve_stop_loss_pct`, called only from `_open_position`). This is
+**stop-loss width only, at position-open time only** — it never touches
+position sizing, leverage, or which side is opened (those stay exactly as
+decided above, unconditionally), and it never revisits an already-open
+position's stop on a later tick; refreshing an open position's width is a
+possible future extension, not built here, matching this feature's own
+smaller-blast-radius scope (`docs/research/VOLATILITY_RISK_SIZING_DESIGN.md`).
+Every gate is fail-closed to the unscaled `strategy_default_stop_loss_pct`
+— wrong model lineage, wrong symbol, no forecast, or the forecast's own
+inputs reported drifted all fall back rather than guess or continue on a
+reading that can't be trusted (`_resolve_stop_loss_pct`'s own docstring has
+the full list). The resulting price is still passed through the identical
+`trading_service.place_order` call as every other automated stop-loss, so
+it is still rejected exactly as before if it would sit beyond the
+position's own liquidation price. Unset (`None`, the default for every
+existing account) behaves exactly as before this feature existed. Never
+applies to a manual order — this module is the only caller that can ever
+set an automated entry's stop-loss from a forecast at all.
+
 Every one of these outcomes — including the ones that place no order —
 is persisted as exactly one `PaperStrategyDecision` row per
 strategy-enabled account per tick: the Strategy panel's own decision
@@ -136,6 +162,25 @@ logger = logging.getLogger("app.services.paper_trading_strategy")
 #: being fully subject to the same position-size/exposure checks a
 #: manual order faces.
 _TARGET_POSITION_SIZE_FRACTION = Decimal("0.5")
+
+#: VOLATILITY-STOP-WIDTH (Option B): fixed, documented multipliers applied
+#: to `strategy_default_stop_loss_pct` when the account's own configured
+#: `logistic_regression` volatility job forecasts a regime change for the
+#: symbol being traded, and that forecast is neither drift-gated nor
+#: unavailable — see `PaperTradingStrategyScheduler._resolve_stop_loss_pct`.
+#: `volatility_regime`'s own label is binary (will realized volatility
+#: expand or contract relative to the trailing window, with no magnitude),
+#: so the response is a modest, asymmetric adjustment — more protective
+#: headroom ahead of an expansion than eagerness to tighten ahead of a
+#: contraction — chosen as a reasoned starting point, not fit to historical
+#: data; a natural target for later tuning once this is watched running for
+#: real (VOLATILITY_RISK_SIZING_DESIGN.md's own "After This" note). Applied
+#: only to a new automated entry's own stop-loss; a manual order's own
+#: human-supplied stop-loss is never touched, and every resulting price
+#: still passes through the exact same liquidation-distance check
+#: `place_order` already enforces on every stop, scaled or not.
+_VOLATILITY_WIDEN_FACTOR = Decimal("1.5")
+_VOLATILITY_TIGHTEN_FACTOR = Decimal("0.75")
 
 
 @dataclass(frozen=True)
@@ -450,6 +495,103 @@ class PaperTradingStrategyScheduler:
                 await log_no_action(reason=f"Cycle failed unexpectedly: {exc}")
             return "no_action"
 
+    async def _resolve_stop_loss_pct(
+        self,
+        *,
+        session: AsyncSession,
+        account: PaperAccount,
+        symbol: str,
+        default_stop_loss_pct: Decimal,
+    ) -> tuple[Decimal, str]:
+        """A new automated entry's stop-loss width, as a fraction (e.g.
+        `Decimal("0.05")` for 5%) — `default_stop_loss_pct` scaled by a
+        fresh `volatility_regime` forecast when the account has opted in
+        (`strategy_volatility_training_job_id` set), or `default_stop_loss_pct`
+        unchanged for every other account, exactly as before this feature
+        existed.
+
+        Every gate below is fail-**closed**: any way this can't produce a
+        trustworthy forecast for *this* symbol falls back to
+        `default_stop_loss_pct` rather than guessing, silently continuing on
+        a drifted reading, or raising and losing the entry entirely. This is
+        strictly downstream of the direction/whether-to-trade decision
+        already made by the caller — it only ever changes the second return
+        value used to compute `stop_loss_price`, never whether an order is
+        placed or which side it's on (VOLATILITY-STOP-WIDTH's own
+        boundary-preserving requirement; see
+        `tests/paper_trading/test_strategy_scheduler.py
+        ::TestVolatilityStopWidth::test_direction_and_whether_to_trade_are_unaffected`).
+
+        Returns `(stop_loss_pct, note)` — `note` is an empty string when
+        unscaled (nothing worth mentioning happened) or a short, already
+        `f"..."`-ready clause explaining what was applied/why not, appended
+        verbatim to this cycle's own decision-log reason so every scaled (or
+        skipped) width is visible in `GET .../strategy/decisions`, not just
+        inferable from the fill price after the fact.
+        """
+        volatility_job_id = account.strategy_volatility_training_job_id
+        if volatility_job_id is None:
+            return default_stop_loss_pct, ""
+
+        job = await TrainingJobRepository(session).get_by_id(volatility_job_id)
+        if job is None:
+            return (
+                default_stop_loss_pct,
+                " (volatility job no longer exists — unscaled default width used)",
+            )
+        if job.model_type != "logistic_regression":
+            return (
+                default_stop_loss_pct,
+                f" (volatility job is {job.model_type!r}, not logistic_regression — unscaled "
+                "default width used)",
+            )
+        if job.symbol != symbol:
+            return (
+                default_stop_loss_pct,
+                f" (volatility job trades {job.symbol!r}, not {symbol!r} — unscaled default "
+                "width used)",
+            )
+
+        prediction_service = get_prediction_service(session)
+        try:
+            forecast = await prediction_service.run(
+                PredictionRunRequest(training_job_id=volatility_job_id, symbol=symbol)
+            )
+        except Exception as exc:  # noqa: BLE001 - a failed forecast falls back, never blocks the entry
+            return (
+                default_stop_loss_pct,
+                f" (volatility forecast unavailable ({exc}) — unscaled default width used)",
+            )
+
+        # Checked before the forecast's own value is trusted at all — the
+        # exact same posture the directional signal already takes on its own
+        # prediction, above, and for the same reason: a drifted model's
+        # output is not a reading to act on, however confident it claims to
+        # be.
+        if forecast.feature_drift_status == "drifted":
+            return (
+                default_stop_loss_pct,
+                f" (volatility forecast's own inputs are drifted "
+                f"({forecast.feature_drift_worst_feature} "
+                f"z={forecast.feature_drift_worst_z:.2f}) — unscaled default width used)",
+            )
+
+        if forecast.predicted_value == "expand":
+            return (
+                default_stop_loss_pct * _VOLATILITY_WIDEN_FACTOR,
+                " (widened: volatility forecast 'expand')",
+            )
+        if forecast.predicted_value == "contract":
+            return (
+                default_stop_loss_pct * _VOLATILITY_TIGHTEN_FACTOR,
+                " (tightened: volatility forecast 'contract')",
+            )
+        return (
+            default_stop_loss_pct,
+            f" (volatility job predicted {forecast.predicted_value!r}, not an expand/contract "
+            "call — unscaled default width used)",
+        )
+
     async def _open_position(
         self,
         *,
@@ -489,7 +631,15 @@ class PaperTradingStrategyScheduler:
                 if quantity <= 0:
                     reason = "Balance too small to size a new automated position."
                 else:
-                    stop_loss_pct = Decimal(account.strategy_default_stop_loss_pct) / Decimal(100)
+                    default_stop_loss_pct = Decimal(account.strategy_default_stop_loss_pct) / (
+                        Decimal(100)
+                    )
+                    stop_loss_pct, volatility_note = await self._resolve_stop_loss_pct(
+                        session=session,
+                        account=account,
+                        symbol=symbol,
+                        default_stop_loss_pct=default_stop_loss_pct,
+                    )
                     # Mandatory, and on the losing side: below a long's entry,
                     # above a short's.
                     stop_loss_price = quote.price * (
@@ -522,7 +672,8 @@ class PaperTradingStrategyScheduler:
                                 f"{confidence_threshold_pct}% threshold; signal "
                                 f"'{prediction.predicted_value}' while flat — opened a "
                                 f"{direction} of {quantity} {symbol} at {strategy_leverage}x "
-                                f"leverage with a stop-loss at {stop_loss_price}.",
+                                f"leverage with a stop-loss at {stop_loss_price}"
+                                f"{volatility_note}.",
                                 predicted_value=prediction.predicted_value,
                                 confidence=prediction.confidence,
                                 confidence_threshold_pct=confidence_threshold_pct,

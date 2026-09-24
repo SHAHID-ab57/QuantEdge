@@ -81,6 +81,14 @@ class VolatilityRegime(TargetGenerator):
     def horizon(self, params: dict[str, object]) -> int:
         return int(params["window_hours"])  # type: ignore[arg-type]
 
+    def leading_context(self, params: dict[str, object]) -> int:
+        # The trailing half of the comparison this target's own label is
+        # defined by (see `generate`, below) needs `window_hours` candles
+        # *before* the row being labeled, exactly mirroring `horizon`'s own
+        # forward-looking requirement (VOLATILITY-STOP-WIDTH: this is what
+        # makes live grading of this target possible at all).
+        return int(params["window_hours"])  # type: ignore[arg-type]
+
     def generate(self, ctx: TargetContext) -> TargetOutput:
         window = ctx.int_param("window_hours")
         candles = ctx.candles

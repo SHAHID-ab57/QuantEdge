@@ -198,6 +198,19 @@ class PaperAccount(BaseModel, TimestampMixin):
         "prediction's confidence (which has been measured to carry no reliable relationship "
         "to being right). Must not exceed max_leverage.",
     )
+    strategy_volatility_training_job_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("training_jobs.id", ondelete="SET NULL"),
+        nullable=True,
+        comment="VOLATILITY-STOP-WIDTH (Option B): the logistic_regression job whose fresh "
+        "volatility_regime forecast scales a new automated entry's stop-loss width — wider "
+        "ahead of a forecast 'expand', tighter ahead of 'contract'. Optional; NULL means every "
+        "automated entry uses strategy_default_stop_loss_pct unscaled, the same as before this "
+        "feature existed. Never validated at write time beyond the FK itself — a job that is "
+        "later deleted, retrained to a different model_type, or never trained on the symbol "
+        "being traded is a runtime fail-closed case (PaperTradingStrategyScheduler falls back "
+        "to strategy_default_stop_loss_pct), not a rejected configuration, mirroring how a "
+        "drifted forecast is handled the same way rather than raising.",
+    )
     strategy_paused_reason: Mapped[str | None] = mapped_column(
         String(50),
         nullable=True,

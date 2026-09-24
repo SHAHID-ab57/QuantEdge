@@ -58,29 +58,35 @@ def grade_one(
     candles: Sequence[OHLCVPoint],
     target_pipeline: TargetPipeline,
     metric_registry: MetricRegistry,
+    as_of_index: int = 0,
 ) -> GradingOutcome | None:
     """Compute one prediction's real outcome, or `None` if it can't be determined.
 
     `candles` must already be exactly the window `PredictionService`
-    decided was gradeable — `horizon + 1` candles, ascending, starting at
-    the exact candle the prediction's feature vector was computed from
-    (`as_of`). This function never decides *whether* a prediction is
-    gradeable (that's a data-availability question the caller already
-    answered by successfully fetching this window); it only computes the
-    answer once asked.
+    decided was gradeable: `leading_context + horizon + 1` candles,
+    ascending, with the candle the prediction's feature vector was
+    computed from (`as_of`) at position `as_of_index` — `0` (the default,
+    and every builtin target before `volatility_regime`) for a target
+    that only ever looks forward from its own row, `leading_context` for
+    one that also needs trailing context (VOLATILITY-STOP-WIDTH; see
+    `TargetGenerator.leading_context`'s own docstring). This function
+    never decides *whether* a prediction is gradeable (that's a
+    data-availability question the caller already answered by
+    successfully fetching this window, at this offset); it only computes
+    the answer once asked.
 
     Returns `None` (rather than raising) if the named target produced no
-    column matching `target_column`, or if that column's first value came
-    back `None` despite a full `horizon + 1`-candle window — both defensive
-    cases that should not occur given a correctly-sized window, but a
-    grading pass over many predictions should skip a surprising row rather
-    than abort the whole pass.
+    column matching `target_column`, or if that column's own value at
+    `as_of_index` came back `None` despite a full window — both defensive
+    cases that should not occur given a correctly-sized, correctly-offset
+    window, but a grading pass over many predictions should skip a
+    surprising row rather than abort the whole pass.
     """
     run = target_pipeline.run(target_name, candles, target_params)
     series = next((s for s in run.output.series if s.column.name == target_column), None)
-    if series is None or not series.values:
+    if series is None or as_of_index >= len(series.values):
         return None
-    actual_outcome = series.values[0]
+    actual_outcome = series.values[as_of_index]
     if actual_outcome is None:
         return None
 

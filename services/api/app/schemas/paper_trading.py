@@ -101,6 +101,12 @@ class PaperAccountResponse(BaseModel):
         description="Every automated entry attaches a stop-loss this % on the losing side of "
         "its own fill price (below a long's, above a short's)"
     )
+    strategy_volatility_training_job_id: str | None = Field(
+        default=None,
+        description="The logistic_regression job whose fresh volatility_regime forecast "
+        "scales a new automated entry's stop-loss width; null means every entry uses "
+        "strategy_default_stop_loss_pct unscaled",
+    )
     strategy_leverage: Decimal = Field(
         description="The one fixed leverage every automated entry uses, long or short — never "
         "derived from a prediction's confidence"
@@ -146,6 +152,11 @@ class PaperAccountResponse(BaseModel):
             ),
             strategy_confidence_threshold_pct=account.strategy_confidence_threshold_pct,
             strategy_default_stop_loss_pct=account.strategy_default_stop_loss_pct,
+            strategy_volatility_training_job_id=(
+                str(account.strategy_volatility_training_job_id)
+                if account.strategy_volatility_training_job_id is not None
+                else None
+            ),
             strategy_leverage=account.strategy_leverage,
             strategy_paused_reason=account.strategy_paused_reason,  # type: ignore[arg-type]
             strategy_paused_at=account.strategy_paused_at,
@@ -539,6 +550,15 @@ class PaperStrategyConfigUpdateRequest(BaseModel):
     enabled: bool | None = Field(default=None, description="Turn the automated strategy on/off")
     training_job_id: uuid.UUID | None = Field(
         default=None, description="The completed, real-data job to predict from"
+    )
+    volatility_training_job_id: uuid.UUID | None = Field(
+        default=None,
+        description="VOLATILITY-STOP-WIDTH (Option B): the logistic_regression job whose "
+        "fresh volatility_regime forecast scales a new automated entry's stop-loss width. "
+        "Null (the default) means unscaled — every entry uses default_stop_loss_pct as-is, "
+        "exactly as before this field existed. Not validated against model_type/symbol at "
+        "write time; an unsuitable job is a runtime fail-closed case, not a rejected "
+        "configuration.",
     )
     confidence_threshold_pct: Decimal | None = Field(
         default=None,

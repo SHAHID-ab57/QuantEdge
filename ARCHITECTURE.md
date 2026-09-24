@@ -3720,6 +3720,98 @@ the configured percentage on the losing side of the order's own `raw_price`
 exactly, for a long and for a short (a further test shows the monitor closes
 an automated short when the price rises to its stop).
 
+**Volatility-Scaled Stop-Loss Width (VOLATILITY-STOP-WIDTH, "Option B").**
+An account may optionally set `PaperAccount
+.strategy_volatility_training_job_id` (migration `75d437dff776`, nullable
+FK → `training_jobs.id`, `ON DELETE SET NULL`) to a _second_, independent
+job whose fresh `volatility_regime` forecast scales
+`strategy_default_stop_loss_pct` on a new automated entry — wider ahead of
+a forecast `"expand"` (×1.5), tighter ahead of `"contract"` (×0.75),
+fixed, documented constants
+(`app.services.paper_trading_strategy._VOLATILITY_WIDEN_FACTOR`/
+`_TIGHTEN_FACTOR`), a reasoned starting point rather than one fit to
+historical data — a natural target for later tuning once this is watched
+running for real, per `docs/research/VOLATILITY_RISK_SIZING_DESIGN.md`'s
+own "After This" note. This followed on from a prerequisite gap the design
+doc itself flagged: `volatility_regime` is the first target whose label
+depends on candles on _both_ sides of the row being labeled (a trailing
+window as well as the forward one every other target already needed), so
+the periodic grading pipeline (`PredictionService._grade_one`) could never
+actually grade a live `volatility_regime` prediction at all until this —
+fixed by a new, general `TargetGenerator.leading_context(params)` method
+(the backward-looking counterpart to the existing `horizon(params)`,
+default `0`) and a matching `resolve_leading_context` in
+`app/prediction/engine.py`, so `_grade_one` now fetches
+`leading_context + horizon + 1` candles instead of just `horizon + 1` and
+grades from the correct offset (`grade_one`'s new `as_of_index`
+parameter) — general to any future backward-looking target, not a
+`volatility_regime`-specific patch, mirroring how T2's `resolve_horizon`
+bug was fixed generally rather than per-target.
+`tests/prediction/test_service.py::TestGradeNowResolvesNonHorizonNamedTargets
+::test_grades_a_volatility_regime_prediction_with_the_exact_correct_label`
+independently recomputes the expected label from the same deterministic
+candle series `seed_real_candles` produces and asserts an exact match —
+not merely that grading no longer errors.
+
+Every gate below is **fail-closed to the unscaled
+`strategy_default_stop_loss_pct`** — this feature only ever narrows or
+widens an entry that was already going to happen, on a side that was
+already decided; it never changes _whether_ a cycle trades or _which_
+direction, and it never guesses or silently continues on a reading that
+can't be trusted (`PaperTradingStrategyScheduler._resolve_stop_loss_pct`,
+called only from `_open_position`, only at position-open time — refreshing
+an already-open position's own stop on a later tick is a possible future
+extension, not built here, matching this feature's own deliberately
+smaller blast radius relative to Option A):
+
+- **Wrong model lineage.** The configured job must be `logistic_regression`
+  specifically — the one model class VERIFY-VOLATILITY-FEATURE's five
+  adversarial checks held up cleanly across every regime tested. Any other
+  `model_type` falls back to the unscaled default without ever calling the
+  prediction service for it at all
+  (`test_a_volatility_job_of_the_wrong_model_type_falls_back_to_the_fixed_default`).
+- **Wrong symbol.** The volatility job must be trained on the exact same
+  symbol the directional job already trades — never a
+  separately-configured one, mirroring the directional job's own
+  "its own recorded symbol" rule above
+  (`test_a_volatility_job_trained_on_a_different_symbol_falls_back_to_the_fixed_default`).
+- **Unavailable forecast.** Any failure requesting a fresh prediction
+  (job not completed, no candle history, feature mismatch, ...) falls
+  back rather than blocking the entry.
+- **Drifted forecast.** The volatility forecast's own
+  `feature_drift_status` is checked before its value is trusted at all —
+  a `"drifted"` reading falls back to the unscaled default, the same
+  posture the directional signal's own drift gate already takes, and for
+  the same reason
+  (`test_a_drifted_volatility_forecast_falls_back_to_the_fixed_default_width`).
+  Unlike a drifted _directional_ prediction, a drifted volatility forecast
+  never auto-pauses the strategy — it only affects width, never whether
+  this cycle acts.
+- **Liquidation distance, unconditionally.** The scaled stop-loss price is
+  passed through the exact same `place_order` call — and therefore the
+  exact same `StopBeyondLiquidationError` check — every automated
+  stop-loss already goes through; a widened stop that now sits beyond the
+  position's liquidation price is rejected (`no_action`, the entry never
+  placed), never silently placed anyway
+  (`test_a_widened_stop_that_would_cross_liquidation_is_rejected_not_placed`).
+- **Never a manual order.** `_resolve_stop_loss_pct` is reachable only
+  from the strategy scheduler's own `_open_position`; a manual order's
+  human-supplied `stop_loss_price`/`take_profit_price` goes straight
+  through `place_order`'s ordinary manual path and is never touched, an
+  account's volatility job configuration notwithstanding
+  (`test_a_manual_order_stop_loss_is_never_scaled_or_overridden`).
+
+**The boundary-preserving proof, not just a paragraph.**
+`test_direction_and_whether_to_trade_are_unaffected_only_width_differs`
+runs two accounts — identical in every respect except one has a
+volatility job configured — through the very same tick against the very
+same directional signal, and asserts the resulting positions' side,
+symbol, quantity and leverage are identical while only the stop-loss
+price differs. This is `docs/research/VOLATILITY_RISK_SIZING_DESIGN.md`'s
+own central claim about why Option B doesn't reopen D1 (leverage/direction
+must never be derived from a discredited confidence signal) — checked
+here directly, not merely asserted in a document.
+
 **"Just another caller," proven, not merely asserted.**
 `TestSharesExistingRiskLimits::test_a_strategy_order_that_would_breach_max_exposure_is_rejected`
 configures a tight `max_exposure_pct`, pre-fills most of that budget with

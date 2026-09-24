@@ -19,20 +19,22 @@ own scheduler.
 """
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.events.bus import EventBus
+from app.models.experiment import Experiment
 from app.prediction.feature_drift import FeatureDriftStatus
 from app.schemas.paper_trading import (
     PaperAccountCreateRequest,
     PaperOrderRequest,
     PaperStrategyConfigUpdateRequest,
 )
-from app.schemas.prediction import PredictionResponse
+from app.schemas.prediction import PredictionResponse, PredictionRunRequest
+from app.schemas.training import TrainingJobCreateRequest
 from app.services import paper_trading_strategy as strategy_module
 from app.services.paper_trading import PaperTradingService
 from app.services.paper_trading_strategy import PaperTradingStrategyScheduler, run_strategy_once
@@ -46,6 +48,7 @@ from tests.paper_trading.test_service import (
     seed_market,
 )
 from tests.prediction.test_service import train_completed_job
+from tests.training.test_service import build_service as build_training_service
 
 
 @pytest.fixture(autouse=True)
@@ -111,6 +114,34 @@ def stub_prediction(
     )
 
 
+class _RoutingPredictionService:
+    """Returns a different, caller-chosen outcome per `training_job_id` —
+    needed once a single cycle can call `PredictionService.run` for two
+    distinct jobs (VOLATILITY-STOP-WIDTH: the directional signal and the
+    optional volatility forecast), each of which must be controlled
+    independently rather than sharing one fixed `_StubPredictionService`
+    outcome regardless of which job was actually asked for."""
+
+    def __init__(self, outcomes: dict[str, PredictionResponse | Exception]) -> None:
+        self._outcomes = outcomes
+
+    async def run(self, request: PredictionRunRequest) -> PredictionResponse:
+        outcome = self._outcomes[str(request.training_job_id)]
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+
+def stub_predictions_by_job(
+    monkeypatch: pytest.MonkeyPatch, outcomes: dict[str, PredictionResponse | Exception]
+) -> None:
+    monkeypatch.setattr(
+        strategy_module,
+        "get_prediction_service",
+        lambda session: _RoutingPredictionService(outcomes),  # noqa: ARG005
+    )
+
+
 class _FreshEachCallPredictionService:
     """Mints a genuinely new `PredictionResponse` — a new `id`, a new
     `created_at` — on every single `.run()` call, while holding
@@ -155,16 +186,136 @@ async def enable_strategy(
     *,
     confidence_threshold_pct: Decimal = Decimal("50"),
     default_stop_loss_pct: Decimal = Decimal("5"),
+    volatility_training_job_id: uuid.UUID | None = None,
+    leverage: Decimal | None = None,
 ) -> None:
-    await service.update_strategy_config(
-        account_id,
-        PaperStrategyConfigUpdateRequest(
+    # `leverage=None` is a real, rejected state (see
+    # `PaperStrategyConfigUpdateRequest._reject_explicit_null_thresholds`),
+    # not "omitted" — built as two explicit variants, rather than a
+    # `**kwargs`-splatted dict, so a test that doesn't ask for a custom
+    # leverage never risks sending an explicit null for it.
+    # `volatility_training_job_id` has no such restriction (`None` is
+    # itself a meaningful, real "unscaled" state), so it is always passed
+    # through directly.
+    if leverage is not None:
+        request = PaperStrategyConfigUpdateRequest(
             enabled=True,
             training_job_id=uuid.UUID(job_id),
             confidence_threshold_pct=confidence_threshold_pct,
             default_stop_loss_pct=default_stop_loss_pct,
-        ),
-    )
+            volatility_training_job_id=volatility_training_job_id,
+            leverage=leverage,
+        )
+    else:
+        request = PaperStrategyConfigUpdateRequest(
+            enabled=True,
+            training_job_id=uuid.UUID(job_id),
+            confidence_threshold_pct=confidence_threshold_pct,
+            default_stop_loss_pct=default_stop_loss_pct,
+            volatility_training_job_id=volatility_training_job_id,
+        )
+    await service.update_strategy_config(account_id, request)
+
+
+async def seed_real_candles_on_own_exchange(
+    session_factory: SessionFactory, *, symbol: str, count: int = 80
+) -> None:
+    """`tests.training.test_service.seed_real_candles`'s own body, with a
+    symbol-derived exchange slug instead of its hardcoded `"delta"` — that
+    helper is only ever called once per test elsewhere in this codebase;
+    a test that needs two *different*, both-real-candle symbols in one
+    test (VOLATILITY-STOP-WIDTH's own wrong-symbol fail-closed case) would
+    otherwise collide on `exchanges.slug`'s uniqueness the second time it
+    ran."""
+    from app.models import Candle
+    from app.models.exchange import Exchange
+    from app.models.market import Market
+
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    async with session_factory() as session:
+        exchange = Exchange(
+            name=f"Delta Exchange {symbol}", slug=f"delta-{symbol.lower()}", country="India"
+        )
+        session.add(exchange)
+        await session.flush()
+        market = Market(
+            exchange_id=exchange.id,
+            symbol=symbol,
+            base_asset=symbol[:3],
+            quote_asset=symbol[3:],
+            market_type="perpetual",
+        )
+        session.add(market)
+        await session.commit()
+
+        price = 100.0
+        for i in range(count):
+            price += 3.0 if i % 3 != 0 else -4.0
+            open_time = base + timedelta(hours=i)
+            session.add(
+                Candle(
+                    market_id=market.id,
+                    timeframe="1h",
+                    open_time=open_time,
+                    close_time=open_time + timedelta(hours=1),
+                    open=Decimal(str(price)),
+                    high=Decimal(str(price + 2)),
+                    low=Decimal(str(price - 2)),
+                    close=Decimal(str(price)),
+                    volume=Decimal("100"),
+                    quote_volume=None,
+                    trade_count=None,
+                    source="delta",
+                )
+            )
+        await session.commit()
+
+
+async def train_second_job_on_existing_symbol(
+    session_factory: SessionFactory,
+    *,
+    symbol: str,
+    model_type: str,
+    target_config: list[dict[str, object]],
+) -> str:
+    """Trains a *second* job against a symbol whose candles/market were
+    already seeded by an earlier `train_completed_job`/
+    `train_completed_job_with_target_config` call for that same symbol —
+    VOLATILITY-STOP-WIDTH's own volatility job is always configured on the
+    same symbol the directional job already trades (`_resolve_stop_loss_pct`'s
+    own symbol-match gate), and `seed_real_candles` creates a brand new
+    `Exchange`/`Market` pair every time it runs, so calling it a second time
+    for the identical symbol would leave two ambiguous `Market` rows for
+    `MarketRepository.get_by_symbol` to resolve between. Returns the new
+    job's own id."""
+    async with session_factory() as session:
+        experiment = Experiment(
+            name="second job on an already-seeded symbol",
+            dataset_version="ds-real",
+            feature_set=[{"feature": "ohlcv", "params": {}}],
+            target_config=target_config,
+            split_config={"train": 0.7, "validation": 0.15, "test": 0.15},
+        )
+        session.add(experiment)
+        await session.commit()
+        experiment_id = str(experiment.id)
+
+    training_service = build_training_service(session_factory)
+    try:
+        job = await training_service.create(
+            TrainingJobCreateRequest(
+                experiment_id=uuid.UUID(experiment_id),
+                model_type=model_type,
+                symbol=symbol,
+                timeframe="1h",
+                normalize_features=True,
+            )
+        )
+        completed = await training_service.run(uuid.UUID(job.id))
+        assert completed.status == "completed", completed.error_message
+        return completed.id
+    finally:
+        await training_service.repository.session.close()
 
 
 @pytest.mark.asyncio
@@ -931,6 +1082,613 @@ class TestAutomatedPositionsAlwaysCarryAStopLoss:
         [triggered] = [o for o in orders.orders if o.trigger_reason is not None]
         assert triggered.trigger_reason == "stop_loss"
         assert triggered.side == "buy"
+
+
+@pytest.mark.asyncio
+class TestVolatilityStopWidth:
+    """VOLATILITY-STOP-WIDTH (Option B): `PaperAccount
+    .strategy_volatility_training_job_id` optionally scales a new
+    automated entry's stop-loss width from a second, `logistic_regression`
+    -trained `volatility_regime` forecast for the same symbol —
+    `_resolve_stop_loss_pct`'s own docstring has the full gate list. Every
+    test here trains two real, completed jobs on one shared symbol (never
+    a stub standing in for `TrainingJobRepository.get_by_id`, since
+    `_resolve_stop_loss_pct` reads `job.model_type`/`job.symbol` straight
+    from the database) and stubs only the *prediction* calls
+    (`stub_predictions_by_job`), for the same reason every other test in
+    this file stubs `PredictionService.run` rather than depending on a
+    real model's own harder-to-control output.
+    """
+
+    _VOLATILITY_TARGET_CONFIG: list[dict[str, object]] = [
+        {"target": "volatility_regime", "params": {"window_hours": "5"}}
+    ]
+
+    async def test_an_unconfigured_volatility_job_leaves_the_stop_loss_unscaled(
+        self, session_factory: SessionFactory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The default, pre-existing behaviour for every account that has
+        never set `strategy_volatility_training_job_id` — regression
+        safety for every other test in this file."""
+        symbol = "STRATVOLUNSETUSD"
+        job_id, _ = await train_completed_job(
+            session_factory, symbol=symbol, model_type="logistic_regression"
+        )
+        state_manager = MarketStateManager()
+        service = await build_service(session_factory, state_manager)
+        account = await service.create_account(
+            PaperAccountCreateRequest(starting_balance=Decimal("100000"))
+        )
+        await enable_strategy(
+            service, uuid.UUID(account.id), job_id, default_stop_loss_pct=Decimal("5")
+        )
+        stub_prediction(
+            monkeypatch,
+            build_prediction(
+                training_job_id=job_id, symbol=symbol, predicted_value="up", confidence=0.9
+            ),
+        )
+
+        scheduler = PaperTradingStrategyScheduler(state_manager=state_manager)
+        summary = await scheduler.run_strategy_tick()
+        assert summary.opened == 1
+
+        position = (await service.list_positions(uuid.UUID(account.id))).positions[0]
+        assert position.stop_loss_price is not None
+        order = (
+            await service.list_orders(
+                uuid.UUID(account.id), sort="created_at", direction="desc", limit=5, offset=0
+            )
+        ).orders[0]
+        expected = float(order.raw_price) * (1 - 0.05)
+        assert float(position.stop_loss_price) == pytest.approx(expected, rel=1e-6)
+
+    async def test_widens_the_stop_loss_on_an_expand_forecast(
+        self, session_factory: SessionFactory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        symbol = "STRATVOLEXPANDUSD"
+        directional_job_id, _ = await train_completed_job(
+            session_factory, symbol=symbol, model_type="logistic_regression"
+        )
+        volatility_job_id = await train_second_job_on_existing_symbol(
+            session_factory,
+            symbol=symbol,
+            model_type="logistic_regression",
+            target_config=self._VOLATILITY_TARGET_CONFIG,
+        )
+        state_manager = MarketStateManager()
+        service = await build_service(session_factory, state_manager)
+        account = await service.create_account(
+            PaperAccountCreateRequest(starting_balance=Decimal("100000"))
+        )
+        await enable_strategy(
+            service,
+            uuid.UUID(account.id),
+            directional_job_id,
+            default_stop_loss_pct=Decimal("5"),
+            volatility_training_job_id=uuid.UUID(volatility_job_id),
+        )
+        stub_predictions_by_job(
+            monkeypatch,
+            {
+                directional_job_id: build_prediction(
+                    training_job_id=directional_job_id,
+                    symbol=symbol,
+                    predicted_value="up",
+                    confidence=0.9,
+                ),
+                volatility_job_id: build_prediction(
+                    training_job_id=volatility_job_id,
+                    symbol=symbol,
+                    predicted_value="expand",
+                    confidence=0.6,
+                ),
+            },
+        )
+
+        scheduler = PaperTradingStrategyScheduler(state_manager=state_manager)
+        summary = await scheduler.run_strategy_tick()
+        assert summary.opened == 1
+
+        position = (await service.list_positions(uuid.UUID(account.id))).positions[0]
+        assert position.stop_loss_price is not None
+        order = (
+            await service.list_orders(
+                uuid.UUID(account.id), sort="created_at", direction="desc", limit=5, offset=0
+            )
+        ).orders[0]
+        # 5% default * 1.5 widen factor = 7.5%, below the resolved quote (a long).
+        expected = float(order.raw_price) * (1 - 0.075)
+        assert float(position.stop_loss_price) == pytest.approx(expected, rel=1e-6)
+
+        decision = (
+            await service.list_strategy_decisions(uuid.UUID(account.id), limit=5, offset=0)
+        ).decisions[0]
+        assert "widened" in decision.reason.lower()
+        assert "expand" in decision.reason.lower()
+
+    async def test_tightens_the_stop_loss_on_a_contract_forecast(
+        self, session_factory: SessionFactory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        symbol = "STRATVOLCONTRACTUSD"
+        directional_job_id, _ = await train_completed_job(
+            session_factory, symbol=symbol, model_type="logistic_regression"
+        )
+        volatility_job_id = await train_second_job_on_existing_symbol(
+            session_factory,
+            symbol=symbol,
+            model_type="logistic_regression",
+            target_config=self._VOLATILITY_TARGET_CONFIG,
+        )
+        state_manager = MarketStateManager()
+        service = await build_service(session_factory, state_manager)
+        account = await service.create_account(
+            PaperAccountCreateRequest(starting_balance=Decimal("100000"))
+        )
+        await enable_strategy(
+            service,
+            uuid.UUID(account.id),
+            directional_job_id,
+            default_stop_loss_pct=Decimal("5"),
+            volatility_training_job_id=uuid.UUID(volatility_job_id),
+        )
+        stub_predictions_by_job(
+            monkeypatch,
+            {
+                directional_job_id: build_prediction(
+                    training_job_id=directional_job_id,
+                    symbol=symbol,
+                    predicted_value="down",
+                    confidence=0.9,
+                ),
+                volatility_job_id: build_prediction(
+                    training_job_id=volatility_job_id,
+                    symbol=symbol,
+                    predicted_value="contract",
+                    confidence=0.6,
+                ),
+            },
+        )
+
+        scheduler = PaperTradingStrategyScheduler(state_manager=state_manager)
+        summary = await scheduler.run_strategy_tick()
+        assert summary.opened == 1
+
+        position = (await service.list_positions(uuid.UUID(account.id))).positions[0]
+        assert position.stop_loss_price is not None
+        order = (
+            await service.list_orders(
+                uuid.UUID(account.id), sort="created_at", direction="desc", limit=5, offset=0
+            )
+        ).orders[0]
+        # 5% default * 0.75 tighten factor = 3.75%, above the resolved quote (a short).
+        expected = float(order.raw_price) * (1 + 0.0375)
+        assert float(position.stop_loss_price) == pytest.approx(expected, rel=1e-6)
+
+        decision = (
+            await service.list_strategy_decisions(uuid.UUID(account.id), limit=5, offset=0)
+        ).decisions[0]
+        assert "tightened" in decision.reason.lower()
+        assert "contract" in decision.reason.lower()
+
+    async def test_a_drifted_volatility_forecast_falls_back_to_the_fixed_default_width(
+        self, session_factory: SessionFactory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The volatility forecast's own inputs reporting drifted must fall
+        back to `strategy_default_stop_loss_pct` unscaled — never a stale or
+        guessed width, and never silently continuing on the drifted reading
+        (mirroring how a drifted *directional* prediction already auto-pauses
+        the whole strategy elsewhere in this module, for the same reason)."""
+        symbol = "STRATVOLDRIFTUSD"
+        directional_job_id, _ = await train_completed_job(
+            session_factory, symbol=symbol, model_type="logistic_regression"
+        )
+        volatility_job_id = await train_second_job_on_existing_symbol(
+            session_factory,
+            symbol=symbol,
+            model_type="logistic_regression",
+            target_config=self._VOLATILITY_TARGET_CONFIG,
+        )
+        state_manager = MarketStateManager()
+        service = await build_service(session_factory, state_manager)
+        account = await service.create_account(
+            PaperAccountCreateRequest(starting_balance=Decimal("100000"))
+        )
+        await enable_strategy(
+            service,
+            uuid.UUID(account.id),
+            directional_job_id,
+            default_stop_loss_pct=Decimal("5"),
+            volatility_training_job_id=uuid.UUID(volatility_job_id),
+        )
+        stub_predictions_by_job(
+            monkeypatch,
+            {
+                directional_job_id: build_prediction(
+                    training_job_id=directional_job_id,
+                    symbol=symbol,
+                    predicted_value="up",
+                    confidence=0.9,
+                ),
+                volatility_job_id: build_prediction(
+                    training_job_id=volatility_job_id,
+                    symbol=symbol,
+                    predicted_value="expand",
+                    confidence=0.6,
+                    feature_drift_status="drifted",
+                    feature_drift_worst_feature="close",
+                    feature_drift_worst_z=-12.0,
+                ),
+            },
+        )
+
+        scheduler = PaperTradingStrategyScheduler(state_manager=state_manager)
+        summary = await scheduler.run_strategy_tick()
+        # The strategy's own auto-pause-on-drift only ever inspects the
+        # *directional* prediction's drift status (healthy here) — a
+        # drifted volatility forecast affects width alone, never whether
+        # this cycle acts at all.
+        assert summary.opened == 1
+        account_after = await service.get_account(uuid.UUID(account.id))
+        assert account_after.strategy_enabled is True
+        assert account_after.strategy_paused_reason is None
+
+        position = (await service.list_positions(uuid.UUID(account.id))).positions[0]
+        assert position.stop_loss_price is not None
+        order = (
+            await service.list_orders(
+                uuid.UUID(account.id), sort="created_at", direction="desc", limit=5, offset=0
+            )
+        ).orders[0]
+        expected = float(order.raw_price) * (1 - 0.05)  # unscaled default, not the 'expand' width
+        assert float(position.stop_loss_price) == pytest.approx(expected, rel=1e-6)
+
+        decision = (
+            await service.list_strategy_decisions(uuid.UUID(account.id), limit=5, offset=0)
+        ).decisions[0]
+        assert "drifted" in decision.reason.lower()
+        assert "unscaled default width used" in decision.reason.lower()
+
+    async def test_a_volatility_job_of_the_wrong_model_type_falls_back_to_the_fixed_default(
+        self, session_factory: SessionFactory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`strategy_volatility_training_job_id` must be `logistic_regression`
+        specifically — a `random_forest` job (even one genuinely trained on
+        `volatility_regime`, for the same symbol) is rejected as a forecast
+        source, fixed-default-fallback rather than used anyway. The stub
+        below deliberately has no entry for `volatility_job_id`: if
+        `_resolve_stop_loss_pct` ever called the prediction service for a
+        wrong-model-type job (a bug), the routing stub would raise
+        `KeyError` and the whole cycle would crash into `no_action` instead
+        of opening — this test would then fail loudly rather than passing
+        by accident."""
+        symbol = "STRATVOLWRONGMODELUSD"
+        directional_job_id, _ = await train_completed_job(
+            session_factory, symbol=symbol, model_type="logistic_regression"
+        )
+        volatility_job_id = await train_second_job_on_existing_symbol(
+            session_factory,
+            symbol=symbol,
+            model_type="random_forest",
+            target_config=self._VOLATILITY_TARGET_CONFIG,
+        )
+        state_manager = MarketStateManager()
+        service = await build_service(session_factory, state_manager)
+        account = await service.create_account(
+            PaperAccountCreateRequest(starting_balance=Decimal("100000"))
+        )
+        await enable_strategy(
+            service,
+            uuid.UUID(account.id),
+            directional_job_id,
+            default_stop_loss_pct=Decimal("5"),
+            volatility_training_job_id=uuid.UUID(volatility_job_id),
+        )
+        stub_predictions_by_job(
+            monkeypatch,
+            {
+                directional_job_id: build_prediction(
+                    training_job_id=directional_job_id,
+                    symbol=symbol,
+                    predicted_value="up",
+                    confidence=0.9,
+                ),
+            },
+        )
+
+        scheduler = PaperTradingStrategyScheduler(state_manager=state_manager)
+        summary = await scheduler.run_strategy_tick()
+        assert summary.opened == 1
+
+        position = (await service.list_positions(uuid.UUID(account.id))).positions[0]
+        assert position.stop_loss_price is not None
+        order = (
+            await service.list_orders(
+                uuid.UUID(account.id), sort="created_at", direction="desc", limit=5, offset=0
+            )
+        ).orders[0]
+        expected = float(order.raw_price) * (1 - 0.05)
+        assert float(position.stop_loss_price) == pytest.approx(expected, rel=1e-6)
+
+        decision = (
+            await service.list_strategy_decisions(uuid.UUID(account.id), limit=5, offset=0)
+        ).decisions[0]
+        assert "random_forest" in decision.reason.lower()
+        assert "unscaled default width used" in decision.reason.lower()
+
+    async def test_a_volatility_job_trained_on_a_different_symbol_falls_back_to_the_fixed_default(
+        self, session_factory: SessionFactory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A `logistic_regression` `volatility_regime` job is still the
+        wrong forecast source if it was trained on a different market —
+        never applied to a symbol it wasn't trained for, matching the
+        directional job's own "its own recorded symbol, never a
+        separately-configured one" rule elsewhere in this module."""
+        symbol = "STRATVOLSYMBOLAUSD"
+        directional_job_id, _ = await train_completed_job(
+            session_factory, symbol=symbol, model_type="logistic_regression"
+        )
+        await seed_real_candles_on_own_exchange(session_factory, symbol="STRATVOLSYMBOLBUSD")
+        volatility_job_id = await train_second_job_on_existing_symbol(
+            session_factory,
+            symbol="STRATVOLSYMBOLBUSD",
+            model_type="logistic_regression",
+            target_config=self._VOLATILITY_TARGET_CONFIG,
+        )
+        state_manager = MarketStateManager()
+        service = await build_service(session_factory, state_manager)
+        account = await service.create_account(
+            PaperAccountCreateRequest(starting_balance=Decimal("100000"))
+        )
+        await enable_strategy(
+            service,
+            uuid.UUID(account.id),
+            directional_job_id,
+            default_stop_loss_pct=Decimal("5"),
+            volatility_training_job_id=uuid.UUID(volatility_job_id),
+        )
+        stub_predictions_by_job(
+            monkeypatch,
+            {
+                directional_job_id: build_prediction(
+                    training_job_id=directional_job_id,
+                    symbol=symbol,
+                    predicted_value="up",
+                    confidence=0.9,
+                ),
+            },
+        )
+
+        scheduler = PaperTradingStrategyScheduler(state_manager=state_manager)
+        summary = await scheduler.run_strategy_tick()
+        assert summary.opened == 1
+
+        position = (await service.list_positions(uuid.UUID(account.id))).positions[0]
+        assert position.stop_loss_price is not None
+        order = (
+            await service.list_orders(
+                uuid.UUID(account.id), sort="created_at", direction="desc", limit=5, offset=0
+            )
+        ).orders[0]
+        expected = float(order.raw_price) * (1 - 0.05)
+        assert float(position.stop_loss_price) == pytest.approx(expected, rel=1e-6)
+
+        decision = (
+            await service.list_strategy_decisions(uuid.UUID(account.id), limit=5, offset=0)
+        ).decisions[0]
+        assert "STRATVOLSYMBOLBUSD" in decision.reason
+        assert "unscaled default width used" in decision.reason.lower()
+
+    async def test_direction_and_whether_to_trade_are_unaffected_only_width_differs(
+        self, session_factory: SessionFactory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The boundary-preserving test VOLATILITY-STOP-WIDTH itself asks
+        for: two accounts, identical in every respect except one has a
+        volatility job configured and the other doesn't, processed in the
+        very same tick against the very same directional signal — proves
+        the strategy's own whether-to-trade/which-direction decision is
+        unaffected by the volatility forecast being active at all, and
+        that only the stop-loss width differs. This is
+        VOLATILITY_RISK_SIZING_DESIGN.md's own central D1 claim ("trading
+        decisions stay identical, only size/width changes"), checked here
+        rather than merely asserted in a document."""
+        symbol = "STRATVOLBOUNDARYUSD"
+        directional_job_id, _ = await train_completed_job(
+            session_factory, symbol=symbol, model_type="logistic_regression"
+        )
+        volatility_job_id = await train_second_job_on_existing_symbol(
+            session_factory,
+            symbol=symbol,
+            model_type="logistic_regression",
+            target_config=self._VOLATILITY_TARGET_CONFIG,
+        )
+        state_manager = MarketStateManager()
+        service = await build_service(session_factory, state_manager)
+        account_unscaled = await service.create_account(
+            PaperAccountCreateRequest(starting_balance=Decimal("100000"))
+        )
+        account_scaled = await service.create_account(
+            PaperAccountCreateRequest(starting_balance=Decimal("100000"))
+        )
+        await enable_strategy(
+            service,
+            uuid.UUID(account_unscaled.id),
+            directional_job_id,
+            default_stop_loss_pct=Decimal("5"),
+        )
+        await enable_strategy(
+            service,
+            uuid.UUID(account_scaled.id),
+            directional_job_id,
+            default_stop_loss_pct=Decimal("5"),
+            volatility_training_job_id=uuid.UUID(volatility_job_id),
+        )
+        stub_predictions_by_job(
+            monkeypatch,
+            {
+                directional_job_id: build_prediction(
+                    training_job_id=directional_job_id,
+                    symbol=symbol,
+                    predicted_value="up",
+                    confidence=0.9,
+                ),
+                volatility_job_id: build_prediction(
+                    training_job_id=volatility_job_id,
+                    symbol=symbol,
+                    predicted_value="expand",
+                    confidence=0.6,
+                ),
+            },
+        )
+
+        scheduler = PaperTradingStrategyScheduler(state_manager=state_manager)
+        summary = await scheduler.run_strategy_tick()
+        assert summary.attempted == 2
+        assert summary.opened == 2
+        assert summary.no_action == 0
+
+        position_unscaled = (
+            await service.list_positions(uuid.UUID(account_unscaled.id))
+        ).positions[0]
+        position_scaled = (await service.list_positions(uuid.UUID(account_scaled.id))).positions[0]
+        assert position_unscaled.stop_loss_price is not None
+        assert position_scaled.stop_loss_price is not None
+
+        # Byte-identical: side, symbol, quantity, leverage — the actual
+        # trading decision, made before `_resolve_stop_loss_pct` is ever
+        # called.
+        assert position_unscaled.side == position_scaled.side == "long"
+        assert position_unscaled.symbol == position_scaled.symbol == symbol
+        assert float(position_unscaled.quantity) == pytest.approx(
+            float(position_scaled.quantity), rel=1e-12
+        )
+        assert float(position_unscaled.leverage) == pytest.approx(
+            float(position_scaled.leverage), rel=1e-12
+        )
+        # Only the stop-loss width differs — the scaled account's own is
+        # wider (the 'expand' forecast), never equal to the unscaled one.
+        assert float(position_scaled.stop_loss_price) != pytest.approx(
+            float(position_unscaled.stop_loss_price), rel=1e-9
+        )
+        assert float(position_scaled.stop_loss_price) < float(position_unscaled.stop_loss_price)
+
+        decision_unscaled = (
+            await service.list_strategy_decisions(uuid.UUID(account_unscaled.id), limit=5, offset=0)
+        ).decisions[0]
+        decision_scaled = (
+            await service.list_strategy_decisions(uuid.UUID(account_scaled.id), limit=5, offset=0)
+        ).decisions[0]
+        assert decision_unscaled.direction == decision_scaled.direction == "long"
+        assert decision_unscaled.action == decision_scaled.action == "opened"
+        assert decision_unscaled.predicted_value == decision_scaled.predicted_value == "up"
+
+    async def test_a_widened_stop_that_would_cross_liquidation_is_rejected_not_placed(
+        self, session_factory: SessionFactory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A default width that comfortably clears the liquidation distance
+        at this leverage can still be pushed past it once widened — this
+        must be rejected exactly as any other stop beyond liquidation would
+        be (`StopBeyondLiquidationError`, raised inside the very same
+        `place_order` call every automated entry already goes through),
+        never silently placed anyway. At 5x leverage the real liquidation
+        distance is ~19.8% of entry; 15% clears it comfortably but 15% *
+        1.5 = 22.5% does not."""
+        symbol = "STRATVOLLIQUSD"
+        directional_job_id, _ = await train_completed_job(
+            session_factory, symbol=symbol, model_type="logistic_regression"
+        )
+        volatility_job_id = await train_second_job_on_existing_symbol(
+            session_factory,
+            symbol=symbol,
+            model_type="logistic_regression",
+            target_config=self._VOLATILITY_TARGET_CONFIG,
+        )
+        state_manager = MarketStateManager()
+        service = await build_service(session_factory, state_manager)
+        account = await service.create_account(
+            PaperAccountCreateRequest(starting_balance=Decimal("100000"))
+        )
+        await enable_strategy(
+            service,
+            uuid.UUID(account.id),
+            directional_job_id,
+            default_stop_loss_pct=Decimal("15"),
+            volatility_training_job_id=uuid.UUID(volatility_job_id),
+            leverage=Decimal("5"),
+        )
+        stub_predictions_by_job(
+            monkeypatch,
+            {
+                directional_job_id: build_prediction(
+                    training_job_id=directional_job_id,
+                    symbol=symbol,
+                    predicted_value="up",
+                    confidence=0.9,
+                ),
+                volatility_job_id: build_prediction(
+                    training_job_id=volatility_job_id,
+                    symbol=symbol,
+                    predicted_value="expand",
+                    confidence=0.6,
+                ),
+            },
+        )
+
+        scheduler = PaperTradingStrategyScheduler(state_manager=state_manager)
+        summary = await scheduler.run_strategy_tick()
+        assert summary.opened == 0
+        assert summary.no_action == 1
+
+        positions = await service.list_positions(uuid.UUID(account.id))
+        assert positions.positions == []
+
+        decision = (
+            await service.list_strategy_decisions(uuid.UUID(account.id), limit=5, offset=0)
+        ).decisions[0]
+        assert decision.action == "no_action"
+        assert "rejected" in decision.reason.lower()
+        assert "liquidat" in decision.reason.lower()
+
+    async def test_a_manual_order_stop_loss_is_never_scaled_or_overridden(
+        self, session_factory: SessionFactory
+    ) -> None:
+        """`_resolve_stop_loss_pct` is only ever called from
+        `PaperTradingStrategyScheduler._open_position` — a manual order's
+        own human-supplied `stop_loss_price` goes straight through
+        `PaperTradingService.place_order`'s ordinary manual path, which
+        never calls it, regardless of whether this account also has a
+        volatility job configured for its *automated* strategy."""
+        other_job_id, _ = await train_completed_job(
+            session_factory, symbol="STRATVOLMANUALOTHERUSD", model_type="logistic_regression"
+        )
+        symbol = "STRATVOLMANUALUSD"
+        await seed_market(session_factory, symbol=symbol)
+        bus = EventBus()
+        state_manager = MarketStateManager().attach(bus)
+        await publish_ticker(bus, symbol, "1000")
+        service = await build_service(session_factory, state_manager)
+        account = await service.create_account(
+            PaperAccountCreateRequest(starting_balance=Decimal("100000"))
+        )
+        account_id = uuid.UUID(account.id)
+        # A volatility job IS configured on this account — the strategy
+        # itself is never enabled, but that's irrelevant to this test's own
+        # point: a manual order never consults this field at all.
+        await service.update_strategy_config(
+            account_id,
+            PaperStrategyConfigUpdateRequest(volatility_training_job_id=uuid.UUID(other_job_id)),
+        )
+
+        await service.place_order(
+            account_id,
+            PaperOrderRequest(
+                symbol=symbol, side="buy", quantity=Decimal("1"), stop_loss_price=Decimal("900")
+            ),
+        )
+
+        position = (await service.list_positions(account_id)).positions[0]
+        assert position.stop_loss_price is not None
+        assert float(position.stop_loss_price) == 900.0
 
 
 @pytest.mark.asyncio

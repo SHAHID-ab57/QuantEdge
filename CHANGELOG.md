@@ -8,6 +8,48 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Volatility-scaled stop-loss width for the automated strategy, and the
+  `volatility_regime` grading gap it depended on fixed first
+  (VOLATILITY-STOP-WIDTH).** Builds Option B from
+  `docs/research/VOLATILITY_RISK_SIZING_DESIGN.md`: an account may
+  optionally set a second, `logistic_regression`-trained
+  `volatility_regime` job (`PaperAccount
+.strategy_volatility_training_job_id`, `PATCH .../strategy`
+  `volatility_training_job_id`) whose fresh forecast scales
+  `strategy_default_stop_loss_pct` on a new automated entry — wider
+  ahead of a forecast `"expand"` (×1.5), tighter ahead of `"contract"`
+  (×0.75). Stop-loss width only, at position-open time only: never
+  position size, leverage, or which side is opened, and never a manual
+  order's own stop-loss. Full design, every fail-closed gate, and the
+  boundary-preserving proof in `ARCHITECTURE.md` § "Paper Trading" →
+  "Automated Strategy" → "Volatility-Scaled Stop-Loss Width".
+  - **Prerequisite fixed first: live `volatility_regime` predictions can
+    now actually be graded.** `volatility_regime` is the first target
+    whose label depends on candles on both sides of the row being
+    labeled, so the periodic grading pipeline
+    (`PredictionService._grade_one`) could never grade a live prediction
+    from it at all — a gap discovered and deliberately left open during
+    MODEL-QUALITY-T2. Fixed generally, not with a target-specific patch:
+    a new `TargetGenerator.leading_context(params)` method (the
+    backward-looking counterpart to the existing `horizon(params)`) plus
+    a matching `resolve_leading_context` (`app/prediction/engine.py`) and
+    a new `as_of_index` parameter on `grade_one`
+    (`app/prediction/grading.py`), so `_grade_one` fetches
+    `leading_context + horizon + 1` candles instead of just `horizon +
+1` and grades from the correct offset. Verified against an
+    independently-recomputed exact expected label, not merely that
+    grading no longer errors
+    (`tests/prediction/test_service.py::TestGradeNowResolvesNonHorizonNamedTargets`).
+  - Every gate is fail-closed to the unscaled default width: wrong model
+    lineage, wrong symbol, an unavailable forecast, or the forecast's own
+    inputs reading `feature_drift_status: "drifted"` (checked
+    independently of the directional signal's own drift gate — never
+    auto-pauses the strategy) all leave a new entry exactly as it would
+    have been without this feature. The scaled price still passes
+    through the same `StopBeyondLiquidationError` check every automated
+    stop-loss already faces; a widened stop that would now cross
+    liquidation is rejected, never placed anyway
+    (`tests/paper_trading/test_strategy_scheduler.py::TestVolatilityStopWidth`).
 - **Scheduled retraining with an enforced minimum window, and the affected
   drift-paused accounts retrained (RETRAIN-WITH-MINIMUM-WINDOW).** Closes
   the loop FEATURE-DRIFT-MONITOR opened: detection and auto-pause existed,

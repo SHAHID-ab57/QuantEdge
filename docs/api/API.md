@@ -2076,6 +2076,7 @@ Milestone 6's live-trading gate) in `ARCHITECTURE.md` § "Paper Trading"
   "training_job_id": "b3c1a2e4-...", // a completed job trained on real market data
   "confidence_threshold_pct": "70", // 0-100, matching every other risk/threshold field on this account
   "default_stop_loss_pct": "7", // (0, 100) — every automated entry attaches a stop-loss this far on the losing side of its fill price (below a long's, above a short's)
+  "volatility_training_job_id": "c4d2b3f5-...", // optional; a logistic_regression volatility_regime job that scales a new entry's stop-loss width. null (default) = unscaled
   "leverage": "2", // [1, the account's max_leverage] — the ONE fixed leverage for every automated entry, long or short
 }
 
@@ -2085,6 +2086,7 @@ Milestone 6's live-trading gate) in `ARCHITECTURE.md` § "Paper Trading"
   "strategy_training_job_id": "b3c1a2e4-...",
   "strategy_confidence_threshold_pct": "70.000000000000000000",
   "strategy_default_stop_loss_pct": "7.000000000000000000",
+  "strategy_volatility_training_job_id": null, // set only once a logistic_regression volatility_regime job is configured (VOLATILITY-STOP-WIDTH, below)
   "strategy_leverage": "2.000000000000000000", // default 2; never derived from a prediction's confidence
   "strategy_paused_reason": null, // "feature_drift" | null — set only when the scheduler itself, not this endpoint, disabled the strategy
   "strategy_paused_at": null, // when strategy_paused_reason was set; null exactly when it is
@@ -2158,6 +2160,34 @@ A client that polls `GET /paper-trading/accounts/{id}` may see
 `strategy_training_job_id` change between polls with no corresponding
 `PATCH .../strategy` in the audit log — that is this, working as designed,
 not a bug.
+
+**VOLATILITY-STOP-WIDTH ("Option B") can scale a new entry's stop-loss
+width from a second, independent forecast — position sizing, leverage,
+and direction are never touched.** An account may optionally set
+`volatility_training_job_id` (`PATCH .../strategy`) to a _second_
+training job — always `logistic_regression`, always trained on
+`volatility_regime`, always for the same symbol the directional
+`training_job_id` already trades — whose fresh forecast scales
+`default_stop_loss_pct` on every new automated entry: wider ahead of a
+forecast `"expand"` (×1.5), tighter ahead of `"contract"` (×0.75). This
+is stop-loss width only, at position-open time only — never position
+size, never leverage, never which side is opened or whether a cycle
+trades at all (those are decided first, exactly as before this field
+existed; see `ARCHITECTURE.md` § "Paper Trading" → "Automated Strategy"
+→ "Volatility-Scaled Stop-Loss Width" for the boundary-preserving proof).
+Every gate fails closed to the unscaled `default_stop_loss_pct` rather
+than guess: an unset field, a deleted/wrong-model-type/wrong-symbol job,
+an unavailable forecast, or that forecast's own inputs reading
+`feature_drift_status: "drifted"` all leave a new entry's stop-loss
+exactly as it would have been without this field at all. The resulting
+price still passes through the same liquidation-distance check every
+automated stop-loss already faces — a widened stop that would now sit
+beyond the position's liquidation price is rejected
+(`stop_beyond_liquidation`, 400) exactly as an unscaled one would be,
+never placed anyway. Never applies to a manually-placed order's own
+stop-loss/take-profit — those are set explicitly by a person via `PATCH
+.../positions/{symbol}` (above) or at order-open time, and this field
+never overrides them.
 
 Every cycle for every strategy-enabled account is logged exactly once,
 acted on or not — a below-threshold prediction, a non-directional

@@ -38,7 +38,7 @@ from app.evaluation.registry import MetricRegistry
 from app.features.dataset import FeatureRequest as DatasetFeatureRequest
 from app.ml_datasets.pipeline import TargetPipeline
 from app.models.prediction import Prediction
-from app.prediction.engine import PredictionEngine, resolve_target_entry
+from app.prediction.engine import PredictionEngine, resolve_leading_context, resolve_target_entry
 from app.prediction.errors import (
     InvalidPredictionSortError,
     LiveFeatureReconstructionNotSupportedError,
@@ -420,45 +420,63 @@ class PredictionService:
         if market is None:
             return None
 
-        candles = await self.candle_repository.get_candles(
-            market.id,
-            prediction.timeframe,
-            start=prediction.as_of,
-            end=None,
-            limit=prediction.horizon + 1,
-            offset=0,
-            sort="open_time",
-            direction="asc",
-        )
-        if len(candles) < prediction.horizon + 1:
-            # The target candle hasn't closed and been ingested yet.
-            return None
-
-        points = [to_point(candle) for candle in candles]
-        as_of = (
-            prediction.as_of if prediction.as_of.tzinfo else prediction.as_of.replace(tzinfo=UTC)
-        )
-        if points[0].open_time != as_of:
-            # Defensive: the candle this prediction was actually computed
-            # from is no longer the oldest one in range (should not happen —
-            # candles are append-only and `as_of` is always a real stored
-            # open_time). Treat as not-yet-gradeable rather than grade
-            # against the wrong starting candle.
-            logger.warning(
-                "Prediction %s: expected as_of candle %s not found at the start of the "
-                "fetched window (got %s); skipping this grading pass",
-                prediction.id,
-                as_of,
-                points[0].open_time,
-            )
-            return None
-
         experiment = await self.experiment_service.get(prediction.experiment_id)
         entry = resolve_target_entry(experiment.target_config, prediction.target_column)
         if entry is None:
             # The experiment's target_config no longer has an entry that
             # produced this column (e.g. edited since this job trained) —
             # nothing to reliably re-run.
+            return None
+        # VOLATILITY-STOP-WIDTH: a target like `volatility_regime`, whose
+        # own label compares a trailing window against a forward one,
+        # needs real candles *before* `as_of` too — resolved here, before
+        # the fetch below, exactly mirroring how `prediction.horizon` was
+        # already resolved (once, at prediction-creation time) for the
+        # forward side. `0` for every target before this one, so this is a
+        # no-op for the common case.
+        leading_context = resolve_leading_context(
+            experiment.target_config, prediction.target_column
+        )
+
+        as_of = (
+            prediction.as_of if prediction.as_of.tzinfo else prediction.as_of.replace(tzinfo=UTC)
+        )
+        fetch_start = as_of - resolution_duration(prediction.timeframe) * leading_context
+
+        candles = await self.candle_repository.get_candles(
+            market.id,
+            prediction.timeframe,
+            start=fetch_start,
+            end=None,
+            limit=leading_context + prediction.horizon + 1,
+            offset=0,
+            sort="open_time",
+            direction="asc",
+        )
+        if len(candles) < leading_context + prediction.horizon + 1:
+            # Either the target candle hasn't closed and been ingested yet,
+            # or (leading_context > 0 only) there isn't yet enough real
+            # history stored before `as_of` for this target's own trailing
+            # requirement either.
+            return None
+
+        points = [to_point(candle) for candle in candles]
+        if points[leading_context].open_time != as_of:
+            # Defensive: the candle this prediction was actually computed
+            # from is not at the expected offset within the fetched window
+            # (should not happen — candles are append-only, `as_of` is
+            # always a real stored open_time, and the fetch above requested
+            # exactly `leading_context` candles before it — but a gap in
+            # stored history would shift this). Treat as not-yet-gradeable
+            # rather than grade against the wrong candle.
+            logger.warning(
+                "Prediction %s: expected as_of candle %s not found at offset %d of the "
+                "fetched window (got %s); skipping this grading pass",
+                prediction.id,
+                as_of,
+                leading_context,
+                points[leading_context].open_time,
+            )
             return None
 
         return grade_one(
@@ -470,4 +488,5 @@ class PredictionService:
             candles=points,
             target_pipeline=self.target_pipeline,
             metric_registry=self.metric_registry,
+            as_of_index=leading_context,
         )

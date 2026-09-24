@@ -1245,6 +1245,10 @@ class PaperTradingService:
             if not job.symbol:
                 raise StrategyTrainingJobMissingSymbolError(new_training_job_id)
 
+        new_volatility_training_job_id = fields.get(
+            "volatility_training_job_id", account.strategy_volatility_training_job_id
+        )
+
         old_enabled = account.strategy_enabled
         old_training_job_id = account.strategy_training_job_id
         old_confidence_threshold_pct = account.strategy_confidence_threshold_pct
@@ -1266,6 +1270,7 @@ class PaperTradingService:
                 "strategy_training_job_id": new_training_job_id,
                 "strategy_confidence_threshold_pct": new_confidence_threshold_pct,
                 "strategy_default_stop_loss_pct": new_default_stop_loss_pct,
+                "strategy_volatility_training_job_id": new_volatility_training_job_id,
                 **(
                     {"strategy_paused_reason": None, "strategy_paused_at": None}
                     if clear_paused_reason

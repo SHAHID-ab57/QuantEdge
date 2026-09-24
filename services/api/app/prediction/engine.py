@@ -98,6 +98,36 @@ def resolve_horizon(target_config: list[TargetRequestDTO] | None, target_column:
         return None
 
 
+def resolve_leading_context(
+    target_config: list[TargetRequestDTO] | None, target_column: str
+) -> int:
+    """How many candles *before* the row being graded this target column
+    needs, via the target generator's own `leading_context(params)`.
+
+    The backward-looking counterpart to `resolve_horizon`
+    (VOLATILITY-STOP-WIDTH): `_grade_one` (`app/services/prediction.py`)
+    uses this to fetch enough history *before* `as_of`, not just enough
+    candles after it, before attempting to grade a prediction from a
+    target whose own label — like `volatility_regime`'s own trailing-vs-
+    forward comparison — depends on data on both sides of the row being
+    labeled. Defaults to `0` (no leading context needed) for an
+    unresolvable entry/generator, exactly matching
+    `TargetGenerator.leading_context`'s own default — a target that never
+    declared one needs none, not "unknown".
+    """
+    entry = resolve_target_entry(target_config, target_column)
+    if entry is None:
+        return 0
+    load_builtin_targets()
+    if not default_target_registry.has(entry.target):
+        return 0
+    generator = default_target_registry.get(entry.target)
+    try:
+        return int(generator.leading_context(entry.params))
+    except Exception:  # noqa: BLE001 - an unresolvable leading context is "none", not fatal here
+        return 0
+
+
 class PredictionEngine:
     """Shapes one prediction's response — the one place that decides what
     "confidence" means and never lets a probability-less model report one."""

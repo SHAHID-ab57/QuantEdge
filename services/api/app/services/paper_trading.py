@@ -1251,6 +1251,7 @@ class PaperTradingService:
 
         old_enabled = account.strategy_enabled
         old_training_job_id = account.strategy_training_job_id
+        old_volatility_training_job_id = account.strategy_volatility_training_job_id
         old_confidence_threshold_pct = account.strategy_confidence_threshold_pct
         old_default_stop_loss_pct = account.strategy_default_stop_loss_pct
         old_leverage = account.strategy_leverage
@@ -1339,6 +1340,9 @@ class PaperTradingService:
             old_value={
                 "enabled": old_enabled,
                 "training_job_id": str(old_training_job_id) if old_training_job_id else None,
+                "volatility_training_job_id": (
+                    str(old_volatility_training_job_id) if old_volatility_training_job_id else None
+                ),
                 "confidence_threshold_pct": str(old_confidence_threshold_pct),
                 "default_stop_loss_pct": str(old_default_stop_loss_pct),
                 "leverage": str(old_leverage),
@@ -1346,6 +1350,9 @@ class PaperTradingService:
             new_value={
                 "enabled": new_enabled,
                 "training_job_id": str(new_training_job_id) if new_training_job_id else None,
+                "volatility_training_job_id": (
+                    str(new_volatility_training_job_id) if new_volatility_training_job_id else None
+                ),
                 "confidence_threshold_pct": str(new_confidence_threshold_pct),
                 "default_stop_loss_pct": str(new_default_stop_loss_pct),
                 "leverage": str(new_leverage),

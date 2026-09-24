@@ -1875,6 +1875,132 @@ class TestUpdateStrategyConfig:
         with pytest.raises(IntegrityError):
             await service.account_repository.session.commit()
 
+    async def test_volatility_training_job_id_appears_in_the_audit_trail(
+        self, session_factory: SessionFactory
+    ) -> None:
+        """HOUSEKEEPING-2: found while attaching a real volatility job to a
+        live account — `update_strategy_config`'s own audit-log write
+        recorded old_value/new_value for every other strategy field but
+        silently omitted `volatility_training_job_id`, so a change to only
+        that field left an audit row with identical old_value/new_value
+        and no way to tell what actually changed, exactly the blind spot
+        LOG-ACCOUNT-CONFIG-CHANGES exists to close. Fixed by capturing
+        `old_volatility_training_job_id` before the mutating
+        `account_repository.update` call (the same pattern every other
+        `old_*` field already uses) and including both old and new in the
+        recorded snapshot."""
+        job_id, _ = await train_completed_job(
+            session_factory, symbol="PTSTRATVOLAUDITUSD", model_type="logistic_regression"
+        )
+        state_manager = MarketStateManager()
+        service = await build_service(session_factory, state_manager)
+        account = await service.create_account(
+            PaperAccountCreateRequest(starting_balance=Decimal("100000"))
+        )
+        account_id = uuid.UUID(account.id)
+
+        await service.update_strategy_config(
+            account_id,
+            PaperStrategyConfigUpdateRequest(volatility_training_job_id=uuid.UUID(job_id)),
+        )
+
+        audit_repository = AuditLogRepository(service.account_repository.session)
+        entries, _ = await audit_repository.list_entries(
+            resource_type="paper_account",
+            resource_id=str(account_id),
+            limit=5,
+            offset=0,
+        )
+        [entry] = [e for e in entries if e.action == "paper_account.update_strategy_config"]
+        assert entry.old_value is not None
+        assert entry.new_value is not None
+        assert entry.old_value["volatility_training_job_id"] is None
+        assert entry.new_value["volatility_training_job_id"] == job_id
+
+        # A second change shows the *previous* job as old_value, not None
+        # again and not the field silently missing. Seeded on its own
+        # exchange (a distinct slug) rather than via a second
+        # `train_completed_job` call: that helper's own `seed_real_candles`
+        # hardcodes the exchange slug `"delta"`, so a second call in the
+        # same test collides on `exchanges.slug`'s uniqueness.
+        second_symbol = "PTSTRATVOLAUDIT2USD"
+        async with session_factory() as seed_session:
+            exchange = Exchange(name="Delta Exchange 2", slug="delta-2", country="India")
+            seed_session.add(exchange)
+            await seed_session.flush()
+            market = Market(
+                exchange_id=exchange.id,
+                symbol=second_symbol,
+                base_asset=second_symbol[:3],
+                quote_asset=second_symbol[3:],
+                market_type="perpetual",
+            )
+            seed_session.add(market)
+            await seed_session.commit()
+            base = datetime(2026, 1, 1, tzinfo=UTC)
+            price = 100.0
+            for i in range(80):
+                price += 3.0 if i % 3 != 0 else -4.0
+                open_time = base + timedelta(hours=i)
+                seed_session.add(
+                    Candle(
+                        market_id=market.id,
+                        timeframe="1h",
+                        open_time=open_time,
+                        close_time=open_time + timedelta(hours=1),
+                        open=Decimal(str(price)),
+                        high=Decimal(str(price + 2)),
+                        low=Decimal(str(price - 2)),
+                        close=Decimal(str(price)),
+                        volume=Decimal("100"),
+                        quote_volume=None,
+                        trade_count=None,
+                        source="delta",
+                    )
+                )
+            await seed_session.commit()
+
+        second_experiment_id = await seed_experiment(
+            session_factory,
+            dataset_version="ds-real",
+            feature_set=[{"feature": "ohlcv", "params": {}}],
+            target_config=[{"target": "next_direction", "params": {"horizon": "1"}}],
+            split_config={"train": 0.7, "validation": 0.15, "test": 0.15},
+        )
+        training_service = build_training_service(session_factory)
+        second_job = await training_service.create(
+            TrainingJobCreateRequest(
+                experiment_id=uuid.UUID(second_experiment_id),
+                model_type="logistic_regression",
+                symbol=second_symbol,
+                timeframe="1h",
+                normalize_features=True,
+            )
+        )
+        second_completed = await training_service.run(uuid.UUID(second_job.id))
+        assert second_completed.status == "completed", second_completed.error_message
+        second_job_id = second_completed.id
+        await training_service.repository.session.close()
+        await service.update_strategy_config(
+            account_id,
+            PaperStrategyConfigUpdateRequest(volatility_training_job_id=uuid.UUID(second_job_id)),
+        )
+        entries, _ = await audit_repository.list_entries(
+            resource_type="paper_account",
+            resource_id=str(account_id),
+            limit=5,
+            offset=0,
+        )
+        [latest] = [
+            e
+            for e in entries
+            if e.action == "paper_account.update_strategy_config"
+            and e.new_value is not None
+            and e.new_value["volatility_training_job_id"] == second_job_id
+        ]
+        assert latest.old_value is not None
+        assert latest.old_value["volatility_training_job_id"] == job_id
+
 
 @pytest.mark.asyncio
 class TestUpdateStrategyConfigClearsAnAutomatedDriftPause:

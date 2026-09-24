@@ -3729,10 +3729,30 @@ job whose fresh `volatility_regime` forecast scales
 a forecast `"expand"` (×1.5), tighter ahead of `"contract"` (×0.75),
 fixed, documented constants
 (`app.services.paper_trading_strategy._VOLATILITY_WIDEN_FACTOR`/
-`_TIGHTEN_FACTOR`), a reasoned starting point rather than one fit to
-historical data — a natural target for later tuning once this is watched
-running for real, per `docs/research/VOLATILITY_RISK_SIZING_DESIGN.md`'s
-own "After This" note. This followed on from a prerequisite gap the design
+`_TIGHTEN_FACTOR`). **Grounded in real historical data
+(VOLATILITY-MULTIPLIER-CHECK), not left as an intuition-only guess**: the
+one number in this whole risk-sizing thread that wasn't yet derived from
+data, checked directly against the platform's own stored candle history
+rather than reasoned about in the abstract. Replaying `volatility_regime`'s
+own trailing/forward realized-volatility computation (`window_hours=24`,
+the target's own default, already assumed elsewhere in this thread) over
+every labeled row of real ETHUSD/1h and BTCUSD/1h history (22,949 and
+23,452 rows respectively) and taking the ratio `forward_vol / trailing_vol`
+conditioned on each label gives, for ETHUSD: `"expand"` median 1.40 (IQR
+1.17–1.77, mean 1.65 — right-skewed by rare large spikes, max 39.7×) and
+`"contract"` median 0.71 (IQR 0.56–0.86, mean 0.70); BTCUSD is
+consistent (`"expand"` median 1.42, `"contract"` median 0.70). The
+current ×1.5/×0.75 sit inside both symbols' own interquartile ranges,
+close to the median (skewed slightly toward the more conservative side
+of each distribution — a smaller widen and a milder tighten than the raw
+median alone would suggest, which is the right direction to err on a
+risk-facing parameter) — **confirmed already reasonable, not replaced**.
+The spread itself is real and worth stating plainly: a single fixed
+multiplier is a simplification of a genuinely wide distribution (the
+IQR spans roughly 1.17–1.77× and 0.56–0.86×), not a tight, well-defined
+constant — a real target for a future, forecast-magnitude-aware version
+of this feature, not evidence that ×1.5/×0.75 are wrong today. This
+followed on from a prerequisite gap the design
 doc itself flagged: `volatility_regime` is the first target whose label
 depends on candles on _both_ sides of the row being labeled (a trailing
 window as well as the forward one every other target already needed), so

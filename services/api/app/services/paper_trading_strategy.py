@@ -172,13 +172,22 @@ _TARGET_POSITION_SIZE_FRACTION = Decimal("0.5")
 #: expand or contract relative to the trailing window, with no magnitude),
 #: so the response is a modest, asymmetric adjustment — more protective
 #: headroom ahead of an expansion than eagerness to tighten ahead of a
-#: contraction — chosen as a reasoned starting point, not fit to historical
-#: data; a natural target for later tuning once this is watched running for
-#: real (VOLATILITY_RISK_SIZING_DESIGN.md's own "After This" note). Applied
-#: only to a new automated entry's own stop-loss; a manual order's own
-#: human-supplied stop-loss is never touched, and every resulting price
-#: still passes through the exact same liquidation-distance check
-#: `place_order` already enforces on every stop, scaled or not.
+#: contraction. **Grounded in real data (VOLATILITY-MULTIPLIER-CHECK)**:
+#: replaying this target's own trailing/forward realized-volatility ratio
+#: over every labeled row of real ETHUSD/1h and BTCUSD/1h history gives an
+#: "expand" ratio (forward_vol/trailing_vol) of median ~1.40-1.42 (IQR
+#: ~1.17-1.83) and a "contract" ratio of median ~0.70-0.71 (IQR
+#: ~0.54-0.86) on both symbols — ×1.5/×0.75 sit inside both IQRs, close to
+#: but slightly more conservative than the raw median, and are confirmed
+#: reasonable rather than replaced (see `ARCHITECTURE.md` § "Volatility-
+#: Scaled Stop-Loss Width" for the full distribution and symbol-by-symbol
+#: numbers). The spread is real, not narrow — a single fixed multiplier is
+#: a simplification a future, forecast-magnitude-aware version of this
+#: feature could improve on. Applied only to a new automated entry's own
+#: stop-loss; a manual order's own human-supplied stop-loss is never
+#: touched, and every resulting price still passes through the exact same
+#: liquidation-distance check `place_order` already enforces on every
+#: stop, scaled or not.
 _VOLATILITY_WIDEN_FACTOR = Decimal("1.5")
 _VOLATILITY_TIGHTEN_FACTOR = Decimal("0.75")
 

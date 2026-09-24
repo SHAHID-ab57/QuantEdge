@@ -1359,6 +1359,26 @@ and deliberately left open (`volatility_regime`'s own predictions still
 can't be graded, for a second, different reason: `_grade_one` never
 fetches the trailing context a backward-looking target needs).
 
+**VERIFY-VOLATILITY-FEATURE then put `realized_volatility`'s own claim
+through the same adversarial scrutiny that had just dissolved
+`triple_barrier`'s — and it survived.** Five checks, run in order: the
+feature's exact window boundary, shown with a worked example (row
+`index`'s own value uses `log_returns[index-window+1..index]` inclusive,
+nothing with a higher index); a new adversarial no-look-ahead test
+(`tests/features/test_builtin_generators.py`'s
+`TestRealizedVolatilityNoLookAhead`), matching the exact "poison the
+future, confirm the past is unaffected" methodology
+`funding_rate`/`open_interest` already required; a boundary-shift stress
+test (a faithful, hyperparameter-exact replication of the real
+comparison, re-run with the feature deliberately delayed by 1-24 hours)
+showing AUC decaying _gradually_, not collapsing at a 1-hour shift the
+way a boundary bug would; the existing cross-check window, corroborating
+rather than contradicting the primary comparison; and a regime
+walk-forward showing every one of 9 regime/model AUCs land in 0.56-0.81
+— never once inside `triple_barrier`'s own 0.44-0.54 chance range, though
+`random_forest`/`gradient_boosting` do weaken specifically in the choppy
+regime. Full detail: `docs/research/VOLATILITY_FEATURE_VERIFICATION.md`.
+
 **`MLDatasetBuilder.build()`** (`dataset.py`) is pure composition: the
 _existing_ `FeatureDatasetBuilder` builds features, the new `TargetPipeline`
 generates targets over the full range, targets are realigned and

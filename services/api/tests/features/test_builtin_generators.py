@@ -228,6 +228,108 @@ class TestRealizedVolatility:
         assert values[2] is None  # the zero-close return is undefined, so its window can't be
 
 
+class TestRealizedVolatilityNoLookAhead:
+    """VERIFY-VOLATILITY-FEATURE, Steps 1-2: the same adversarial no-look-ahead
+    proof `TestNoLookAhead` (`tests/features/test_delta_market_data_features.py`)
+    already requires of `funding_rate`/`open_interest` — a single, isolated
+    "spike" candle whose effect on every other row's value is checked
+    precisely, the same "poison the future, confirm the past is unaffected"
+    shape, adapted for a rolling-window statistic instead of a step-function
+    external value.
+
+    A flat series (every close identical, so every log return is exactly
+    0.0 and every trailing-window stdev is exactly 0.0) with one huge price
+    jump at a single known row makes the feature's own window boundary
+    directly observable: the jump can only ever change `pstdev(...)` away
+    from 0.0 for the rows whose own trailing window actually contains it.
+    """
+
+    SPIKE_INDEX = 10
+    WINDOW = 5
+
+    def _bars(self, *, spike_close: float = 500.0, n: int = 20):  # noqa: ANN202 - test helper
+        bars = [candle(i, open_=100, high=100, low=100, close=100) for i in range(n)]
+        bars[self.SPIKE_INDEX] = candle(
+            self.SPIKE_INDEX,
+            open_=spike_close,
+            high=spike_close,
+            low=spike_close,
+            close=spike_close,
+        )
+        return bars
+
+    def test_worked_example_the_exact_window_boundary(self, pipeline: FeaturePipeline) -> None:
+        """Step 1: the precise computation window, shown with real numbers,
+        not described. `log_returns[j] = log(close[j] / close[j-1])` — the
+        return *realized during* candle `j`, fully known once candle `j`
+        has closed. Row `index`'s own value is `pstdev(log_returns[index -
+        window + 1 : index + 1])` — inclusive of `log_returns[index]`
+        itself (candle `index`'s own just-closed return) and nothing with
+        a higher index. For `SPIKE_INDEX=10`, `WINDOW=5`: the spike return
+        `log_returns[10] = log(500/100)` first enters row 10's own trailing
+        window (`log_returns[6:11]`) and last appears in row 14's
+        (`log_returns[10:15]`); row 9's own window is `log_returns[5:10]`
+        — the slice upper bound `10` is *exclusive*, so index 9 (and
+        therefore the spike return at index 10) is never included."""
+        import math
+
+        bars = self._bars()
+        run = pipeline.run("realized_volatility", bars, {"window": str(self.WINDOW)})
+        values = columns_of(run.output)[f"realized_volatility_{self.WINDOW}"]
+
+        spike_return = math.log(500.0 / 100.0)
+        assert spike_return == pytest.approx(1.6094, abs=1e-3)
+        # Row 9's own window is log_returns[5:10] — strictly before the spike.
+        assert values[9] == pytest.approx(0.0)
+        # Row 10's own window is log_returns[6:11] — includes the spike (index 10).
+        assert values[10] > 0.5
+
+    def test_a_future_spike_never_changes_a_past_rows_value(
+        self, pipeline: FeaturePipeline
+    ) -> None:
+        """The direct 'poison the future' proof: every row strictly before
+        the spike is byte-identical whether or not the spike ever happens —
+        computed from a completely disjoint, non-poisoned candle series
+        truncated right before it, not merely asserted to be zero."""
+        poisoned = self._bars()
+        clean = poisoned[: self.SPIKE_INDEX]  # candles 0..9 only — the spike never happens
+
+        poisoned_run = pipeline.run("realized_volatility", poisoned, {"window": str(self.WINDOW)})
+        clean_run = pipeline.run("realized_volatility", clean, {"window": str(self.WINDOW)})
+
+        poisoned_values = columns_of(poisoned_run.output)[f"realized_volatility_{self.WINDOW}"]
+        clean_values = columns_of(clean_run.output)[f"realized_volatility_{self.WINDOW}"]
+
+        # Every row that exists in both series (0..9) must match exactly —
+        # the spike at index 10 must not reach backward into any of them.
+        assert poisoned_values[: self.SPIKE_INDEX] == clean_values
+
+    def test_the_window_has_a_hard_trailing_edge_the_spike_eventually_rolls_out_of(
+        self, pipeline: FeaturePipeline
+    ) -> None:
+        """The window is *rolling*, not cumulative: once enough real hours
+        have passed that neither anomalous return is among the trailing
+        `WINDOW` returns, the feature must read exactly 0.0 again — proving
+        the window is bounded on both sides, not merely non-negative on the
+        left (Step 1's own boundary claim, from the other direction). A
+        single spiked *candle* produces two anomalous *returns* — the jump
+        in (`log_returns[10]`) and the jump back out
+        (`log_returns[11]`) — so the affected rows are 10 through 15
+        (whichever row's own trailing window contains either one), not
+        just 10 through 14."""
+        bars = self._bars(n=self.SPIKE_INDEX + self.WINDOW + 6)
+        run = pipeline.run("realized_volatility", bars, {"window": str(self.WINDOW)})
+        values = columns_of(run.output)[f"realized_volatility_{self.WINDOW}"]
+
+        last_affected_row = (
+            self.SPIKE_INDEX + self.WINDOW
+        )  # 15: window [11, 15] still has return[11]
+        for index in range(self.SPIKE_INDEX, last_affected_row + 1):
+            assert values[index] > 0.5, f"row {index} should still see one of the two spikes"
+        for index in range(last_affected_row + 1, len(bars)):
+            assert values[index] == pytest.approx(0.0), f"row {index} should have rolled past it"
+
+
 class TestIndicatorBackedFeatures:
     """SMA/EMA/WMA delegate to the indicator engine rather than reimplementing it."""
 

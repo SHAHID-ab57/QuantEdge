@@ -21,11 +21,6 @@ def _settings(**overrides: object) -> SimpleNamespace:
     values = {
         "market_data_live": False,
         "delta_market_symbols": "ETHUSD, BTCUSD",
-        "candle_sync_enabled": False,
-        "candle_sync_interval_seconds": 300,
-        "candle_sync_backfill_days": 3,
-        "prediction_grading_enabled": False,
-        "prediction_grading_interval_seconds": 300,
         "delta_base_url": "https://api.test.invalid",
         "delta_api_key": "",
         "delta_api_secret": "",
@@ -51,17 +46,6 @@ def _settings(**overrides: object) -> SimpleNamespace:
         "paper_trading_funding_enabled": False,
         "paper_trading_funding_interval_seconds": 300,
         "paper_trading_funding_lookback_hours": 48,
-        # Read by `ExternalDataSyncScheduler`'s own construction in
-        # `Runtime.start` — mirrors `app/core/config.py`'s real defaults.
-        "external_data_sync_enabled": False,
-        "external_data_sync_interval_seconds": 3600,
-        "external_data_sync_sources": "",
-        "external_data_sync_backfill_days": 3650,
-        # Read by `NewsSyncScheduler`'s own construction in `Runtime.start`
-        # — mirrors `app/core/config.py`'s real defaults.
-        "news_sync_enabled": False,
-        "news_sync_interval_seconds": 21600,
-        "news_sync_backfill_days": 3650,
         # Read by `OrderFlowCapture`'s construction in `Runtime.__init__`
         # — mirrors `app/core/config.py`'s real defaults.
         "orderflow_capture_enabled": True,
@@ -71,14 +55,6 @@ def _settings(**overrides: object) -> SimpleNamespace:
         "orderflow_trade_buffer_max": 500,
         "orderflow_retention_days": 365,
         "orderflow_prune_interval_seconds": 3600,
-        # Read by `RetrainingScheduler`'s own construction in `Runtime.start`
-        # (RETRAIN-WITH-MINIMUM-WINDOW) — mirrors `app/core/config.py`'s real
-        # defaults.
-        "retraining_scheduler_enabled": False,
-        "retraining_experiment_ids": "",
-        "retraining_tick_interval_seconds": 3600,
-        "retraining_min_interval_seconds": 168 * 3600,
-        "retraining_window_hours": 8760,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -167,9 +143,7 @@ async def test_start_and_shutdown_offline(monkeypatch: pytest.MonkeyPatch) -> No
     runtime = get_runtime()
     assert runtime.pipeline is None
     assert runtime.delta_ws is None
-    assert runtime.candle_sync is None
     assert runtime.paper_trading_strategy is None
-    assert runtime.external_data_sync is None
 
     await shutdown_runtime()
     assert runtime_module._runtime is None
@@ -195,63 +169,6 @@ async def test_start_live_wires_pipeline_and_ws(
     await shutdown_runtime()
     assert fake_ws.closed is True
     assert runtime_module._runtime is None
-
-
-async def test_runtime_shutdown_stops_candle_sync(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The candle sync scheduler is stopped when configured."""
-    stopped = []
-
-    class FakeSync:
-        async def start(self) -> None:
-            pass
-
-        async def stop(self) -> None:
-            stopped.append(True)
-
-    monkeypatch.setattr(
-        runtime_module,
-        "get_settings",
-        lambda: _settings(candle_sync_enabled=True),
-    )
-    monkeypatch.setattr(runtime_module, "CandleSyncScheduler", lambda **_: FakeSync())
-
-    runtime = _runtime()
-    await runtime.start()
-    assert runtime.candle_sync is not None
-    await runtime.shutdown()
-    assert stopped == [True]
-    assert runtime.candle_sync is None
-
-
-async def test_runtime_shutdown_stops_prediction_grading(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The prediction grading scheduler is stopped when configured — the
-    same start/shutdown wiring `CandleSyncScheduler` already gets."""
-    stopped = []
-
-    class FakeGrading:
-        async def start(self) -> None:
-            pass
-
-        async def stop(self) -> None:
-            stopped.append(True)
-
-    monkeypatch.setattr(
-        runtime_module,
-        "get_settings",
-        lambda: _settings(prediction_grading_enabled=True),
-    )
-    monkeypatch.setattr(runtime_module, "PredictionGradingScheduler", lambda **_: FakeGrading())
-
-    runtime = _runtime()
-    await runtime.start()
-    assert runtime.prediction_grading is not None
-    await runtime.shutdown()
-    assert stopped == [True]
-    assert runtime.prediction_grading is None
 
 
 async def test_runtime_shutdown_stops_paper_trading_strategy(
@@ -326,98 +243,6 @@ async def test_runtime_does_not_start_funding_when_disabled(
     await runtime.start()
     assert runtime.paper_funding is None
     await runtime.shutdown()
-
-
-async def test_runtime_shutdown_stops_external_data_sync(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The external data sync scheduler is stopped when configured — the
-    same start/shutdown wiring `CandleSyncScheduler`/
-    `PredictionGradingScheduler`/`PaperTradingStrategyScheduler` already
-    get."""
-    stopped = []
-
-    class FakeExternalDataSync:
-        async def start(self) -> None:
-            pass
-
-        async def stop(self) -> None:
-            stopped.append(True)
-
-    monkeypatch.setattr(
-        runtime_module,
-        "get_settings",
-        lambda: _settings(external_data_sync_enabled=True),
-    )
-    monkeypatch.setattr(
-        runtime_module, "ExternalDataSyncScheduler", lambda **_: FakeExternalDataSync()
-    )
-
-    runtime = _runtime()
-    await runtime.start()
-    assert runtime.external_data_sync is not None
-    await runtime.shutdown()
-    assert stopped == [True]
-    assert runtime.external_data_sync is None
-
-
-async def test_runtime_shutdown_stops_retraining(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The scheduled retraining loop (RETRAIN-WITH-MINIMUM-WINDOW) is
-    stopped when configured — wired into start/shutdown the identical way
-    every other scheduler already is."""
-    stopped = []
-
-    class FakeRetraining:
-        async def start(self) -> None:
-            pass
-
-        async def stop(self) -> None:
-            stopped.append(True)
-
-    monkeypatch.setattr(
-        runtime_module,
-        "get_settings",
-        lambda: _settings(
-            retraining_scheduler_enabled=True,
-            retraining_experiment_ids="6f1e4a2c-3b8d-4c9a-9e2f-1a7c5d6b8e90",
-        ),
-    )
-    monkeypatch.setattr(runtime_module, "RetrainingScheduler", lambda **_: FakeRetraining())
-
-    runtime = _runtime()
-    await runtime.start()
-    assert runtime.retraining is not None
-    await runtime.shutdown()
-    assert stopped == [True]
-
-
-async def test_runtime_shutdown_stops_news_sync(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The news sync scheduler is stopped when configured — a genuinely
-    separate scheduler from `ExternalDataSyncScheduler` (see
-    `ConnectorMetadata.auto_synced`'s own docstring for why), but wired
-    into start/shutdown the identical way."""
-    stopped = []
-
-    class FakeNewsSync:
-        async def start(self) -> None:
-            pass
-
-        async def stop(self) -> None:
-            stopped.append(True)
-
-    monkeypatch.setattr(
-        runtime_module,
-        "get_settings",
-        lambda: _settings(news_sync_enabled=True),
-    )
-    monkeypatch.setattr(runtime_module, "NewsSyncScheduler", lambda **_: FakeNewsSync())
-
-    runtime = _runtime()
-    await runtime.start()
-    assert runtime.news_sync is not None
-    await runtime.shutdown()
-    assert stopped == [True]
-    assert runtime.news_sync is None
 
 
 async def test_delta_connection_none_when_not_running() -> None:

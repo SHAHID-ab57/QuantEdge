@@ -15,6 +15,7 @@ regardless of import order.
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -77,3 +78,40 @@ def find_duplicate_env_keys(path: str | Path) -> list[DuplicateEnvKey]:
         for key, occurrences in occurrences_by_key.items()
         if len(occurrences) > 1
     ]
+
+
+def raise_for_conflicting_duplicates(
+    duplicates: list[DuplicateEnvKey], *, logger: logging.Logger
+) -> None:
+    """Shared ENV-CONFIG-INTEGRITY decision: warn on a harmless duplicate
+    (identical values), raise on a conflicting one. Takes an already-computed
+    duplicate list rather than a path so every entrypoint that needs this
+    (`app.application`'s API startup, `app.scheduler_main`'s scheduler-process
+    startup) keeps calling `find_duplicate_env_keys` itself under its own
+    module attribute — needed so each entrypoint's own tests can monkeypatch
+    that call independently, which patching a shared call site here would break.
+    """
+    conflicting: list[str] = []
+    for duplicate in duplicates:
+        if duplicate.values_differ:
+            declarations = ", ".join(
+                f"line {line_number}={value!r}" for line_number, value in duplicate.occurrences
+            )
+            conflicting.append(
+                f"{duplicate.key} ({declarations}; effective value: {duplicate.effective_value!r})"
+            )
+        else:
+            logger.warning(
+                "%s is declared %d times in .env with the identical value — harmless, "
+                "but worth removing the redundant line(s)",
+                duplicate.key,
+                len(duplicate.occurrences),
+            )
+    if conflicting:
+        raise RuntimeError(
+            "Conflicting duplicate keys in .env (ENV-CONFIG-INTEGRITY): "
+            + "; ".join(conflicting)
+            + ". python-dotenv silently resolves each to its LAST declaration — this "
+            "is exactly how RETRAINING_EXPERIMENT_IDS sat nullified with no error "
+            "anywhere. Remove the redundant declaration(s) before starting."
+        )

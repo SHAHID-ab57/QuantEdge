@@ -22,38 +22,51 @@ still requires a human to SSH in and run the same steps correctly.
 
 ## Overview
 
-The stack is four containers on one machine, orchestrated by
+The stack is five containers on one machine, orchestrated by
 `infra/docker/docker-compose.yml`:
 
 - `web` — the Next.js 15 dashboard (`apps/dashboard`), served standalone on
   port 3000.
 - `api` — the FastAPI backend (`services/api`), served by a single
   `uvicorn` process on port 8000.
+- `scheduler` — the standalone background-scheduler process
+  (`python -m app.scheduler_main`), sharing `api`'s build context but
+  running as its own container with no HTTP port. Added per
+  `docs/infrastructure/EVENT_LOOP_SEPARATION_DESIGN.md` to get candle
+  sync, prediction grading, external-data sync, news sync, and
+  retraining off `api`'s request-serving event loop.
 - `postgres` — PostgreSQL 17 (`postgres:17-alpine`).
 - `redis` — Redis 7 (`redis:7-alpine`), used for rate limiting, login
   lockout, and token revocation.
 
 Plus one one-shot `migrate` service (see
-[Deployment procedure](#deployment-procedure)). All four/five services run
+[Deployment procedure](#deployment-procedure)). All five/six services run
 on a single DigitalOcean droplet, on one Docker bridge network. There is no
-load balancer, no reverse proxy, and no multi-instance setup — `web` and
-`api` are each a single container.
+load balancer, no reverse proxy, and no multi-instance setup — each
+service is a single container.
 
-**Real architectural constraint discovered during today's deploy**: the
-`api` container's `uvicorn` process is started with no `--workers` flag
-(`services/api/Dockerfile`'s `CMD`) — a single ASGI worker. That same
-process also owns the live Delta Exchange WebSocket feed and every
-background scheduler (candle sync, external-data sync, news sync,
-prediction grading, paper-trading strategy, order-flow capture) via
-`app/runtime.py`'s `Runtime` composition root. Naively adding
-`--workers N` would duplicate the live WS connection and every scheduler
-N-fold across worker processes — a real redesign, not a config flag. This
-constraint is **not yet documented in `ARCHITECTURE.md`** — that file's own
-"Deployment View" section still says "No production deployment topology is
-defined anywhere in this repository yet," and its "Scalability Strategy"
-section is an unwritten placeholder (`> To be completed in future tasks.`).
-Today it exists only in this session's commit messages (notably
-`d009d1b`, `c32d777`) and here.
+**Real architectural constraint discovered during the initial deploy, since
+partially addressed**: the `api` container's `uvicorn` process is started
+with no `--workers` flag (`services/api/Dockerfile`'s `CMD`) — a single
+ASGI worker. That same process owns the live Delta Exchange WebSocket
+feed, `StopLossTakeProfitMonitor`, order-flow capture, and the two
+paper-trading schedulers (strategy, funding) via `app/runtime.py`'s
+`Runtime` composition root — all of them read live in-memory price state
+that only exists in this one process, which is why they couldn't simply
+move to `scheduler` (see `EVENT_LOOP_SEPARATION_DESIGN.md`'s Option 1/2
+analysis for why that would need a new cross-process state bridge).
+Candle sync, prediction grading, external-data sync, news sync, and
+retraining had no such dependency and now run in `scheduler` instead —
+this removed one confirmed, measured source of event-loop contention
+(`docs/infrastructure/WORKER_HEADROOM_CHECK.md`), but naively adding
+`--workers N` to `api` itself would still duplicate the live WS
+connection and the remaining live-state-coupled components N-fold — still
+a real redesign, not a config flag, if `api` itself ever needs to scale
+beyond one process. This constraint is **not yet documented in
+`ARCHITECTURE.md`** — that file's own "Deployment View" section still says
+"No production deployment topology is defined anywhere in this
+repository yet," and its "Scalability Strategy" section is an unwritten
+placeholder (`> To be completed in future tasks.`).
 
 ## Environments
 
@@ -78,8 +91,8 @@ during today's deploy — they are not hypothetical.
 
 ```bash
 git pull
-docker compose -f infra/docker/docker-compose.yml build --no-cache api
-docker compose -f infra/docker/docker-compose.yml up -d api
+docker compose -f infra/docker/docker-compose.yml build --no-cache api migrate scheduler
+docker compose -f infra/docker/docker-compose.yml up -d api migrate scheduler
 ```
 
 `up -d` — not `restart` — matters here for a concrete reason hit today:
@@ -88,10 +101,21 @@ existing environment baked in; it does **not** re-read `services/api/.env`
 (the `env_file` the `api` service loads). A CORS fix that only changed
 `.env` (`CORS_ORIGINS`) had no effect until the container was recreated
 with `up -d`, which does pick up `env_file` changes. If only `.env` changed
-and the image itself didn't, `up -d api` alone (no rebuild) is enough —
-recreating the container is what re-reads the env file; rebuilding the
-image is only needed when the image's own contents (code, dependencies)
-changed.
+and the image itself didn't, `up -d api migrate scheduler` alone (no
+rebuild) is enough — recreating the container is what re-reads the env
+file; rebuilding the image is only needed when the image's own contents
+(code, dependencies) changed.
+
+**Always build `api`, `migrate`, and `scheduler` together.** All three
+share the exact same build context and Dockerfile (`services/api/`), but
+compose gives each its own image tag — rebuilding `api` alone leaves
+`migrate` and `scheduler` on their old image. This has caused two real
+outages already: `migrate` running a stale image without a just-added
+migration file (`Can't locate revision <rev>`), hit twice before this
+rule was written down. `scheduler` (added per
+`docs/infrastructure/EVENT_LOOP_SEPARATION_DESIGN.md`) shares the same
+risk — a code change to `app/services/candle_sync.py` and friends needs
+all three rebuilt, not just `api`.
 
 **Frontend (`apps/dashboard`) change:**
 
@@ -173,8 +197,9 @@ developer's own machine, not in any shared pipeline.
 ## Infrastructure
 
 The production droplet is a single DigitalOcean VM: 2 vCPUs, 3.8 GiB RAM,
-77 GiB disk (confirmed live via SSH). It runs all four containers
-(`postgres`, `redis`, `api`, `web`) plus the one-shot `migrate` job.
+77 GiB disk (confirmed live via SSH). It runs all five containers
+(`postgres`, `redis`, `api`, `scheduler`, `web`) plus the one-shot
+`migrate` job.
 
 Sizing rationale, evidenced directly by today's own investigation rather
 than assumed: candle-heavy Postgres queries on a 1.36M-row table
@@ -229,6 +254,11 @@ rediscovered the hard way:
   exactly as it did in production before this fix. The real artifact set
   (~47 MB / 210 files) still has to be present on the host path
   separately — the bind mount doesn't create or sync the data itself.
+  `scheduler` needs the identical mount too, for the opposite direction:
+  `RetrainingScheduler` writes new artifacts through the same training
+  pipeline, and without this mount a freshly retrained model would be
+  invisible to `api`, the process that actually serves predictions from
+  it.
 - **Stats/quality caching is a 30-second, in-process cache, not a
   permanent fix.** `get_candle_stats`, `count_invalid_ohlc`, and
   `count_out_of_order` (`app/repositories/candles.py`) still run full
@@ -238,12 +268,16 @@ rediscovered the hard way:
   computation. This is fine at today's low, single-operator traffic;
   revisit before multi-user load, since the underlying query cost hasn't
   been reduced, only its repetition.
-- **Single-worker/live-feed constraint.** See
-  [Overview](#overview) — this API cannot safely run multiple `uvicorn`
-  workers without first redesigning which process owns the live Delta
-  WebSocket feed and the background schedulers. Don't add `--workers N`
-  to the Dockerfile's `CMD` as a quick scaling fix; it will duplicate the
-  live feed and every scheduler once per worker.
+- **Single-worker/live-feed constraint, partially addressed.** See
+  [Overview](#overview) — candle sync, prediction grading, external-data
+  sync, news sync, and retraining now run in the separate `scheduler`
+  process instead of on `api`'s event loop. `api` itself still cannot
+  safely run multiple `uvicorn` workers without first redesigning which
+  process owns the live Delta WebSocket feed and the remaining
+  live-state-coupled components (`StopLossTakeProfitMonitor`, order-flow
+  capture, the paper-trading strategy/funding schedulers). Don't add
+  `--workers N` to the Dockerfile's `CMD` as a quick scaling fix; it will
+  duplicate the live feed and those components once per worker.
 
 ## Monitoring & Alerting
 

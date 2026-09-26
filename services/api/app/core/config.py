@@ -50,6 +50,22 @@ class Settings(BaseSettings):
     db_pool_size: int = 5
     db_max_overflow: int = 10
     db_echo: bool = False
+    #: How long asyncpg waits for a brand-new physical connection to
+    #: complete (TCP + SSL + auth), not a query timeout and not
+    #: SQLAlchemy's own pool-checkout wait. Raised from a hardcoded 5s
+    #: (found live on the production droplet, 2026-09-26): under real
+    #: concurrent load -- `StopLossTakeProfitMonitor` opens one new
+    #: session per trade/ticker event, fire-and-forget, so a burst of
+    #: several events near-simultaneously can need multiple new pooled
+    #: connections at once on a 2-vCPU box already running order-flow
+    #: capture and the live WS feed -- 5s was tight enough to
+    #: occasionally time out a connection attempt that was otherwise
+    #: healthy, logged as an isolated (never fatal, per EventBus's own
+    #: per-handler isolation) monitor failure. 10s is still well short of
+    #: a request-blocking wait; a connection that can't complete in 10s
+    #: on a healthy database is a real problem worth surfacing, not
+    #: masking with an even longer timeout.
+    db_connect_timeout_seconds: int = 10
 
     #: Redis (M5-E3-T1) — backs rate limiting, login lockout, and token
     #: revocation with durable, TTL-capable, restart-surviving state.

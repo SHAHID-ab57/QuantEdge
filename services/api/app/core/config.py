@@ -47,7 +47,25 @@ class Settings(BaseSettings):
         default="",
         validation_alias=AliasChoices("DATABASE_URL", "DB_URL"),
     )
-    db_pool_size: int = 5
+    #: Raised from a hardcoded 5 (2026-09-26, production incident): a
+    #: small standing pool means most of StopLossTakeProfitMonitor's own
+    #: one-session-per-trade/ticker-event handlers need to open a *brand
+    #: new* physical connection rather than reuse an already-open idle
+    #: one -- and opening a new connection is measurably far slower under
+    #: real concurrency than reusing a pooled one (directly measured on
+    #: the production droplet: ~0.08s for a lone new connection, ~1.05s
+    #: average when 15 are opened simultaneously, vs. a pooled checkout
+    #: being effectively instant). A larger standing pool means more
+    #: event handlers find an idle connection ready to reuse instead of
+    #: needing a new one, directly reducing exposure to this. Does not
+    #: address the deeper cause (this single-worker process's own event
+    #: loop is occasionally busy enough, running other schedulers' I/O,
+    #: that a brand-new connection attempt's wall-clock timeout can still
+    #: be exceeded even though neither Postgres nor the network is slow)
+    #: -- that remains the same open architectural question
+    #: DEPLOYMENT.md's own "Known gotchas" already flags, not something
+    #: to redesign as a side effect of this tuning change.
+    db_pool_size: int = 10
     db_max_overflow: int = 10
     db_echo: bool = False
     #: How long asyncpg waits for a brand-new physical connection to

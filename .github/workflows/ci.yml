@@ -88,6 +88,9 @@ jobs:
       - name: ruff check
         run: uv run ruff check app tests scripts alembic
 
+      - name: check .env.example for duplicate keys
+        run: make check-env
+
       - name: pyright
         run: uvx pyright app tests
 

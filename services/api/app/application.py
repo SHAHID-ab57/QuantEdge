@@ -14,7 +14,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.router import api_router
 from app.auth.login_lockout import build_login_lockout_tracker
 from app.auth.token_revocation import build_token_blocklist
-from app.core.config import get_settings
+from app.core.config import Settings, get_settings
+from app.core.env_validation import find_duplicate_env_keys
 from app.core.exceptions import register_exception_handlers
 from app.core.logging import setup_logging
 from app.core.redis import dispose_redis_client, get_redis_client, probe_redis
@@ -40,11 +41,109 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         await shutdown()
 
 
-async def startup() -> None:
-    """Enforce the JWT secret, verify Redis (if configured), then
-    initialize the database engine and verify connectivity.
+def _check_env_duplicates() -> None:
+    """ENV-CONFIG-INTEGRITY: fails the whole application at startup if
+    the real, local `.env` file declares the same key twice with two
+    different values — a conflicting duplicate is refused exactly like a
+    missing JWT secret, before anything else runs. A harmless duplicate
+    (identical values on every declaration) only logs a warning.
 
-    The JWT secret check runs first, and unconditionally — before either
+    `python-dotenv` (what `Settings`' own `env_file` loading uses)
+    resolves a duplicate key to its *last* declaration, silently — no
+    error, no warning, nothing. `RETRAINING_EXPERIMENT_IDS` sat silently
+    nullified this exact way for an unknown number of days: a real
+    lineage ID declared once, then re-declared empty later in the same
+    file, with the scheduler ticking on schedule and retraining nothing
+    the entire time.
+
+    **Startup, not CI, is the mechanism that actually catches this.**
+    `.env` is gitignored and per-environment (`configs/README.md`) — a
+    CI check only ever sees what's committed, so it could check
+    `.env.example` (see `scripts/check_env_duplicates.py`, run in CI)
+    but can never see the real file where this incident happened at all.
+    Only a check that runs where `.env` actually lives — here, at the
+    startup of the process that reads it — closes this gap for real.
+    """
+    conflicting: list[str] = []
+    for duplicate in find_duplicate_env_keys(".env"):
+        if duplicate.values_differ:
+            declarations = ", ".join(
+                f"line {line_number}={value!r}" for line_number, value in duplicate.occurrences
+            )
+            conflicting.append(
+                f"{duplicate.key} ({declarations}; effective value: {duplicate.effective_value!r})"
+            )
+        else:
+            logger.warning(
+                "%s is declared %d times in .env with the identical value — harmless, "
+                "but worth removing the redundant line(s)",
+                duplicate.key,
+                len(duplicate.occurrences),
+            )
+    if conflicting:
+        raise RuntimeError(
+            "Conflicting duplicate keys in .env (ENV-CONFIG-INTEGRITY): "
+            + "; ".join(conflicting)
+            + ". python-dotenv silently resolves each to its LAST declaration — this "
+            "is exactly how RETRAINING_EXPERIMENT_IDS sat nullified with no error "
+            "anywhere. Remove the redundant declaration(s) before starting."
+        )
+
+
+def _log_automation_config(settings: Settings) -> None:
+    """ENV-CONFIG-INTEGRITY: every setting that gates a scheduler or
+    automation loop, logged together in one place at startup, so a human
+    glancing at the startup logs can see the actually-resolved values
+    directly — never needing to separately query `Settings` or hunt
+    across several different schedulers' own, separately-logged
+    "started" lines to find out. Complements, never replaces, each
+    scheduler's own descriptive startup log line (e.g. `OrderFlowCapture`
+    already logs its own resolved `retention=365d`).
+    """
+    logger.info(
+        "Automation configuration: market_data_live=%s orderflow_capture_enabled=%s "
+        "orderflow_retention_days=%s candle_sync_enabled=%s "
+        "prediction_grading_enabled=%s paper_trading_funding_enabled=%s "
+        "paper_trading_strategy_scheduler_enabled=%s retraining_scheduler_enabled=%s "
+        "retraining_experiment_ids=%r news_sync_enabled=%s external_data_sync_enabled=%s",
+        settings.market_data_live,
+        settings.orderflow_capture_enabled,
+        settings.orderflow_retention_days,
+        settings.candle_sync_enabled,
+        settings.prediction_grading_enabled,
+        settings.paper_trading_funding_enabled,
+        settings.paper_trading_strategy_scheduler_enabled,
+        settings.retraining_scheduler_enabled,
+        settings.retraining_experiment_ids,
+        settings.news_sync_enabled,
+        settings.external_data_sync_enabled,
+    )
+    # The exact shape of the incident this task exists to catch: enabled,
+    # but silently retraining nothing. Called out explicitly rather than
+    # left for a reader to notice buried in the line above.
+    if settings.retraining_scheduler_enabled and not settings.retraining_experiment_ids.strip():
+        logger.warning(
+            "retraining_experiment_ids is empty while retraining_scheduler_enabled is "
+            "true: the scheduler will tick on schedule but retrain no lineage at all. "
+            "If a lineage was intended, check .env for a duplicate/overriding "
+            "declaration (ENV-CONFIG-INTEGRITY)."
+        )
+
+
+async def startup() -> None:
+    """Check `.env` for conflicting duplicate keys, log every automation-
+    gating setting's resolved value, enforce the JWT secret, verify Redis
+    (if configured), then initialize the database engine and verify
+    connectivity.
+
+    The `.env` duplicate check and the automation-config log both run
+    first, and unconditionally — before the JWT secret check itself —
+    since they are cheap, require no I/O, and a config problem should be
+    visible (or fatal) before anything else about startup is even
+    attempted (see `_check_env_duplicates`/`_log_automation_config`'s own
+    docstrings for why, ENV-CONFIG-INTEGRITY).
+
+    The JWT secret check runs next, and unconditionally — before either
     the Redis or the database check, and regardless of whether either is
     even configured — because it is cheap, requires no I/O, and this
     application should never be reachable at all without a real signing
@@ -64,7 +163,9 @@ async def startup() -> None:
     Redis-backed durability should not silently fall back to a weaker
     guarantee without an operator finding out.
     """
+    _check_env_duplicates()
     settings = get_settings()
+    _log_automation_config(settings)
     if not settings.jwt_secret_key:
         raise RuntimeError(
             "JWT_SECRET_KEY is not configured. This service cannot start without a "

@@ -8,6 +8,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Configuration-integrity checking: duplicate `.env` keys refuse
+  startup, and every automation-gating setting's resolved value is
+  logged (ENV-CONFIG-INTEGRITY).** Closes a gap in the existing
+  Monitoring epic (M5-E5), not new scope: three real `.env` drift
+  incidents surfaced in one session, none producing an error or warning
+  anywhere — `MARKET_DATA_LIVE` missing entirely (a restart silently
+  disabled live market data and order-flow capture), and
+  `RETRAINING_EXPERIMENT_IDS` silently nullified by a duplicate, later,
+  empty declaration (`python-dotenv` resolves a duplicate key to its
+  _last_ declaration with no warning — the retraining scheduler had been
+  ticking hourly and retraining nothing for an unknown number of days).
+  New `app.core.env_validation.find_duplicate_env_keys` parses the raw
+  `.env` directly (never through `Settings`, which may have already
+  resolved silently wrong); `app.application._check_env_duplicates` runs
+  it first at every startup, refusing to start at all (`RuntimeError`)
+  on a _conflicting_ duplicate (naming every declaration and which one
+  actually won), warning only on a harmless identical one.
+  `app.application._log_automation_config` logs every scheduler/
+  automation-gating setting's resolved value together at startup
+  (`market_data_live`, `orderflow_*`, `candle_sync_enabled`,
+  `retraining_*`, and others in the same category), plus a targeted
+  warning whenever `retraining_experiment_ids` is empty while the
+  scheduler is enabled — the exact shape of incident 2. Startup, not CI,
+  is the mechanism that actually catches this (`.env` is gitignored and
+  per-environment, so CI can only ever see `.env.example`); a
+  complementary, much weaker CI-usable script
+  (`scripts/check_env_duplicates.py`, wired into `.github/workflows/ci.yml`
+  as `make check-env`) checks the committed template using the identical
+  detection function. The immediate bug is fixed and confirmed working,
+  not just reconfigured: a manual `run_retraining_once` tick against the
+  real lineage now returns `attempted=1, not_due=1` (correctly deferring
+  to the enforced minimum retrain interval), where it previously
+  attempted zero targets. `ARCHITECTURE.md` § "Configuration Integrity
+  (ENV-CONFIG-INTEGRITY)".
+
 - **Volatility-scaled stop-loss width for the automated strategy, and the
   `volatility_regime` grading gap it depended on fixed first
   (VOLATILITY-STOP-WIDTH).** Builds Option B from

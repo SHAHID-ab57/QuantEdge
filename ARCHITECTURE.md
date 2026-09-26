@@ -4390,6 +4390,108 @@ the default 100-candle limit even with an explicit `start`/`end`; see
 way"). `candles_max_limit` was also raised from 1,000 to 10,000, the
 previous ceiling being itself too low for an 8,760-hour window.
 
+### Configuration Integrity (ENV-CONFIG-INTEGRITY)
+
+Stays inside the existing Monitoring epic (M5-E5) — closing a gap in
+scope that epic already covers (a model silently drifting, a connector
+silently going quiet), not opening new scope, for the platform's own
+configuration. Three real `.env` drift incidents surfaced in one
+session, none producing an error, a warning, or any visible sign
+anywhere — each found only because someone happened to check:
+
+1. **`MARKET_DATA_LIVE` missing entirely.** Never declared in the local
+   `.env` at all; a long-running dev process had it set some other,
+   undocumented way (an exported shell variable, not `.env`). A plain
+   restart lost it, silently falling back to the code default (`false`)
+   and turning off live market data — and, with it, order-flow capture,
+   which is gated on the identical flag — without any error. Caught only
+   by checking `/api/v1/system/status` before declaring the restart
+   successful.
+2. **`RETRAINING_EXPERIMENT_IDS` silently nullified by a duplicate
+   declaration.** Set correctly, once, to the real lineage id; a second,
+   later block in the same file re-declared it empty. `python-dotenv`
+   (what `Settings`' own `env_file` loading uses) resolves a duplicate
+   key to its _last_ declaration, silently — no error, no warning,
+   nothing. The retraining scheduler had been ticking on its own
+   `retraining_tick_interval_seconds` cadence and retraining nothing for
+   an unknown number of days.
+3. **`orderflow_retention_days`'s own activation required a restart that
+   nearly repeated incident 1.** The setting itself was changed
+   correctly, but `Settings` only reads `.env` once at process start
+   (`SettingsConfigDict(env_file=".env")`, no hot-reload), so activating
+   it needed a restart — the exact same restart that, without incident 1
+   already being caught, would have silently disabled order-flow capture
+   as a side effect of the very change meant to protect its retained
+   history.
+
+**This is one failure shape three times, not three unrelated mistakes: a
+setting can be silently wrong, and nothing on this platform notices.**
+Two mechanisms close it, both cheap and mechanical rather than another
+model/connector-style monitor (there is no meaningful "drift" signal for
+a config file — the failure mode is binary: right or silently wrong).
+
+**Duplicate-key detection, at startup, not CI.**
+`app.core.env_validation.find_duplicate_env_keys` parses the raw `.env`
+file directly — never through `Settings`, which has already resolved
+(possibly silently wrong) by the time anything else could ask it — and
+`app.application._check_env_duplicates` runs it unconditionally, first,
+before even the JWT secret check. A key declared twice with two
+_different_ values fails the whole application at startup
+(`RuntimeError`, naming every declaration's line number and value plus
+which one is actually in effect), exactly like the existing JWT-secret
+precedent (`ARCHITECTURE.md` § "Authentication & Audit Trail"); a
+harmless duplicate (identical values on every declaration) only logs a
+warning. **Startup, not CI, is the mechanism that actually catches
+this** — `.env` is gitignored and per-environment (`configs/README.md`),
+so a CI check can only ever see what's committed. A CI job could check
+`.env.example` (and does: `scripts/check_env_duplicates.py`, wired into
+`.github/workflows/ci.yml` as `make check-env`, using the identical
+`find_duplicate_env_keys` function), but that is a materially weaker
+guarantee against a different file — it can never see the real,
+untracked `.env` where all three of the incidents above actually
+happened. The two are complementary, not substitutes for each other:
+startup validation is the primary mechanism; the CI check only guards
+the committed template from accumulating the identical mistake.
+
+**Resolved-value visibility, at every startup.**
+`app.application._log_automation_config` logs every setting that gates a
+scheduler or automation loop — `market_data_live`,
+`orderflow_capture_enabled`, `orderflow_retention_days`,
+`candle_sync_enabled`, `prediction_grading_enabled`,
+`paper_trading_funding_enabled`,
+`paper_trading_strategy_scheduler_enabled`,
+`retraining_scheduler_enabled`, `retraining_experiment_ids`,
+`news_sync_enabled`, `external_data_sync_enabled` — together, in one
+line, at every startup, so a human glancing at the logs sees the real,
+resolved state without separately querying `Settings` or hunting across
+several different schedulers' own, separately-logged "started" lines
+(which already exist and are not replaced by this — `OrderFlowCapture`
+still logs its own `retention=365d`, for instance). A second, explicit,
+targeted warning fires whenever `retraining_scheduler_enabled` is true
+but `retraining_experiment_ids` is empty — the exact shape incident 2
+took — rather than leaving a reader to notice an empty string buried
+inside one long combined log line.
+
+**The immediate bug, fixed and confirmed working, not just
+reconfigured.** `.env`'s duplicate `RETRAINING_EXPERIMENT_IDS` block was
+merged into one; a live check against the running settings confirmed the
+real lineage id resolves correctly (`retraining_experiment_ids='49bbf390-...'`,
+not `''`), and a manual `run_retraining_once` tick against it returned
+`attempted=1, not_due=1` — proof the scheduler now recognizes the real
+target and correctly defers to the enforced minimum retrain interval
+(due 2026-09-29, seven days after the lineage's last retrain), not just
+that the setting reads correctly in isolation.
+
+**What this does not cover.** Sentry (deferred, still the user's own
+open item) would have surfaced incident 1 or 2 as a real alert the
+moment either scheduler started behaving abnormally, had it been wired
+up — this closes the detection gap for the configuration itself, not a
+substitute for alerting on its downstream symptoms. Env vars injected
+directly with no `.env` file at all (a real production deployment, most
+likely) have nothing for `find_duplicate_env_keys` to check — this is a
+local/dev-`.env` protection specifically, matching where all three real
+incidents actually happened.
+
 ### External Data Connectors
 
 Milestone 4 (Data Breadth) begins here — a reusable abstraction every

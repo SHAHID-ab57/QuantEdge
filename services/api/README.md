@@ -84,13 +84,14 @@ to start when connectivity cannot be verified at startup (fail fast).
 
 ### Environment Variables
 
-| Variable          | Required | Description                              | Default |
-| ----------------- | -------- | ---------------------------------------- | ------- |
-| `DATABASE_URL`    | No*      | Async PostgreSQL connection string       | —       |
-| `DB_URL`          | No*      | Repo-convention alias for `DATABASE_URL` | —       |
-| `DB_POOL_SIZE`    | No       | Connection pool size                     | `5`     |
-| `DB_MAX_OVERFLOW` | No       | Pool overflow connections                | `10`    |
-| `DB_ECHO`         | No       | Log all SQL statements                   | `false` |
+| Variable                     | Required | Description                                     | Default |
+| ---------------------------- | -------- | ----------------------------------------------- | ------- |
+| `DATABASE_URL`               | No*      | Async PostgreSQL connection string              | —       |
+| `DB_URL`                     | No*      | Repo-convention alias for `DATABASE_URL`        | —       |
+| `DB_POOL_SIZE`               | No       | Connection pool size                            | `10`    |
+| `DB_MAX_OVERFLOW`            | No       | Pool overflow connections                       | `10`    |
+| `DB_ECHO`                    | No       | Log all SQL statements                          | `false` |
+| `DB_CONNECT_TIMEOUT_SECONDS` | No       | How long a brand-new connection has to complete | `10`    |
 
 \* At least one of `DATABASE_URL` / `DB_URL` must be set for the database
 layer to activate. `DATABASE_URL` takes precedence when both are present.

@@ -153,3 +153,66 @@ after the pool-size fix) is judged acceptable, proceeding with Option A is
 not unreasonable — the added load is not large in absolute terms. But that
 would be accepting a known, still-open reliability issue rather than
 resolving it first, and should be a conscious choice, not a default.
+
+## Addendum (2026-09-26, post-deploy): SCHEDULER-PROCESS-SPLIT deployed and re-measured
+
+The recommendation above was acted on:
+`docs/infrastructure/EVENT_LOOP_SEPARATION_DESIGN.md` designed the fix
+(Option 3 — move the five DB/REST-only schedulers off `api`'s event loop
+into a new standalone `scheduler` process), and it was built, verified
+locally, and deployed to production the same session. This addendum
+records the real, post-deploy measurement — not an assumption that
+building it was enough.
+
+**Deployed**: `docker compose build api migrate scheduler` (three distinct
+image tags, confirmed) → `docker compose up -d` on the production droplet.
+Both `eth-api` and `eth-scheduler` came up `healthy`; `eth-api`'s startup
+log shows zero mention of any of the five relocated schedulers (candle
+sync, prediction grading, external-data sync, news sync, retraining)
+while `StopLossTakeProfitMonitor`, order-flow capture, and the two
+paper-trading schedulers start exactly as before; `eth-scheduler`'s log
+shows all five starting and ticking independently.
+
+**Re-measured over an 11-minute real window** (19:08–19:19 UTC) at the
+same real WS load as the original measurement (~27 msg/s, comparable to
+the ~29.4 msg/s baseline):
+
+- Two full candle-sync ticks ran in `scheduler`, taking **46.45s and
+  33.06s** — both at or above the original 33.08s tick duration that
+  coincided with the very first observed timeout. Each tick internally
+  ran 4 back-to-back candle-ingestion jobs (BTCUSD/ETHUSD × 1m/5m,
+  spanning ~36 seconds) — the same multi-symbol/timeframe burst shape
+  that produced the 14-failure cluster documented in this file's main
+  body, now happening in complete isolation from `api`.
+- `api`'s own log for the full window: **zero `TimeoutError`
+  occurrences** — checked directly with `grep -c`, not inferred.
+- `api`'s strategy-tick durations returned to steady-state fast (11.15s
+  cold-start immediately after restart, then 0.49s and 0.35s) — no
+  33-second-scale outlier, consistent with candle-sync no longer sharing
+  its event loop.
+- Postgres now shows connections from two independent pools (16 total
+  observed: `api`'s + `scheduler`'s), comfortably under `max_connections`
+  (100) — the two-pool tradeoff named in the design doc, confirmed
+  harmless in practice.
+
+**Honest limits of this evidence**: 11 minutes and 2 candle-sync cycles is
+a real but modest sample — the original incident's own failure rate was
+itself uneven (2 failures in one 13-minute window, 14 in under 25 seconds
+in another), so a single clean window is meaningful, comparable evidence
+of resolution, not a permanent guarantee. This is not being declared
+"fixed forever" on the strength of one observation window — matching this
+document's own standing rule about not generalizing from a thin sample.
+Continued passive monitoring of `eth-api`'s logs during real candle-sync
+bursts is the recommended way to build confidence over the coming days,
+the same way the original pattern was itself only found by repeated real
+checks rather than one look.
+
+**Verdict for Option A**: the specific, measured blocker this document
+raised is resolved as far as this evidence shows. Group 1's remaining
+event-loop coupling (`StopLossTakeProfitMonitor`, order-flow capture, the
+two paper-trading schedulers) is unchanged and still shares `api`'s loop
+with the live feed — if a _different_ contention source ever surfaces
+there, that's the Option 1/2 live-state-bridge problem, not something this
+change touches. Proceeding with Option A is reasonable now, with the same
+expectation as everything else in this thread: verify with real
+measurement after it ships, don't assume.

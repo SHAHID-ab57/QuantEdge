@@ -270,6 +270,7 @@ class TestExport:
         exported = await service.export_dataset("ETCUSD", request(item("ohlcv")), "csv")
         assert exported.media_type.startswith("text/csv")
         assert exported.filename.endswith(".csv")
+        assert isinstance(exported.content, str)  # CSV is always text, never Parquet's bytes
         assert "timestamp,open,high,low,close,volume" in exported.content
 
     async def test_exports_json_with_a_filename_and_media_type(
@@ -279,6 +280,7 @@ class TestExport:
         exported = await service.export_dataset("ETCUSD", request(item("ohlcv")), "json")
         assert exported.media_type.startswith("application/json")
         assert exported.filename.endswith(".json")
+        assert isinstance(exported.content, str)  # JSON is always text, never Parquet's bytes
         assert '"symbol": "ETCUSD"' in exported.content
 
     async def test_export_ignores_preview_truncation(
@@ -290,6 +292,7 @@ class TestExport:
         exported = await service.export_dataset(
             "ETHUSD", request(item("ohlcv"), preview_rows=1), "csv"
         )
+        assert isinstance(exported.content, str)  # CSV is always text, never Parquet's bytes
         data_rows = [
             line
             for line in exported.content.splitlines()

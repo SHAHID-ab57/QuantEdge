@@ -20,9 +20,11 @@ from time import perf_counter
 
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from app.connectors.marketaux import MARKETAUX_SOURCE
 from app.core.config import get_settings
 from app.db.engine import get_engine
 from app.repositories.news import NewsRepository
+from app.services.connector_sync_runs import describe_failure, record_sync_run
 from app.services.news_ingest import NewsIngestError, NewsIngestReport, ingest_news
 
 logger = logging.getLogger("app.services.news_sync")
@@ -119,15 +121,41 @@ class NewsSyncScheduler:
             return NewsSyncTickSummary(0, 0, 0, perf_counter() - started, None)
 
         start, end = window
+        attempt_started = datetime.now(UTC)
         try:
             report = await ingest_news(start=start, end=end)
         except NewsIngestError as exc:
             logger.error("News sync failed: %s", exc)
+            await record_sync_run(
+                get_engine(),
+                source=MARKETAUX_SOURCE,
+                started_at=attempt_started,
+                success=False,
+                error_message=describe_failure(exc),
+            )
             return NewsSyncTickSummary(1, 0, 1, perf_counter() - started, None)
-        except Exception:
+        except Exception as exc:
             logger.exception("News sync crashed")
+            await record_sync_run(
+                get_engine(),
+                source=MARKETAUX_SOURCE,
+                started_at=attempt_started,
+                success=False,
+                error_message=describe_failure(exc),
+            )
             return NewsSyncTickSummary(1, 0, 1, perf_counter() - started, None)
 
+        await record_sync_run(
+            get_engine(),
+            source=MARKETAUX_SOURCE,
+            started_at=attempt_started,
+            success=True,
+            received=report.received,
+            inserted=report.inserted,
+            duplicates_skipped=report.duplicates_skipped,
+            rejected=report.rejected,
+            duration_seconds=report.duration_seconds,
+        )
         return NewsSyncTickSummary(1, 1, 0, perf_counter() - started, report)
 
     async def _catch_up_window(self, now: datetime) -> tuple[datetime, datetime] | None:

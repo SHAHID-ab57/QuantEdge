@@ -1,4 +1,5 @@
-"""Tests for `ExperimentService` — the errors and orchestration the repository itself doesn't know about."""
+"""Tests for `ExperimentService` — the errors and orchestration the repository
+itself doesn't know about."""
 
 import uuid
 

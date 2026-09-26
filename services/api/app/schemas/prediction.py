@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel, Field, field_serializer
 
 from app.prediction.engine import NO_CONFIDENCE_REASON
+from app.prediction.feature_drift import FeatureDriftStatus
 from app.services.candle_ingest import resolution_duration
 
 if TYPE_CHECKING:
@@ -110,6 +111,24 @@ class PredictionResponse(BaseModel):
     graded_at: datetime | None = Field(
         default=None, description="When grading actually ran for this prediction"
     )
+    feature_drift_status: FeatureDriftStatus = Field(
+        description=(
+            "'healthy': every input feature's z-score against the job's own stored "
+            "normalization was inside the drift threshold. 'drifted': at least one was not "
+            "(see feature_drift_worst_feature/_worst_z). 'unavailable': the job carries no "
+            "normalization stats to compare against. See ARCHITECTURE.md § 'Feature Drift "
+            "Monitoring'."
+        )
+    )
+    feature_drift_worst_feature: str | None = Field(
+        default=None,
+        description="The feature column with the largest-magnitude z-score; null when "
+        "feature_drift_status is 'unavailable'",
+    )
+    feature_drift_worst_z: float | None = Field(
+        default=None,
+        description="That column's own signed z-score against the job's stored normalization",
+    )
     available_after: datetime | None = Field(
         default=None,
         description=(
@@ -148,6 +167,9 @@ class PredictionResponse(BaseModel):
             is_correct=prediction.is_correct,
             error=prediction.error,
             graded_at=prediction.graded_at,
+            feature_drift_status=prediction.feature_drift_status,  # type: ignore[arg-type]
+            feature_drift_worst_feature=prediction.feature_drift_worst_feature,
+            feature_drift_worst_z=prediction.feature_drift_worst_z,
             available_after=_available_after(prediction),
             created_at=prediction.created_at,
         )

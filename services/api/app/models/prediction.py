@@ -157,5 +157,27 @@ class Prediction(BaseModel, TimestampMixin):
             "ordinary live POST /predictions/run call. See this model's own docstring."
         ),
     )
+    feature_drift_status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        server_default="unavailable",
+        comment=(
+            "'healthy' | 'drifted' | 'unavailable' — this feature vector's own z-score check "
+            "against the job's stored result_summary.normalization at prediction time "
+            "(app.prediction.feature_drift.compute_feature_drift). 'unavailable' when the job "
+            "carries no normalization stats to compare against, never a guessed 'healthy'."
+        ),
+    )
+    feature_drift_worst_feature: Mapped[str | None] = mapped_column(
+        String(100),
+        nullable=True,
+        comment="The single feature column with the largest-magnitude z-score this check "
+        "found, or NULL when feature_drift_status is 'unavailable'.",
+    )
+    feature_drift_worst_z: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+        comment="That column's own signed z-score against the job's stored normalization.",
+    )
 
     __table_args__ = (Index("ix_predictions_job_created_at", "training_job_id", "created_at"),)

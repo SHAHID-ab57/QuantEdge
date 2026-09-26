@@ -137,8 +137,10 @@ async def test_get_candles_negative_limit_rejected(client: httpx.AsyncClient, se
 
 
 async def test_get_candles_limit_over_max_rejected(client: httpx.AsyncClient, seeded: None) -> None:
+    # candles_max_limit was raised from 1,000 to 10,000 by RETRAIN-WITH-MINIMUM-WINDOW
+    # (an 8,760-hour training window needs it) — one past the new ceiling, not the old one.
     response = await client.get(
-        "/api/v1/markets/ETHUSD/candles", params={"timeframe": "1h", "limit": 1001}
+        "/api/v1/markets/ETHUSD/candles", params={"timeframe": "1h", "limit": 10_001}
     )
 
     assert response.status_code == 422

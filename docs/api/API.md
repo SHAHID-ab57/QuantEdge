@@ -66,7 +66,7 @@ candles:
   "open_interest": "1793422",
   "price_change_24h": "-0.2466",
   "turnover_24h": "702460936.06",
-  "funding_rate": "0.000757002682453864", // signed fraction per interval
+  "funding_rate": "0.001666603719307179", // signed PERCENT per interval (0.01 = 0.01%)
   "funding_interval_seconds": 28800,
   "next_funding_time": "2026-09-11T00:00:00Z",
 }
@@ -282,8 +282,9 @@ unchanged.
 Registered today: `ohlcv` (`category: "raw"`), `candle_shape`
 (`price_action`), `sma`/`ema`/`wma` (`trend`), `fear_greed` (`sentiment`),
 `fed_funds_rate` (`macro`), `eth_gas_price` (`on-chain`), `eth_tvl`
-(`on-chain`), `btc_dominance` (`market`), and `news_sentiment`
-(`sentiment`). The set is queried from `GET /api/v1/features` at
+(`on-chain`), `btc_dominance` (`market`), `news_sentiment`
+(`sentiment`), and `funding_rate`/`open_interest` (`derivatives`, ETHUSD only,
+from `app/connectors/delta_market_data.py`). The set is queried from `GET /api/v1/features` at
 runtime, never hardcoded by a client; see `ARCHITECTURE.md` §
 "Feature Engineering Engine" for how a new generator joins this list
 with no API change, and § "External Data Connectors" for
@@ -339,8 +340,9 @@ of, or alongside, candle data — empty for every generator except
 `fear_greed` (`("fear_greed",)`), `fed_funds_rate`
 (`("fed_funds_rate",)`), `eth_gas_price` (`("eth_gas_price",)`),
 `eth_tvl` (`("eth_tvl",)`), `btc_dominance`
-(`("btc_dominance",)`), and `news_sentiment`
-(`("news_sentiment",)`). A feature declaring `external_sources` is
+(`("btc_dominance",)`), `news_sentiment`
+(`("news_sentiment",)`), `funding_rate` (`("delta_ethusd_funding_rate",)`), and
+`open_interest` (`("delta_ethusd_open_interest",)`). A feature declaring `external_sources` is
 never served from the feature cache (`cache_status` reports `"disabled"`,
 not `"miss"`, for that column), because the cache key fingerprints candles
 and parameters only, never a connector's own freshness. A feature declaring
@@ -647,11 +649,39 @@ connector with zero stored points, never a 404 or a crash:
       "requires_auth": false,
       "latest_value": 42.0,
       "latest_timestamp": "2026-01-02T00:00:00Z",
+      "health_status": "healthy",
     },
   ],
   "total": 1,
 }
 ```
+
+**`health_status`** (M5-E5-T1) is one of `healthy`, `stale`, `failing`, or
+`never_ingested`, computed on every request from the connector's newest
+stored point and its most recent sync attempts — not a stored flag, so it
+can never lag behind the data. Checked in this order, first match wins:
+
+| Value            | Meaning                                                                                                                     |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `failing`        | The connector's 3 most recent sync attempts all errored, even if its last good point is still recent                        |
+| `never_ingested` | No point has ever been stored for this source (`latest_timestamp` is `null`)                                                |
+| `stale`          | The newest point is older than this connector's own threshold — its data has stopped moving forward (see `ARCHITECTURE.md`) |
+| `healthy`        | Anything else                                                                                                               |
+
+`failing` outranks `stale` and `never_ingested`: a connector erroring on
+every tick is the more urgent situation and the likelier root cause. The
+response says a connector is failing, not why; the individual error
+messages are recorded but not yet exposed by any endpoint.
+
+The threshold is scaled per connector, not one flat number: a daily source
+(Fear & Greed, DefiLlama TVL) goes `stale` after 3 days, the monthly FRED
+series after 60 days, the hourly-sampled sources (Etherscan, CoinGecko)
+after 3 hours, and Marketaux news sentiment after 108 hours (it has no
+weekend values, so a Friday-to-Monday gap is normal). The expected interval
+is not itself an API field. This is a health _signal_ only — nothing is
+notified when a connector goes `stale` or `failing`; see `ARCHITECTURE.md` § "Connector
+Health Monitoring" for the evidence behind the thresholds and the known
+limitations.
 
 A second connector, `fed_funds_rate` (`app/connectors/fred.py`), is
 registered the same way with `"requires_auth": true` — the catalogue
@@ -1272,6 +1302,7 @@ method produced a given run's table).
   "timeframe": "1h", // required alongside symbol
   "start": null, // optional, must be given together with end — see below
   "end": null,
+  "limit": null, // optional candle-row ceiling — see below (RETRAIN-WITH-MINIMUM-WINDOW)
   "target_column": null, // optional — defaults to the first target column the dataset build produces
   "hyperparameters": { "max_iter": 200, "C": 1.0, "random_seed": 42 },
 }
@@ -1282,6 +1313,19 @@ against a real dataset (the ML Dataset Builder never persists one) — it is
 a citation, exactly as `Experiment.dataset_version` already is.
 `symbol`/`timeframe`/`target_column` are only meaningful for a
 `requires_real_data` adapter — the placeholder ignores them entirely.
+
+**`limit` — added by RETRAIN-WITH-MINIMUM-WINDOW, fixing a real bug: a
+request naming an explicit `start`/`end` used to be silently truncated to
+the platform's default 100-candle limit regardless of how wide a range was
+requested** (`docs/research/RETRAIN_WINDOW_ANALYSIS.md` § "A platform bug
+found along the way" has the full account). `limit` (when given) is passed
+straight through as the dataset build's own row ceiling, capped by
+`candles_max_limit` (10,000); omitted, the platform default (100) still
+applies as before. With no `start`/`end`, `limit` bounds how many of the
+most recent candles are used — this is how `RetrainingScheduler` requests
+its own enforced-minimum window (`limit=8760`, one year of hourly candles)
+without needing an explicit date range that would go stale the moment it
+was written.
 
 **`start`/`end` — added by FIX-TRAINING-DATE-RANGE, fixing a real bug: a
 job that omitted both used to silently train on a market's _oldest_
@@ -1307,6 +1351,7 @@ optional way to pin one.
   "timeframe": "1h",
   "dataset_start": null, // the explicit range this job trained on, if one was given
   "dataset_end": null,
+  "dataset_limit": null, // the candle-row ceiling this job trained on, if one was given
   "target_column": "next_direction_1",
   "model_type": "logistic_regression",
   "hyperparameters": { "max_iter": 200, "C": 1.0, "random_seed": 42 },
@@ -1608,6 +1653,9 @@ used (if any), runs the model, and persists the result.
   "probabilities": { "down": 0.19, "up": 0.81 }, // null for a regressor
   "classes": ["down", "up"], // null for a regressor
   "feature_columns": ["open", "high", "low", "close", "volume"],
+  "feature_drift_status": "healthy", // "healthy" | "drifted" | "unavailable" — see below
+  "feature_drift_worst_feature": "close", // the largest-magnitude z-score's own column
+  "feature_drift_worst_z": 1.12, // that column's own signed z-score
   "actual_outcome": null, // null until the target horizon has arrived and grading has run
   "is_correct": null, // classification only; null for a regressor or while ungraded
   "error": null, // regression only; null for a classifier or while ungraded
@@ -1619,10 +1667,25 @@ used (if any), runs the model, and persists the result.
 
 `target_column`, `horizon`, `as_of`, and `confidence` always accompany
 `predicted_value` — the response never presents a bare number as fact.
+
+**`feature_drift_status`** (FEATURE-DRIFT-MONITOR,
+`app/prediction/feature_drift.py`, full design in `ARCHITECTURE.md` §
+"Feature Drift Monitoring"): every live feature is z-scored against the
+job's own already-stored `result_summary.normalization` at the moment this
+prediction was made. `"drifted"` means at least one feature's |z| reached
+10 or more — real incidents this was built to catch measured 15 to 89;
+`"unavailable"` means the job carries no normalization to compare against
+(`normalize_features=False`). `feature_drift_worst_feature`/`_worst_z` are
+`null` exactly when the status is `"unavailable"`. `PaperTradingStrategyScheduler`
+acts on this directly: a `"drifted"` prediction auto-pauses that account's
+strategy (`PaperAccountResponse.strategy_paused_reason` becomes
+`"feature_drift"`, see "Paper Trading" below) before the confidence/signal
+gate is ever reached.
 `GET /predictions/{id}` returns the identical shape for a past run;
 `GET /predictions` returns the same fields minus `confidence_unavailable_reason`/
-`probabilities`/`classes`/`feature_columns` (kept out of the list view the
-same way `TrainingJobSummaryDTO` keeps a job's full log list out of
+`probabilities`/`classes`/`feature_columns`/`feature_drift_status`/
+`feature_drift_worst_feature`/`feature_drift_worst_z` (kept out of the list
+view the same way `TrainingJobSummaryDTO` keeps a job's full log list out of
 `GET /training-jobs`), plus `total`/`limit`/`offset`. It accepts
 `training_job_id`/`experiment_id`/`symbol` filters and
 `sort`/`dir`/`limit`/`offset` (one of `symbol`, `as_of`, `created_at`;
@@ -1769,36 +1832,54 @@ the list endpoint) round out the rest.
 
 ### Paper Trading
 
-| Method | Path                                                     | Auth | Purpose                                                              |
-| ------ | -------------------------------------------------------- | ---- | -------------------------------------------------------------------- |
-| POST   | `/api/v1/paper-trading/accounts`                         | 🔒   | Open a new virtual trading account                                   |
-| GET    | `/api/v1/paper-trading/accounts`                         |      | List every account, most recently created first                      |
-| GET    | `/api/v1/paper-trading/accounts/{id}`                    |      | Get one account                                                      |
-| POST   | `/api/v1/paper-trading/accounts/{id}/orders`             | 🔒   | Place and fill a market order                                        |
-| GET    | `/api/v1/paper-trading/accounts/{id}/orders`             |      | List an account's own order history                                  |
-| GET    | `/api/v1/paper-trading/accounts/{id}/positions`          |      | List an account's currently-open positions                           |
-| GET    | `/api/v1/paper-trading/accounts/{id}/summary`            |      | Balance, realized PnL, and live unrealized PnL                       |
-| GET    | `/api/v1/paper-trading/accounts/{id}/risk`               |      | Current exposure %/drawdown %, distance to each limit, halted status |
-| POST   | `/api/v1/paper-trading/accounts/{id}/resume-trading`     | 🔒   | Clear a drawdown halt, resetting peak_balance to the current balance |
-| PATCH  | `/api/v1/paper-trading/accounts/{id}/positions/{symbol}` | 🔒   | Set, update, or clear a position's stop-loss/take-profit             |
-| PATCH  | `/api/v1/paper-trading/accounts/{id}/strategy`           | 🔒   | Enable/disable the automated strategy, tune threshold/stop-loss      |
-| GET    | `/api/v1/paper-trading/accounts/{id}/strategy/decisions` |      | An account's own automated-strategy decision log, paginated          |
+| Method | Path                                                     | Auth | Purpose                                                                  |
+| ------ | -------------------------------------------------------- | ---- | ------------------------------------------------------------------------ |
+| POST   | `/api/v1/paper-trading/accounts`                         | 🔒   | Open a new virtual trading account                                       |
+| GET    | `/api/v1/paper-trading/accounts`                         |      | List every account, most recently created first                          |
+| GET    | `/api/v1/paper-trading/accounts/{id}`                    |      | Get one account                                                          |
+| POST   | `/api/v1/paper-trading/accounts/{id}/orders`             | 🔒   | Place and fill a market order                                            |
+| GET    | `/api/v1/paper-trading/accounts/{id}/orders`             |      | List an account's own order history                                      |
+| GET    | `/api/v1/paper-trading/accounts/{id}/positions`          |      | List an account's currently-open positions                               |
+| GET    | `/api/v1/paper-trading/accounts/{id}/summary`            |      | Balance, realized PnL, and live unrealized PnL                           |
+| GET    | `/api/v1/paper-trading/accounts/{id}/risk`               |      | Current exposure %/drawdown %, distance to each limit, halted status     |
+| GET    | `/api/v1/paper-trading/accounts/{id}/funding`            |      | An account's funding payments (rate, index price, amount), paginated     |
+| POST   | `/api/v1/paper-trading/accounts/{id}/resume-trading`     | 🔒   | Clear a drawdown halt, resetting peak_balance to the current equity      |
+| PATCH  | `/api/v1/paper-trading/accounts/{id}/positions/{symbol}` | 🔒   | Set, update, or clear a position's stop-loss/take-profit                 |
+| PATCH  | `/api/v1/paper-trading/accounts/{id}/strategy`           | 🔒   | Enable/disable the automated strategy, tune threshold/stop-loss/leverage |
+| GET    | `/api/v1/paper-trading/accounts/{id}/strategy/decisions` |      | An account's own automated-strategy decision log, paginated              |
 
 Full design in `ARCHITECTURE.md` § "Paper Trading". A virtual trading
 account: place simulated market orders against real prices, track
-positions, and compute PnL. Long-only, market orders only, no automation
-— no margin, no shorting, no leverage, and no prediction-driven trading
-exist anywhere in this surface.
+positions, and compute PnL. Market orders only. A manual order may go
+long or short and use isolated-margin leverage (M3-E5-T2); the automated
+strategy also places its orders here (M3-E5-T3): long or short at its account's
+one fixed `strategy_leverage`, always with a stop-loss, never scaled by
+confidence.
+
+**Shorts, leverage and margin.** One net position per market: a buy
+opens/adds to a long or reduces a short; a sell opens/adds to a short or
+reduces a long. An order larger than the position it reduces is rejected
+(400 `insufficient_position`, never carried through zero). `leverage` (1 to
+the account's `max_leverage`, default 5) is fixed when a position opens and
+posts `notional / leverage` of available cash as isolated margin;
+`reduce_only: true` refuses to open or add (use it to close: a plain
+opposite-side order that lost a race to a stop-loss would open a short).
+A short or leveraged position is liquidated when the **mark price** reaches its
+`liquidation_price` (whole margin forfeited, never more); its notional above
+100,000 USD is rejected (Delta's margin scaling is not modelled).
 
 **Place an order** (`POST /paper-trading/accounts/{id}/orders`):
 
 ```jsonc
-// Request — stop_loss_price/take_profit_price are optional and buy-only
-// (rejected outright on a sell)
+// Request — leverage/reduce_only/stop_loss_price/take_profit_price are optional.
+// Thresholds only apply to an order that opens or adds (a long's stop is below the
+// price, a short's above; a stop beyond the liquidation price is rejected).
 {
   "symbol": "ETHUSD",
   "side": "buy",
   "quantity": "10",
+  "leverage": "5", // optional; omit for 1x, or to add to / reduce an existing position
+  "reduce_only": false, // optional; true = may only shrink an existing position
   "stop_loss_price": "900", // optional — sets the resulting position's stop-loss
   "take_profit_price": "1100", // optional — sets the resulting position's take-profit
 }
@@ -1810,6 +1891,10 @@ exist anywhere in this surface.
   "account_id": "2cff34d9-...",
   "symbol": "ETHUSD",
   "side": "buy",
+  "position_side": "long", // "long" | "short": the kind of position this order opened/added to/reduced
+  "leverage": "1.000000000000000000", // the leverage of that position
+  "margin_applied": "10005.000000000000000000", // margin posted (open/add) or released (reduce); forfeited on a liquidation
+  "reduce_only": false,
   "quantity": "10.000000000000000000",
   "raw_price": "1000.000000000000000000", // the resolved quote, before slippage
   "fill_price": "1000.500000000000000000", // what the account was actually charged — never a perfect fill
@@ -1820,8 +1905,10 @@ exist anywhere in this surface.
   "slippage_applied": "0.500000000000000000", // always visible, never folded into fill_price
   "fee_applied": "10.005000000000000000",
   "notional": "10005.000000000000000000", // fill_price * quantity
-  "realized_pnl": null, // set only for a sell; null for a buy
-  "trigger_reason": null, // "stop_loss" | "take_profit" for a market-triggered auto-close; null for a manual order
+  "realized_pnl": null, // set only for an order that reduces a position; null when opening/adding
+  "trigger_reason": null, // "stop_loss" | "take_profit" | "liquidation" for a market-triggered close; null for a manual order
+  "gapped_through_bankruptcy": false, // liquidation only: mark was already past the bankruptcy price (loss still capped at the margin)
+  "trigger_price_basis": null, // liquidation only: "mark", or "last_fallback" if no mark price was available
   "created_at": "2026-01-05T12:00:03Z",
 }
 ```
@@ -1843,48 +1930,70 @@ used and how fresh it was; a fallback price older than
 `paper_trading_stale_price_threshold_seconds` (default 300s) is marked
 `is_stale_price: true` rather than presented as current.
 
-**Long-only, no margin**: a buy that would take the account's cash
-balance negative, or a sell that would exceed the account's currently-held
-quantity, is rejected outright — never a partial fill.
+**Cash and margin**: an order that opens or adds needs its margin
+(`notional / leverage`, the whole notional at 1x) plus fee in available
+cash; if it can't be covered, or a reducing order exceeds the held quantity,
+it is rejected outright — never a partial fill.
+
+**Positions** (`GET .../positions`) carry `side`, `leverage`, `margin`,
+`liquidation_price` (null for an unleveraged long, which cannot be
+liquidated) and `liquidation_distance_pct`; `unrealized_pnl` is
+`(price - entry) * quantity` for a long and `(entry - price) * quantity`
+for a short. **Funding** for a short/leveraged position is settled at each
+real Delta funding time (`GET .../funding`): `position value at the index price
+
+- funding rate`, longs pay when the rate is positive, charged to cash first
+  and to the position's margin only for the shortfall.
 
 **PnL**: `GET .../positions` marks every open position to a live price
 (`unrealized_pnl`, mark-to-market — no slippage/fee applied, since
 nothing has actually been sold); `GET .../summary` reports the account's
-own cash `balance`, cumulative `realized_pnl` (updated the instant a
-trade closes or reduces a position), the summed `unrealized_pnl` across
-every open position, and `total_equity` (`balance` plus every open
-position's own live mark-to-market value).
+own available cash `balance`, cumulative `realized_pnl` (net of fees and
+funding; updated the instant a trade closes or reduces a position), the
+summed `unrealized_pnl`, `margin_in_use`, `total_equity` (`balance` plus
+every position's margin plus its unrealized PnL), `total_notional` and
+`effective_leverage` (notional over equity).
 
 **Pre-trade risk limits** — every account carries `max_position_size_pct`
 (default 10%), `max_exposure_pct` (default 50%), and `max_drawdown_pct`
 (default 20%), settable per account at creation (`PaperAccountCreateRequest`)
 or left to fall back to this platform's configured defaults. Every order
-is checked, in order: halted (`trading_halted`, 400 `trading_halted`) →
-position sizing (this order's own resulting position value vs. current
-balance, 400 `max_position_size_exceeded`) → exposure (every open
-position's _current_ value, live-priced, plus this order's own resulting
-value, vs. current balance, 400 `max_exposure_exceeded`). After the trade
-completes, `peak_balance` and `trading_halted` are re-evaluated — a
-balance drop of more than `max_drawdown_pct` below the (possibly
-just-raised) peak halts the account. A halt never self-clears; only
-`POST .../resume-trading` clears it (and resets `peak_balance` to the
-current balance). Every rejection's `detail` names the specific limit and
-the actual numbers involved — never a generic message.
+is checked, in order (limits apply to orders that open or add): halted
+(`trading_halted`, 400 `trading_halted`; reduce-only orders and triggered
+exits still go through) → position sizing (this order's own resulting
+position **notional** vs. current **equity**, 400 `max_position_size_exceeded`)
+→ exposure (every open position's live notional plus this order's own, vs.
+current equity, 400 `max_exposure_exceeded`; leverage does not raise it).
+**Drawdown is measured on equity** (cash + margin + unrealized PnL) against its
+peak, re-evaluated after every fill, triggered close, liquidation and funding
+payment and before any order that adds risk: a fall of more than
+`max_drawdown_pct` below the (possibly just-raised) peak halts the account and
+raises an alert. (**Behaviour change in M3-E5-T2:** it used to be measured on
+cash, so spending cash on a position could halt an account with no price
+movement at all.) A halt never self-clears; only `POST .../resume-trading`
+clears it (and resets `peak_balance`, now the peak equity, to the current
+equity). Every rejection's `detail` names the specific limit and the actual
+numbers involved — never a generic message.
 
 **Risk summary** (`GET /paper-trading/accounts/{id}/risk`):
 
 ```jsonc
 {
   "account_id": "2cff34d9-...",
-  "balance": "89984.995000000000000000",
-  "peak_balance": "100000.000000000000000000",
-  "current_exposure_pct": "11.116944...", // total open-position value, current prices, as a % of balance
+  "balance": "89984.995000000000000000", // available cash
+  "equity": "99989.995000000000000000", // cash + margin in use + unrealized PnL
+  "margin_in_use": "10005.000000000000000000",
+  "peak_balance": "100000.000000000000000000", // the highest equity ever reached
+  "total_notional": "11000.000000000000000000",
+  "effective_leverage": "0.110001...", // total_notional / equity
+  "current_exposure_pct": "11.000...", // total open notional, current prices, as a % of equity
   "max_exposure_pct": "50.000000000000000000",
   "exposure_headroom_pct": "38.883055...", // max_exposure_pct - current_exposure_pct
-  "current_drawdown_pct": "10.015000000000000000", // how far below peak_balance, as a %
+  "current_drawdown_pct": "10.015000000000000000", // how far equity is below peak_balance, as a %
   "max_drawdown_pct": "20.000000000000000000",
   "drawdown_headroom_pct": "9.985000000000000000",
   "max_position_size_pct": "10.000000000000000000", // threshold only — checked per order, per symbol, not as one account-wide "current" figure
+  "max_leverage": "5.000000000000000000",
   "trading_halted": false,
 }
 ```
@@ -1892,7 +2001,7 @@ the actual numbers involved — never a generic message.
 **Resume trading** (`POST /paper-trading/accounts/{id}/resume-trading`,
 no request body) returns the updated `PaperAccountResponse` with
 `trading_halted: false` and `peak_balance` reset to the account's current
-balance.
+equity.
 
 **Stop-loss / take-profit** — set at order-open time (above) or via the
 dedicated update endpoint:
@@ -1917,18 +2026,22 @@ dedicated update endpoint:
 ```
 
 A long position's stop-loss must sit below the current price and its
-take-profit above it — a value that would trigger immediately is
-rejected (`invalid_stop_loss_price`/`invalid_take_profit_price`, 400).
-Whenever both are set, the stop-loss must also be strictly below the
-take-profit (`stop_loss_not_below_take_profit`, 400) — this is what
+take-profit above it (a short's, the reverse) — a value that would trigger
+immediately is rejected (`invalid_stop_loss_price`/`invalid_take_profit_price`,
+400), and so is a stop-loss beyond the position's liquidation price
+(`stop_beyond_liquidation`, 400: it could never fire, the position is
+liquidated first). Whenever both are set, the stop-loss must also sit on the
+far side of the take-profit (`stop_loss_not_below_take_profit`, 400) — this is what
 keeps a single price from ever satisfying both trigger conditions at
 once. Once either is crossed by a live price event, the position closes
 automatically through the exact same fill logic a manual sell uses, at a
 _wider_ modeled slippage than a manual order
 (`paper_trading_triggered_slippage_bps`, default 25bps) — a triggered
 exit during a fast price move is not a perfect fill either. The
-resulting order's `trigger_reason` (`"stop_loss"`/`"take_profit"`) marks
-it as distinct from a manually-placed order. Full design — including the
+resulting order's `trigger_reason` (`"stop_loss"`/`"take_profit"`/
+`"liquidation"`) marks it as distinct from a manually-placed order. A
+liquidation runs on the mark price, is checked before either threshold, and
+forfeits the whole margin. Full design — including the
 concurrency guard against a triggered close racing a concurrent manual
 one, and why a single tick can never satisfy both conditions at once —
 in `ARCHITECTURE.md` § "Paper Trading".
@@ -1962,7 +2075,9 @@ Milestone 6's live-trading gate) in `ARCHITECTURE.md` § "Paper Trading"
   "enabled": true,
   "training_job_id": "b3c1a2e4-...", // a completed job trained on real market data
   "confidence_threshold_pct": "70", // 0-100, matching every other risk/threshold field on this account
-  "default_stop_loss_pct": "7", // (0, 100) — every automated buy attaches a stop-loss this far below its fill price
+  "default_stop_loss_pct": "7", // (0, 100) — every automated entry attaches a stop-loss this far on the losing side of its fill price (below a long's, above a short's)
+  "volatility_training_job_id": "c4d2b3f5-...", // optional; a logistic_regression volatility_regime job that scales a new entry's stop-loss width. null (default) = unscaled
+  "leverage": "2", // [1, the account's max_leverage] — the ONE fixed leverage for every automated entry, long or short
 }
 
 // Response (200) — the full PaperAccountResponse, now including:
@@ -1971,6 +2086,10 @@ Milestone 6's live-trading gate) in `ARCHITECTURE.md` § "Paper Trading"
   "strategy_training_job_id": "b3c1a2e4-...",
   "strategy_confidence_threshold_pct": "70.000000000000000000",
   "strategy_default_stop_loss_pct": "7.000000000000000000",
+  "strategy_volatility_training_job_id": null, // set only once a logistic_regression volatility_regime job is configured (VOLATILITY-STOP-WIDTH, below)
+  "strategy_leverage": "2.000000000000000000", // default 2; never derived from a prediction's confidence
+  "strategy_paused_reason": null, // "feature_drift" | null — set only when the scheduler itself, not this endpoint, disabled the strategy
+  "strategy_paused_at": null, // when strategy_paused_reason was set; null exactly when it is
   // ...every other existing PaperAccountResponse field, unchanged
 }
 ```
@@ -1986,7 +2105,9 @@ Milestone 6's live-trading gate) in `ARCHITECTURE.md` § "Paper Trading"
       "training_job_id": "b3c1a2e4-...",
       "symbol": "ETHUSD",
       "action": "opened", // "opened" | "closed" | "no_action"
-      "reason": "Confidence 91.00% >= 70% threshold; signal 'up' while flat — opened 4.2 ETHUSD with a stop-loss at 976.50.",
+      "reason": "Confidence 91.00% >= 70% threshold; signal 'up' while flat — opened a long of 4.2 ETHUSD at 2.000x leverage with a stop-loss at 976.50.",
+      "direction": "long", // "long" | "short" | null: the side this cycle concerned (opened/closed), or for a no_action the side the call pointed at (up = long, down = short); null only with no directional call
+      "strategy_leverage": "2.000000000000000000", // the fixed leverage in force at this cycle, snapshotted
       "predicted_value": "up",
       "confidence": 0.91, // 0-1, the raw prediction confidence — not a percentage
       "confidence_threshold_pct": "70.000000000000000000", // snapshotted at the moment of this cycle
@@ -2000,6 +2121,73 @@ Milestone 6's live-trading gate) in `ARCHITECTURE.md` § "Paper Trading"
   "offset": 0,
 }
 ```
+
+**The strategy trades both directions** (M3-E5-T3): a confident `"up"` call opens
+a long, a confident `"down"` call opens a short, and a call against the held
+side closes it (`reduce_only`, one action per cycle). Every entry uses the
+account's fixed `strategy_leverage` (`PATCH .../strategy` `leverage`, default 2,
+never above `max_leverage`, never derived from confidence) and carries a
+mandatory, direction-aware stop-loss; the position-size, exposure and drawdown
+limits and the halt apply to a short exactly as to a long, and a halt blocks new
+entries in both directions while still allowing closes. New error codes:
+`strategy_leverage_exceeds_maximum` and `strategy_stop_beyond_liquidation` (a
+stop-loss that could not fire before the strategy's leverage liquidates the
+position), both 400. The live model calls "down" in over 99% of cases, so expect
+an almost-always-short strategy; the decision log's `direction` column shows it.
+
+**FEATURE-DRIFT-MONITOR can also disable the strategy, without this
+endpoint ever being called.** Each cycle, before the confidence/signal gate,
+the scheduler checks the fresh prediction's own `feature_drift_status`
+(above). A `"drifted"` result sets `strategy_enabled: false` and
+`strategy_paused_reason: "feature_drift"` directly (a decision-log
+`no_action` row names the feature and z-score), places no order, and
+alerts — see `ARCHITECTURE.md` § "Feature Drift Monitoring". This is the
+one way `strategy_enabled` can flip to `false` other than a `PATCH
+.../strategy` call; `strategy_paused_reason` is how a client tells the two
+apart. Calling `PATCH .../strategy` with `enabled` named — either value —
+always clears `strategy_paused_reason`/`_paused_at`, since a human decision
+about the field supersedes an automated one; a request that never names
+`enabled` (e.g. only retuning leverage) leaves an existing pause as is.
+
+**RETRAIN-WITH-MINIMUM-WINDOW can also change `strategy_training_job_id`,
+without this endpoint ever being called.** `RetrainingScheduler` (see
+`ARCHITECTURE.md` § "Scheduled Retraining") periodically retrains each
+configured model lineage and, only once the fresh job itself reads
+`healthy` against the same drift check above, repoints every currently
+`strategy_enabled: true` account on that lineage onto it — never a disabled
+account, and never `strategy_enabled`/`strategy_paused_reason` themselves.
+A client that polls `GET /paper-trading/accounts/{id}` may see
+`strategy_training_job_id` change between polls with no corresponding
+`PATCH .../strategy` in the audit log — that is this, working as designed,
+not a bug.
+
+**VOLATILITY-STOP-WIDTH ("Option B") can scale a new entry's stop-loss
+width from a second, independent forecast — position sizing, leverage,
+and direction are never touched.** An account may optionally set
+`volatility_training_job_id` (`PATCH .../strategy`) to a _second_
+training job — always `logistic_regression`, always trained on
+`volatility_regime`, always for the same symbol the directional
+`training_job_id` already trades — whose fresh forecast scales
+`default_stop_loss_pct` on every new automated entry: wider ahead of a
+forecast `"expand"` (×1.5), tighter ahead of `"contract"` (×0.75). This
+is stop-loss width only, at position-open time only — never position
+size, never leverage, never which side is opened or whether a cycle
+trades at all (those are decided first, exactly as before this field
+existed; see `ARCHITECTURE.md` § "Paper Trading" → "Automated Strategy"
+→ "Volatility-Scaled Stop-Loss Width" for the boundary-preserving proof).
+Every gate fails closed to the unscaled `default_stop_loss_pct` rather
+than guess: an unset field, a deleted/wrong-model-type/wrong-symbol job,
+an unavailable forecast, or that forecast's own inputs reading
+`feature_drift_status: "drifted"` all leave a new entry's stop-loss
+exactly as it would have been without this field at all. The resulting
+price still passes through the same liquidation-distance check every
+automated stop-loss already faces — a widened stop that would now sit
+beyond the position's liquidation price is rejected
+(`stop_beyond_liquidation`, 400) exactly as an unscaled one would be,
+never placed anyway. Never applies to a manually-placed order's own
+stop-loss/take-profit — those are set explicitly by a person via `PATCH
+.../positions/{symbol}` (above) or at order-open time, and this field
+never overrides them.
 
 Every cycle for every strategy-enabled account is logged exactly once,
 acted on or not — a below-threshold prediction, a non-directional
@@ -2114,7 +2302,7 @@ is implicit); the server replies with an immediate `snapshot` and then
 for a client `ping`. The `snapshot` message carries `trade`, `ticker`,
 `funding` and `orderbook` fields (each `null` until first seen). The
 `ticker` payload now includes `open_interest`; the `funding` message /
-snapshot field carries `funding_rate` (signed fraction per interval),
+snapshot field carries `funding_rate` (signed percent per interval, e.g. `0.01` = 0.01%),
 `funding_interval_seconds`, `next_funding_time` and `event_time` — funding
 frames are infrequent, so `funding` stays `null` for a while after a fresh
 connection. Order-book messages carry an already-sorted (bids descending,

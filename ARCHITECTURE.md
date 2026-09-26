@@ -1297,17 +1297,87 @@ actually fires.
 
 **Initial targets, one file each in `app/ml_datasets/targets/`:**
 
-| Target           | Category    | Column               | What it predicts                                 |
-| ---------------- | ----------- | -------------------- | ------------------------------------------------ |
-| `next_close`     | `price`     | `next_close_{h}`     | The raw close price `h` candles ahead            |
-| `next_return`    | `return`    | `next_return_{h}`    | Fractional change to the close `h` candles ahead |
-| `next_direction` | `direction` | `next_direction_{h}` | `"up"` / `"down"` / `"flat"` classification      |
+| Target              | Category     | Column                   | What it predicts                                                               |
+| ------------------- | ------------ | ------------------------ | ------------------------------------------------------------------------------ |
+| `next_close`        | `price`      | `next_close_{h}`         | The raw close price `h` candles ahead                                          |
+| `next_return`       | `return`     | `next_return_{h}`        | Fractional change to the close `h` candles ahead                               |
+| `next_direction`    | `direction`  | `next_direction_{h}`     | `"up"` / `"down"` / `"flat"` classification                                    |
+| `triple_barrier`    | `direction`  | `triple_barrier_{p}_{h}` | First-touch `"up"`/`"down"`/`"time_expired"` against a symmetric price barrier |
+| `volatility_regime` | `volatility` | `volatility_regime_{h}`  | `"expand"`/`"contract"` — next-`h`-hour realized vol vs. trailing-`h`-hour vol |
 
-Every target shares one parameter, `horizon` (default `1`, declared once in
-`targets/common.py` as `HORIZON_PARAMETER` and reused by all three rather
-than redeclared). `next_return` guards a zero-close division explicitly
-(returns `None` rather than `inf`/`NaN`), which is why it cannot reuse the
-generic `shifted_column` helper the other two share.
+Every `next_*` target shares one parameter, `horizon` (default `1`,
+declared once in `targets/common.py` as `HORIZON_PARAMETER` and reused by
+all three rather than redeclared). `next_return` guards a zero-close
+division explicitly (returns `None` rather than `inf`/`NaN`), which is why
+it cannot reuse the generic `shifted_column` helper the other two share.
+
+**`triple_barrier`/`volatility_regime`** (MODEL-QUALITY-T1) were added
+after `next_direction` failed five independent checks across this
+platform's own research thread
+(`docs/research/CONNECTOR_FEATURE_VALUE_ASSESSMENT.md`,
+`HORIZON_SWEEP_ASSESSMENT.md`, `REGIME_WALKFORWARD_ASSESSMENT.md`, the
+funding/open-interest assessment, `CONFIDENCE_RECHECK_POST_FIX.md`), and
+only after cheap diagnostics confirmed real structure on this platform's
+own stored data first — see
+`docs/research/TARGET_REDEFINITION_ASSESSMENT.md`. `triple_barrier` is a
+first-touch **walk** (not a fixed-horizon lookahead like the other four):
+it scans forward from each row, candle by candle, until price clears an
+upper or lower barrier or `max_hours` elapses; its default barrier (5%)
+is this platform's own real risk convention
+(`paper_trading_strategy_default_stop_loss_pct`), not a value chosen in
+isolation. `volatility_regime` is deliberately binary classification, not
+regression, so it fits the same three-classifier comparison
+(`logistic_regression`/`random_forest`/`gradient_boosting`) every other
+target in the research thread was checked against — this platform's only
+regression adapter (`linear_regression`) has no classifier counterpart to
+compare it against symmetrically. **MODEL-QUALITY-T1's own primary,
+properly-powered comparison found neither a real, tradable edge with the
+existing fixed feature set** (`ohlc`+`volume_log`+`sma(20)`) — including
+how its own permutation-importance check caught an inflated,
+non-generalizing result on a smaller cross-check window, the same
+failure mode `CONNECTOR_FEATURE_VALUE_ASSESSMENT.md` already caught once
+for DefiLlama TVL.
+
+**MODEL-QUALITY-T2 followed up on both leads, with two different
+answers.** `volatility_regime` was flat only because nothing in the fixed
+feature set directly measured volatility — adding `realized_volatility`
+(below) and re-running the identical comparison lifted ROC-AUC from
+~0.50 to 0.72-0.74 across all three classifiers, the first positive
+result this whole research thread has produced. `triple_barrier`'s own
+tree-model accuracy edge, walked forward across the same three real
+out-of-sample regimes `REGIME_WALKFORWARD_ASSESSMENT.md` used, did not
+survive (at or below its own majority baseline in every regime,
+`sma_20`'s own importance reversing sign or vanishing) — confirmed an
+artifact of the one test split it was found on, not a portable edge. A
+real platform bug surfaced doing this work: `app/prediction/engine.py`'s
+`resolve_horizon` assumed every target names its own look-ahead
+parameter `"horizon"`, which silently meant neither new target's
+predictions could ever be graded (fixed generally, via the target's own
+`horizon(params)`) — see `docs/research/TARGET_REDEFINITION_ASSESSMENT.md`
+for the full account of both follow-ups, including one further gap found
+and deliberately left open (`volatility_regime`'s own predictions still
+can't be graded, for a second, different reason: `_grade_one` never
+fetches the trailing context a backward-looking target needs).
+
+**VERIFY-VOLATILITY-FEATURE then put `realized_volatility`'s own claim
+through the same adversarial scrutiny that had just dissolved
+`triple_barrier`'s — and it survived.** Five checks, run in order: the
+feature's exact window boundary, shown with a worked example (row
+`index`'s own value uses `log_returns[index-window+1..index]` inclusive,
+nothing with a higher index); a new adversarial no-look-ahead test
+(`tests/features/test_builtin_generators.py`'s
+`TestRealizedVolatilityNoLookAhead`), matching the exact "poison the
+future, confirm the past is unaffected" methodology
+`funding_rate`/`open_interest` already required; a boundary-shift stress
+test (a faithful, hyperparameter-exact replication of the real
+comparison, re-run with the feature deliberately delayed by 1-24 hours)
+showing AUC decaying _gradually_, not collapsing at a 1-hour shift the
+way a boundary bug would; the existing cross-check window, corroborating
+rather than contradicting the primary comparison; and a regime
+walk-forward showing every one of 9 regime/model AUCs land in 0.56-0.81
+— never once inside `triple_barrier`'s own 0.44-0.54 chance range, though
+`random_forest`/`gradient_boosting` do weaken specifically in the choppy
+regime. Full detail: `docs/research/VOLATILITY_FEATURE_VERIFICATION.md`.
 
 **`MLDatasetBuilder.build()`** (`dataset.py`) is pure composition: the
 _existing_ `FeatureDatasetBuilder` builds features, the new `TargetPipeline`
@@ -3051,13 +3121,18 @@ was written:**
 
 A virtual trading account: place simulated market orders against real
 prices, track positions, and compute PnL. Milestone 3 (Paper Trading &
-Risk) — deliberately narrow in scope throughout: long-only, market
-orders only, no margin, no shorting, no leverage. Its one automated
-order path (see "Automated Strategy" below) is opt-in, off by default,
-and reuses this same order-placement machinery rather than a second one
-— everything else about "no automation" still holds: there is still no
-margin, no shorting, no leverage, and still nothing here that touches
-live trading (see Milestone 6's own gate, unaffected by any of this).
+Risk) — market orders only. Orders placed **manually** may go long or
+short and may use isolated-margin leverage (Epic 3.5, M3-E5-T2: see
+"Margin, Shorts, Leverage, Liquidation and Funding" at the end of this
+section); the sections below describe the engine's original long-only,
+cash-only accounting, which is exactly what a 1x long still is. Its one
+automated order path (see "Automated Strategy" below) is opt-in, off by
+default, and reuses this same order-placement machinery rather than a
+second one. It was **long-only and unleveraged through M3-E5-T2**; M3-E5-T3
+then deliberately extended it to trade long and short at one fixed,
+per-account leverage that is never derived from the model's confidence (see
+"Automated Strategy"). Nothing here touches live trading (see Milestone 6's own gate,
+unaffected by any of this).
 
 **Realistic execution is the one thing this feature exists to guarantee.**
 A market order never fills at a perfect, cost-free price — that would be
@@ -3181,7 +3256,9 @@ every fill so far has genuinely used the `candle_close` fallback — the
 real, unstaged behavior this feature will actually run under until live
 market data is enabled.
 
-**Long-only accounting, stated plainly** (`app/services/paper_trading.py`):
+**Long-only accounting, stated plainly** (`app/services/paper_trading.py`;
+this is the 1x-long case of the margin model described at the end of this
+section, which reproduces it exactly):
 `average_entry_price` (on the materialized `PaperPosition`) is the VWAP of
 _fill_ prices only — fees are never blended into cost basis. A **buy**
 immediately realizes its own fee as a certain, already-paid cost
@@ -3202,8 +3279,11 @@ slippage-adjusted hypothetical exit).
 that would exceed the account's currently-held quantity, is rejected
 outright** — `InsufficientBalanceError`/`InsufficientPositionError` (both
 400), never a partial fill and never a negative balance or a short
-position. No margin, no leverage, no shorting exists anywhere in this
-feature to make either possible in the first place.
+position. (Since M3-E5-T2 a manual _sell_ against nothing opens a short
+and an over-sized reducing order is rejected as `PositionFlipError`, a
+subclass of `InsufficientPositionError` with the same API code; the
+automated strategy still gets `InsufficientPositionError` for a sell with
+nothing to close.)
 
 **Persistence** — three new tables (migration `7a3254fe72af`), extended
 once (migration `c1e00878df40`) with the risk-limit columns above:
@@ -3560,20 +3640,75 @@ is unavailable (an unsupported model kind) or below
 `strategy_confidence_threshold_pct`, do nothing; otherwise interpret
 `predicted_value` — `"up"` is bullish, `"down"` is bearish, anything else
 (`"flat"`, a regressor's own number) is not a directional call and does
-nothing either. Flat + bullish opens a buy, sized at half the account's
-own `max_position_size_pct` of current balance (there is no separate
-strategy-specific position-sizing config — this is a deliberately
-conservative default, leaving headroom for slippage/fee and any other
-open exposure) with a stop-loss attached at
-`strategy_default_stop_loss_pct` below the resolved price. Long +
-bearish closes the full held quantity. Long + bullish and flat + bearish
-are both "already consistent with the signal" — no shorting, ever, for
-an automated order exactly as for a manual one.
+nothing either. **Since M3-E5-T3 the strategy trades both directions:**
+`"up"` is a long and `"down"` is a short. Flat + bullish opens a long and
+flat + bearish opens a short, each sized at half the account's own
+`max_position_size_pct` of its cash (notional; there is no separate
+strategy-specific position-sizing config — a deliberately conservative
+default, leaving headroom for slippage/fee and any other open exposure),
+placed at the account's fixed `strategy_leverage`, with a mandatory
+stop-loss at `strategy_default_stop_loss_pct` on the losing side of the
+resolved price (below a long's, above a short's). A signal against the
+held side closes it (a sell for a long, a buy for a short); a signal
+matching the held side is "already consistent" and does nothing. One action
+per cycle, so a reversal closes now and, if the call still stands, opens the
+other side on a later cycle: no order is ever larger than the position it
+reduces. A close is `reduce_only`, so one that loses a race to a stop-loss or
+a liquidation fails instead of opening the opposite side.
+
+**Leverage is one fixed number, and is never derived from the prediction.**
+`PaperAccount.strategy_leverage` (migration `b3d95f10c7e4`, default 2,
+per-account, validated `1 <= x <= max_leverage`) is the only source of an
+automated order's leverage. The model's confidence is used for exactly one
+thing, the yes/no threshold gate. That is deliberate: confidence was measured
+to carry no reliable relationship to being right (mean 0.889 against accuracy
+0.460 over 8,126 graded predictions, Spearman -0.020, and no horizon, model
+class or regime showed skill: `docs/research/`), so scaling leverage by it
+would put the largest bets on the least trustworthy signal. 2x was chosen from
+the research's liquidation-frequency table (near-zero liquidations at 2-3x
+even over a 72-hour hold). Enforced three ways, so it does not rest on the
+strategy module's own good behaviour: `PaperTradingService` refuses an
+automated entry at any leverage but the account's `strategy_leverage`; a test
+reads the strategy's syntax tree and asserts the `leverage=` it passes contains
+only that one name, and another scans every application module for any
+expression that sets a leverage from something mentioning confidence; and a
+behavioural test runs the same account at 66%, 80% and 99% confidence and gets
+the same leverage. `PATCH .../strategy` also refuses a leverage whose
+liquidation distance is not wider than the mandatory stop-loss (at 20x a 5%
+stop could never fire before liquidation).
+
+**The shared order path, not a new one.** `place_order(..., automated=True)`
+is the strategy's explicit declaration (nothing is inferred from a missing
+`user_id`, which the earlier version did). **`place_order` requires exactly one
+of `user_id` (manual) or `automated=True`** and raises before reading or writing
+anything if given neither or both, so a forgotten argument can never become the
+lenient manual path; a test scans every `place_order` call in `app/` and pins the
+classification (one manual: the HTTP endpoint; two automated: the strategy's
+open and close). It subjects an automated order to
+`_enforce_automated_restrictions`: an entry must use exactly
+`strategy_leverage`, must carry a stop-loss, and an automated order never adds
+to a position. Everything else (the halt, position size, exposure, drawdown,
+the stop-loss's validity against the price and the liquidation price) is the
+same code as a manual order, and the same atomic guard M3-E5-T2 proved under
+real concurrency.
+
+**Disclosed consequence.** The live model calls "down" in over 99% of cases
+across every regime tested, so with shorts enabled this strategy will very
+likely be short almost all the time. That is the model's own measured
+behaviour becoming visible, not something this change introduces; every
+decision-log row records its direction so it can be seen. Deploy note: an
+account whose strategy was already enabled trades at 2x and may open shorts on
+its next tick (the migration's default), where before it opened only
+unleveraged longs. The old "the automated strategy can never short" guard and
+the test proving it were removed on purpose and replaced by positive tests
+that shorting is reachable and correct
+(`test_flat_and_bearish_opens_a_short`).
 
 **Every automated position carries a stop-loss — structurally, not by
-convention.** The buy request `place_order` receives always names
-`stop_loss_price`; there is no code path that opens an automated position
-without one. If the price has moved enough by fill time that the
+convention.** The entry request `place_order` receives always names
+`stop_loss_price` (a long's below the price, a short's above it), and since
+M3-E5-T3 the shared path itself refuses an automated entry without one; there
+is no code path that opens an automated position without one. If the price has moved enough by fill time that the
 precomputed stop-loss would no longer be valid,
 `place_order`'s own `InvalidStopLossPriceError` is the backstop — caught
 generically alongside every other order-placement failure (see below)
@@ -3581,7 +3716,121 @@ and logged as a `no_action` decision, self-healing on the next tick,
 never silently opening an unprotected position.
 `tests/paper_trading/test_strategy_scheduler.py::TestAutomatedPositionsAlwaysCarryAStopLoss`
 proves the resulting position's `stop_loss_price` is set, and matches
-the configured percentage below the order's own `raw_price` exactly.
+the configured percentage on the losing side of the order's own `raw_price`
+exactly, for a long and for a short (a further test shows the monitor closes
+an automated short when the price rises to its stop).
+
+**Volatility-Scaled Stop-Loss Width (VOLATILITY-STOP-WIDTH, "Option B").**
+An account may optionally set `PaperAccount
+.strategy_volatility_training_job_id` (migration `75d437dff776`, nullable
+FK → `training_jobs.id`, `ON DELETE SET NULL`) to a _second_, independent
+job whose fresh `volatility_regime` forecast scales
+`strategy_default_stop_loss_pct` on a new automated entry — wider ahead of
+a forecast `"expand"` (×1.5), tighter ahead of `"contract"` (×0.75),
+fixed, documented constants
+(`app.services.paper_trading_strategy._VOLATILITY_WIDEN_FACTOR`/
+`_TIGHTEN_FACTOR`). **Grounded in real historical data
+(VOLATILITY-MULTIPLIER-CHECK), not left as an intuition-only guess**: the
+one number in this whole risk-sizing thread that wasn't yet derived from
+data, checked directly against the platform's own stored candle history
+rather than reasoned about in the abstract. Replaying `volatility_regime`'s
+own trailing/forward realized-volatility computation (`window_hours=24`,
+the target's own default, already assumed elsewhere in this thread) over
+every labeled row of real ETHUSD/1h and BTCUSD/1h history (22,949 and
+23,452 rows respectively) and taking the ratio `forward_vol / trailing_vol`
+conditioned on each label gives, for ETHUSD: `"expand"` median 1.40 (IQR
+1.17–1.77, mean 1.65 — right-skewed by rare large spikes, max 39.7×) and
+`"contract"` median 0.71 (IQR 0.56–0.86, mean 0.70); BTCUSD is
+consistent (`"expand"` median 1.42, `"contract"` median 0.70). The
+current ×1.5/×0.75 sit inside both symbols' own interquartile ranges,
+close to the median (skewed slightly toward the more conservative side
+of each distribution — a smaller widen and a milder tighten than the raw
+median alone would suggest, which is the right direction to err on a
+risk-facing parameter) — **confirmed already reasonable, not replaced**.
+The spread itself is real and worth stating plainly: a single fixed
+multiplier is a simplification of a genuinely wide distribution (the
+IQR spans roughly 1.17–1.77× and 0.56–0.86×), not a tight, well-defined
+constant — a real target for a future, forecast-magnitude-aware version
+of this feature, not evidence that ×1.5/×0.75 are wrong today. This
+followed on from a prerequisite gap the design
+doc itself flagged: `volatility_regime` is the first target whose label
+depends on candles on _both_ sides of the row being labeled (a trailing
+window as well as the forward one every other target already needed), so
+the periodic grading pipeline (`PredictionService._grade_one`) could never
+actually grade a live `volatility_regime` prediction at all until this —
+fixed by a new, general `TargetGenerator.leading_context(params)` method
+(the backward-looking counterpart to the existing `horizon(params)`,
+default `0`) and a matching `resolve_leading_context` in
+`app/prediction/engine.py`, so `_grade_one` now fetches
+`leading_context + horizon + 1` candles instead of just `horizon + 1` and
+grades from the correct offset (`grade_one`'s new `as_of_index`
+parameter) — general to any future backward-looking target, not a
+`volatility_regime`-specific patch, mirroring how T2's `resolve_horizon`
+bug was fixed generally rather than per-target.
+`tests/prediction/test_service.py::TestGradeNowResolvesNonHorizonNamedTargets
+::test_grades_a_volatility_regime_prediction_with_the_exact_correct_label`
+independently recomputes the expected label from the same deterministic
+candle series `seed_real_candles` produces and asserts an exact match —
+not merely that grading no longer errors.
+
+Every gate below is **fail-closed to the unscaled
+`strategy_default_stop_loss_pct`** — this feature only ever narrows or
+widens an entry that was already going to happen, on a side that was
+already decided; it never changes _whether_ a cycle trades or _which_
+direction, and it never guesses or silently continues on a reading that
+can't be trusted (`PaperTradingStrategyScheduler._resolve_stop_loss_pct`,
+called only from `_open_position`, only at position-open time — refreshing
+an already-open position's own stop on a later tick is a possible future
+extension, not built here, matching this feature's own deliberately
+smaller blast radius relative to Option A):
+
+- **Wrong model lineage.** The configured job must be `logistic_regression`
+  specifically — the one model class VERIFY-VOLATILITY-FEATURE's five
+  adversarial checks held up cleanly across every regime tested. Any other
+  `model_type` falls back to the unscaled default without ever calling the
+  prediction service for it at all
+  (`test_a_volatility_job_of_the_wrong_model_type_falls_back_to_the_fixed_default`).
+- **Wrong symbol.** The volatility job must be trained on the exact same
+  symbol the directional job already trades — never a
+  separately-configured one, mirroring the directional job's own
+  "its own recorded symbol" rule above
+  (`test_a_volatility_job_trained_on_a_different_symbol_falls_back_to_the_fixed_default`).
+- **Unavailable forecast.** Any failure requesting a fresh prediction
+  (job not completed, no candle history, feature mismatch, ...) falls
+  back rather than blocking the entry.
+- **Drifted forecast.** The volatility forecast's own
+  `feature_drift_status` is checked before its value is trusted at all —
+  a `"drifted"` reading falls back to the unscaled default, the same
+  posture the directional signal's own drift gate already takes, and for
+  the same reason
+  (`test_a_drifted_volatility_forecast_falls_back_to_the_fixed_default_width`).
+  Unlike a drifted _directional_ prediction, a drifted volatility forecast
+  never auto-pauses the strategy — it only affects width, never whether
+  this cycle acts.
+- **Liquidation distance, unconditionally.** The scaled stop-loss price is
+  passed through the exact same `place_order` call — and therefore the
+  exact same `StopBeyondLiquidationError` check — every automated
+  stop-loss already goes through; a widened stop that now sits beyond the
+  position's liquidation price is rejected (`no_action`, the entry never
+  placed), never silently placed anyway
+  (`test_a_widened_stop_that_would_cross_liquidation_is_rejected_not_placed`).
+- **Never a manual order.** `_resolve_stop_loss_pct` is reachable only
+  from the strategy scheduler's own `_open_position`; a manual order's
+  human-supplied `stop_loss_price`/`take_profit_price` goes straight
+  through `place_order`'s ordinary manual path and is never touched, an
+  account's volatility job configuration notwithstanding
+  (`test_a_manual_order_stop_loss_is_never_scaled_or_overridden`).
+
+**The boundary-preserving proof, not just a paragraph.**
+`test_direction_and_whether_to_trade_are_unaffected_only_width_differs`
+runs two accounts — identical in every respect except one has a
+volatility job configured — through the very same tick against the very
+same directional signal, and asserts the resulting positions' side,
+symbol, quantity and leverage are identical while only the stop-loss
+price differs. This is `docs/research/VOLATILITY_RISK_SIZING_DESIGN.md`'s
+own central claim about why Option B doesn't reopen D1 (leverage/direction
+must never be derived from a discredited confidence signal) — checked
+here directly, not merely asserted in a document.
 
 **"Just another caller," proven, not merely asserted.**
 `TestSharesExistingRiskLimits::test_a_strategy_order_that_would_breach_max_exposure_is_rejected`
@@ -3589,10 +3838,13 @@ configures a tight `max_exposure_pct`, pre-fills most of that budget with
 an ordinary _manual_ buy in a different symbol, and shows the automated
 buy is rejected by the identical `MaxExposureExceededError` a manual
 order would hit in the same situation — no order placed, no position
-opened, one `no_action` decision logged naming the rejection. A halted
-account rejects an automated close exactly like a manual one too
-(`TestLongAndBearishClosesThePosition
-::test_a_rejected_automated_close_is_logged_as_no_action`).
+opened, one `no_action` decision logged naming the rejection; the test is
+parametrized so an automated short is rejected exactly as a long is, and a
+position-size counterpart shows leverage buys no extra size (the limits are on
+notional over equity). A halted account takes no new automated entry in either
+direction but can still close what it holds (D4;
+`TestKillSwitchHaltsEntriesInBothDirectionsButNotExits`), and a liquidation is
+never blockable.
 
 **Every cycle is logged — acted on or not, and why.** A new table,
 `paper_strategy_decisions` (migration `9a50eaff41a2`): `account_id`,
@@ -3603,7 +3855,11 @@ prediction was ever obtained this cycle), `confidence_threshold_pct` (a
 snapshot of the account's own threshold _at the moment of this cycle_ —
 never re-read from a possibly-since-changed account),
 `prediction_id`/`order_id` (independently nullable — a logged `no_action`
-after a real prediction names the former without the latter). Exactly
+after a real prediction names the former without the latter), and, since
+M3-E5-T3, `direction` (`long`/`short`: the side the cycle concerned, or for a
+`no_action` the side the model's call pointed at; null only with no
+directional call) and `strategy_leverage` (a snapshot of the leverage in force,
+like the threshold). A cycle that crashes is logged too. Exactly
 one row is written per strategy-enabled account per tick, unconditionally
 — proven by
 `TestEveryCycleIsLogged::test_every_tick_is_logged_whether_it_acted_or_not`
@@ -3616,7 +3872,7 @@ paginated read, the Strategy panel's decision log data source.
 
 **API**: `PaperAccountResponse` gains `strategy_enabled`/
 `strategy_training_job_id`/`strategy_confidence_threshold_pct`/
-`strategy_default_stop_loss_pct`; `PATCH .../strategy`
+`strategy_default_stop_loss_pct`/`strategy_leverage`; `PATCH .../strategy`
 (`PaperStrategyConfigUpdateRequest`) sets them; `GET .../strategy/decisions`
 (`PaperStrategyDecisionListResponse`) lists the decision log.
 
@@ -3794,6 +4050,447 @@ cases in `TestUpdatePositionThresholds`/`TestUpdateStrategyConfig`/
 `TestResumeTrading`), including a case proving a no-op field change still
 logs the general summary line without the dedicated `ENABLED`/`DISABLED`
 one, which is reserved for an actual flip.
+
+#### Margin, Shorts, Leverage, Liquidation and Funding (M3-E5-T2)
+
+Built from `docs/research/FUTURES_MECHANICS_AND_LEVERAGE_DESIGN.md` (M3-E5-T1,
+which documents Delta Exchange India's real perpetual-futures mechanics and
+designs this). **Manual orders only.** Locked decisions, none re-opened: D1
+automated trades get no leverage; D2 the automated strategy may not short;
+D3 the drawdown limit measures equity, not cash; D4 a halt blocks new risk and
+alerts; D5 isolated margin only; D6 a liquidation forfeits the whole margin;
+D7 the existing exposure caps are **not raised**.
+
+**The automated strategy was not touched by M3-E5-T2** (superseded by
+M3-E5-T3, which extended it on purpose; see "Automated Strategy"; the guard
+described here, `_enforce_automated_restrictions`, was rewritten then, and now
+allows a fixed-leverage entry with a stop-loss in either direction).
+`app/services/paper_trading_strategy.py` had no diff in that change. The guard
+is structural, on the one order path it shares with manual orders:
+`PaperTradingService.place_order` treats `user_id is None` (its own long-standing
+contract for "the automated strategy": a human caller always has one) as
+automated and refuses anything but opening/adding to an **unleveraged long** or
+reducing a long (`_enforce_automated_restrictions`). That matters beyond
+leverage: an account can hold a manually opened short in the very market the
+strategy trades, and its "close what I hold" sell would otherwise have _added_
+to that short. The refusal surfaces as a logged `no_action` in the strategy's own
+decision log. A test reads the strategy's source and asserts it names no
+`leverage`/`margin`/`reduce_only`/`liquidation` and builds `PaperOrderRequest`
+only from the original four fields; it cannot reach either capability.
+
+**Model.** One net position per `(account, symbol)`, `side` long or short.
+`PaperAccount.balance` is _available cash_; opening posts `notional / leverage`
+of it as the position's isolated `margin` (the whole notional at 1x, i.e. the
+old cash accounting exactly). **Equity** = cash + every position's margin + its
+unrealized PnL at the live price (never stored). Short PnL is the mirror image
+of long: `(entry - fill) * quantity - fee`. The fill model needed no change: it
+was already direction-symmetric (a buy fills higher, a sell lower). A reducing
+order returns the released margin plus PnL to cash, floored at zero (isolated
+margin never loses more than was posted); funding is part of `realized_pnl`, so
+once flat `balance == starting_balance + realized_pnl` still holds. Leverage is
+fixed when a position opens, capped by the account's `max_leverage` (default 5,
+configurable to Delta's 200), and any short or leveraged position above Delta's
+`max_leverage_notional` (100,000 USD, where Delta's margin scaling starts) is
+rejected rather than approximated. An order larger than the position it reduces
+is rejected (`PositionFlipError`); `reduce_only` refuses to open or add.
+**Closing from the UI sends a reduce-only order**: a plain opposite-side order
+that lost a race to a stop-loss or liquidation would find the account flat and
+_open a short_ instead of failing.
+
+**Liquidation formula: derived, not verified.** Delta gives no closed form. The
+engine uses the algebra of Delta's documented condition ("Position Margin minus
+Unrealized PnL equals the Maintenance Margin"): long `E(1-IM)/(1-MM)`, short
+`E(1+IM)/(1+MM)`, generalized to the position's actual margin so funding taken
+from margin moves it (`app/paper_trading/margin.py`). It was **not** confirmed
+against a linear-contract liquidation price from Delta: the only worked examples
+on Delta's page are for an _inverse_ contract (reproduced in
+`tests/paper_trading/test_margin.py`, where the inverse form matches them and
+the linear form does not, so they cannot verify it), and no authenticated
+Delta account was available. One further ambiguity remains, whether the
+maintenance margin is taken on the liquidation price (used) or the entry price;
+the two differ by under 0.05% of entry at 5x and above (bounded in tests).
+`TestVerifiedLinearReference` is the empty, skipped slot for one real figure from
+Delta's calculator; adding it changes one function and one table.
+
+**Liquidation.** The existing `StopLossTakeProfitMonitor` gains a third trigger,
+checked first: liquidation on the **mark price**, then stop-loss, then
+take-profit on the last price. It is only evaluated on a ticker event (the only
+event carrying a mark price); with no mark the last price stands in and the order
+records `trigger_price_basis='last_fallback'`. The fill uses the wider triggered
+slippage; the whole remaining margin is forfeited (cash returned: zero); the loss
+is never charged beyond the margin, and `gapped_through_bankruptcy` records a
+mark price already past the bankruptcy price. A stop-loss must lie on the safe
+side of the position's liquidation price (one beyond it can never fire) and is
+direction-aware by side. A halted account is still liquidated and still stops
+out (D4).
+
+**Funding** (`app/services/funding_rates.py`, `app/services/paper_funding.py`).
+Delta publishes `funding_rate` **in percent** (`0.01` = 0.01%; established from
+its own formula against 17 real funding times, embedded in
+`tests/paper_trading/test_funding_rates.py`); it is converted to a fraction
+exactly once, at ingestion. History (the rate, the index price, the mark price at
+each funding time) comes from Delta's public candles endpoint (`FUNDING:<sym>`,
+`MARK:<sym>`, and the product's own `spot_index` symbol, which differs per market:
+`.DEETHUSD` but `.DEXBTUSD`, so it is read from the product, never guessed) into
+the `funding_rates` table. A scheduler ingests it for markets with an open
+position and settles every funding time exactly once
+(`paper_funding_settlements`, unique on `(account, symbol, funding_time)`):
+`position value at the index price * rate`, longs pay when positive, charged to
+cash first and only the shortfall taken from the position's margin (which moves
+its liquidation price). Limits: a 48-hour catch-up window, and the quantity
+charged is the position's current size; a position opened after a funding time
+owes nothing for it.
+
+**Risk limits, re-derived (D3, D7).** Position size and exposure are **notional
+at the live price as a % of equity**, not cash; `max_exposure_pct` is not raised,
+so leverage changes margin efficiency and the liquidation distance, not the
+account's risk ceiling (a test shows a $6,000 notional order is rejected against
+a 50% limit on $10,000 equity even though its margin is only 12%). They are
+checked only on orders that open or add. **Drawdown is equity against peak
+equity** (`peak_balance` keeps its name and now holds peak _equity_): an
+announced behaviour change. The old rule halted an account for merely _spending_
+more than the limit's share of its cash on a position, with no price movement at
+all (the old test asserted exactly that), and could not see unrealized losses.
+The migration raises each account's stored peak to its cost-basis equity so no
+account is halted by the change. It is evaluated after every fill, trigger,
+liquidation and funding payment, and before any order that would add risk, so an
+unrealized loss stops new risk even when nothing has traded since. **A halt
+blocks new risk only** (reduce-only orders and triggered exits still work) and
+raises an alert (`capture_trading_halted`). Flattening on a halt, which D4 calls
+opt-in, is **not built**.
+
+**Concurrency, and a real bug found by running it on Postgres.** The atomic guard
+now also matches on `paper_accounts.state_version`, bumped by every guarded update:
+a liquidation returns no cash, so a guard on `balance` alone cannot see it. More
+importantly, the guarded update is now the _first write of one transaction_ that
+also writes the position and the order, and commits once
+(`try_apply_trade_effects(commit=False)`), so the account row lock is held until
+everything it gates is written. The old order (commit the guard, then write the
+position) left a window in which a second actor could read the committed account
+with a not-yet-updated position and close a position that had just been closed;
+it was invisible to the SQLite suite (one shared connection: no row locks, no
+isolation) and showed up only when the liquidation-versus-manual-close race was run
+against real Postgres. Two related read-freshness fixes came with it: the account
+and position reads now bypass the session's identity map (`populate_existing`),
+because these sessions do not expire on commit and a retry after a lost race would
+otherwise re-read the stale row and exhaust its attempts. The racing tests moved to
+`tests/paper_trading/test_concurrency_postgres.py` (marked `postgres`, separate
+connections, auto-skipped without `TEST_DATABASE_URL`).
+
+**Persistence.** Migration `a7c41e9b3d52` adds `side`/`leverage`/`margin`/
+`liquidation_price`/`opened_at` to `paper_positions`; `max_leverage`/
+`state_version` to `paper_accounts`; `position_side`/`leverage`/`margin_applied`/
+`reduce_only`/`gapped_through_bankruptcy`/`trigger_price_basis` (and the
+`liquidation` trigger reason) to `paper_orders`; and the `funding_rates` and
+`paper_funding_settlements` tables. Every new column defaults to the old
+long-only, unleveraged meaning, and existing positions are backfilled to
+`margin = quantity * average_entry_price`. Tested up, down and up again on a
+scratch Postgres with rows in place.
+
+**Not built.** A funding-payments table in the UI (the API lists them:
+`GET .../funding`; they are inside realized PnL); cross margin (D5); flattening
+on a halt; Delta's margin scaling beyond `max_leverage_notional`; per-market
+initial/maintenance margin (0.25% maintenance is a setting); changing leverage or
+adding margin to an open position. (Automated-strategy integration was
+deliberately a separate, later task; it was done in M3-E5-T3, where the user
+explicitly revisited D1/D2: long and short, one fixed leverage, never from
+confidence.)
+
+### Feature Drift Monitoring (FEATURE-DRIFT-MONITOR)
+
+**The motivating evidence: two real, live incidents, found only by directly
+checking the running system.** `docs/research/FEATURE_DRIFT_INVESTIGATION.md`
+checked the two training jobs actually referenced by a strategy-enabled
+account's own `strategy_training_job_id` and found both already severely
+drifted, right now, producing near-saturated (>99% confidence) "down" live
+predictions with nothing on the platform flagging either:
+
+- `733082cc` (accounts `37b2d8da`, `d790e9ec`) — trained on
+  `2024-02-06 → 2024-11-01`, drifted through `volume` (live z = +89, worse
+  than the +58 that first surfaced this in M4-E3-T5).
+- `6e7fb4ed` (account `2cff34d9`) — retrained only 13 days before it was
+  checked, drifted through **price and SMA(20) instead**, because its
+  100-candle training window's own standard deviation (≈\$15) was too tight
+  to survive an ordinary two-week move (z = +15 to +18). A coefficient-
+  contribution breakdown confirmed price/SMA, not volume, drives this one.
+
+Mirrors `app.connectors.health`'s own opening reasoning almost exactly: "no
+error raised, no crash, no alert" was the connector epic's motivating
+problem, and it is the identical shape of gap for a live prediction — nothing
+on this platform ever asked "is what I'm about to act on anywhere near what
+this model was actually trained on?"
+
+**Detection (`app/prediction/feature_drift.py`).** `compute_feature_drift`
+z-scores every live feature against the job's own already-**stored**
+`result_summary.normalization` (never a re-estimated or recomputed fit — the
+same values `TrainingJobService.predict` already applies for normalization,
+just read a second time for this comparison) and reports `healthy` /
+`drifted` / `unavailable` (a job trained with `normalize_features=False`
+carries nothing to compare against — reported honestly, never guessed
+`healthy`). Wired into `PredictionService.run` itself — the one place a live
+feature vector is already assembled before a decision is made — so **every**
+prediction (live, manual, or backtest-generated) persists its own
+`feature_drift_status`/`feature_drift_worst_feature`/`feature_drift_worst_z`
+alongside it, not only the ones the automated strategy acts on.
+
+**The threshold is derived from real data, not chosen by feel.**
+`DRIFT_Z_THRESHOLD = 10.0`. A genuinely healthy reading — job `733082cc`'s own
+held-out test split, drawn from the identical window its normalization was
+fit on, so by construction not drifted — measured directly: price/SMA columns
+never exceed |z| = 2.6; `volume`'s own heavier right tail (real hourly volume
+is nowhere near normally distributed) tops out at |z| = 9.32. Both real
+incidents above measured 15.4 to 89 — one to two orders of magnitude past
+that. 10 sits with real headroom above the worst healthy reading and an
+enormous margin below the mildest real incident, so one threshold separates
+the two cleanly without a per-feature tuned value.
+
+**Response policy: auto-pause — chosen explicitly, not defaulted.** Detection
+alone does not stop a bad trade, and given two of three live accounts were
+already found saturated by chance, a log-only response risked the identical
+situation recurring silently. `PaperTradingStrategyScheduler` checks
+`feature_drift_status` immediately after requesting each cycle's fresh
+prediction, **before the confidence/signal gate** — a drifted model's
+saturated confidence is exactly the failure mode this guards against, so a
+drifted prediction must never reach that logic however confident it claims to
+be. A `drifted` result:
+
+1. Sets `strategy_enabled = false`, `strategy_paused_reason = 'feature_drift'`,
+   `strategy_paused_at = now` directly via `PaperAccountRepository.update` —
+   deliberately **not** routed through `PaperTradingService
+.update_strategy_config` (the human-facing `PATCH .../strategy` path):
+   that method requires a real `user_id` for its audit-trail write, and there
+   is no human here, the identical reason the drawdown kill switch's own
+   fully-automated `_alert_halted` writes a log line and a Sentry alert and
+   never an `audit_log` row. Mutates the exact same `strategy_enabled` field
+   `PATCH .../strategy` controls, through the same repository method, so it
+   is recognizable as the same kind of state change even though it reaches
+   the database differently.
+2. Logs a structured error line and calls `capture_feature_drift`
+   (`app/monitoring/error_tracking.py`) — mirrors `capture_trading_halted`
+   exactly: one Sentry event per pause, grouped per account by fingerprint,
+   so a recurring pause is one issue to triage, not one alert per tick.
+3. Records the cycle as a `no_action` `PaperStrategyDecision` naming the
+   worst feature, its z-score, and the threshold — visible in the existing
+   decision log, no new endpoint.
+4. Places no order. The account is simply absent from every later tick's own
+   `list_strategy_enabled` query — the identical "disabling takes effect
+   before the next cycle" guarantee a human's own disable already gives,
+   and, like `trading_halted`, **not self-healing**: it stays paused until a
+   human acts.
+
+**Clearing the pause is a human decision, not automatic.**
+`update_strategy_config` clears `strategy_paused_reason`/`_paused_at`
+whenever a request explicitly names `enabled` — whichever way it sets it —
+since that is a real decision about the field superseding whatever automated
+reason put the account in its current state; a field-only update (e.g. just
+retuning leverage) leaves an existing pause exactly as it was. Surfaced on
+`/paper-trading`'s Strategy panel as a distinct error banner (mirroring the
+drawdown kill switch's own halted-banner pattern) whenever
+`strategy_paused_reason === 'feature_drift'`, so an auto-pause reads as
+categorically different from a human's own earlier disable, not merely
+`strategy_enabled: false` with no further context.
+
+**What this does not do.** This closes the "silent failure" gap; it does not
+fix drift itself. `733082cc` and `6e7fb4ed` were left exactly as found —
+still capable of drifting again once re-enabled against fresh candles — this
+task was scoped to detect and respond, not to redesign training/normalization.
+Two further options were investigated and deliberately not built yet: rolling
+retraining on a window with an **enforced minimum length** (a naive "retrain
+more often" policy alone reproduces `6e7fb4ed`'s own too-narrow-window
+problem — it is itself a rolling-retrain outcome, 13 days old, already
+drifted) and rolling/online normalization as a defense-in-depth layer between
+retrains. Full tradeoffs: `docs/research/FEATURE_DRIFT_INVESTIGATION.md` § "Step
+3 — Designing a general fix."
+
+**Migration** `51ad89f7cadb` adds `feature_drift_status` /
+`_worst_feature` / `_worst_z` to `predictions` (existing rows default to
+`'unavailable'`, never a retroactively-guessed `'healthy'`) and
+`strategy_paused_reason` / `_paused_at` to `paper_accounts`.
+
+### Scheduled Retraining (RETRAIN-WITH-MINIMUM-WINDOW)
+
+Closes the loop FEATURE-DRIFT-MONITOR deliberately left open: that task
+could detect and auto-pause a drifted model but nothing retrained one.
+`app/services/retraining.py`'s `RetrainingScheduler` periodically retrains
+each configured model lineage on a fresh rolling window and, only if the
+fresh job itself reads `healthy` against `app.prediction.feature_drift`,
+auto-swaps every currently-enabled account on that lineage onto it.
+
+**The window width and retrain cadence are hard floors, derived from real
+data, not chosen by feel** — full analysis, including why the first attempt
+at this analysis itself produced a window that immediately drifted against
+itself, in `docs/research/RETRAIN_WINDOW_ANALYSIS.md`:
+
+- `MIN_WINDOW_HOURS = 8,760` (365 days). A dataset window's own fit split is
+  only its chronologically first 70% (`ColumnNormalizer.fit` fits on the
+  train split alone, never validation/test) — the exact mechanism that made
+  a too-narrow window (`6e7fb4ed`, 100 candles) read drifted against itself
+  within days. At 365 days and a weekly retrain, price/SMA's 99th-percentile
+  z stays ≈2.9–3.2 (worst case ≈3.1–3.4), an order of magnitude under the
+  drift monitor's own `DRIFT_Z_THRESHOLD = 10.0`.
+- `MAX_RETRAIN_INTERVAL_SECONDS = 168·3600` (7 days). Fixes the second,
+  independent failure mode the first FEATURE-DRIFT-MONITOR incident showed:
+  `733082cc` drifted through `volume` not because its window was narrow but
+  because it was old — volume's real-world absolute scale trends upward
+  over calendar time, so no fixed window stays representative forever,
+  however wide. A capped retrain age bounds how stale any lineage is allowed
+  to get.
+- Both are checked once, at construction (`RetrainingScheduler.__init__`),
+  and rejected outright (`ValueError`) if violated — no warn-and-continue
+  path, and not overridable narrower/longer even explicitly.
+
+**`volume` is deliberately never in the retrained feature set.** The same
+analysis found raw volume cannot be kept under the alarm threshold at any
+practical window/cadence combination (99th-percentile z in the teens to
+40s, worst case over 60) — the opposite of price/SMA, widening the window
+makes it _worse_, since a wider window's fit sits further in the past, at a
+systematically lower real-world volume scale than "now." `log1p(volume)`
+(`app/features/builtin/volume_log.py`) fixes this by a wide margin
+(99th-percentile stays ≈3–4, worst case under 10, across the same grid) —
+a measured finding, not an assumption. Every job this scheduler creates
+uses `ohlc` (`app/features/builtin/ohlc.py`, the four price columns with no
+volume) + `volume_log` + `sma(20, close)`, never the bundled `ohlcv`.
+
+**A lineage's own `symbol`/`timeframe`/`model_type`/`hyperparameters` are
+never separately configured** — `RetrainingTarget` names only an
+`experiment_id`; every retrain clones those fields from the lineage's own
+most recent _completed_ job, so they can never drift out of sync with what
+has actually been trained and verified working. A lineage with no completed
+job yet is skipped, logged, not an error — the same "bootstrap it once by
+hand, then let the scheduler keep it fresh" step this task's own manual
+retrain already did once for the very first job in each affected lineage.
+
+**Promotion is auto-swap, chosen explicitly** (the one real judgment call in
+this task, decided by the user rather than defaulted, the same way the
+drift monitor's own response policy was). A promotion never re-enables a
+disabled account (human-disabled or still drift-paused) — only an account
+already `strategy_enabled = true` and already pointed at the retrained
+lineage gets repointed, the exact same "an explicit human decision about
+`enabled` is never made for you" boundary `update_strategy_config`'s own
+drift-pause-clearing logic already draws. Like `PaperTradingStrategyScheduler`'s
+own auto-pause, a promotion is **not** routed through the human-audited
+`update_strategy_config` path — there is no human to attribute it to — it
+writes the account row directly and alerts via `capture_model_promoted`
+(`app/monitoring/error_tracking.py`), mirroring `capture_feature_drift`'s
+own precedent.
+
+**A retrain that reads drifted against itself is never promoted.** Every
+fresh job is checked against `app.prediction.feature_drift` before any
+promotion decision — without this, a scheduler like this could just as
+easily reproduce the original problem on a schedule instead of fixing it.
+`capture_retrain_unhealthy` alerts when this happens; it should be rare (the
+whole point of the enforced floors), and a recurring one is itself worth
+investigating.
+
+**Migration** `20260923_57b6bdcad9da` adds `training_jobs.dataset_limit`
+(the new `TrainingJobCreateRequest.limit` field this task also added —
+without it, a wide-date-range training request was silently truncated to
+the default 100-candle limit even with an explicit `start`/`end`; see
+`docs/research/RETRAIN_WINDOW_ANALYSIS.md` § "A platform bug found along the
+way"). `candles_max_limit` was also raised from 1,000 to 10,000, the
+previous ceiling being itself too low for an 8,760-hour window.
+
+### Configuration Integrity (ENV-CONFIG-INTEGRITY)
+
+Stays inside the existing Monitoring epic (M5-E5) — closing a gap in
+scope that epic already covers (a model silently drifting, a connector
+silently going quiet), not opening new scope, for the platform's own
+configuration. Three real `.env` drift incidents surfaced in one
+session, none producing an error, a warning, or any visible sign
+anywhere — each found only because someone happened to check:
+
+1. **`MARKET_DATA_LIVE` missing entirely.** Never declared in the local
+   `.env` at all; a long-running dev process had it set some other,
+   undocumented way (an exported shell variable, not `.env`). A plain
+   restart lost it, silently falling back to the code default (`false`)
+   and turning off live market data — and, with it, order-flow capture,
+   which is gated on the identical flag — without any error. Caught only
+   by checking `/api/v1/system/status` before declaring the restart
+   successful.
+2. **`RETRAINING_EXPERIMENT_IDS` silently nullified by a duplicate
+   declaration.** Set correctly, once, to the real lineage id; a second,
+   later block in the same file re-declared it empty. `python-dotenv`
+   (what `Settings`' own `env_file` loading uses) resolves a duplicate
+   key to its _last_ declaration, silently — no error, no warning,
+   nothing. The retraining scheduler had been ticking on its own
+   `retraining_tick_interval_seconds` cadence and retraining nothing for
+   an unknown number of days.
+3. **`orderflow_retention_days`'s own activation required a restart that
+   nearly repeated incident 1.** The setting itself was changed
+   correctly, but `Settings` only reads `.env` once at process start
+   (`SettingsConfigDict(env_file=".env")`, no hot-reload), so activating
+   it needed a restart — the exact same restart that, without incident 1
+   already being caught, would have silently disabled order-flow capture
+   as a side effect of the very change meant to protect its retained
+   history.
+
+**This is one failure shape three times, not three unrelated mistakes: a
+setting can be silently wrong, and nothing on this platform notices.**
+Two mechanisms close it, both cheap and mechanical rather than another
+model/connector-style monitor (there is no meaningful "drift" signal for
+a config file — the failure mode is binary: right or silently wrong).
+
+**Duplicate-key detection, at startup, not CI.**
+`app.core.env_validation.find_duplicate_env_keys` parses the raw `.env`
+file directly — never through `Settings`, which has already resolved
+(possibly silently wrong) by the time anything else could ask it — and
+`app.application._check_env_duplicates` runs it unconditionally, first,
+before even the JWT secret check. A key declared twice with two
+_different_ values fails the whole application at startup
+(`RuntimeError`, naming every declaration's line number and value plus
+which one is actually in effect), exactly like the existing JWT-secret
+precedent (`ARCHITECTURE.md` § "Authentication & Audit Trail"); a
+harmless duplicate (identical values on every declaration) only logs a
+warning. **Startup, not CI, is the mechanism that actually catches
+this** — `.env` is gitignored and per-environment (`configs/README.md`),
+so a CI check can only ever see what's committed. A CI job could check
+`.env.example` (and does: `scripts/check_env_duplicates.py`, wired into
+`.github/workflows/ci.yml` as `make check-env`, using the identical
+`find_duplicate_env_keys` function), but that is a materially weaker
+guarantee against a different file — it can never see the real,
+untracked `.env` where all three of the incidents above actually
+happened. The two are complementary, not substitutes for each other:
+startup validation is the primary mechanism; the CI check only guards
+the committed template from accumulating the identical mistake.
+
+**Resolved-value visibility, at every startup.**
+`app.application._log_automation_config` logs every setting that gates a
+scheduler or automation loop — `market_data_live`,
+`orderflow_capture_enabled`, `orderflow_retention_days`,
+`candle_sync_enabled`, `prediction_grading_enabled`,
+`paper_trading_funding_enabled`,
+`paper_trading_strategy_scheduler_enabled`,
+`retraining_scheduler_enabled`, `retraining_experiment_ids`,
+`news_sync_enabled`, `external_data_sync_enabled` — together, in one
+line, at every startup, so a human glancing at the logs sees the real,
+resolved state without separately querying `Settings` or hunting across
+several different schedulers' own, separately-logged "started" lines
+(which already exist and are not replaced by this — `OrderFlowCapture`
+still logs its own `retention=365d`, for instance). A second, explicit,
+targeted warning fires whenever `retraining_scheduler_enabled` is true
+but `retraining_experiment_ids` is empty — the exact shape incident 2
+took — rather than leaving a reader to notice an empty string buried
+inside one long combined log line.
+
+**The immediate bug, fixed and confirmed working, not just
+reconfigured.** `.env`'s duplicate `RETRAINING_EXPERIMENT_IDS` block was
+merged into one; a live check against the running settings confirmed the
+real lineage id resolves correctly (`retraining_experiment_ids='49bbf390-...'`,
+not `''`), and a manual `run_retraining_once` tick against it returned
+`attempted=1, not_due=1` — proof the scheduler now recognizes the real
+target and correctly defers to the enforced minimum retrain interval
+(due 2026-09-29, seven days after the lineage's last retrain), not just
+that the setting reads correctly in isolation.
+
+**What this does not cover.** Sentry (deferred, still the user's own
+open item) would have surfaced incident 1 or 2 as a real alert the
+moment either scheduler started behaving abnormally, had it been wired
+up — this closes the detection gap for the configuration itself, not a
+substitute for alerting on its downstream symptoms. Env vars injected
+directly with no `.env` file at all (a real production deployment, most
+likely) have nothing for `find_duplicate_env_keys` to check — this is a
+local/dev-`.env` protection specifically, matching where all three real
+incidents actually happened.
 
 ### External Data Connectors
 
@@ -5012,6 +5709,215 @@ real-article, null-sentiment, empty, error, and filter/clear states;
 `news_sentiment` connector renders as an ordinary card with zero
 News-specific code, alongside Fear & Greed's own.
 
+#### Connector Health Monitoring (M5-E5-T1)
+
+**The motivating evidence: three real, silent failures.** Each of these
+was invisible from the outside — no error raised, no crash, nothing
+logged above INFO — and each was found only by someone deliberately
+hitting the real system:
+
+- **M4-E1-T1 (Fear & Greed).** `external_sources` was computed
+  server-side but never threaded onto the `/features` response DTO, so the
+  real HTTP catalogue silently omitted a documented field. The mocked
+  suite passed throughout.
+- **M4-E1-T2 (FRED).** FRED silently defaults its own `realtime_start`/
+  `realtime_end` to "today" when omitted, collapsing every observation
+  onto one fake vintage date; the idempotency check then discarded 865 of
+  866 real values as duplicates. The scheduler reported a healthy tick the
+  whole time.
+- **M4-E1-T4 (Etherscan).** The scheduler snapshots `now` before the
+  connector's HTTP round trip, so the connector's own post-round-trip
+  timestamp always landed just past the stale `end` bound, returning
+  `received=0` on every tick, forever.
+
+The common shape: a scheduler that looks perfectly healthy while quietly
+doing nothing useful. Nothing on the platform asked "how long since this
+connector's data actually moved forward?"
+
+**Scope: a health _signal_, not alerting.** This piece answers that one
+question and makes it queryable. Turning it into a notification (email,
+Slack, pager) belongs with error tracking, the remaining piece of this
+epic; standing up a third-party alerting service before the platform can
+even tell a connector has gone quiet would be the wrong order.
+
+**Two parts.**
+
+1. **Per-tick outcomes are persisted, not just logged.**
+   `ExternalDataSyncScheduler.run_catch_up` already built an
+   `ExternalDataIngestReport` (received/inserted/updated/
+   duplicates_skipped/rejected/duration) per source per tick, and threw it
+   away when the coroutine returned; the periodic `_loop` did not even log
+   those numbers (only `synced`/`failed`). Each attempt now writes one
+   `connector_sync_runs` row (`ConnectorSyncRun`,
+   `app/models/external_data.py`), including a `success=False` row with
+   `error_message` when a source raises (the exception's type name if its
+   message is blank). Marketaux is ingested by its own `NewsSyncScheduler`
+   rather than the generic one, so that scheduler records its tick the same
+   way; otherwise five of the six connectors would be covered and the sixth
+   silently not. Both go through one helper,
+   `app/services/connector_sync_runs.py`. A source with nothing to fetch
+   (window already current) writes no row, since no attempt happened.
+   Recording is best-effort: a failure writing health history is logged and
+   swallowed, never allowed to fail, or look like a failure of, the
+   ingestion it describes.
+2. **Health is judged per connector, from both the data and the syncs.**
+   `app/connectors/health.py::compute_health_status` returns one of four
+   statuses, checked in this order: `failing` (the connector's
+   `FAILING_STREAK` (3) most recent `connector_sync_runs` attempts all
+   failed), `never_ingested` (no point ever), `stale` (newest point older
+   than its threshold), else `healthy`. The threshold is `STALE_MULTIPLIER`
+   (3) x the connector's own `ConnectorMetadata.expected_interval_seconds`,
+   unless the connector sets `stale_after_seconds` (only FRED does, below).
+   Each connector declares its own real cadence, so a monthly series and
+   an hourly one are not held to one flat threshold. The status is
+   surfaced as `health_status` on the existing `GET /connectors` response
+   (no second endpoint) and as a pill on each `/data-sources` card.
+
+   **Why `failing` exists.** Staleness alone measures only "is the newest
+   stored point recent enough." A connector erroring on every sync tick
+   still has a recent last-good point, so it kept reading `healthy` until
+   its threshold independently elapsed (up to 60 days for FRED): the same
+   "looks fine from the outside while doing nothing useful" failure this
+   feature exists to catch, one layer deeper, with the raw failure rows
+   sitting unread beside it. `failing` takes precedence over `stale` and
+   `never_ingested` because it is the more urgent situation and the root
+   cause when they coincide. Three consecutive failures, not one: a single
+   failed tick is routinely a network blip or an upstream 5xx. Sync
+   attempts happen roughly hourly (every 6 hours for Marketaux), so a
+   connector is reported `failing` after about three hours of continuous
+   failure (about eighteen for Marketaux), instead of after its staleness
+   threshold. Only the newest attempts count: a success clears it.
+
+**The thresholds come from real data, and checking them changed one.**
+Gaps between consecutive stored points, from the dev database
+(`external_data_points`, source-wide rows), in hours:
+
+| source           | median | p95  | max   | `expected_interval_seconds` | stale after |
+| ---------------- | ------ | ---- | ----- | --------------------------- | ----------- |
+| `eth_tvl`        | 24     | 24   | 24    | 86,400 (1d)                 | 3d          |
+| `fear_greed`     | 24     | 24   | 96    | 86,400 (1d)                 | 3d          |
+| `fed_funds_rate` | 696    | 840  | 1,008 | 2,592,000 (30d)             | 60d         |
+| `news_sentiment` | 24     | 72   | 72    | 129,600 (36h)               | 108h        |
+| `eth_gas_price`  | 0.01   | 1    | 22    | 3,600 (1h)                  | 3h          |
+| `btc_dominance`  | 0.5    | 17.7 | 23    | 3,600 (1h)                  | 3h          |
+
+- `news_sentiment` was first set to a plain 24h cadence (72h threshold).
+  Checking the actual gaps showed a Friday-to-Monday 72h gap in 6 of 6
+  weeks (no weekend aggregates): with a 72h threshold the connector would
+  have flipped to `stale` every Monday morning before ingestion caught up,
+  a recurring false positive that teaches people to ignore the signal. It
+  is now 36h (108h threshold), which covers the weekly gap plus ingest
+  delay and still flags a dead connector within about 4.5 days.
+- `fear_greed`'s one 96h gap (April 2018) would have been flagged, as it
+  should: a daily source going three or more days without a value is
+  exactly the abnormal case.
+- `eth_gas_price` and `btc_dominance` have no publication cadence of their
+  own (they are sampled per scheduler tick), so their expected interval is
+  the scheduler's own 3,600s tick: "stale" means the scheduler stopped
+  ticking. Their historical max gaps (22-23h) are dev-machine downtime
+  (the local server is not always on), not a source property; on an
+  always-on server these are far tighter.
+- `fed_funds_rate` was first left at the default 3 x 30 = 90 days. That
+  waits out two missed monthly releases before flagging a silently broken
+  monthly connector, which is the slow detection this feature exists to
+  avoid, so it now sets `stale_after_seconds` to 60 days (an explicit
+  decision). 60 clears the real maximum gap (42 days over 30 years) by 18
+  days. It is a separate override rather than a 20-day
+  `expected_interval_seconds`, so that field keeps stating FRED's real
+  30-day cadence. Against the stored data: newest value is 18 days old
+  today, so `healthy`; it would turn `stale` only past 60 days.
+
+**Verified against real data, not only mocks.** (The staleness checks
+below predate `failing`; the `failing` path was checked separately, see the
+end of this paragraph.) One real sync tick against
+the real APIs and the real dev Postgres wrote correct rows (e.g.
+`eth_gas_price received=1 inserted=1`, `eth_tvl received=2 inserted=1
+updated=1` showing DefiLlama's revisable behavior). Advancing the clock
+against the real stored data, with no new points arriving, flipped each
+connector at its own threshold: at +2 days only the hourly connectors were
+`stale`; at +5 days the daily ones flipped while monthly `fed_funds_rate`
+stayed `healthy`; at +100 days all were `stale`. That is a simulation of
+elapsed time, not a naturally occurring outage. The `failing` status was
+checked against real Postgres by inserting three failed runs for
+`fear_greed` (whose data was fresh) inside a transaction and rolling it
+back: the connector read `failing`, the other five stayed `healthy`, and no
+rows were left behind. An end-to-end test seeds the same situation through
+the real HTTP endpoint, and was confirmed to fail (reading `healthy`) when
+the service is temporarily made to ignore sync-run history.
+
+**Known limitations.**
+
+- `connector_sync_runs` is append-only with no retention (unlike
+  `trade_flow`/`orderbook_snapshots`). At roughly 5 rows/hour that is
+  about 44,000 rows/year, small, but unbounded; add pruning if it matters.
+- `failing` is judged from recorded attempts alone, with no recency bound:
+  if the scheduler itself later dies while the API keeps running, the last
+  known state stays `failing` until a success is recorded, and staleness is
+  what eventually reports the silence. The individual failure rows
+  (`error_message` etc.) are queryable through
+  `ConnectorSyncRunRepository.list_recent` but no endpoint exposes them;
+  the status only reports that a connector is failing, not why. Surfacing
+  the reason belongs with the error-tracking piece.
+- `GET /connectors` now issues one extra small query per connector (its
+  newest 3 sync runs), 6 today; fine at this scale, worth batching if the
+  connector count grows.
+- Pre-existing, unrelated schema drift surfaced while generating the
+  migration (a comment-text change on `ml_dataset_builds.ml_dataset_id`, a
+  check-constraint name on `paper_strategy_decisions`) was deliberately
+  left out of this migration; `alembic check` still reports it.
+
+#### Delta Market-Data Connectors: Funding Rate & Open Interest History (M4-E3-T5)
+
+Two connectors, `delta_ethusd_funding_rate` and `delta_ethusd_open_interest`
+(`app/connectors/delta_market_data.py`), record **history** of two signals the
+Delta REST/WS layers only ever cached live (see "Funding Rate, Open Interest &
+Order-Flow Capture" below). They were built to test, on the same footing as
+every other connector, whether either helps prediction; the answer was no
+(`docs/research/CONNECTOR_FEATURE_VALUE_ASSESSMENT.md` § "M4-E3-T5").
+
+**The history was investigated, not assumed.** Delta's public
+`GET /v2/history/candles` serves derived series under prefixed symbols, the same
+endpoint the candle ingester uses. `FUNDING:ETHUSD` runs from 2024-02-05 12:00
+UTC (22,997 hourly candles, in **percent**) and `OI:ETHUSD` from 2024-02-06
+08:00 UTC (23,001, in ETH, no gaps). Neither carries volume, so both go through
+`DeltaClient.get_series` and `SeriesCandle` rather than the OHLCV path.
+
+**Stamping is the no-look-ahead contract.** Features attach the latest point at
+or before a candle's `open_time`, so a stored point must be stamped with the
+moment its value was _observable_:
+
+- **Funding** is a step function set at funding times (multiples of 28,800 s)
+  and never revised. One point is stored per funding time, plus any off-boundary
+  change, never one per constant hour; the as-of lookup carries the value
+  forward, which is exactly what a step means. Percent becomes a fraction exactly
+  once, through the platform's single `funding_percent_to_fraction`.
+- **Open interest** stores the OI candle's **open** at the candle's open time.
+  Its close is not known until an hour later and is never used.
+
+**Storage is the generic `external_data_points` table**, not a dedicated one:
+the as-of lookup, sync scheduler, backfill, health monitor and Data Sources page
+all work on it, and both signals are one number per `(source, timestamp)`.
+Funding also lives in `funding_rates` (M3-E5-T2), which settlement uses because a
+payment needs the index and mark prices and is keyed per market; the duplication
+is deliberate, two consumers with two shapes. Both connectors declare their real
+cadence (`expected_interval_seconds` 28,800 and 3,600), so the health monitor
+flags them stale after 24 h and 3 h.
+
+**Both are ETHUSD only.** The lookups are global (`symbol=None`) like
+`eth_tvl`, so the `funding_rate` and `open_interest` features (category
+`derivatives`) must not build a dataset for another market; their descriptions
+say so. Open interest is also a **non-stationary level** (0.09 ETH in February
+2024, 15,000 to 26,000 through 2026) and funding sits on Delta's 0.01% floor
+69.5% of the time; both facts are documented in the module and drove the
+research findings, including that a model normalized on a 2024 window
+saturates on 2026 open interest exactly as it does on `volume`.
+
+Tests: `tests/connectors/test_delta_market_data.py` (stamping, unit conversion,
+step compression, chunking, error mapping) and
+`tests/features/test_delta_market_data_features.py`, which carries the same
+three-level no-look-ahead proof as every connector-backed feature (pure
+generator, poisoned future points, real database-backed path).
+
 ### Funding Rate, Open Interest & Order-Flow Capture (M4-E2-T1)
 
 Milestone 4's second epic — **Delta REST/WS completion** — is a different
@@ -5125,12 +6031,17 @@ and ~16 MB/day for `orderbook_snapshots`, ~31 MB/day combined** — about
 sweep**: every `orderflow_prune_interval_seconds` (default 3600s — a
 `DELETE … WHERE captured_at < cutoff` is cheap regardless of how often
 it's checked, so this doesn't need the 5–15s capture cadence) it deletes
-rows from both tables older than `orderflow_retention_days` (default 60),
-keyed on each row's own `captured_at` — not the exchange's `event_time` —
-via `OrderFlowRepository.prune_trades_older_than` /
-`prune_snapshots_older_than`. 60 days of history is enough for a first
-microstructure research pass without the tables growing forever
-unattended; both are configurable and the sweep is on by construction
+rows from both tables older than `orderflow_retention_days` (default
+**365**, raised from an initial 60 — ORDERFLOW-STATUS-CHECK/
+HOUSEKEEPING-1, `docs/research/ORDERFLOW_STATUS_CHECK.md`), keyed on
+each row's own `captured_at` — not the exchange's `event_time` — via
+`OrderFlowRepository.prune_trades_older_than` /
+`prune_snapshots_older_than`. This data has no backfill, so a day pruned
+past the cutoff is gone forever; 60 days would have permanently capped
+this platform below the "primary window" depth (365 days) every other
+analysis in this research thread has actually needed for real
+statistical power, for a real measured cost of only ~11 GB steady-state
+at 365 days — both are configurable and the sweep is on by construction
 whenever the capture itself is.
 
 **Execution path — confirmed from the actual code, not asserted.**
@@ -5183,8 +6094,8 @@ admin/member distinction). This is a scope decision, not an oversight —
 building role-based access control now, before this platform has more
 than a handful of real users, would be exactly the kind of premature
 infrastructure this project has otherwise been careful to defer (see
-the Paper Trading section's own "no margin, no shorting, no leverage"
-posture for the same discipline applied elsewhere).
+the Paper Trading section's own deliberately-narrow-scope posture for
+the same discipline applied elsewhere).
 
 **`users`** (`app/models/user.py`): `id`, `email` (unique, indexed),
 `hashed_password`, `created_at`/`updated_at`. Passwords are hashed with
@@ -5759,6 +6670,203 @@ residual case — a token neither source can vouch for — raising
 directly-measured account of exactly how wide that failure mode is in
 practice.
 
+### Structured Logging & Error Tracking (M5-E5-T2)
+
+**Why.** The connector health task (M5-E5-T1) produced a signal, a pill on
+a dashboard someone has to remember to open, and explicitly deferred the
+harder half: making a person actually _get told_. This task closes that,
+for connector failures and for any unhandled exception anywhere in the API.
+
+**Starting point.** `app/core/logging.py` called `logging.basicConfig` with
+a plain-text format (`%(asctime)s %(levelname)s [%(name)s] %(message)s`).
+No error tracking of any kind existed; an unhandled exception became a
+`logger.exception` line and a generic 500.
+
+**Structured logging: a formatter, not a framework.** Every existing
+`logger.*` call is untouched. `app/monitoring/json_logging.py`'s
+`JsonFormatter` (stdlib only, no new dependency) emits one JSON object per
+line: `timestamp` (ISO-8601 UTC, ms), `level`, `logger`, `message`,
+`exception` (the traceback, as a string) and any `extra=` fields as
+top-level keys. Inside a request it also adds `request_id`, `method`,
+`path` and, on authenticated routes, `user_id`. `LOG_FORMAT=text` is the
+opt-in for reading a local console. uvicorn's three loggers ship their own
+plain-text handlers with `propagate=False`; left alone they would
+interleave non-JSON lines with the app's JSON lines and break every parser
+reading the stream, so `configure_logging` brings them under the same
+handler. The existing suppression of httpx's request logger (which would
+print connector API keys from their query strings) is preserved and has a
+test.
+
+**Error tracking: the Sentry protocol, hosted-vs-self-hosted left open.**
+`sentry-sdk` speaks a wire protocol that Sentry, GlitchTip and Bugsink all
+accept, so the choice of backend is one value, `SENTRY_DSN`, and the code
+is identical for all three. Blank (the default) initializes nothing and
+every call is a no-op, the same soft-dependency convention as `REDIS_URL`.
+
+#### The cost and limits comparison (checked 2026-09-19)
+
+Numbers are from each vendor's own pricing page unless marked; third-party
+comparison sites disagreed with each other (one gave Sentry's retention as
+14 days, another 30), which is why the primary pages were used.
+
+| Option                    | Free tier                                                   | Retention             | Alerts on the free tier                           | Self-host requirement                                                                |
+| ------------------------- | ----------------------------------------------------------- | --------------------- | ------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| Sentry (hosted Developer) | 5k errors/month, 1 user, unlimited projects                 | 30-day lookback       | Email listed; Slack not listed                    | n/a (self-hosting not compared)                                                      |
+| GlitchTip (hosted)        | 1,000 events/month, unlimited projects and members          | Not stated on pricing | Not stated on the pricing page                    | n/a                                                                                  |
+| GlitchTip (self-hosted)   | Free, no event cap                                          | 90 days (default)     | Its own                                           | Postgres 14+ and one service; 512 MB RAM recommended, 256 MB minimum; Redis optional |
+| Bugsink (hosted)          | 15K events/month, 1 user, but only 5K events retained       | 5K events on free     | Slack, Discord, email, webhooks, on the free plan | n/a                                                                                  |
+| Bugsink (self-hosted)     | Free, all features, unlimited users, volume set by hardware | Set by hardware       | Same as hosted                                    | Not on the pricing page                                                              |
+
+Paid tiers, for scale only: GlitchTip $15/month for 100k events; Bugsink
+EUR 16/month for 75K events. Sentry's paid prices were not retrieved from
+its own page and are not quoted.
+
+**What this platform's volume actually is.** The design below sends only
+unhandled exceptions and one event per connector outage, never log lines
+and never performance traces. That is a handful of events a month in normal
+operation; even six connectors each flapping in and out of `failing` daily
+is about 200 a month. Every free tier's event cap is far above that, so
+volume does not decide anything here.
+
+**Recommendation: hosted Sentry, Developer (free) plan.** The reasoning,
+in the order it mattered:
+
+1. **Hosted, not self-hosted.** The production droplet is one 2-vCPU /
+   3.8 GB machine that was already CPU-starved earlier in this project
+   (see `docs/deployment/DEPLOYMENT.md`). A tracker on the same box uses
+   memory the API needs and, worse, dies with the box, exactly when its
+   alert would matter. A second droplet costs more than any of these free
+   tiers. That rules out both self-hosted options for now.
+2. **Retention.** Sentry keeps full events for 30 days; Bugsink's free
+   plan keeps only the newest 5K events; GlitchTip's hosted retention is
+   not published on its pricing page.
+3. **It was not chosen for being best known.** On volume all three tie,
+   and Bugsink is ahead on one thing that may matter: Slack, Discord and
+   webhook alerts are on its free plan, while Sentry's free plan page lists
+   email only. If a push notification to a chat channel is wanted rather
+   than an email, switch to Bugsink hosted; it is a DSN change and nothing
+   else. Sentry's one-user limit is fine for a solo operator and becomes a
+   reason to revisit if a second person joins.
+
+**Not verified:** that an alert email actually arrives. That needs an
+account and an alert rule in the chosen tracker; the code guarantees a
+distinct, correctly-grouped issue reaches it (below), not what the tracker
+does with it.
+
+#### What is sent, and what is deliberately not
+
+An error tracker's defaults are not acceptable for a platform with a login
+endpoint and connector API keys in query strings. `init_error_tracking`
+sets these explicitly, and each has a test that fails when the protection
+is removed (checked by disabling each one in turn):
+
+| Never sent                                                              | How                                                                                                                                                                                                                                                        |
+| ----------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Request bodies (a crash in a login-style route would ship the password) | `max_request_body_size="never"`; the SDK records that config removed it                                                                                                                                                                                    |
+| Local variables in stack frames                                         | `include_local_variables=False`. The SDK's scrubber matches whole key names, so a local named `hashed_password` or `api_token` would go out. Turning this on failed five tests at once, including leaking the `Authorization` header and the user's email. |
+| Default PII, cookies, the Authorization header                          | `send_default_pii=False`, plus extra scrubber key names                                                                                                                                                                                                    |
+| HTTP-client breadcrumbs                                                 | Dropped. The SDK's `httpx` breadcrumbs record the full URL, and Etherscan, FRED and Marketaux put their real key in the query string (`apikey`, `api_key`, `api_token`)                                                                                    |
+| An API key inside an exception message or query string                  | `redact_secrets` in `before_send` rewrites `name=value` for secret-looking names to `[Filtered]`                                                                                                                                                           |
+| Log lines as events                                                     | `LoggingIntegration(event_level=None)`: log records are breadcrumbs only                                                                                                                                                                                   |
+
+The last row is a quota decision as much as a privacy one. Left at the
+SDK default, an hourly sync failing for a week would be one event per tick
+per connector (over 1,000 a week for six connectors), exhausting a 5k plan.
+
+**What is sent:** the exception type, message (redacted) and stack trace,
+including a few lines of _source code_ around each frame (normal for an
+error tracker, and the reason the tests build their fake secrets at
+runtime: a secret spelled out in source would appear as context). Nothing
+in this repository hardcodes a secret; they come from the environment.
+Also: request method, URL (redacted) and non-sensitive headers, the
+`request_id` tag, the authenticated user's **id only** (never email or
+name), `environment` and a `release` of `eth-ai-api@<version>`.
+
+#### Connector `failing` becomes a real alert
+
+Health status is computed on read, so before this nothing watched the
+_transition_: a connector could start failing at 3am and stay red until
+someone opened `/data-sources`. `record_sync_run` (shared by both the
+generic and the Marketaux scheduler) now checks, right after recording a
+failed attempt, whether that attempt completed a streak of
+`FAILING_STREAK` (3) failures. `entered_failing` in
+`app/connectors/health.py` is the one definition of that transition, tested
+against `compute_health_status` so they cannot disagree about when
+"failing" starts. It fires once per outage, not once per tick: the 4th,
+5th... consecutive failure is not a transition, and a recovery followed by
+a second outage alerts again. The event carries the connector name as a
+tag, a fingerprint of `["connector-failing", source]` (so one connector is
+one issue), and the last three error messages, redacted, so the alert says
+_why_ and not only _that_.
+
+#### Request context, and a bug the tests found in the first design
+
+`RequestContextMiddleware` (pure ASGI; `BaseHTTPMiddleware` runs the app in
+a separate task and does not reliably carry `contextvars`) gives every
+request a `request_id`, used both in log lines and as a tag on error
+events, so an alert can be matched to the exact log lines of that request.
+
+The first version bound the context with a context manager and reset it on
+exit. A test comparing the log line to the event found that the most
+important log line, "Unhandled exception", had **no request id or path**.
+The app's catch-all handler runs in Starlette's `ServerErrorMiddleware`,
+which sits outside every user middleware, so the context was already
+unbound. The fix keeps the context dict on the request
+(`scope["state"]["log_context"]`) and rebinds it in the handler.
+
+**Ordering constraint:** `init_error_tracking` runs at the top of
+`create_app()`, not in the lifespan, because the SDK's Starlette
+integration hooks the middleware stack, which Starlette builds on the
+first ASGI call, before the lifespan starts.
+
+#### Verified against a real server, not only an in-process transport
+
+Beyond the unit tests (which assert on the SDK's actual wire payload), a
+throwaway local Bugsink container (a real Sentry-protocol server, since
+removed) received events from the real SDK over real HTTP. It stored
+exactly two issues: the unhandled `RuntimeError`, with its message showing
+`apikey=[Filtered]` and the `request_id` tag, and the connector alert as
+**one** event after **five** consecutive failures were recorded. The fake
+API key placed in both error messages appeared nowhere in what the server
+stored. This proves the payload is accepted, grouped and scrubbed by a
+real server. It is not the recommended hosted service, and it does not
+prove notification delivery.
+
+Bugs found and fixed while testing, none reported by anyone else: the
+missing request context in the exception handler (above); `is_enabled()`
+answering "yes" for the DSN-less client the SDK leaves behind after a
+reset; a user id and tag written to the SDK's shared process-wide scope
+even with error tracking disabled (with no client there is no per-request
+scope isolation, so one request's user could colour a later, unrelated
+event; found only because the full suite failed while the file alone
+passed, and fixed by making both calls no-ops when disabled); and a
+redaction pattern that also consumed a trailing comma
+(deliberately kept: over-redacting a punctuation mark beats leaving a
+fragment of a secret that itself contained a comma).
+
+#### Known limitations
+
+- **Changing `LOG_FORMAT`'s default changes the log format on the next
+  deploy.** Anything that parsed the old plain-text lines (a `grep` on
+  `docker compose logs`) sees JSON instead. `LOG_FORMAT=text` restores it.
+- **An alert only fires if the API process is running and recording sync
+  runs.** If the process or the scheduler task dies, no failing alert
+  fires; the dashboard's staleness status eventually reports the silence.
+  Nothing watches the API from outside (no uptime monitor exists).
+- **No recovery notification.** A connector coming back is not reported.
+- **Exceptions inside background asyncio tasks** (the schedulers'
+  loops) are not covered by the ASGI integration. Each source's failure is
+  caught and recorded per tick, which is what the `failing` alert reads,
+  but a bug that kills a scheduler loop outright has not been tested for
+  capture.
+- **User id is attached only on authenticated routes.** Most reads are
+  unauthenticated, so their events carry no user.
+- **Nothing monitors the tracker's own quota or health.**
+- **uvicorn's access log still prints query strings.** Unchanged from
+  before; it now appears as a `message` field.
+- **Not deployed.** Nothing here is active on the production droplet until
+  it is deployed and `SENTRY_DSN` is set in `services/api/.env`.
+
 ### Feature Store
 
 > Not built. Features are computed on demand and exported; no persisted,
@@ -5801,7 +6909,9 @@ Management" for the current, honest boundary between the two.
 
 ### Monitoring
 
-> To be completed in future tasks.
+> See § "Connector Health Monitoring" (under External Data Connectors) and
+> § "Structured Logging & Error Tracking" above. No uptime monitor or
+> metrics collection exists yet.
 
 ## Data Flow
 
@@ -5854,6 +6964,67 @@ lockout's IP-keyed defenses trivially bypassable by anyone who can set
 an arbitrary header — the exact spoofing vector already confirmed live
 against uvicorn's own loopback-trust default, just reachable from the
 public internet instead of only from the proxy's own host.
+
+## CI/CD Pipeline
+
+**Real, as of M5-E4-T1** (`.github/workflows/ci.yml`) — GitHub Actions,
+two jobs, triggered on every push and every pull request:
+
+- **`backend`** (`services/api`) — real PostgreSQL 17 and Redis 7 service
+  containers (matching `docker-compose.yml`'s own versions, not sqlite-only
+  or a fake/mocked Redis), then `uv sync --locked`, `ruff check`,
+  `uvx pyright`, and `make test-coverage` (the same 80% gate
+  `pyproject.toml`'s `[tool.coverage.report]` already defines — this
+  workflow doesn't invent a new threshold, it's the first thing to
+  actually enforce the existing one automatically).
+- **`frontend`** (pnpm workspace root) — `pnpm install --frozen-lockfile`,
+  `pnpm lint`, `pnpm typecheck`, `pnpm test`, `pnpm build`.
+
+Every command the workflow runs is one already documented as the manual
+standard elsewhere in this repo — `services/api/TESTING.md`'s own "Gates"
+section (`ruff check`, `pyright`, `make test-coverage`) and the root
+`package.json` scripts (`lint`, `typecheck`, `test`, `build`) — CI adds no
+check beyond what was already expected of every change by hand.
+
+**Why real service containers, not mocks.** `tests/conftest.py` forces
+`DATABASE_URL`/`DB_URL`/`REDIS_URL` empty for every test app regardless of
+the environment (its own docstring explains why: a stray real `REDIS_URL`
+must never leak into the default suite), so the default test run always
+exercises the in-memory SQLite engine no matter what CI sets. The
+`postgres`- and `redis`-marked tests reach the real service containers
+through the separate `TEST_DATABASE_URL`/`TEST_REDIS_URL` variables
+instead — the exact same opt-in mechanism local development already uses
+(`postgres_engine`/`redis_client` fixtures, both auto-skip if unreachable)
+— so CI genuinely runs these against real Postgres/Redis rather than
+skipping them, without changing how the fixtures themselves work.
+
+**A genuinely clean environment.** GitHub-hosted runners start from a
+fresh VM every run — no local `.env`, no pre-existing native Redis or
+Postgres a stray env var could accidentally resolve to. This incidentally
+gives the Redis-related environment-variable leaks found and fixed during
+M5-E3-T1 a standing regression check: if a future change reintroduced one,
+CI's clean environment would surface it the same way a fresh clone already
+does locally, rather than only being caught by chance on a developer's own
+already-configured machine.
+
+**Deliberate exclusion — live external-API verification.** This workflow
+never passes `--run-integration` or `--run-performance`, so
+`tests/integration/delta/*` (real Delta Exchange REST/WS calls) and
+`tests/performance/*` stay opt-in, exactly as they are locally. This
+project's standard for every connector (Delta, CoinGecko, Marketaux,
+Etherscan, FRED, DefiLlama) has been a real, human-supervised call against
+the live API before accepting the work — not something to re-run
+automatically on every push, which would make CI's pass/fail depend on
+third-party uptime and rate limits rather than on this project's own code.
+Mocked/unit tests prove the code understands a contract; only a real call
+proves the contract itself, and that real call stays a deliberate act.
+Do not "improve" this workflow by adding live external calls to it.
+
+**Not yet covered by this workflow**: this repository's own
+`docs/deployment/DEPLOYMENT.md` records that the current production
+deploy process is entirely manual (SSH + `docker compose build`/`up -d` by
+hand) — this CI workflow verifies the code, it does not deploy it. No
+continuous-deployment step exists.
 
 ## Scalability Strategy
 

@@ -29,7 +29,7 @@ function LoadingRows() {
     <>
       {Array.from({ length: 3 }, (_, index) => (
         <TableRow key={index}>
-          <TableCell colSpan={6}>
+          <TableCell colSpan={8}>
             <Skeleton variant="text" />
           </TableCell>
         </TableRow>
@@ -64,6 +64,19 @@ function DecisionRow({ decision }: { decision: PaperStrategyDecision }) {
         />
       </TableCell>
       <TableCell>
+        {decision.direction === null ? (
+          '—'
+        ) : (
+          <Chip
+            size="small"
+            variant="outlined"
+            color={decision.direction === 'long' ? 'success' : 'error'}
+            label={decision.direction === 'long' ? 'Long' : 'Short'}
+          />
+        )}
+      </TableCell>
+      <TableCell align="right">{`${Number(decision.strategy_leverage)}x`}</TableCell>
+      <TableCell>
         {decision.predicted_value === null ? '—' : String(decision.predicted_value)}
       </TableCell>
       <TableCell align="right">
@@ -85,7 +98,10 @@ function DecisionRow({ decision }: { decision: PaperStrategyDecision }) {
  * visually distinct from "No Action" the same way `OrderHistoryTable`
  * makes a triggered auto-close distinct from a manual order — a filled
  * chip for something that actually happened, an outlined one for a
- * cycle that changed nothing.
+ * cycle that changed nothing. Every row also says which side the cycle
+ * concerned (the position it opened or closed, or the side the model's call
+ * pointed at when nothing was done) and the fixed leverage in force, so a
+ * strategy that is short nearly all the time is plainly visible here.
  */
 export function StrategyDecisionLogTable({
   data,
@@ -106,6 +122,8 @@ export function StrategyDecisionLogTable({
               <TableCell>Time</TableCell>
               <TableCell>Symbol</TableCell>
               <TableCell>Action</TableCell>
+              <TableCell>Direction</TableCell>
+              <TableCell align="right">Leverage</TableCell>
               <TableCell>Signal</TableCell>
               <TableCell align="right">Confidence</TableCell>
               <TableCell>Reason</TableCell>
@@ -119,7 +137,7 @@ export function StrategyDecisionLogTable({
             )}
             {!isLoading && decisions.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={6} align="center" sx={{ py: 4 }}>
+                <TableCell colSpan={8} align="center" sx={{ py: 4 }}>
                   <Typography variant="body2" color="text.secondary" role="status">
                     No strategy cycles logged yet — enable the strategy above to start.
                   </Typography>

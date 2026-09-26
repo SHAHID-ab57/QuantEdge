@@ -42,9 +42,11 @@ from app.paper_trading.errors import (
     MaxPositionSizeExceededError,
     PaperAccountNotFoundError,
     PositionNotFoundError,
+    ReduceOnlyViolationError,
     StopLossNotBelowTakeProfitError,
     StrategyMissingTrainingJobError,
     StrategyTrainingJobMissingSymbolError,
+    ThresholdsOnReducingOrderError,
     TradingHaltedError,
 )
 from app.repositories.audit_log import AuditLogRepository
@@ -61,6 +63,7 @@ from app.schemas.paper_trading import (
     PaperAccountCreateRequest,
     PaperAccountResponse,
     PaperOrderRequest,
+    PaperOrderResponse,
     PaperPositionDTO,
     PaperStrategyConfigUpdateRequest,
     PositionThresholdsUpdateRequest,
@@ -116,7 +119,7 @@ async def seed_market(session_factory: SessionFactory, *, symbol: str) -> None:
         await session.commit()
 
 
-async def _persisted_test_user_id(session_factory: SessionFactory) -> uuid.UUID:
+async def persisted_test_user_id(session_factory: SessionFactory) -> uuid.UUID:
     """A real, persisted `User` row for these unit tests' `user_id=` calls.
 
     `audit_log.user_id` is a real foreign key, so the id these tests
@@ -162,6 +165,25 @@ class _TestPaperTradingService(PaperTradingService):
     ) -> PaperAccountResponse:
         return await super().create_account(request, user_id=user_id or self._default_user_id)
 
+    async def place_order(
+        self,
+        account_id: uuid.UUID,
+        request: PaperOrderRequest,
+        *,
+        user_id: uuid.UUID | None = None,
+        automated: bool = False,
+    ) -> PaperOrderResponse:
+        """A test order is a manual one unless it says `automated=True`.
+
+        `PaperTradingService.place_order` deliberately REQUIRES one of the two
+        (an order naming neither is refused, see `TestOrderActorIsRequired`), so
+        the ~80 pre-existing call sites that never named a user are attributed to
+        the bound test user here, exactly like every other mutating method above.
+        The guard itself is tested against the base class directly."""
+        if not automated and user_id is None:
+            user_id = self._default_user_id
+        return await super().place_order(account_id, request, user_id=user_id, automated=automated)
+
     async def update_strategy_config(
         self,
         account_id: uuid.UUID,
@@ -195,7 +217,7 @@ async def build_service(
     session_factory: SessionFactory, state_manager: MarketStateManager
 ) -> _TestPaperTradingService:
     session = session_factory()
-    user_id = await _persisted_test_user_id(session_factory)
+    user_id = await persisted_test_user_id(session_factory)
     return _TestPaperTradingService(
         account_repository=PaperAccountRepository(session),
         order_repository=PaperOrderRepository(session),
@@ -233,6 +255,28 @@ async def publish_ticker(bus: EventBus, symbol: str, price: str) -> None:
         )
     )
     await bus.drain()
+
+
+async def induce_equity_halt(
+    service: PaperTradingService, bus: EventBus, symbol: str, account_id: uuid.UUID
+) -> None:
+    """Halt an account the way the drawdown limit now actually works: by
+    *losing equity*, not by spending cash.
+
+    Buy 5 units at a $1000 quote (a $5,002.50 position, cash falls to
+    $4,992.50, equity stays ~$9,995), then let the price fall to $500:
+    equity is now ~$7,492 (a ~25% drawdown from the $10,000 peak against a
+    20% limit). Nothing has *traded* since the loss, so the halt only lands
+    when the account next tries to add risk — which is rejected, and
+    persisted, here."""
+    await service.place_order(
+        account_id, PaperOrderRequest(symbol=symbol, side="buy", quantity=Decimal("5"))
+    )
+    await publish_ticker(bus, symbol, "500")
+    with pytest.raises(TradingHaltedError):
+        await service.place_order(
+            account_id, PaperOrderRequest(symbol=symbol, side="buy", quantity=Decimal("0.001"))
+        )
 
 
 def assert_decimal_approx(value: Decimal | None, expected: float) -> None:
@@ -481,9 +525,12 @@ class TestBalanceAndPositionRejection:
                 PaperOrderRequest(symbol="PTSHORTUSD", side="sell", quantity=Decimal("2")),
             )
 
-    async def test_rejects_a_sell_with_no_position_at_all(
+    async def test_a_manual_sell_with_no_position_opens_a_short_but_a_reduce_only_one_is_rejected(
         self, session_factory: SessionFactory
     ) -> None:
+        """A sell against nothing used to be rejected (long-only). Since
+        M3-E5-T2 it opens a short; `reduce_only` is how a caller says "only
+        ever close", and that is still rejected with nothing to close."""
         await seed_market(session_factory, symbol="PTNOPOSUSD")
         bus = EventBus()
         state_manager = MarketStateManager().attach(bus)
@@ -493,11 +540,18 @@ class TestBalanceAndPositionRejection:
             PaperAccountCreateRequest(starting_balance=Decimal("100000"))
         )
 
-        with pytest.raises(InsufficientPositionError):
+        with pytest.raises(ReduceOnlyViolationError):
             await service.place_order(
                 uuid.UUID(account.id),
-                PaperOrderRequest(symbol="PTNOPOSUSD", side="sell", quantity=Decimal("1")),
+                PaperOrderRequest(
+                    symbol="PTNOPOSUSD", side="sell", quantity=Decimal("1"), reduce_only=True
+                ),
             )
+        opened = await service.place_order(
+            uuid.UUID(account.id),
+            PaperOrderRequest(symbol="PTNOPOSUSD", side="sell", quantity=Decimal("1")),
+        )
+        assert opened.position_side == "short"
 
     async def test_raises_for_an_unknown_account(self, session_factory: SessionFactory) -> None:
         service = await build_service(session_factory, MarketStateManager())
@@ -804,11 +858,15 @@ class TestExposureLimit:
 
 @pytest.mark.asyncio
 class TestDrawdownHalt:
-    """`max_drawdown_pct` — evaluated against the account's own cash
-    `balance` after a trade completes (this feature's own spec), isolated
-    from the other two limits (both wide open here)."""
+    """`max_drawdown_pct` — evaluated against the account's own **equity**
+    (cash + margin + unrealized PnL at live prices), not its cash balance
+    (D3, M3-E5-T2). This is a deliberate, announced behaviour change: the
+    old rule halted an account merely for *spending* more than the limit's
+    share of its cash on a position, with no price movement at all — the
+    first test below is that exact old scenario, now asserting the opposite.
+    Isolated from the other two limits (both wide open here)."""
 
-    async def test_a_trade_that_breaches_drawdown_halts_the_account(
+    async def test_spending_cash_on_a_position_no_longer_halts_the_account(
         self, session_factory: SessionFactory
     ) -> None:
         await seed_market(session_factory, symbol="PTDRAWDOWNUSD")
@@ -826,40 +884,87 @@ class TestDrawdownHalt:
         )
         account_id = uuid.UUID(account.id)
 
-        # 2 units at a ~$1000.5 fill: notional $2001.0, fee $2.001, total
-        # cost $2003.001 — new balance $7996.999, a 20.03% drop from the
-        # $10,000 peak, just over the 20% drawdown limit. The order
-        # itself is not blocked by its own resulting halt (the halt is
-        # evaluated *after* this trade, per this feature's own spec).
+        # The old scenario: 2 units at a ~$1000.5 fill drops *cash* to
+        # $7,996.999 (a 20.03% drop) — but equity is ~$9,997, a 0.03% loss
+        # (the fee and the slippage), so nothing is halted.
         order = await service.place_order(
             account_id,
             PaperOrderRequest(symbol="PTDRAWDOWNUSD", side="buy", quantity=Decimal("2")),
         )
         assert float(order.fill_price) == pytest.approx(1000.5)
 
+        after = await service.get_account(account_id)
+        assert float(after.balance) == pytest.approx(7996.999)
+        assert after.trading_halted is False
+        risk = await service.risk_summary(account_id)
+        assert float(risk.equity) == pytest.approx(9996.999)
+        assert float(risk.current_drawdown_pct) == pytest.approx(0.03001, abs=1e-4)
+
+    async def test_an_equity_loss_past_the_limit_halts_the_account_and_rejects_new_risk(
+        self, session_factory: SessionFactory
+    ) -> None:
+        await seed_market(session_factory, symbol="PTDRAWDOWN2USD")
+        bus = EventBus()
+        state_manager = MarketStateManager().attach(bus)
+        await publish_ticker(bus, "PTDRAWDOWN2USD", "1000")
+        service = await build_service(session_factory, state_manager)
+        account = await service.create_account(
+            PaperAccountCreateRequest(
+                starting_balance=Decimal("10000"),
+                max_position_size_pct=GENEROUS_MAX_PCT,
+                max_exposure_pct=GENEROUS_MAX_PCT,
+                max_drawdown_pct=Decimal("20"),
+            )
+        )
+        account_id = uuid.UUID(account.id)
+
+        await induce_equity_halt(service, bus, "PTDRAWDOWN2USD", account_id)
+
         halted_account = await service.get_account(account_id)
         assert halted_account.trading_halted is True
         assert float(halted_account.peak_balance) == pytest.approx(10000.0)
 
-        # Any further order — even one that would otherwise be perfectly
-        # fine — is rejected outright until explicitly resumed.
-        with pytest.raises(TradingHaltedError):
-            await service.place_order(
-                account_id,
-                PaperOrderRequest(symbol="PTDRAWDOWNUSD", side="buy", quantity=Decimal("0.001")),
-            )
+        # Still halted, cash untouched by the rejected attempt.
+        assert float(halted_account.balance) == pytest.approx(4992.4975)
 
-        # Still halted, still exactly the same balance — the rejected
-        # attempt never touched anything.
+    async def test_a_halt_blocks_new_risk_but_never_a_reducing_order(
+        self, session_factory: SessionFactory
+    ) -> None:
+        """D4: the kill switch stops *new risk*, not risk reduction — a halted
+        account that could not sell what it holds would stay exposed."""
+        await seed_market(session_factory, symbol="PTHALTEXITUSD")
+        bus = EventBus()
+        state_manager = MarketStateManager().attach(bus)
+        await publish_ticker(bus, "PTHALTEXITUSD", "1000")
+        service = await build_service(session_factory, state_manager)
+        account = await service.create_account(
+            PaperAccountCreateRequest(
+                starting_balance=Decimal("10000"),
+                max_position_size_pct=GENEROUS_MAX_PCT,
+                max_exposure_pct=GENEROUS_MAX_PCT,
+                max_drawdown_pct=Decimal("20"),
+            )
+        )
+        account_id = uuid.UUID(account.id)
+        await induce_equity_halt(service, bus, "PTHALTEXITUSD", account_id)
+
+        sold = await service.place_order(
+            account_id,
+            PaperOrderRequest(symbol="PTHALTEXITUSD", side="sell", quantity=Decimal("5")),
+        )
+        assert sold.realized_pnl is not None
+
+        # Closing did not un-halt it: only an explicit resume does.
         still_halted = await service.get_account(account_id)
         assert still_halted.trading_halted is True
-        assert float(still_halted.balance) == pytest.approx(7996.999)
+        positions = await service.list_positions(account_id)
+        assert positions.positions == []
 
 
 @pytest.mark.asyncio
 class TestResumeTrading:
     """`resume_trading` is the *only* way a drawdown halt ever clears, and
-    also resets `peak_balance` to the account's current balance (see that
+    also resets `peak_balance` to the account's current *equity* (see that
     method's own docstring for why: without the reset, an account still
     deep in drawdown against its old peak would re-halt on its very next
     order regardless of that order's own direction)."""
@@ -882,26 +987,17 @@ class TestResumeTrading:
         )
         account_id = uuid.UUID(account.id)
 
-        # Same halt-inducing trade as `TestDrawdownHalt`.
-        await service.place_order(
-            account_id,
-            PaperOrderRequest(symbol="PTRESUMEUSD", side="buy", quantity=Decimal("2")),
-        )
+        # Same halt-inducing loss as `TestDrawdownHalt`.
+        await induce_equity_halt(service, bus, "PTRESUMEUSD", account_id)
         halted_account = await service.get_account(account_id)
         assert halted_account.trading_halted is True
 
-        with pytest.raises(TradingHaltedError):
-            await service.place_order(
-                account_id,
-                PaperOrderRequest(symbol="PTRESUMEUSD", side="buy", quantity=Decimal("0.001")),
-            )
-
         resumed = await service.resume_trading(account_id)
         assert resumed.trading_halted is False
-        # peak_balance resets to the current (post-halt) balance, not the
+        # peak_balance resets to the current (post-halt) *equity*, not the
         # original $10,000 — otherwise the next order below would
         # immediately re-halt regardless of its own direction.
-        assert float(resumed.peak_balance) == pytest.approx(7996.999)
+        assert float(resumed.peak_balance) == pytest.approx(7492.4975)
 
         # A valid, small order now succeeds — the halt is genuinely
         # cleared, not merely bypassed for one call.
@@ -935,10 +1031,7 @@ class TestResumeTrading:
             )
         )
         account_id = uuid.UUID(account.id)
-        await service.place_order(
-            account_id,
-            PaperOrderRequest(symbol="PTRESUMELOGUSD", side="buy", quantity=Decimal("2")),
-        )
+        await induce_equity_halt(service, bus, "PTRESUMELOGUSD", account_id)
         halted_account = await service.get_account(account_id)
         assert halted_account.trading_halted is True
 
@@ -1188,13 +1281,44 @@ class TestStopLossTakeProfitValidation:
                 ),
             )
 
-    async def test_a_sell_can_never_carry_thresholds(self) -> None:
-        with pytest.raises(ValueError, match="only apply to a buy"):
+    async def test_a_reduce_only_order_can_never_carry_thresholds(self) -> None:
+        with pytest.raises(ValueError, match="only apply to an order that opens or adds"):
             PaperOrderRequest(
                 symbol="PTVALSELLUSD",
                 side="sell",
                 quantity=Decimal("1"),
+                reduce_only=True,
                 stop_loss_price=Decimal("900"),
+            )
+
+    async def test_an_order_that_reduces_a_position_can_never_carry_thresholds(
+        self, session_factory: SessionFactory
+    ) -> None:
+        """A sell against an existing long only reduces it — there is nothing
+        left to protect, so naming a stop-loss on it is rejected by the
+        service (the schema can no longer know: a sell may also open a short)."""
+        await seed_market(session_factory, symbol="PTVALREDUCEUSD")
+        bus = EventBus()
+        state_manager = MarketStateManager().attach(bus)
+        await publish_ticker(bus, "PTVALREDUCEUSD", "1000")
+        service = await build_service(session_factory, state_manager)
+        account = await service.create_account(
+            PaperAccountCreateRequest(starting_balance=Decimal("100000"))
+        )
+        account_id = uuid.UUID(account.id)
+        await service.place_order(
+            account_id,
+            PaperOrderRequest(symbol="PTVALREDUCEUSD", side="buy", quantity=Decimal("2")),
+        )
+        with pytest.raises(ThresholdsOnReducingOrderError):
+            await service.place_order(
+                account_id,
+                PaperOrderRequest(
+                    symbol="PTVALREDUCEUSD",
+                    side="sell",
+                    quantity=Decimal("1"),
+                    stop_loss_price=Decimal("900"),
+                ),
             )
 
     async def test_valid_thresholds_are_set_at_order_open_time(
@@ -1750,3 +1874,224 @@ class TestUpdateStrategyConfig:
         model.strategy_default_stop_loss_pct = Decimal("0")
         with pytest.raises(IntegrityError):
             await service.account_repository.session.commit()
+
+    async def test_volatility_training_job_id_appears_in_the_audit_trail(
+        self, session_factory: SessionFactory
+    ) -> None:
+        """HOUSEKEEPING-2: found while attaching a real volatility job to a
+        live account — `update_strategy_config`'s own audit-log write
+        recorded old_value/new_value for every other strategy field but
+        silently omitted `volatility_training_job_id`, so a change to only
+        that field left an audit row with identical old_value/new_value
+        and no way to tell what actually changed, exactly the blind spot
+        LOG-ACCOUNT-CONFIG-CHANGES exists to close. Fixed by capturing
+        `old_volatility_training_job_id` before the mutating
+        `account_repository.update` call (the same pattern every other
+        `old_*` field already uses) and including both old and new in the
+        recorded snapshot."""
+        job_id, _ = await train_completed_job(
+            session_factory, symbol="PTSTRATVOLAUDITUSD", model_type="logistic_regression"
+        )
+        state_manager = MarketStateManager()
+        service = await build_service(session_factory, state_manager)
+        account = await service.create_account(
+            PaperAccountCreateRequest(starting_balance=Decimal("100000"))
+        )
+        account_id = uuid.UUID(account.id)
+
+        await service.update_strategy_config(
+            account_id,
+            PaperStrategyConfigUpdateRequest(volatility_training_job_id=uuid.UUID(job_id)),
+        )
+
+        audit_repository = AuditLogRepository(service.account_repository.session)
+        entries, _ = await audit_repository.list_entries(
+            resource_type="paper_account",
+            resource_id=str(account_id),
+            limit=5,
+            offset=0,
+        )
+        [entry] = [e for e in entries if e.action == "paper_account.update_strategy_config"]
+        assert entry.old_value is not None
+        assert entry.new_value is not None
+        assert entry.old_value["volatility_training_job_id"] is None
+        assert entry.new_value["volatility_training_job_id"] == job_id
+
+        # A second change shows the *previous* job as old_value, not None
+        # again and not the field silently missing. Seeded on its own
+        # exchange (a distinct slug) rather than via a second
+        # `train_completed_job` call: that helper's own `seed_real_candles`
+        # hardcodes the exchange slug `"delta"`, so a second call in the
+        # same test collides on `exchanges.slug`'s uniqueness.
+        second_symbol = "PTSTRATVOLAUDIT2USD"
+        async with session_factory() as seed_session:
+            exchange = Exchange(name="Delta Exchange 2", slug="delta-2", country="India")
+            seed_session.add(exchange)
+            await seed_session.flush()
+            market = Market(
+                exchange_id=exchange.id,
+                symbol=second_symbol,
+                base_asset=second_symbol[:3],
+                quote_asset=second_symbol[3:],
+                market_type="perpetual",
+            )
+            seed_session.add(market)
+            await seed_session.commit()
+            base = datetime(2026, 1, 1, tzinfo=UTC)
+            price = 100.0
+            for i in range(80):
+                price += 3.0 if i % 3 != 0 else -4.0
+                open_time = base + timedelta(hours=i)
+                seed_session.add(
+                    Candle(
+                        market_id=market.id,
+                        timeframe="1h",
+                        open_time=open_time,
+                        close_time=open_time + timedelta(hours=1),
+                        open=Decimal(str(price)),
+                        high=Decimal(str(price + 2)),
+                        low=Decimal(str(price - 2)),
+                        close=Decimal(str(price)),
+                        volume=Decimal("100"),
+                        quote_volume=None,
+                        trade_count=None,
+                        source="delta",
+                    )
+                )
+            await seed_session.commit()
+
+        second_experiment_id = await seed_experiment(
+            session_factory,
+            dataset_version="ds-real",
+            feature_set=[{"feature": "ohlcv", "params": {}}],
+            target_config=[{"target": "next_direction", "params": {"horizon": "1"}}],
+            split_config={"train": 0.7, "validation": 0.15, "test": 0.15},
+        )
+        training_service = build_training_service(session_factory)
+        second_job = await training_service.create(
+            TrainingJobCreateRequest(
+                experiment_id=uuid.UUID(second_experiment_id),
+                model_type="logistic_regression",
+                symbol=second_symbol,
+                timeframe="1h",
+                normalize_features=True,
+            )
+        )
+        second_completed = await training_service.run(uuid.UUID(second_job.id))
+        assert second_completed.status == "completed", second_completed.error_message
+        second_job_id = second_completed.id
+        await training_service.repository.session.close()
+        await service.update_strategy_config(
+            account_id,
+            PaperStrategyConfigUpdateRequest(volatility_training_job_id=uuid.UUID(second_job_id)),
+        )
+        entries, _ = await audit_repository.list_entries(
+            resource_type="paper_account",
+            resource_id=str(account_id),
+            limit=5,
+            offset=0,
+        )
+        [latest] = [
+            e
+            for e in entries
+            if e.action == "paper_account.update_strategy_config"
+            and e.new_value is not None
+            and e.new_value["volatility_training_job_id"] == second_job_id
+        ]
+        assert latest.old_value is not None
+        assert latest.old_value["volatility_training_job_id"] == job_id
+
+
+@pytest.mark.asyncio
+class TestUpdateStrategyConfigClearsAnAutomatedDriftPause:
+    """FEATURE-DRIFT-MONITOR: `PaperTradingStrategyScheduler`'s own
+    auto-pause (`app.services.paper_trading_strategy._pause_for_drift`,
+    covered end to end in `tests/paper_trading/test_strategy_scheduler.py`
+    ::TestFeatureDriftAutoPause) sets `strategy_paused_reason`/
+    `_paused_at` directly on the account row, bypassing this service's own
+    `update_strategy_config` entirely (there is no human to attribute an
+    audit row to). These tests set that same state up the identical way —
+    a direct repository write — and prove `update_strategy_config` is the
+    one place it gets cleared, and only when a human actually names
+    `enabled`.
+    """
+
+    async def _paused_account(
+        self, session_factory: SessionFactory, *, job_id: str
+    ) -> tuple[_TestPaperTradingService, str]:
+        state_manager = MarketStateManager()
+        service = await build_service(session_factory, state_manager)
+        account = await service.create_account(
+            PaperAccountCreateRequest(starting_balance=Decimal("100000"))
+        )
+        await service.update_strategy_config(
+            uuid.UUID(account.id),
+            PaperStrategyConfigUpdateRequest(enabled=True, training_job_id=uuid.UUID(job_id)),
+        )
+        model = await service.account_repository.get_by_id(uuid.UUID(account.id))
+        assert model is not None
+        await service.account_repository.update(
+            model,
+            {
+                "strategy_enabled": False,
+                "strategy_paused_reason": "feature_drift",
+                "strategy_paused_at": datetime.now(UTC),
+            },
+        )
+        paused = await service.get_account(uuid.UUID(account.id))
+        assert paused.strategy_paused_reason == "feature_drift"
+        assert paused.strategy_paused_at is not None
+        return service, account.id
+
+    async def test_re_enabling_clears_the_reason(self, session_factory: SessionFactory) -> None:
+        job_id, _ = await train_completed_job(
+            session_factory, symbol="PTDRIFTCLEARONUSD", model_type="logistic_regression"
+        )
+        service, account_id = await self._paused_account(session_factory, job_id=job_id)
+
+        resumed = await service.update_strategy_config(
+            uuid.UUID(account_id), PaperStrategyConfigUpdateRequest(enabled=True)
+        )
+
+        assert resumed.strategy_enabled is True
+        assert resumed.strategy_paused_reason is None
+        assert resumed.strategy_paused_at is None
+
+    async def test_explicitly_disabling_also_clears_the_reason(
+        self, session_factory: SessionFactory
+    ) -> None:
+        """A human choosing to *keep* it off is still an explicit decision
+        about `enabled` — it must not leave a stale 'feature_drift' reason
+        attributed to a state the human, not the scheduler, now owns."""
+        job_id, _ = await train_completed_job(
+            session_factory, symbol="PTDRIFTCLEAROFFUSD", model_type="logistic_regression"
+        )
+        service, account_id = await self._paused_account(session_factory, job_id=job_id)
+
+        still_off = await service.update_strategy_config(
+            uuid.UUID(account_id), PaperStrategyConfigUpdateRequest(enabled=False)
+        )
+
+        assert still_off.strategy_enabled is False
+        assert still_off.strategy_paused_reason is None
+        assert still_off.strategy_paused_at is None
+
+    async def test_a_field_only_update_leaves_the_reason_untouched(
+        self, session_factory: SessionFactory
+    ) -> None:
+        """Tuning leverage/threshold without ever naming `enabled` is not a
+        decision about the pause at all — the reason must survive it."""
+        job_id, _ = await train_completed_job(
+            session_factory, symbol="PTDRIFTKEEPUSD", model_type="logistic_regression"
+        )
+        service, account_id = await self._paused_account(session_factory, job_id=job_id)
+
+        still_paused = await service.update_strategy_config(
+            uuid.UUID(account_id),
+            PaperStrategyConfigUpdateRequest(confidence_threshold_pct=Decimal("80")),
+        )
+
+        assert still_paused.strategy_enabled is False
+        assert still_paused.strategy_paused_reason == "feature_drift"
+        assert still_paused.strategy_paused_at is not None
+        assert float(still_paused.strategy_confidence_threshold_pct) == pytest.approx(80.0)

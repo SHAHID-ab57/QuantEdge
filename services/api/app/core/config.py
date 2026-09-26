@@ -26,6 +26,18 @@ class Settings(BaseSettings):
     app_version: str = "0.1.0"
     app_env: Literal["development", "test", "staging", "production"] = "development"
     log_level: str = "INFO"
+    #: `json` (default) emits one JSON object per line — what a log
+    #: aggregator or `jq` can actually parse — `text` is the old
+    #: human-readable line, an opt-in for reading a local dev console.
+    log_format: Literal["json", "text"] = "json"
+    #: Error tracking (M5-E5-T2). Blank disables it entirely: no SDK
+    #: initialization, no network calls, every capture call a no-op — the
+    #: same soft-dependency convention as `redis_url`. Any Sentry-protocol
+    #: server accepts the same DSN (Sentry, GlitchTip, Bugsink), so this
+    #: is the only thing that changes when switching between them.
+    sentry_dsn: str = ""
+    #: Sentry "environment" tag; blank falls back to `app_env`.
+    sentry_environment: str = ""
     cors_origins: list[str] = [
         "http://localhost:3000",
         "http://127.0.0.1:3000",
@@ -62,7 +74,17 @@ class Settings(BaseSettings):
     redis_url: str = ""
 
     candles_default_limit: int = 100
-    candles_max_limit: int = 1000
+    #: Raised from 1,000 (RETRAIN-WITH-MINIMUM-WINDOW): the scheduled retraining
+    #: floor derived in docs/research/RETRAIN_WINDOW_ANALYSIS.md needs a real
+    #: ~7,200-candle (300-day) training window, plus this endpoint's own warmup
+    #: widening on top of whatever `limit` a caller passes — 1,000 silently
+    #: clamped any such request back down to a much narrower, dangerously
+    #: stale-normalization window (exactly the trap this whole task exists to
+    #: close), with no error raised. 10,000 leaves real headroom above every
+    #: window width considered there, while staying well under the full stored
+    #: ETHUSD/1h history (~23,000 candles), so a request still has to ask for a
+    #: genuinely large window on purpose, not receive one by accident.
+    candles_max_limit: int = 10_000
 
     experiments_default_limit: int = 50
     experiments_max_limit: int = 200
@@ -145,10 +167,15 @@ class Settings(BaseSettings):
     #: tracked symbols, `trade_flow` grows on the order of tens of MB/day and
     #: `orderbook_snapshots` a similar amount (measured live — see
     #: `ARCHITECTURE.md` § "Funding Rate, Open Interest & Order-Flow Capture"
-    #: for the actual numbers), so this is deliberately finite. 60 days is
-    #: long enough for a first microstructure research pass without letting
-    #: the tables grow forever unattended.
-    orderflow_retention_days: int = 60
+    #: for the actual numbers), so this is deliberately finite. **365 days**
+    #: (raised from an initial 60, ORDERFLOW-STATUS-CHECK/HOUSEKEEPING-1,
+    #: `docs/research/ORDERFLOW_STATUS_CHECK.md`): this data has no backfill,
+    #: so a day pruned past the cutoff is gone forever, and 60 days would
+    #: have permanently capped this platform below the "primary window"
+    #: depth (365 days) every other analysis in this research thread has
+    #: actually needed for real statistical power. Real measured cost at
+    #: 365 days is ~11 GB steady-state — modest for what it buys.
+    orderflow_retention_days: int = 365
     #: How often the retention sweep runs — independent of, and far less
     #: frequent than, the snapshot/flush cadence above, since a DELETE over
     #: a day-old cutoff is cheap regardless of how often it's checked.
@@ -259,6 +286,30 @@ class Settings(BaseSettings):
     paper_trading_default_max_exposure_pct: Decimal = Decimal("50")
     paper_trading_default_max_drawdown_pct: Decimal = Decimal("20")
 
+    #: Margin/leverage (isolated margin only). The automated strategy uses one
+    #: fixed per-account `strategy_leverage` (below), refused by
+    #: `PaperTradingService.place_order` if it is anything else.
+    #: `paper_trading_default_max_leverage` is a new account's own per-account
+    #: leverage ceiling (a deliberately conservative starting point, raisable
+    #: per account up to Delta's 200x). `paper_trading_maintenance_margin_pct`
+    #: is Delta's real minimum maintenance margin for ETHUSD/BTCUSD (0.25%);
+    #: margin scaling beyond Delta's position threshold is not modelled, so an
+    #: order that is short or leveraged and whose notional exceeds
+    #: `paper_trading_max_leverage_notional` (Delta's `max_leverage_notional`,
+    #: 100,000 USD) is rejected rather than approximated.
+    paper_trading_default_max_leverage: Decimal = Decimal("5")
+    paper_trading_maintenance_margin_pct: Decimal = Decimal("0.25")
+    paper_trading_max_leverage_notional: Decimal = Decimal("100000")
+
+    #: Funding for open short/leveraged positions: periodically ingest Delta's
+    #: real `FUNDING:`/`MARK:`/index candle history for every market with an
+    #: open position, then settle each real funding time exactly once
+    #: (`app.services.paper_funding`). Only gates the *loop*; a market with no
+    #: open position is never fetched.
+    paper_trading_funding_enabled: bool = True
+    paper_trading_funding_interval_seconds: int = 300
+    paper_trading_funding_lookback_hours: int = 48
+
     #: Bounded retries for the optimistic-concurrency guard around placing
     #: an order (`PaperAccountRepository.try_apply_trade_effects`) — see
     #: that method's own docstring for why a single atomic `UPDATE` isn't
@@ -275,12 +326,46 @@ class Settings(BaseSettings):
     paper_trading_strategy_scheduler_enabled: bool = True
     paper_trading_strategy_interval_seconds: int = 300
 
+    #: RETRAIN-WITH-MINIMUM-WINDOW (`app/services/retraining.py`). The loop
+    #: itself defaults on, the same convention every other scheduler on this
+    #: platform already uses — real gating is `retraining_experiment_ids`
+    #: below, empty by default, so an unconfigured deployment retrains
+    #: nothing (mirrors `strategy_enabled=False` being the real per-account
+    #: gate for `paper_trading_strategy_scheduler_enabled=True` above).
+    retraining_scheduler_enabled: bool = True
+    #: Comma-separated experiment ids, each one model lineage to keep fresh.
+    #: `symbol`/`timeframe`/`model_type`/`hyperparameters` are always cloned
+    #: from that experiment's own most recent completed job, never
+    #: configured here — see `RetrainingTarget`'s own docstring for why.
+    retraining_experiment_ids: str = ""
+    #: How often the loop itself checks whether anything is due — cheap,
+    #: independent of how often a retrain actually happens.
+    retraining_tick_interval_seconds: int = 3600
+    #: The actual retrain cadence and dataset window width. Both default to,
+    #: and can never be configured past, `app.services.retraining`'s own
+    #: `MAX_RETRAIN_INTERVAL_SECONDS`/`MIN_WINDOW_HOURS` — real, hard floors
+    #: derived in `docs/research/RETRAIN_WINDOW_ANALYSIS.md`, enforced by
+    #: `RetrainingScheduler.__init__` itself, not just by these defaults.
+    retraining_min_interval_seconds: int = 168 * 3600
+    retraining_window_hours: int = 8760
+
     #: Defaults for a new account's own strategy configuration when its
     #: `PaperStrategyConfigUpdateRequest` doesn't override them — the same
     #: "never hardcoded past this one place" convention every other paper
     #: trading default already follows.
     paper_trading_strategy_default_confidence_threshold_pct: Decimal = Decimal("65")
     paper_trading_strategy_default_stop_loss_pct: Decimal = Decimal("5")
+
+    #: The one, fixed leverage a new account's automated strategy uses for every
+    #: entry, long or short (`PaperAccount.strategy_leverage`, tunable per
+    #: account). Deliberately a plain setting and never a function of a
+    #: prediction: the model's confidence has been measured to carry no reliable
+    #: relationship to being right (mean confidence 0.889 against accuracy 0.460),
+    #: so scaling risk by it would size the largest bets on the least
+    #: trustworthy signal. 2x is chosen from the liquidation-frequency table in
+    #: `docs/research/FUTURES_MECHANICS_AND_LEVERAGE_DESIGN.md` (near-zero
+    #: liquidations at 2-3x even over a 72-hour hold).
+    paper_trading_strategy_default_leverage: Decimal = Decimal("2")
 
     #: Strategy decision log pagination (`GET .../strategy/decisions`).
     paper_trading_strategy_decisions_default_limit: int = 20

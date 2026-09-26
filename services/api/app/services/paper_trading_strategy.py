@@ -46,21 +46,71 @@ manual one would be when it would breach a configured risk limit.
 3. No `confidence` at all (an unsupported model kind) — logged
    `no_action`. Below `strategy_confidence_threshold_pct` — logged
    `no_action`.
-4. Interpret `predicted_value`: `"up"` is bullish, `"down"` is bearish,
-   anything else (`"flat"`, a regressor's own number, ...) is not a
-   directional call — logged `no_action`. Flat + bullish opens a
-   position (a buy, sized at half the account's own
-   `max_position_size_pct` of current balance — deliberately
-   conservative headroom for slippage/fee and any other open exposure,
-   since there is no separate strategy-specific position-sizing config
-   — with a stop-loss attached at `strategy_default_stop_loss_pct`
-   below the resolved price: `place_order`'s own
-   `InvalidStopLossPriceError` is the backstop if the price has moved
-   by fill time, itself logged `no_action` rather than raised anywhere).
-   Long + bearish closes it (a sell for the full held quantity). Long +
-   bullish and flat + bearish are both "no consistent change" — logged
-   `no_action`, never a short: this platform is long-only,
-   unconditionally, for an automated order exactly as for a manual one.
+4. Interpret `predicted_value`: `"up"` is bullish (a long), `"down"` is
+   bearish (a short), anything else (`"flat"`, a regressor's own number, ...)
+   is not a directional call — logged `no_action`. Then, by what the account
+   holds in that market:
+
+   | call   | flat                | long held             | short held            |
+   | ------ | ------------------- | --------------------- | --------------------- |
+   | `up`   | **open a long**     | no change (`no_action`) | **close the short**   |
+   | `down` | **open a short**    | **close the long**    | no change (`no_action`) |
+
+   One action per cycle: a reversal closes this cycle and, if the call still
+   stands, opens the other side on a later cycle, so no order is ever
+   larger than the position it reduces. An entry is sized at half the
+   account's own `max_position_size_pct` of its cash (notional; deliberately
+   conservative headroom for slippage/fee and any other open exposure, since
+   there is no separate strategy-specific sizing config), is placed at the
+   account's **fixed `strategy_leverage`**, and carries a **mandatory
+   stop-loss** at `strategy_default_stop_loss_pct` on the losing side of the
+   resolved price (below a long's, above a short's; `place_order`'s own
+   `InvalidStopLossPriceError`/`StopBeyondLiquidationError` are the backstop if
+   the price has moved by fill time, itself logged `no_action` rather than
+   raised). A close is a `reduce_only` order, so one that loses a race to a
+   stop-loss or a liquidation fails instead of opening the opposite side.
+
+**Leverage is fixed, and is never derived from the prediction.** The one
+number is `PaperAccount.strategy_leverage` (default 2, tunable per account).
+Nothing in this module reads a prediction's confidence into it, and
+`PaperTradingService` refuses an automated entry at any other leverage. That is
+a deliberate decision, not an omission: the model's confidence has been
+measured to carry no reliable relationship to being right (mean confidence 0.889
+against accuracy 0.460 over 8,126 graded predictions, correlation -0.020), so
+scaling leverage by it would put the largest bets on the least trustworthy
+signal. Confidence only decides *whether* to act, through the threshold.
+
+**Disclosed consequence.** The live model calls "down" in 99.8%+ of cases
+across every regime tested, so with shorts enabled this strategy will very
+likely be almost always short. That is the model's own measured behaviour
+becoming visible, not something this module introduces; the decision log shows
+each cycle's direction so it can be seen and audited.
+
+**Stop-loss width can be volatility-scaled, but direction never is
+(VOLATILITY-STOP-WIDTH, "Option B").** An account may optionally set
+`PaperAccount.strategy_volatility_training_job_id` to a *second*,
+`logistic_regression`-trained job — a distinct model lineage from the one
+above that decides direction — whose fresh `volatility_regime` forecast for
+the same symbol scales `strategy_default_stop_loss_pct` on a new entry:
+wider ahead of a forecast "expand", tighter ahead of "contract"
+(`_resolve_stop_loss_pct`, called only from `_open_position`). This is
+**stop-loss width only, at position-open time only** — it never touches
+position sizing, leverage, or which side is opened (those stay exactly as
+decided above, unconditionally), and it never revisits an already-open
+position's stop on a later tick; refreshing an open position's width is a
+possible future extension, not built here, matching this feature's own
+smaller-blast-radius scope (`docs/research/VOLATILITY_RISK_SIZING_DESIGN.md`).
+Every gate is fail-closed to the unscaled `strategy_default_stop_loss_pct`
+— wrong model lineage, wrong symbol, no forecast, or the forecast's own
+inputs reported drifted all fall back rather than guess or continue on a
+reading that can't be trusted (`_resolve_stop_loss_pct`'s own docstring has
+the full list). The resulting price is still passed through the identical
+`trading_service.place_order` call as every other automated stop-loss, so
+it is still rejected exactly as before if it would sit beyond the
+position's own liquidation price. Unset (`None`, the default for every
+existing account) behaves exactly as before this feature existed. Never
+applies to a manual order — this module is the only caller that can ever
+set an automated entry's stop-loss from a forecast at all.
 
 Every one of these outcomes — including the ones that place no order —
 is persisted as exactly one `PaperStrategyDecision` row per
@@ -74,7 +124,7 @@ import contextlib
 import logging
 import uuid
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from time import perf_counter
 
@@ -84,8 +134,10 @@ from app.core.config import Settings, get_settings
 from app.db.engine import get_engine
 from app.dependencies.prediction import get_prediction_service
 from app.models.paper_trading import PaperAccount, PaperStrategyDecision
+from app.monitoring.error_tracking import capture_feature_drift
 from app.paper_trading.errors import NoPriceAvailableError
 from app.paper_trading.pricing import resolve_current_price
+from app.prediction.feature_drift import DRIFT_Z_THRESHOLD
 from app.repositories.audit_log import AuditLogRepository
 from app.repositories.candles import CandleRepository
 from app.repositories.markets import MarketRepository
@@ -110,6 +162,34 @@ logger = logging.getLogger("app.services.paper_trading_strategy")
 #: being fully subject to the same position-size/exposure checks a
 #: manual order faces.
 _TARGET_POSITION_SIZE_FRACTION = Decimal("0.5")
+
+#: VOLATILITY-STOP-WIDTH (Option B): fixed, documented multipliers applied
+#: to `strategy_default_stop_loss_pct` when the account's own configured
+#: `logistic_regression` volatility job forecasts a regime change for the
+#: symbol being traded, and that forecast is neither drift-gated nor
+#: unavailable — see `PaperTradingStrategyScheduler._resolve_stop_loss_pct`.
+#: `volatility_regime`'s own label is binary (will realized volatility
+#: expand or contract relative to the trailing window, with no magnitude),
+#: so the response is a modest, asymmetric adjustment — more protective
+#: headroom ahead of an expansion than eagerness to tighten ahead of a
+#: contraction. **Grounded in real data (VOLATILITY-MULTIPLIER-CHECK)**:
+#: replaying this target's own trailing/forward realized-volatility ratio
+#: over every labeled row of real ETHUSD/1h and BTCUSD/1h history gives an
+#: "expand" ratio (forward_vol/trailing_vol) of median ~1.40-1.42 (IQR
+#: ~1.17-1.83) and a "contract" ratio of median ~0.70-0.71 (IQR
+#: ~0.54-0.86) on both symbols — ×1.5/×0.75 sit inside both IQRs, close to
+#: but slightly more conservative than the raw median, and are confirmed
+#: reasonable rather than replaced (see `ARCHITECTURE.md` § "Volatility-
+#: Scaled Stop-Loss Width" for the full distribution and symbol-by-symbol
+#: numbers). The spread is real, not narrow — a single fixed multiplier is
+#: a simplification a future, forecast-magnitude-aware version of this
+#: feature could improve on. Applied only to a new automated entry's own
+#: stop-loss; a manual order's own human-supplied stop-loss is never
+#: touched, and every resulting price still passes through the exact same
+#: liquidation-distance check `place_order` already enforces on every
+#: stop, scaled or not.
+_VOLATILITY_WIDEN_FACTOR = Decimal("1.5")
+_VOLATILITY_TIGHTEN_FACTOR = Decimal("0.75")
 
 
 @dataclass(frozen=True)
@@ -235,6 +315,12 @@ class PaperTradingStrategyScheduler:
         decision_repository = PaperStrategyDecisionRepository(session)
         confidence_threshold_pct = Decimal(account.strategy_confidence_threshold_pct)
         job_id = account.strategy_training_job_id
+        # Snapshotted once for the whole cycle: what is logged is what was in
+        # force, never re-read from a since-changed account.
+        strategy_leverage = Decimal(account.strategy_leverage)
+        # Read up front: a rollback (the crash path below) expires the row, and
+        # a lazy reload of `account.id` in async code would raise.
+        account_id = account.id
 
         async def log_no_action(
             *,
@@ -243,10 +329,11 @@ class PaperTradingStrategyScheduler:
             predicted_value: object | None = None,
             confidence: float | None = None,
             prediction_id: uuid.UUID | None = None,
+            direction: str | None = None,
         ) -> str:
             await decision_repository.create(
                 _build_decision(
-                    account_id=account.id,
+                    account_id=account_id,
                     training_job_id=job_id,
                     symbol=symbol,
                     action="no_action",
@@ -256,6 +343,8 @@ class PaperTradingStrategyScheduler:
                     confidence_threshold_pct=confidence_threshold_pct,
                     prediction_id=prediction_id,
                     order_id=None,
+                    direction=direction,
+                    strategy_leverage=strategy_leverage,
                 )
             )
             return "no_action"
@@ -287,6 +376,46 @@ class PaperTradingStrategyScheduler:
                 return await log_no_action(symbol=symbol, reason=f"Prediction unavailable: {exc}")
 
             prediction_id = uuid.UUID(prediction.id)
+
+            # Checked before every other gate, including confidence: a
+            # feature-drifted model's saturated confidence is exactly the
+            # failure mode this guards against (both real incidents behind
+            # this check were >99% confident "down" — see
+            # docs/research/FEATURE_DRIFT_INVESTIGATION.md), so a drifted
+            # prediction must never reach the confidence/signal logic below
+            # at all, however confident it claims to be.
+            if prediction.feature_drift_status == "drifted":
+                # `compute_feature_drift`'s own contract: `worst_feature`/`worst_z` are set
+                # whenever status is "drifted" — never both None together.
+                assert prediction.feature_drift_worst_feature is not None
+                assert prediction.feature_drift_worst_z is not None
+                await _pause_for_drift(
+                    session,
+                    account,
+                    training_job_id=job_id,
+                    worst_feature=prediction.feature_drift_worst_feature,
+                    worst_z=prediction.feature_drift_worst_z,
+                )
+                return await log_no_action(
+                    symbol=symbol,
+                    reason=(
+                        f"Auto-paused: feature drift detected "
+                        f"({prediction.feature_drift_worst_feature} "
+                        f"z={prediction.feature_drift_worst_z:.2f}, "
+                        f"threshold {DRIFT_Z_THRESHOLD:.1f}). Strategy disabled; "
+                        "re-enable via PATCH .../strategy once reviewed."
+                    ),
+                    predicted_value=prediction.predicted_value,
+                    confidence=prediction.confidence,
+                    prediction_id=prediction_id,
+                )
+
+            # The side the model's call points at, known before any gate, so
+            # even a cycle skipped for low confidence records what it was
+            # skipped *for*. ("up" is a long, "down" is a short.) Confidence
+            # is used below for exactly one thing: whether to act at all.
+            signal = _interpret_signal(prediction.predicted_value)
+            call_direction = None if signal is None else ("long" if signal == "up" else "short")
             if prediction.confidence is None:
                 return await log_no_action(
                     symbol=symbol,
@@ -294,6 +423,7 @@ class PaperTradingStrategyScheduler:
                     or "Confidence unavailable for this model.",
                     predicted_value=prediction.predicted_value,
                     prediction_id=prediction_id,
+                    direction=call_direction,
                 )
 
             confidence_pct = Decimal(str(prediction.confidence)) * Decimal(100)
@@ -305,13 +435,14 @@ class PaperTradingStrategyScheduler:
                     predicted_value=prediction.predicted_value,
                     confidence=prediction.confidence,
                     prediction_id=prediction_id,
+                    direction=call_direction,
                 )
 
-            signal = _interpret_signal(prediction.predicted_value)
             position = await PaperPositionRepository(session).get_by_account_and_symbol(
                 account.id, symbol
             )
             held = Decimal(position.quantity) if position is not None else Decimal(0)
+            held_side = position.side if position is not None and held > 0 else None
 
             if signal is None:
                 return await log_no_action(
@@ -323,11 +454,13 @@ class PaperTradingStrategyScheduler:
                     prediction_id=prediction_id,
                 )
 
+            assert call_direction is not None  # `signal` is not None past the check above
+
             trading_service = _build_trading_service(
                 session, self._state_manager, settings=settings
             )
 
-            if signal == "up" and held <= 0:
+            if held_side is None:
                 return await self._open_position(
                     session=session,
                     trading_service=trading_service,
@@ -335,10 +468,11 @@ class PaperTradingStrategyScheduler:
                     account=account,
                     job_id=job_id,
                     symbol=symbol,
+                    direction=call_direction,
                     prediction=prediction,
                     confidence_threshold_pct=confidence_threshold_pct,
                 )
-            if signal == "down" and held > 0:
+            if held_side != call_direction:
                 return await self._close_position(
                     trading_service=trading_service,
                     decision_repository=decision_repository,
@@ -346,27 +480,126 @@ class PaperTradingStrategyScheduler:
                     job_id=job_id,
                     symbol=symbol,
                     held=held,
+                    held_side=held_side,
                     prediction=prediction,
                     confidence_threshold_pct=confidence_threshold_pct,
                 )
 
-            if signal == "up":
-                reason = "Signal is 'up' but the account is already long — no change to make."
-            else:
-                reason = (
-                    "Signal is 'down' but the account is flat — this platform is long-only, so "
-                    "there is nothing to close and no short is ever opened."
-                )
             return await log_no_action(
                 symbol=symbol,
-                reason=reason,
+                reason=f"Signal is '{signal}' and the account is already {held_side} — no "
+                "change to make.",
                 predicted_value=prediction.predicted_value,
                 confidence=prediction.confidence,
                 prediction_id=prediction_id,
+                direction=call_direction,
             )
-        except Exception:  # noqa: BLE001 - isolated per account, never stops the rest of the tick
+        except Exception as exc:  # noqa: BLE001 - isolated per account, never stops the rest of the tick
             logger.exception("Paper trading strategy cycle crashed for account=%s", account.id)
+            # Every cycle is logged, including one that crashed. The session may
+            # be unusable (the failure may have been the database), so this is
+            # best-effort and never raises out of the tick.
+            with contextlib.suppress(Exception):
+                await session.rollback()
+                await log_no_action(reason=f"Cycle failed unexpectedly: {exc}")
             return "no_action"
+
+    async def _resolve_stop_loss_pct(
+        self,
+        *,
+        session: AsyncSession,
+        account: PaperAccount,
+        symbol: str,
+        default_stop_loss_pct: Decimal,
+    ) -> tuple[Decimal, str]:
+        """A new automated entry's stop-loss width, as a fraction (e.g.
+        `Decimal("0.05")` for 5%) — `default_stop_loss_pct` scaled by a
+        fresh `volatility_regime` forecast when the account has opted in
+        (`strategy_volatility_training_job_id` set), or `default_stop_loss_pct`
+        unchanged for every other account, exactly as before this feature
+        existed.
+
+        Every gate below is fail-**closed**: any way this can't produce a
+        trustworthy forecast for *this* symbol falls back to
+        `default_stop_loss_pct` rather than guessing, silently continuing on
+        a drifted reading, or raising and losing the entry entirely. This is
+        strictly downstream of the direction/whether-to-trade decision
+        already made by the caller — it only ever changes the second return
+        value used to compute `stop_loss_price`, never whether an order is
+        placed or which side it's on (VOLATILITY-STOP-WIDTH's own
+        boundary-preserving requirement; see
+        `tests/paper_trading/test_strategy_scheduler.py
+        ::TestVolatilityStopWidth::test_direction_and_whether_to_trade_are_unaffected`).
+
+        Returns `(stop_loss_pct, note)` — `note` is an empty string when
+        unscaled (nothing worth mentioning happened) or a short, already
+        `f"..."`-ready clause explaining what was applied/why not, appended
+        verbatim to this cycle's own decision-log reason so every scaled (or
+        skipped) width is visible in `GET .../strategy/decisions`, not just
+        inferable from the fill price after the fact.
+        """
+        volatility_job_id = account.strategy_volatility_training_job_id
+        if volatility_job_id is None:
+            return default_stop_loss_pct, ""
+
+        job = await TrainingJobRepository(session).get_by_id(volatility_job_id)
+        if job is None:
+            return (
+                default_stop_loss_pct,
+                " (volatility job no longer exists — unscaled default width used)",
+            )
+        if job.model_type != "logistic_regression":
+            return (
+                default_stop_loss_pct,
+                f" (volatility job is {job.model_type!r}, not logistic_regression — unscaled "
+                "default width used)",
+            )
+        if job.symbol != symbol:
+            return (
+                default_stop_loss_pct,
+                f" (volatility job trades {job.symbol!r}, not {symbol!r} — unscaled default "
+                "width used)",
+            )
+
+        prediction_service = get_prediction_service(session)
+        try:
+            forecast = await prediction_service.run(
+                PredictionRunRequest(training_job_id=volatility_job_id, symbol=symbol)
+            )
+        except Exception as exc:  # noqa: BLE001 - a failed forecast falls back, never blocks the entry
+            return (
+                default_stop_loss_pct,
+                f" (volatility forecast unavailable ({exc}) — unscaled default width used)",
+            )
+
+        # Checked before the forecast's own value is trusted at all — the
+        # exact same posture the directional signal already takes on its own
+        # prediction, above, and for the same reason: a drifted model's
+        # output is not a reading to act on, however confident it claims to
+        # be.
+        if forecast.feature_drift_status == "drifted":
+            return (
+                default_stop_loss_pct,
+                f" (volatility forecast's own inputs are drifted "
+                f"({forecast.feature_drift_worst_feature} "
+                f"z={forecast.feature_drift_worst_z:.2f}) — unscaled default width used)",
+            )
+
+        if forecast.predicted_value == "expand":
+            return (
+                default_stop_loss_pct * _VOLATILITY_WIDEN_FACTOR,
+                " (widened: volatility forecast 'expand')",
+            )
+        if forecast.predicted_value == "contract":
+            return (
+                default_stop_loss_pct * _VOLATILITY_TIGHTEN_FACTOR,
+                " (tightened: volatility forecast 'contract')",
+            )
+        return (
+            default_stop_loss_pct,
+            f" (volatility job predicted {forecast.predicted_value!r}, not an expand/contract "
+            "call — unscaled default width used)",
+        )
 
     async def _open_position(
         self,
@@ -377,10 +610,15 @@ class PaperTradingStrategyScheduler:
         account: PaperAccount,
         job_id: uuid.UUID,
         symbol: str,
+        direction: str,
         prediction: PredictionResponse,
         confidence_threshold_pct: Decimal,
     ) -> str:
+        """Open a long (`direction="long"`, a buy) or a short (`"short"`, a
+        sell) at the account's fixed `strategy_leverage`, with a mandatory
+        stop-loss on the losing side of the resolved price."""
         prediction_id = uuid.UUID(prediction.id)
+        strategy_leverage = Decimal(account.strategy_leverage)
         market = await MarketRepository(session).get_by_symbol(symbol)
         if market is None:
             reason = f"Market {symbol!r} not found."
@@ -402,20 +640,36 @@ class PaperTradingStrategyScheduler:
                 if quantity <= 0:
                     reason = "Balance too small to size a new automated position."
                 else:
-                    stop_loss_pct = Decimal(account.strategy_default_stop_loss_pct)
-                    stop_loss_price = quote.price * (Decimal(1) - stop_loss_pct / Decimal(100))
+                    default_stop_loss_pct = Decimal(account.strategy_default_stop_loss_pct) / (
+                        Decimal(100)
+                    )
+                    stop_loss_pct, volatility_note = await self._resolve_stop_loss_pct(
+                        session=session,
+                        account=account,
+                        symbol=symbol,
+                        default_stop_loss_pct=default_stop_loss_pct,
+                    )
+                    # Mandatory, and on the losing side: below a long's entry,
+                    # above a short's.
+                    stop_loss_price = quote.price * (
+                        Decimal(1) - stop_loss_pct
+                        if direction == "long"
+                        else Decimal(1) + stop_loss_pct
+                    )
                     try:
                         order = await trading_service.place_order(
                             account.id,
                             PaperOrderRequest(
                                 symbol=symbol,
-                                side="buy",
+                                side="buy" if direction == "long" else "sell",
                                 quantity=quantity,
+                                leverage=strategy_leverage,
                                 stop_loss_price=stop_loss_price,
                             ),
+                            automated=True,
                         )
                     except Exception as exc:  # noqa: BLE001 - rejection is a logged no_action
-                        reason = f"Automated buy rejected: {exc}"
+                        reason = f"Automated {direction} entry rejected: {exc}"
                     else:
                         await decision_repository.create(
                             _build_decision(
@@ -424,14 +678,18 @@ class PaperTradingStrategyScheduler:
                                 symbol=symbol,
                                 action="opened",
                                 reason=f"Confidence {prediction.confidence:.2%} >= "
-                                f"{confidence_threshold_pct}% threshold; signal 'up' while flat — "
-                                f"opened {quantity} {symbol} with a stop-loss at "
-                                f"{stop_loss_price}.",
+                                f"{confidence_threshold_pct}% threshold; signal "
+                                f"'{prediction.predicted_value}' while flat — opened a "
+                                f"{direction} of {quantity} {symbol} at {strategy_leverage}x "
+                                f"leverage with a stop-loss at {stop_loss_price}"
+                                f"{volatility_note}.",
                                 predicted_value=prediction.predicted_value,
                                 confidence=prediction.confidence,
                                 confidence_threshold_pct=confidence_threshold_pct,
                                 prediction_id=prediction_id,
                                 order_id=uuid.UUID(order.id),
+                                direction=direction,
+                                strategy_leverage=strategy_leverage,
                             )
                         )
                         return "opened"
@@ -448,6 +706,8 @@ class PaperTradingStrategyScheduler:
                 confidence_threshold_pct=confidence_threshold_pct,
                 prediction_id=prediction_id,
                 order_id=None,
+                direction=direction,
+                strategy_leverage=strategy_leverage,
             )
         )
         return "no_action"
@@ -461,13 +721,26 @@ class PaperTradingStrategyScheduler:
         job_id: uuid.UUID,
         symbol: str,
         held: Decimal,
+        held_side: str,
         prediction: PredictionResponse,
         confidence_threshold_pct: Decimal,
     ) -> str:
+        """Close the whole held position (a sell for a long, a buy for a short),
+        `reduce_only` so that if something else has already closed it (a
+        stop-loss, a liquidation) this fails instead of opening the opposite
+        side."""
         prediction_id = uuid.UUID(prediction.id)
+        strategy_leverage = Decimal(account.strategy_leverage)
         try:
             order = await trading_service.place_order(
-                account.id, PaperOrderRequest(symbol=symbol, side="sell", quantity=held)
+                account.id,
+                PaperOrderRequest(
+                    symbol=symbol,
+                    side="sell" if held_side == "long" else "buy",
+                    quantity=held,
+                    reduce_only=True,
+                ),
+                automated=True,
             )
         except Exception as exc:  # noqa: BLE001 - rejection is a logged no_action
             await decision_repository.create(
@@ -476,12 +749,14 @@ class PaperTradingStrategyScheduler:
                     training_job_id=job_id,
                     symbol=symbol,
                     action="no_action",
-                    reason=f"Automated close rejected: {exc}"[:500],
+                    reason=f"Automated close of the {held_side} rejected: {exc}"[:500],
                     predicted_value=prediction.predicted_value,
                     confidence=prediction.confidence,
                     confidence_threshold_pct=confidence_threshold_pct,
                     prediction_id=prediction_id,
                     order_id=None,
+                    direction=held_side,
+                    strategy_leverage=strategy_leverage,
                 )
             )
             return "no_action"
@@ -493,15 +768,68 @@ class PaperTradingStrategyScheduler:
                 symbol=symbol,
                 action="closed",
                 reason=f"Confidence {prediction.confidence:.2%} >= {confidence_threshold_pct}% "
-                f"threshold; signal 'down' while long — closed {held} {symbol}.",
+                f"threshold; signal '{prediction.predicted_value}' while {held_side} — closed "
+                f"{held} {symbol}.",
                 predicted_value=prediction.predicted_value,
                 confidence=prediction.confidence,
                 confidence_threshold_pct=confidence_threshold_pct,
                 prediction_id=prediction_id,
                 order_id=uuid.UUID(order.id),
+                direction=held_side,
+                strategy_leverage=strategy_leverage,
             )
         )
         return "closed"
+
+
+async def _pause_for_drift(
+    session: AsyncSession,
+    account: PaperAccount,
+    *,
+    training_job_id: uuid.UUID,
+    worst_feature: str,
+    worst_z: float,
+) -> None:
+    """Disable an account's strategy because its own fresh prediction just
+    came back feature-drifted (FEATURE-DRIFT-MONITOR, Option C, "auto-pause"
+    — the chosen response policy; see
+    `docs/research/FEATURE_DRIFT_INVESTIGATION.md`).
+
+    Deliberately **not** routed through `PaperTradingService
+    .update_strategy_config` (the human-facing `PATCH .../strategy` path):
+    that method requires a real `user_id` for its audit-trail write, and
+    there is no human here — the same reason a fully-automated state change
+    already on this platform, the drawdown kill switch's own
+    `PaperTradingService._alert_halted`, writes a structured log line plus a
+    Sentry alert and never an `audit_log` row. This mutates the exact same
+    `strategy_enabled` field `PATCH .../strategy` controls, through the same
+    `PaperAccountRepository.update`, so it is recognizable as the same kind
+    of state change even though it reaches the database differently.
+    """
+    now = datetime.now(UTC)
+    await PaperAccountRepository(session).update(
+        account,
+        {
+            "strategy_enabled": False,
+            "strategy_paused_reason": "feature_drift",
+            "strategy_paused_at": now,
+        },
+    )
+    logger.error(
+        "Paper trading strategy auto-paused for account=%s: feature drift detected "
+        "(job=%s, %s z=%.2f)",
+        account.id,
+        training_job_id,
+        worst_feature,
+        worst_z,
+    )
+    capture_feature_drift(
+        str(account.id),
+        training_job_id=str(training_job_id),
+        worst_feature=worst_feature,
+        worst_z=worst_z,
+        threshold=DRIFT_Z_THRESHOLD,
+    )
 
 
 def _interpret_signal(predicted_value: object) -> str | None:
@@ -548,6 +876,10 @@ def _build_trading_service(
         default_strategy_default_stop_loss_pct=(
             settings.paper_trading_strategy_default_stop_loss_pct
         ),
+        default_strategy_leverage=settings.paper_trading_strategy_default_leverage,
+        default_max_leverage=settings.paper_trading_default_max_leverage,
+        maintenance_margin_rate=settings.paper_trading_maintenance_margin_pct / Decimal(100),
+        max_leverage_notional=settings.paper_trading_max_leverage_notional,
     )
 
 
@@ -563,6 +895,8 @@ def _build_decision(
     confidence_threshold_pct: Decimal,
     prediction_id: uuid.UUID | None,
     order_id: uuid.UUID | None,
+    direction: str | None,
+    strategy_leverage: Decimal,
 ) -> PaperStrategyDecision:
     return PaperStrategyDecision(
         account_id=account_id,
@@ -575,6 +909,8 @@ def _build_decision(
         confidence_threshold_pct=confidence_threshold_pct,
         prediction_id=prediction_id,
         order_id=order_id,
+        direction=direction,
+        strategy_leverage=strategy_leverage,
     )
 
 

@@ -19,10 +19,16 @@
 # User management (uv)
 #
 #   make create-user EMAIL="someone@example.com"   prompts for a password twice
+#
+# Config integrity (ENV-CONFIG-INTEGRITY)
+#
+#   make check-env          duplicate-key check on .env.example (CI-usable;
+#                            the real .env is checked at every app startup
+#                            instead — see app.core.env_validation)
 
 .PHONY: db-create-migration db-upgrade db-downgrade db-history db-current db-stamp
 .PHONY: test test-verbose test-coverage test-integration test-performance test-postgres
-.PHONY: create-user
+.PHONY: create-user check-env
 
 MESSAGE ?= "migration description"
 REV ?= -1
@@ -65,3 +71,6 @@ test-postgres:
 
 create-user:
 	uv run python -m app.cli.create_user "$(EMAIL)"
+
+check-env:
+	uv run python scripts/check_env_duplicates.py

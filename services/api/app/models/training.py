@@ -26,6 +26,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
+    Integer,
     String,
     Text,
     func,
@@ -94,6 +95,19 @@ class TrainingJob(BaseModel, TimestampMixin):
         nullable=True,
         comment="Explicit candle-range end this job trains on; must be set together with "
         "dataset_start.",
+    )
+    dataset_limit: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+        comment=(
+            "Explicit candle-row ceiling for this job's own dataset build; NULL means the "
+            "load_dataset stage's own default (candles_default_limit, currently 100). Set "
+            "this whenever dataset_start/dataset_end span more real candles than the "
+            "default would return — omitting it silently truncates a wide date range to "
+            "the first candles_default_limit candles (ascending) within it, not an error, "
+            "which is exactly the too-narrow-window trap FEATURE-DRIFT-MONITOR exists to "
+            "catch (see docs/research/RETRAIN_WINDOW_ANALYSIS.md)."
+        ),
     )
     target_column: Mapped[str | None] = mapped_column(
         String(100),

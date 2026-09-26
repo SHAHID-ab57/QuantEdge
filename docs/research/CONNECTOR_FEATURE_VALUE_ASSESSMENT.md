@@ -1110,3 +1110,384 @@ the assumption that "retrained" alone meant "fine."
 - The Dataset Builder's own byte-identical 44-row parity across all 8
   variants was verified by diffing full `timestamps` arrays returned by
   `POST /markets/ETHUSD/ml/dataset`, not just comparing row counts.
+
+## Follow-up: the confidence score itself
+
+Whether the model's own confidence score carries any signal (as a strategy gate,
+or after Platt/isotonic recalibration) was measured separately in
+`CONFIDENCE_GATE_AUDIT.md`: it does not (AUC of confidence against correctness
+0.506, 95% interval 0.491 to 0.520), which is consistent with the no-skill findings
+above.
+
+---
+
+## M4-E3-T5: Funding rate and open interest (Delta-native), 2026-09-21
+
+The six-connector thread closed negative under three model classes, five
+horizons and three regimes. Funding rate and open interest were never part of
+it: Delta's REST and WebSocket layers cache them live, but nothing recorded
+their history, so nothing could be tested. This section investigates whether
+real history exists, backfills it, and runs the same primary comparison.
+(Task ID note: the task was issued as "M4-E3-T3", an ID the TASKBOOK already
+uses for the horizon sweep, so it is recorded there as M4-E3-T5.)
+
+### TL;DR verdict
+
+1. **The history exists and is real** (Step 1 below), so the question is
+   testable. It was investigated, not assumed.
+2. **Neither feature adds measurable predictive value.** Under logistic
+   regression, Random Forest and Gradient Boosting, on the same primary window,
+   split, noise band and diagnostics as every prior comparison, all nine
+   model x variant cells (18 deltas) sit inside the +-1.68 pp band, on test
+   accuracy and on ROC-AUC. Permutation importance for both features is within shuffle noise
+   for every model. This is the **fourth** confirmation of a negative result
+   (after Fear & Greed / FRED / DefiLlama under three models, the horizon sweep
+   and the regime walk-forward).
+3. **The prediction-distribution question, answered directly** (the live
+   model reproduced exactly; details below). Funding rate changes nothing: the
+   "down" share stays 99.66% and 27% of predictions stay above 0.99 confidence
+   (23% with funding). **Open interest does change the distribution, in the
+   wrong direction:** the model becomes a _pure_ constant-"down" caller (100%)
+   and confidence saturates further (77% of predictions above 0.99). Accuracy is
+   unchanged, identical to a constant-"down" baseline (0.4922).
+4. **A finding independent of these features, and more important than
+   them:** the near-constant "down" and saturated confidence are caused by the
+   **`volume` column's scale drift**, not by price and not by anything these
+   features could fix. On the backtest bars `volume` sits at a mean of 58
+   standard deviations from the training window's mean (max 430). Removing it
+   ends the saturation (ablation below). Open interest adds a second column
+   with the same problem.
+5. **Sequencing.** No feature on the improvement list has moved the needle
+   in four attempts. The next step should be **target redefinition**
+   (volatility or triple-barrier), as anticipated, and it should be preceded
+   by fixing how scale-drifting inputs are handled, since that
+   confound would contaminate any new target's evaluation too.
+
+### Step 1: what history exists (checked against the live API, not assumed)
+
+Delta's public `GET /v2/history/candles` serves derived series under prefixed
+symbols, the same endpoint the platform already uses for OHLCV.
+
+| Signal        | Symbol           | First candle         | Candles | Gaps                                                              | Unit                         |
+| ------------- | ---------------- | -------------------- | ------- | ----------------------------------------------------------------- | ---------------------------- |
+| Funding rate  | `FUNDING:ETHUSD` | 2024-02-05 12:00 UTC | 22,997  | 24 missing hours (eight 4-hour holes), harmless for a step series | **percent** (`0.01` = 0.01%) |
+| Open interest | `OI:ETHUSD`      | 2024-02-06 08:00 UTC | 23,001  | none; starts exactly where the price candles start                | ETH (contracts x 0.01)       |
+
+Both are real time series with hourly resolution, so open interest is **not**
+snapshot-only. Depth is the full ETHUSD candle history (about 2.6 years), the
+same window every prior comparison used.
+
+**Funding semantics and the no-look-ahead attach rule.** The series is a step
+function: `open == close` in every candle, and the value changes only at funding
+times (multiples of 28,800 s), with one off-boundary change on 2024-11-29 09:00.
+The value at candle time `t` is the rate settled at `t`, computed from the
+premium over the 8 hours ending at `t`, so it is knowable from `t` onward and
+never revised. A candle with `open_time = T` may therefore use the latest
+funding point stamped at or before `T`, and nothing later. That is exactly the
+platform's existing as-of rule (`most_recent_value_at_or_before`).
+
+**Open interest semantics.** An OI candle for hour `t` closes at `t + 1h`, so
+only its **open** is knowable at `t`. The connector stores the open, stamped at
+`t`. The close is deliberately never used. (`open[t] == close[t-1]` holds only 37%
+of the time, so this is a real choice of sample.)
+
+**Two data-quality facts that shape the results.**
+
+- **Funding is degenerate.** Delta floors the rate at 0.01% per interval, and it
+  sits on that floor **69.5%** of the time (the first candles are 0.0). It has
+  little variance to exploit by construction, and it never extrapolates
+  (mean |z| 0.1 on the backtest bars).
+- **Open interest is a non-stationary level.** 0.09 ETH in February 2024, a
+  monthly median of about 250 ETH in May 2024 and 2,100 in November 2024, then
+  15,000 to 26,000 through 2026. Its scale is dominated by the market's growth,
+  not by a stable relationship. A 24-hour percent change computed in 2024 is
+  taken off a base of a few ETH (max +4,967%, 176 hours beyond +-100%).
+
+### Step 2A: what was built
+
+Persisted per the existing connector-data conventions, in
+**`external_data_points`**, not a dedicated table. Justification: the whole
+plumbing (as-of lookup, sync scheduler, backfill, health/alerting, Data Sources
+page) works on that table, and both signals fit its shape of one number per
+`(source, timestamp)`. Funding _also_ lives in `funding_rates` (M3-E5-T2), which
+paper-trading settlement uses; that table carries the index and mark prices a
+payment needs and is keyed per market, so the duplication is deliberate: two
+consumers, two shapes.
+
+- Connectors: `delta_ethusd_funding_rate` (percent converted to a fraction
+  exactly once, via the platform's single `funding_percent_to_fraction`; one point
+  per funding time and per off-boundary change, 8-hour cadence) and
+  `delta_ethusd_open_interest` (hourly, the candle's open). Both in
+  `app/connectors/delta_market_data.py`, auto-discovered, auto-synced.
+- Features: `funding_rate` and `open_interest` (category `derivatives`,
+  `missing_values_expected`), `app/features/builtin/`. Both are **ETHUSD only**
+  (global, `symbol=None` lookups, like `eth_tvl`), and say so.
+- Backfill: 2,880 funding points (2024-02-05 12:00 to 2026-09-21 16:00) and
+  23,001 open-interest points. The running dev scheduler had already ingested
+  both by the time the manual backfill ran (it found every point present, 0
+  inserted); the stored rows were then checked against an independent raw pull:
+  0 value mismatches, 0 missing, 0 extra.
+- Tests: 18 connector tests (stamping, percent to fraction, constant-stretch
+  compression, off-boundary change, chunking/deduplication, error mapping) and
+  16 feature tests, including an adversarial no-look-ahead proof run through
+  the real database-backed path (a future point never changes a past candle's
+  value; every value used is stamped at or before its candle).
+
+### Method (identical to every prior comparison)
+
+Same primary window **2024-02-06 08:00 to 2026-09-10 11:00 UTC** (end exclusive):
+n_train 15,897 / n_val 3,406 / n_test 3,408, 0.7/0.15/0.15 chronological split.
+**Verified byte-identical to T2**: the baseline's `close` normalization mean
+3095.367661 and std 727.567269 match T2 to the last digit, and the LR, RF and
+GB baselines reproduce T2 / the RF re-test / the GB spot-check's test accuracy
+exactly (0.5035 / 0.4918 / 0.4891). Baseline is OHLCV + SMA(20), target
+`next_direction` h=1. Variants: baseline, + funding_rate, + open_interest,
+
+- both. Models through the existing adapters with their documented
+  hyperparameters (LR: the live job's; RF: modest 200/8/2; GB: defaults).
+  Noise band +-1.68 pp on the 3,408-row test set; recent 41-day cross-check
+  (n = 699/149/151, +-7.98 pp); threshold-artifact diagnostic (a change in F1
+  without a change in ROC-AUC is a decision-boundary shift, not skill).
+
+**Additions this section makes, disclosed:** (a) a paired 24-hour-block
+bootstrap on each delta (the +-1.68 pp band is a single-model heuristic; the
+paired interval is tighter and is reported beside it, never instead of it);
+(b) the ROC-AUC column is the **binary up-vs-rest AUC**, because the engine's
+multiclass ROC-AUC is undefined on the 41-day test set (no "flat" rows), so
+it is used for every row for consistency (the engine's value is within 0.2 pp
+of it on the primary window, and both are shown there); (c) permutation
+importance for **every** model (not impurity), on the validation split, 10
+shuffles, plus the standard deviation across shuffles.
+
+### Primary comparison (n_test 3,408, band +-1.68 pp)
+
+Held-out **test** accuracy and binary ROC-AUC; deltas in percentage points vs the
+same model's baseline, with the paired block-bootstrap 95% interval.
+
+| Model | Variant   | Test acc | d acc | 95% (paired)   | ROC-AUC | d AUC | 95% (paired)   | d F1  |
+| ----- | --------- | -------- | ----- | -------------- | ------- | ----- | -------------- | ----- |
+| LR    | baseline  | 0.5035   |       |                | 0.5322  |       |                |       |
+| LR    | + funding | 0.5059   | +0.23 | [+0.03, +0.47] | 0.5320  | -0.02 | [-0.14, +0.09] | +0.64 |
+| LR    | + OI      | 0.5012   | -0.23 | [-0.67, +0.18] | 0.5312  | -0.10 | [-1.56, +1.47] | -1.60 |
+| LR    | + both    | 0.5006   | -0.29 | [-0.76, +0.15] | 0.5309  | -0.13 | [-1.69, +1.47] | -1.77 |
+| RF    | baseline  | 0.4918   |       |                | 0.5090  |       |                |       |
+| RF    | + funding | 0.4962   | +0.44 | [-0.35, +1.23] | 0.5089  | -0.01 | [-0.73, +0.74] | +1.44 |
+| RF    | + OI      | 0.4953   | +0.35 | [-0.94, +1.64] | 0.5012  | -0.78 | [-2.27, +0.71] | -7.24 |
+| RF    | + both    | 0.4962   | +0.44 | [-0.82, +1.73] | 0.5060  | -0.30 | [-2.32, +1.74] | -8.23 |
+| GB    | baseline  | 0.4891   |       |                | 0.4930  |       |                |       |
+| GB    | + funding | 0.4956   | +0.65 | [-1.03, +2.29] | 0.5028  | +0.98 | [-0.54, +2.43] | +0.37 |
+| GB    | + OI      | 0.4950   | +0.59 | [-1.44, +2.61] | 0.4969  | +0.40 | [-1.65, +2.54] | -1.95 |
+| GB    | + both    | 0.5023   | +1.32 | [-0.67, +3.35] | 0.5014  | +0.84 | [-1.21, +2.92] | -0.92 |
+
+**Every one of the 18 deltas (nine cells, two metrics) is inside +-1.68 pp**, and every paired interval
+for ROC-AUC includes zero. Two things to read carefully rather than wave away:
+
+- **LR + funding, accuracy +0.23 pp, paired interval [+0.03, +0.47]** excludes
+  zero. It is a 0.23 pp movement with ROC-AUC unchanged (-0.02 pp) and F1 up
+  0.64 pp, which is the threshold-artifact signature (a small boundary shift,
+  no new ranking), and it is one of nine cells.
+- **GB + both, +1.32 pp accuracy** is the largest positive cell, and its paired
+  interval includes zero comfortably. Neither LR (-0.29) nor RF (+0.44 with AUC
+  -0.30) replicates it.
+
+**Threshold-artifact diagnostic.** F1 moves far more than ROC-AUC wherever a
+feature moves anything: RF + OI changes F1 by -7.24 pp and RF + both by
+-8.23 pp with ROC-AUC changes of -0.78 and -0.30 pp. That is a decision-boundary
+shift (RF's "up" share goes 85.7% to 98.0% and 99.3%), not a change in
+discrimination.
+
+### Recent 41-day cross-check (n_test 151, band +-7.98 pp; weaker, for robustness)
+
+Every accuracy delta is inside the band. The direction is worth recording: **open
+interest is consistently _negative_ here** (LR -3.97 pp, GB -3.31 pp accuracy; GB
+ROC-AUC -6.02 pp with paired interval [-10.25, -2.51]), funding is flat (0.00 to
++1.32 pp accuracy), and there is no positive signal anywhere. 151 test rows cannot
+distinguish this from noise and it is not claimed as harm; it is consistent with
+the extrapolation problem below.
+
+### Matured-market sensitivity (disclosed extra; n_test 2,109, band +-2.10 pp)
+
+Open interest is near zero for the first nine months of the primary window (see
+data facts), so a level feature is arguably being asked to learn from a market
+that barely existed. As a sensitivity, all 12 fits (four variants, three models) were re-run on
+**2025-02-01 to 2026-09-10 11:00** (n = 9,838 / 2,108 / 2,109; OI median already
+about 2,800 ETH at the start). Result: **still nothing.** Every accuracy delta
+is inside the band (LR -0.33 / +0.05 / -0.85, RF -0.62 / -1.56 / -0.66, GB -0.33 /
+-0.81 / -1.23 for funding / OI / both). The only paired ROC-AUC interval that
+excludes zero is LR + both at -1.86 pp [-3.67, -0.11], and it is negative.
+
+### Stationary open-interest variant (disclosed extra)
+
+Because the level is non-stationary, open interest's **24-hour fractional change**
+was also tested (derived from the same built rows; the first 24 rows, 0.15% of
+train, have no lag and are set to 0). The path reproduces the baseline exactly
+(0.5035 / 0.4918 / 0.4891), so the transform is the only difference.
+
+| Model | + OI 24h change: d acc [95% paired] | d AUC | + it and funding: d acc [95% paired] | d AUC |
+| ----- | ----------------------------------- | ----- | ------------------------------------ | ----- |
+| LR    | +0.41 [+0.12, +0.70]                | -0.17 | +0.35 [+0.00, +0.70]                 | -0.18 |
+| RF    | -0.21 [-1.29, +0.82]                | -0.17 | -0.06 [-1.09, +0.97]                 | -0.65 |
+| GB    | -0.50 [-2.44, +1.44]                | -0.21 | **+1.79 [-0.12, +3.70]**             | +1.31 |
+
+One cell is outside the +-1.68 pp heuristic band: **GB with both, +1.79 pp**. Its
+paired interval [-0.12, +3.70] includes zero, LR and RF do not replicate it (AUC
+-0.18 and -0.65), and it is the largest positive cell among the 33 run in this section (nine primary,
+nine cross-check, nine matured-window, six stationary-variant), where a single
+nominal exceedance across six cells is unremarkable (about 0.3 expected by
+chance). It is the one number here that a future run could
+usefully re-test, and no more than that. The LR + OI-change interval that
+excludes zero (+0.12) coincides with a ROC-AUC decrease, again the boundary
+signature.
+
+### Permutation importance (validation split, 10 shuffles)
+
+Mean drop in validation accuracy when the column is shuffled, in percentage
+points, with the standard deviation across shuffles (which measures shuffle
+variance only, **not** validation-set sampling noise, which is about +-1.7 pp for
+3,406 rows).
+
+| Model | Variant   | funding_rate | open_interest | Strongest reference feature |
+| ----- | --------- | ------------ | ------------- | --------------------------- |
+| LR    | + funding | +0.04 +-0.07 |               | close +1.41 +-1.00          |
+| LR    | + OI      |              | -0.23 +-0.19  | high -0.72 +-0.94           |
+| LR    | + both    | +0.01 +-0.08 | -0.33 +-0.19  | high -0.85 +-1.00           |
+| RF    | + funding | -0.07 +-0.18 |               | sma_20 -0.53 +-0.44         |
+| RF    | + OI      |              | -0.27 +-0.29  | sma_20 -0.36 +-0.18         |
+| RF    | + both    | -0.01 +-0.06 | -0.16 +-0.10  | close -0.24 +-0.26          |
+| GB    | + funding | +0.08 +-0.14 |               | high +1.27 +-0.32           |
+| GB    | + OI      |              | +0.20 +-0.53  | high +1.10 +-0.41           |
+| GB    | + both    | +0.35 +-0.20 | +0.79 +-0.41  | high +0.83 +-0.37           |
+
+No importance is distinguishable from zero given validation sampling noise. The
+largest, GB's open interest in the "both" variant (+0.79 pp), is under half the
+validation noise band and does not appear as a held-out gain (+1.32 pp accuracy,
+interval including zero). Funding is at or near zero for LR and RF, consistent
+with a feature that is on its floor 69.5% of the time.
+
+### The prediction-distribution question
+
+The task asked whether adding these features changes the model's _own_
+prediction distribution (near-constant "down" caller, saturated probabilities,
+27% of predictions above 0.99 confidence), not just the aggregate number. The
+short answer needed care, because **that behavior belongs to the live model, not
+to the full-history models above**, whose test-set confidence never exceeds 0.99
+(0% above 0.99 for LR, RF and GB alike).
+
+**Reproducing the live model exactly.** The 5,544 backtest predictions in the
+confidence-gate audit were made by training job `733082cc` (logistic regression,
+`C=1.0`, `max_iter=200`, seed 42, trained on **2024-02-06 to 2024-11-01**, 4,499 /
+964 / 965 rows, normalized). It was retrained from that configuration and
+checked against the database:
+
+- normalization statistics identical to the stored job (`close` mean
+  3290.025127806179, std 374.56893314626194);
+- predicted probabilities equal to the stored predictions to **2.2e-15** on the
+  first 300 bars (all 5,544 matched by as-of time);
+- 99.66% "down", 27.0% of predictions above 0.99, mean confidence 0.893,
+  accuracy 0.4922 (a constant-"down" caller's, exactly).
+
+That is the behavior under test, reproduced bit for bit. Then features were added
+to the same training configuration and the same 5,544 bars scored:
+
+| Variant         | Predicted down | Confidence > 0.99 | Confidence > 0.90 | Mean confidence | Accuracy | Bars whose call differs from baseline |
+| --------------- | -------------- | ----------------- | ----------------- | --------------- | -------- | ------------------------------------- |
+| baseline        | 99.66%         | 27.0%             | 62.0%             | 0.893           | 0.4922   | 0                                     |
+| + funding       | 99.66%         | 23.1%             | 57.2%             | 0.881           | 0.4921   | 1                                     |
+| + open interest | **100.00%**    | **76.7%**         | 100.0%            | 0.993           | 0.4922   | 19                                    |
+| + both          | **100.00%**    | **69.1%**         | 100.0%            | 0.990           | 0.4922   | 19                                    |
+
+Accuracy is 0.4922 for all four (constant "down"), and the paired block-bootstrap
+interval on the accuracy difference is [-0.14, +0.14] pp at most. Up-vs-rest
+ROC-AUC on those bars is 0.505, 0.505, 0.506, 0.507: no ranking gain either.
+
+**Answer: funding does not change the behavior; open interest changes it for
+the worse.** It turns a 99.7% "down" caller into a 100% one and pushes
+confidence from 27% to 77% above 0.99, because it is a second column that lives
+far outside the range it was trained on (mean |z| 68 on those bars, max 179;
+monthly median open interest was 2 to about 2,100 ETH during training and 2,700 to 26,000 afterwards).
+On the full-history models open interest also moves the predicted-class mix
+strongly with no discrimination gain (LR "up" 96.1% to 97.8%, RF 85.7% to 98.0%,
+Kolmogorov-Smirnov distance between P(up) distributions 0.44 to 0.56, with
+correlation with baseline falling to 0.52 to 0.69), which is _shift without
+skill_. Funding moves those distributions by a KS distance of 0.05 to 0.09.
+
+**Why the live model behaves this way: an ablation.** The live model's mean
+|z| on the backtest bars is 2.0 for price columns (max 4.1) but **58.3 for
+`volume` (max 430)**: contract volume in 2026 is about two orders of magnitude
+above the 2024 window it was normalized on. Same training window, LR, same 5,544 bars:
+
+| Columns                                                     | Predicted down | Confidence > 0.99 | Mean confidence | Accuracy |
+| ----------------------------------------------------------- | -------------- | ----------------- | --------------- | -------- |
+| open, high, low, close, **volume**, sma_20 (the live model) | 99.66%         | 27.0%             | 0.893           | 0.4922   |
+| the same **without volume**                                 | 13.9%          | 0.0%              | 0.615           | 0.2581   |
+| without volume, + funding                                   | 14.9%          | 0.0%              | 0.614           | 0.2590   |
+| without volume, + open interest                             | **100.00%**    | 61.1%             | 0.988           | 0.4922   |
+| without volume, + both                                      | 100.00%        | 53.6%             | 0.985           | 0.4922   |
+| the live columns + both                                     | 100.00%        | 69.1%             | 0.990           | 0.4922   |
+
+Removing `volume` ends the saturation and the constant-"down" behavior, so it
+is the cause. It does **not** produce skill: without volume the model calls
+"flat" for about half the bars (accuracy 0.258, and "flat" is rare), a
+different extrapolation failure of the price columns at the 2025-26 levels. Adding
+open interest to the volume-free model recreates the original pathology in full,
+which pins the open-interest result on the same mechanism. Funding, whose |z| never
+exceeds 0.4 on those bars, cannot cause or cure it.
+
+**Two hedges on this.** (1) A separate 30-anchor replication of the live
+_procedure_ (retraining on the latest 100 candles at 30 different anchors) did
+**not** reproduce a near-constant-"down" caller (the down share ranged 0.03 to
+0.84 across anchors and variants, none above 0.99), while the saturation itself
+did reproduce (median about 50% of predictions above 0.99). So the
+constant-"down" behavior belongs to job `733082cc` specifically (its 2024
+window against 2025-26 volume), not to every model this platform could train.
+(2) Across 49 hourly anchors around the live 100-candle fit, scored on the
+2025-04-30 to 2026-09-03 bars, the same direction shows up more mildly: the
+median share of predictions above 0.99 confidence is 76% at baseline, 79% with
+funding, 83% with open interest and 83% with both, and the "down" share stays
+near half (44.5% to 51.6% across all variants). These are the same mechanism
+at a smaller scale, not a separate result.
+
+### Per-feature verdict
+
+- **`funding_rate`: no predictive value; not a distribution shifter.** All
+  deltas inside the noise band, ROC-AUC flat, permutation importance at zero for
+  LR/RF, no change to the live model's behavior. Structurally low-information
+  (on its floor 69.5% of the time).
+- **`open_interest`: no predictive value; actively harmful when used as a raw
+  level** against a training window that predates its growth. Its stationary
+  24-hour change is no better (one marginal GB cell, not replicated). It is
+  worth keeping registered (correct, tested, no-look-ahead) as available
+  infrastructure, and **not** worth adding to the live strategy's feature set.
+
+### Consequences
+
+- **The live strategy's feature set is unchanged.** Nothing here justifies adding
+  either feature. This is the fourth consecutive negative result.
+- **Target redefinition is now the next step**, as the sequencing note
+  anticipated: volatility or triple-barrier, not the next feature on the
+  improvement list.
+- **Prerequisite for any new target evaluation:** the scale-drift finding. A
+  model normalized on a 2024 window will saturate on any later bars whose input
+  scales moved (`volume`, and open interest if it is ever used as a level), and
+  that saturation would contaminate the evaluation of a new target exactly as it
+  contaminated this one. That is a separate, scoped piece of work; nothing was
+  changed here.
+- **The confidence-gate audit's recommendation is reinforced, not changed:** the
+  saturation explains _why_ confidence carries no information (it reports
+  distance from the training window, not certainty).
+
+### Evidence trail
+
+- Code: `app/connectors/delta_market_data.py`, `app/features/builtin/funding_rate.py`,
+  `app/features/builtin/open_interest.py`; tests
+  `tests/connectors/test_delta_market_data.py`,
+  `tests/features/test_delta_market_data_features.py`.
+- The comparison drivers ran in-process against the exact seam every earlier
+  comparison used (`MLDatasetService.build_ml_dataset`, `build_training_dataset`
+  with `normalize=True`, then the model adapters), from a scratch directory.
+  They are research scripts, not committed code, matching this thread's
+  convention. Reproduction checks: the baseline matches T2, the RF re-test and
+  the GB spot-check to four decimals; the live-model reproduction matches the
+  stored database predictions to 2.2e-15.
+- Windows: primary 2024-02-06 08:00 to 2026-09-10 11:00; cross-check 2026-07-30
+  to 2026-09-10 11:00; matured 2025-02-01 to 2026-09-10 11:00 (all end exclusive).

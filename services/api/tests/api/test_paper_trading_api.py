@@ -312,7 +312,7 @@ class TestRiskLimits:
         self, client: httpx.AsyncClient, session_factory: SessionFactory, app: FastAPI
     ) -> None:
         await seed_market(session_factory, symbol="APIPTRISKUSD")
-        await override_runtime_with_ticker(app, symbol="APIPTRISKUSD", price="1000")
+        runtime = await override_runtime_with_ticker(app, symbol="APIPTRISKUSD", price="1000")
         account = (
             await client.post(
                 "/api/v1/paper-trading/accounts",
@@ -330,19 +330,39 @@ class TestRiskLimits:
         ).json()
         assert float(risk_before["current_exposure_pct"]) == pytest.approx(0.0)
         assert float(risk_before["current_drawdown_pct"]) == pytest.approx(0.0)
+        assert float(risk_before["equity"]) == pytest.approx(10000.0)
         assert risk_before["trading_halted"] is False
 
-        # 2 units at a ~$1000.5 fill: total cost ~$2003.001 — a >20%
-        # drop from the $10,000 peak, breaching the drawdown limit.
+        # 5 units at a ~$1000.5 fill spends $5,002.50 of *cash* — under the
+        # equity-based drawdown limit that alone halts nothing.
         await client.post(
             f"/api/v1/paper-trading/accounts/{account['id']}/orders",
-            json={"symbol": "APIPTRISKUSD", "side": "buy", "quantity": "2"},
+            json={"symbol": "APIPTRISKUSD", "side": "buy", "quantity": "5"},
         )
+        risk_spent = (
+            await client.get(f"/api/v1/paper-trading/accounts/{account['id']}/risk")
+        ).json()
+        assert risk_spent["trading_halted"] is False
+        assert float(risk_spent["current_drawdown_pct"]) < 1.0
+        assert float(risk_spent["margin_in_use"]) == pytest.approx(5002.5)
 
+        # The price then falls to $500: equity ~$7,492, a ~25% drawdown against
+        # a 20% limit. The halt lands when the account next tries to add risk.
+        await runtime.bus.publish(
+            TickerUpdated(
+                source="test",
+                ticker=TickerEvent(
+                    exchange="delta",
+                    symbol="APIPTRISKUSD",
+                    event_time=datetime.now(UTC),
+                    last_price=Decimal("500"),
+                ),
+            )
+        )
+        await runtime.bus.drain()
         risk_after = (
             await client.get(f"/api/v1/paper-trading/accounts/{account['id']}/risk")
         ).json()
-        assert risk_after["trading_halted"] is True
         assert float(risk_after["current_drawdown_pct"]) > 20.0
 
         halted_response = await client.post(
@@ -351,11 +371,17 @@ class TestRiskLimits:
         )
         assert halted_response.status_code == 400
         assert halted_response.json()["code"] == "trading_halted"
+        risk_halted = (
+            await client.get(f"/api/v1/paper-trading/accounts/{account['id']}/risk")
+        ).json()
+        assert risk_halted["trading_halted"] is True
 
         resumed = (
             await client.post(f"/api/v1/paper-trading/accounts/{account['id']}/resume-trading")
         ).json()
         assert resumed["trading_halted"] is False
+        # peak_balance now names the (post-loss) equity, so drawdown restarts from ~0.
+        assert float(resumed["peak_balance"]) == pytest.approx(7492.4975)
 
         resumed_order = await client.post(
             f"/api/v1/paper-trading/accounts/{account['id']}/orders",
@@ -408,6 +434,42 @@ class TestUpdateStrategyConfig:
         assert body["strategy_training_job_id"] == job_id
         assert float(body["strategy_confidence_threshold_pct"]) == pytest.approx(70.0)
         assert float(body["strategy_default_stop_loss_pct"]) == pytest.approx(8.0)
+
+    async def test_leverage_is_a_fixed_validated_setting_that_defaults_to_2x(
+        self, client: httpx.AsyncClient
+    ) -> None:
+        account = (
+            await client.post("/api/v1/paper-trading/accounts", json={"starting_balance": "100000"})
+        ).json()
+        assert float(account["strategy_leverage"]) == pytest.approx(2.0)
+
+        url = f"/api/v1/paper-trading/accounts/{account['id']}/strategy"
+        ok = await client.patch(url, json={"leverage": "3"})
+        assert ok.status_code == 200
+        assert float(ok.json()["strategy_leverage"]) == pytest.approx(3.0)
+
+        # Above the account's own max_leverage (default 5).
+        too_high = await client.patch(url, json={"leverage": "8"})
+        assert too_high.status_code == 400
+        assert too_high.json()["code"] == "strategy_leverage_exceeds_maximum"
+
+        # A 5% stop-loss cannot fire before liquidation at 20x (~4.7% away): needs a
+        # bigger account ceiling first, so raise both in one account created for it.
+        big = (
+            await client.post(
+                "/api/v1/paper-trading/accounts",
+                json={"starting_balance": "100000", "max_leverage": "50"},
+            )
+        ).json()
+        beyond = await client.patch(
+            f"/api/v1/paper-trading/accounts/{big['id']}/strategy", json={"leverage": "20"}
+        )
+        assert beyond.status_code == 400
+        assert beyond.json()["code"] == "strategy_stop_beyond_liquidation"
+
+        # Below 1, above 200 and an explicit null are schema errors.
+        for bad in ({"leverage": "0.5"}, {"leverage": "201"}, {"leverage": None}):
+            assert (await client.patch(url, json=bad)).status_code == 422
 
     async def test_returns_404_for_an_unknown_training_job(self, client: httpx.AsyncClient) -> None:
         account = (

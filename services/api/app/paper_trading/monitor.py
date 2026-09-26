@@ -1,8 +1,21 @@
-"""Stop-loss/take-profit monitor — the same event-bus subscriber pattern
-`app.state.manager.MarketStateManager` uses (`bus.subscribe(event_type,
+"""Stop-loss/take-profit/liquidation monitor — the same event-bus subscriber
+pattern `app.state.manager.MarketStateManager` uses (`bus.subscribe(event_type,
 handler)`, an `isinstance` check narrowing each event), applied to
-closing a position automatically the instant its stop-loss or
-take-profit price is crossed.
+closing a position automatically the instant its stop-loss, take-profit or
+liquidation price is crossed.
+
+**Three triggers, checked in a fixed order: liquidation, then stop-loss,
+then take-profit.** A stop and a take-profit are orders the simulator
+executes on the *last* traded price; a liquidation is the exchange acting on
+the account regardless of what the account intended, and it runs on the
+*mark* price (Delta: "A position goes into liquidation when Mark Price
+reaches the Liquidation Price"). Because the two use different prices a fast
+move can cross both on one tick; liquidation is checked first because it is
+the outcome the real venue would impose. It is only evaluated on a ticker
+event, the one event that carries a mark price; if a ticker arrives without
+one the last price stands in and the resulting order records
+`trigger_price_basis='last_fallback'`. A trade event never triggers a
+liquidation (it has no mark price to judge by).
 
 **Why the event bus, not a new polling loop.** Every live price this
 platform ever sees already flows through `EventBus` as a
@@ -67,6 +80,7 @@ from app.events.event import Event
 from app.marketdata.bus_events import TickerUpdated, TradeEventReceived
 from app.models.paper_trading import PaperPosition
 from app.paper_trading.base import FillQuote
+from app.paper_trading.margin import is_liquidated
 from app.paper_trading.pricing import is_stale
 from app.repositories.audit_log import AuditLogRepository
 from app.repositories.candles import CandleRepository
@@ -104,7 +118,13 @@ class StopLossTakeProfitMonitor:
         max_order_attempts: int,
         default_strategy_confidence_threshold_pct: Decimal,
         default_strategy_default_stop_loss_pct: Decimal,
+        default_max_leverage: Decimal = Decimal("5"),
+        maintenance_margin_rate: Decimal = Decimal("0.0025"),
+        max_leverage_notional: Decimal = Decimal("100000"),
     ) -> None:
+        self._default_max_leverage = default_max_leverage
+        self._maintenance_margin_rate = maintenance_margin_rate
+        self._max_leverage_notional = max_leverage_notional
         self._state_manager = state_manager
         self._slippage_bps = slippage_bps
         self._fee_bps = fee_bps
@@ -128,15 +148,29 @@ class StopLossTakeProfitMonitor:
         if not isinstance(event, TickerUpdated):
             return
         ticker = event.ticker
-        if ticker.last_price is None:
-            return
-        quote = FillQuote(
-            price=ticker.last_price,
-            source="ticker",
-            observed_at=ticker.event_time,
-            is_stale=is_stale(ticker.event_time, self._staleness_threshold),
+        stale = is_stale(ticker.event_time, self._staleness_threshold)
+        last_quote = (
+            FillQuote(
+                price=ticker.last_price,
+                source="ticker",
+                observed_at=ticker.event_time,
+                is_stale=stale,
+            )
+            if ticker.last_price is not None
+            else None
         )
-        await self._check_symbol(ticker.symbol, quote)
+        # Liquidation runs on the mark price; the last price stands in only
+        # when the ticker carries no mark, and the order says so.
+        mark_price = ticker.mark_price if ticker.mark_price is not None else ticker.last_price
+        if mark_price is None:
+            return
+        mark_quote = FillQuote(
+            price=mark_price, source="ticker", observed_at=ticker.event_time, is_stale=stale
+        )
+        mark_basis = "mark" if ticker.mark_price is not None else "last_fallback"
+        await self._check_symbol(
+            ticker.symbol, last_quote, mark_quote=mark_quote, mark_basis=mark_basis
+        )
 
     async def _on_trade_received(self, event: Event) -> None:
         if not isinstance(event, TradeEventReceived):
@@ -150,9 +184,18 @@ class StopLossTakeProfitMonitor:
         )
         await self._check_symbol(trade.symbol, quote)
 
-    async def _check_symbol(self, symbol: str, quote: FillQuote) -> None:
-        """Close every open position in `symbol`, across every account,
-        whose stop-loss or take-profit this `quote` has crossed."""
+    async def _check_symbol(
+        self,
+        symbol: str,
+        quote: FillQuote | None,
+        *,
+        mark_quote: FillQuote | None = None,
+        mark_basis: str = "mark",
+    ) -> None:
+        """Close every open position in `symbol`, across every account, that
+        this event has liquidated (`mark_quote` crossed its liquidation
+        price) or whose stop-loss/take-profit `quote` (the last price) has
+        crossed — liquidation first, and never both for one position."""
         engine = get_engine()
         if engine is None:
             return
@@ -160,7 +203,7 @@ class StopLossTakeProfitMonitor:
         session_factory = async_sessionmaker(bind=engine, expire_on_commit=False)
         async with session_factory() as session:
             position_repository = PaperPositionRepository(session)
-            positions = await position_repository.list_open_with_thresholds(symbol)
+            positions = await position_repository.list_open_monitored(symbol)
             if not positions:
                 return
 
@@ -188,15 +231,37 @@ class StopLossTakeProfitMonitor:
                 default_strategy_default_stop_loss_pct=(
                     self._default_strategy_default_stop_loss_pct
                 ),
+                default_max_leverage=self._default_max_leverage,
+                maintenance_margin_rate=self._maintenance_margin_rate,
+                max_leverage_notional=self._max_leverage_notional,
             )
 
             for position in positions:
-                reason = self._crossed_threshold(position, quote.price)
-                if reason is None:
+                trigger_quote: FillQuote | None = None
+                price_basis: str | None = None
+                reason: str | None = None
+                if mark_quote is not None and is_liquidated(
+                    side=position.side,  # type: ignore[arg-type]
+                    mark_price=mark_quote.price,
+                    liquidation=(
+                        Decimal(position.liquidation_price)
+                        if position.liquidation_price is not None
+                        else None
+                    ),
+                ):
+                    reason, trigger_quote, price_basis = "liquidation", mark_quote, mark_basis
+                elif quote is not None:
+                    reason = self._crossed_threshold(position, quote.price)
+                    trigger_quote = quote
+                if reason is None or trigger_quote is None:
                     continue
                 try:
                     await service.trigger_close(
-                        position.account_id, symbol, reason=reason, quote=quote
+                        position.account_id,
+                        symbol,
+                        reason=reason,
+                        quote=trigger_quote,
+                        price_basis=price_basis,
                     )
                 except Exception:
                     # Isolated per position — one account's failure (or a
@@ -204,7 +269,8 @@ class StopLossTakeProfitMonitor:
                     # price event from being checked against every other
                     # account's own position in this symbol.
                     logger.exception(
-                        "Stop-loss/take-profit trigger failed: account=%s symbol=%s reason=%s",
+                        "Stop-loss/take-profit/liquidation trigger failed: "
+                        "account=%s symbol=%s reason=%s",
                         position.account_id,
                         symbol,
                         reason,
@@ -213,11 +279,22 @@ class StopLossTakeProfitMonitor:
     @staticmethod
     def _crossed_threshold(position: PaperPosition, price: Decimal) -> str | None:
         """`'stop_loss'`/`'take_profit'` if `price` has crossed that
-        position's own threshold, else `None`. Stop-loss is checked
-        first — see this module's own docstring for why that ordering is
-        defense-in-depth, not something ordinary use can ever reach."""
-        if position.stop_loss_price is not None and price <= Decimal(position.stop_loss_price):
+        position's own threshold, else `None`. Direction depends on the
+        side: a long's stop-loss is crossed at or below its price and its
+        take-profit at or above; a short's are the reverse. Stop-loss is
+        checked first — see this module's own docstring for why that
+        ordering is defense-in-depth, not something ordinary use can ever
+        reach."""
+        stop = position.stop_loss_price
+        take = position.take_profit_price
+        if position.side == "short":
+            if stop is not None and price >= Decimal(stop):
+                return "stop_loss"
+            if take is not None and price <= Decimal(take):
+                return "take_profit"
+            return None
+        if stop is not None and price <= Decimal(stop):
             return "stop_loss"
-        if position.take_profit_price is not None and price >= Decimal(position.take_profit_price):
+        if take is not None and price >= Decimal(take):
             return "take_profit"
         return None

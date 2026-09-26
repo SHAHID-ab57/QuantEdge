@@ -19,6 +19,7 @@ dependencies = [
     "bcrypt>=4.2.0",
     "pyjwt>=2.9.0",
     "email-validator>=2.2.0",
+    "sentry-sdk[fastapi]>=2.69.2",
 ]
 
 [dependency-groups]

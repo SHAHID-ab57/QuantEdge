@@ -27,7 +27,7 @@ const ticker: LiveTickerData = {
 };
 
 const funding: LiveFundingData = {
-  funding_rate: '-0.001156',
+  funding_rate: '-0.0067',
   funding_interval_seconds: 28800,
   next_funding_time: '2026-01-01T08:00:00Z',
   event_time: '2026-01-01T00:00:05Z',
@@ -118,10 +118,26 @@ describe('PriceCard', () => {
     expect(screen.getByText('17,934.20')).toBeInTheDocument();
   });
 
-  it('renders the funding rate as a signed percentage', () => {
+  // Delta publishes `funding_rate` already in percent (0.01 = 0.01%), so it must be
+  // shown as-is. It was once multiplied by 100 again, showing values 100x too large.
+  it('renders the funding rate as a signed percentage, as published', () => {
     renderCard({ latestFunding: funding });
     expect(screen.getByText('Funding Rate')).toBeInTheDocument();
-    expect(screen.getByText('-0.1156%')).toBeInTheDocument();
+    expect(screen.getByText('-0.0067%')).toBeInTheDocument();
+    expect(screen.queryByText('-0.6700%')).not.toBeInTheDocument();
+  });
+
+  it('does not rescale the funding rate: the 0.01% interest-rate floor shows as 0.0100%', () => {
+    renderCard({ latestFunding: { ...funding, funding_rate: '0.01' } });
+    expect(screen.getByText('+0.0100%')).toBeInTheDocument();
+    expect(screen.queryByText('+1.0000%')).not.toBeInTheDocument();
+  });
+
+  it('renders a real live-ticker funding value at its true scale', () => {
+    // A real ETHUSD value observed from Delta's ticker: about +0.0017% per 8h, not +0.17%.
+    renderCard({ latestFunding: { ...funding, funding_rate: '0.001666603719307179' } });
+    expect(screen.getByText('+0.0017%')).toBeInTheDocument();
+    expect(screen.queryByText('+0.1667%')).not.toBeInTheDocument();
   });
 
   it('says "Unavailable" for the funding rate until a funding frame arrives', () => {

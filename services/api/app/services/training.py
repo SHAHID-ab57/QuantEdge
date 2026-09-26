@@ -132,6 +132,7 @@ class TrainingJobService:
             timeframe=payload.timeframe,
             dataset_start=payload.start,
             dataset_end=payload.end,
+            dataset_limit=payload.limit,
             target_column=payload.target_column,
             model_type=payload.model_type,
             hyperparameters=payload.hyperparameters,
@@ -437,6 +438,7 @@ class TrainingJobService:
                 timeframe=job.timeframe,
                 start=job.dataset_start,
                 end=job.dataset_end,
+                limit=job.dataset_limit,
                 features=[
                     FeatureRequestItem(feature=item.feature, params=item.params)
                     for item in experiment.feature_set

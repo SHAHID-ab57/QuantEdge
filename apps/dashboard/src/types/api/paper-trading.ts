@@ -14,6 +14,10 @@ export const PAPER_ORDER_SIDES = ['buy', 'sell'] as const;
 export const PaperOrderSideSchema = z.enum(PAPER_ORDER_SIDES);
 export type PaperOrderSide = z.infer<typeof PaperOrderSideSchema>;
 
+export const PAPER_POSITION_SIDES = ['long', 'short'] as const;
+export const PaperPositionSideSchema = z.enum(PAPER_POSITION_SIDES);
+export type PaperPositionSide = z.infer<typeof PaperPositionSideSchema>;
+
 export const PAPER_PRICE_SOURCES = ['ticker', 'trade', 'candle_close'] as const;
 export const PaperPriceSourceSchema = z.enum(PAPER_PRICE_SOURCES);
 export type PaperPriceSource = z.infer<typeof PaperPriceSourceSchema>;
@@ -27,12 +31,21 @@ export const PaperAccountSchema = z.object({
   max_position_size_pct: z.string(),
   max_exposure_pct: z.string(),
   max_drawdown_pct: z.string(),
+  max_leverage: z.string(),
+  /** The highest account EQUITY ever reached (the drawdown limit's reference). */
   peak_balance: z.string(),
   trading_halted: z.boolean(),
   strategy_enabled: z.boolean(),
   strategy_training_job_id: z.string().nullable(),
   strategy_confidence_threshold_pct: z.string(),
   strategy_default_stop_loss_pct: z.string(),
+  /** The one fixed leverage every automated entry uses, long or short. */
+  strategy_leverage: z.string(),
+  /** Set only when the scheduler itself — never a human — disabled the
+   * strategy (today: only 'feature_drift'). Null when strategy_enabled is
+   * false because a human turned it off, or it was never auto-paused. */
+  strategy_paused_reason: z.enum(['feature_drift']).nullable(),
+  strategy_paused_at: z.string().datetime().nullable(),
   created_at: z.string().datetime(),
 });
 
@@ -47,7 +60,7 @@ export const PaperAccountListResponseSchema = z.object({
 
 export type PaperAccountListResponse = z.infer<typeof PaperAccountListResponseSchema>;
 
-export const PAPER_TRIGGER_REASONS = ['stop_loss', 'take_profit'] as const;
+export const PAPER_TRIGGER_REASONS = ['stop_loss', 'take_profit', 'liquidation'] as const;
 export const PaperTriggerReasonSchema = z.enum(PAPER_TRIGGER_REASONS);
 export type PaperTriggerReason = z.infer<typeof PaperTriggerReasonSchema>;
 
@@ -56,6 +69,12 @@ export const PaperOrderSchema = z.object({
   account_id: z.string(),
   symbol: z.string(),
   side: PaperOrderSideSchema,
+  /** The kind of position this order opened, added to or reduced. */
+  position_side: PaperPositionSideSchema,
+  leverage: z.string(),
+  /** Margin posted (opening/adding) or released (reducing); forfeited on a liquidation. */
+  margin_applied: z.string(),
+  reduce_only: z.boolean(),
   quantity: z.string(),
   raw_price: z.string(),
   fill_price: z.string(),
@@ -68,6 +87,10 @@ export const PaperOrderSchema = z.object({
   notional: z.string(),
   realized_pnl: z.string().nullable(),
   trigger_reason: PaperTriggerReasonSchema.nullable(),
+  /** Liquidation only: the mark price had already passed the bankruptcy price. */
+  gapped_through_bankruptcy: z.boolean(),
+  /** Liquidation only: `mark`, or `last_fallback` if no mark price was available. */
+  trigger_price_basis: z.enum(['mark', 'last_fallback']).nullable(),
   created_at: z.string().datetime(),
 });
 
@@ -84,8 +107,16 @@ export type PaperOrderListResponse = z.infer<typeof PaperOrderListResponseSchema
 
 export const PaperPositionSchema = z.object({
   symbol: z.string(),
+  side: PaperPositionSideSchema,
+  /** Position size — always positive; `side` gives the direction. */
   quantity: z.string(),
   average_entry_price: z.string(),
+  leverage: z.string(),
+  /** Isolated margin posted against this position. */
+  margin: z.string(),
+  /** The mark price at which it is liquidated; null if it cannot be (a 1x long). */
+  liquidation_price: z.string().nullable(),
+  liquidation_distance_pct: z.string().nullable(),
   current_price: z.string(),
   price_source: PaperPriceSourceSchema,
   unrealized_pnl: z.string(),
@@ -106,7 +137,10 @@ export const PortfolioSummarySchema = z.object({
   balance: z.string(),
   realized_pnl: z.string(),
   unrealized_pnl: z.string(),
+  margin_in_use: z.string(),
   total_equity: z.string(),
+  total_notional: z.string(),
+  effective_leverage: z.string(),
   open_position_count: z.number().int().nonnegative(),
 });
 
@@ -114,8 +148,14 @@ export type PortfolioSummary = z.infer<typeof PortfolioSummarySchema>;
 
 export const RiskSummarySchema = z.object({
   account_id: z.string(),
+  /** Available cash (margin already posted is not included). */
   balance: z.string(),
+  /** Cash + margin in use + unrealized PnL at live prices. */
+  equity: z.string(),
+  margin_in_use: z.string(),
   peak_balance: z.string(),
+  total_notional: z.string(),
+  effective_leverage: z.string(),
   current_exposure_pct: z.string(),
   max_exposure_pct: z.string(),
   exposure_headroom_pct: z.string(),
@@ -123,6 +163,7 @@ export const RiskSummarySchema = z.object({
   max_drawdown_pct: z.string(),
   drawdown_headroom_pct: z.string(),
   max_position_size_pct: z.string(),
+  max_leverage: z.string(),
   trading_halted: z.boolean(),
 });
 
@@ -142,6 +183,10 @@ export const PaperStrategyDecisionSchema = z.object({
   predicted_value: z.unknown().nullable(),
   confidence: z.number().nullable(),
   confidence_threshold_pct: z.string(),
+  /** The side this cycle concerned (see the API docs); null with no directional call. */
+  direction: PaperPositionSideSchema.nullable(),
+  /** The fixed strategy leverage in force at that moment. */
+  strategy_leverage: z.string(),
   prediction_id: z.string().nullable(),
   order_id: z.string().nullable(),
   created_at: z.string().datetime(),

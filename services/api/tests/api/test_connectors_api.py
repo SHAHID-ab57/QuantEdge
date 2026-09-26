@@ -5,14 +5,14 @@ serialization, and the shared ``AppError`` -> JSON envelope are all
 covered end to end.
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
 
 import app.services.connectors as connectors_service_module
 from app.connectors.registry import ConnectorRegistry
-from app.models.external_data import ExternalDataPoint
+from app.models.external_data import ConnectorSyncRun, ExternalDataPoint
 from tests.conftest import SessionFactory
 
 
@@ -27,6 +27,36 @@ async def seed_point(
     async with session_factory() as session:
         session.add(ExternalDataPoint(source=source, symbol=None, timestamp=timestamp, value=value))
         await session.commit()
+
+
+async def seed_runs(
+    session_factory: SessionFactory,
+    outcomes: list[bool],
+    *,
+    source: str = "fear_greed",
+) -> None:
+    """Insert sync runs for a source, `outcomes` given newest first."""
+    now = datetime.now(UTC)
+    async with session_factory() as session:
+        for minutes_ago, success in enumerate(outcomes):
+            started = now - timedelta(minutes=minutes_ago)
+            session.add(
+                ConnectorSyncRun(
+                    source=source,
+                    started_at=started,
+                    completed_at=started,
+                    success=success,
+                    received=1 if success else 0,
+                    inserted=0,
+                    error_message=None if success else "upstream 503",
+                )
+            )
+        await session.commit()
+
+
+async def fear_greed_status(client: httpx.AsyncClient) -> str:
+    body = (await client.get("/api/v1/connectors")).json()
+    return next(e for e in body["connectors"] if e["source"] == "fear_greed")["health_status"]
 
 
 class TestConnectorCatalogueEndpoint:
@@ -90,6 +120,7 @@ class TestConnectorCatalogueEndpoint:
         assert entry["latest_timestamp"] is None
         assert entry["label"] == "Fear & Greed Index"
         assert entry["requires_auth"] is False
+        assert entry["health_status"] == "never_ingested"
 
     async def test_reports_the_real_latest_value_once_ingested(
         self, client: httpx.AsyncClient, session_factory: SessionFactory
@@ -101,6 +132,85 @@ class TestConnectorCatalogueEndpoint:
         entry = next(e for e in body["connectors"] if e["source"] == "fear_greed")
         assert entry["latest_value"] == 70.0
         assert entry["latest_timestamp"] == "2026-01-02T00:00:00Z"
+
+    async def test_reports_healthy_for_a_point_within_the_expected_cadence(
+        self, client: httpx.AsyncClient, session_factory: SessionFactory
+    ) -> None:
+        """Fear & Greed's own real expected_interval_seconds is 86400s (1
+        day) — a point from an hour ago is well within that."""
+        await seed_point(
+            session_factory, value=42.0, timestamp=datetime.now(UTC) - timedelta(hours=1)
+        )
+
+        body = (await client.get("/api/v1/connectors")).json()
+        entry = next(e for e in body["connectors"] if e["source"] == "fear_greed")
+        assert entry["health_status"] == "healthy"
+
+    async def test_reports_stale_for_a_point_well_past_the_expected_cadence(
+        self, client: httpx.AsyncClient, session_factory: SessionFactory
+    ) -> None:
+        """A point 30 days old is far past Fear & Greed's own 3-day
+        (STALE_MULTIPLIER x 1 day) staleness threshold."""
+        await seed_point(
+            session_factory, value=42.0, timestamp=datetime.now(UTC) - timedelta(days=30)
+        )
+
+        body = (await client.get("/api/v1/connectors")).json()
+        entry = next(e for e in body["connectors"] if e["source"] == "fear_greed")
+        assert entry["health_status"] == "stale"
+
+    async def test_reports_failing_when_recent_syncs_all_failed_despite_fresh_data(
+        self, client: httpx.AsyncClient, session_factory: SessionFactory
+    ) -> None:
+        """The gap this closes: a connector erroring on every tick used to
+        read `healthy` until its staleness threshold independently elapsed,
+        because its last good point was still recent."""
+        await seed_point(
+            session_factory, value=42.0, timestamp=datetime.now(UTC) - timedelta(hours=1)
+        )
+        assert await fear_greed_status(client) == "healthy"
+
+        await seed_runs(session_factory, [False, False, False])
+
+        assert await fear_greed_status(client) == "failing"
+
+    async def test_two_failed_syncs_are_not_yet_failing(
+        self, client: httpx.AsyncClient, session_factory: SessionFactory
+    ) -> None:
+        await seed_point(
+            session_factory, value=42.0, timestamp=datetime.now(UTC) - timedelta(hours=1)
+        )
+        await seed_runs(session_factory, [False, False])
+
+        assert await fear_greed_status(client) == "healthy"
+
+    async def test_a_recent_success_after_failures_clears_failing(
+        self, client: httpx.AsyncClient, session_factory: SessionFactory
+    ) -> None:
+        """Newest first: the connector recovered on its latest attempt."""
+        await seed_point(
+            session_factory, value=42.0, timestamp=datetime.now(UTC) - timedelta(hours=1)
+        )
+        await seed_runs(session_factory, [True, False, False, False, False])
+
+        assert await fear_greed_status(client) == "healthy"
+
+    async def test_failing_takes_precedence_over_never_ingested(
+        self, client: httpx.AsyncClient, session_factory: SessionFactory
+    ) -> None:
+        await seed_runs(session_factory, [False, False, False])
+
+        assert await fear_greed_status(client) == "failing"
+
+    async def test_failures_for_one_source_do_not_affect_another(
+        self, client: httpx.AsyncClient, session_factory: SessionFactory
+    ) -> None:
+        await seed_point(
+            session_factory, value=42.0, timestamp=datetime.now(UTC) - timedelta(hours=1)
+        )
+        await seed_runs(session_factory, [False, False, False], source="eth_tvl")
+
+        assert await fear_greed_status(client) == "healthy"
 
     async def test_zero_registered_connectors_is_handled_not_crashed_on(
         self, client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
@@ -120,6 +230,122 @@ class TestConnectorCatalogueEndpoint:
 
     async def test_is_mounted_unversioned_too(self, client: httpx.AsyncClient) -> None:
         assert (await client.get("/connectors")).status_code == 200
+
+
+class TestSyncTimingFields:
+    """`total_points`/`expected_interval_seconds`/`last_attempt_at`/
+    `last_attempt_success`/`next_sync_at` — added so the Data Sources page can
+    explain *why* a connector is stale (an overdue scheduler tick) instead of
+    only naming the fact, and so a value's own precision is never confused
+    with how long ago it was fetched."""
+
+    async def test_total_points_counts_every_stored_row_for_that_source_only(
+        self, client: httpx.AsyncClient, session_factory: SessionFactory
+    ) -> None:
+        for day in range(3):
+            await seed_point(
+                session_factory, value=float(day), timestamp=datetime(2026, 1, 1 + day, tzinfo=UTC)
+            )
+        await seed_point(
+            session_factory, value=1.0, timestamp=datetime(2026, 1, 1, tzinfo=UTC), source="eth_tvl"
+        )
+
+        body = (await client.get("/api/v1/connectors")).json()
+        entry = next(e for e in body["connectors"] if e["source"] == "fear_greed")
+        assert entry["total_points"] == 3
+        eth_tvl = next(e for e in body["connectors"] if e["source"] == "eth_tvl")
+        assert eth_tvl["total_points"] == 1
+
+    async def test_expected_interval_seconds_matches_the_connectors_own_metadata(
+        self, client: httpx.AsyncClient
+    ) -> None:
+        """Fear & Greed publishes daily — 86,400 seconds."""
+        body = (await client.get("/api/v1/connectors")).json()
+        entry = next(e for e in body["connectors"] if e["source"] == "fear_greed")
+        assert entry["expected_interval_seconds"] == 86_400
+
+    async def test_no_recorded_attempt_reports_null_timing_fields(
+        self, client: httpx.AsyncClient
+    ) -> None:
+        body = (await client.get("/api/v1/connectors")).json()
+        entry = next(e for e in body["connectors"] if e["source"] == "fear_greed")
+        assert entry["last_attempt_at"] is None
+        assert entry["last_attempt_success"] is None
+        assert entry["next_sync_at"] is None
+
+    async def test_last_attempt_is_the_newest_recorded_run_regardless_of_outcome(
+        self, client: httpx.AsyncClient, session_factory: SessionFactory
+    ) -> None:
+        """Newest first: a failed attempt more recent than an older success
+        is still the one reported, exactly like the health-status streak
+        check reads the same rows."""
+        await seed_runs(session_factory, [False, True, True])
+
+        body = (await client.get("/api/v1/connectors")).json()
+        entry = next(e for e in body["connectors"] if e["source"] == "fear_greed")
+        assert entry["last_attempt_at"] is not None
+        assert entry["last_attempt_success"] is False
+
+    async def test_next_sync_at_projects_the_generic_schedulers_own_interval(
+        self, client: httpx.AsyncClient, session_factory: SessionFactory
+    ) -> None:
+        """Fear & Greed is `auto_synced=True` — the generic
+        `ExternalDataSyncScheduler`'s own interval applies, never Marketaux's
+        dedicated `NewsSyncScheduler` interval."""
+        from app.core.config import get_settings
+
+        started = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+        async with session_factory() as session:
+            session.add(
+                ConnectorSyncRun(
+                    source="fear_greed",
+                    started_at=started,
+                    completed_at=started,
+                    success=True,
+                    received=1,
+                    inserted=1,
+                )
+            )
+            await session.commit()
+
+        body = (await client.get("/api/v1/connectors")).json()
+        entry = next(e for e in body["connectors"] if e["source"] == "fear_greed")
+        expected = started + timedelta(seconds=get_settings().external_data_sync_interval_seconds)
+        assert entry["last_attempt_at"] == started.isoformat().replace("+00:00", "Z")
+        assert entry["next_sync_at"] == expected.isoformat().replace("+00:00", "Z")
+
+    async def test_next_sync_at_projects_the_dedicated_news_scheduler_interval_for_marketaux(
+        self, client: httpx.AsyncClient, session_factory: SessionFactory
+    ) -> None:
+        """`news_sentiment` is `auto_synced=False` — its own `NewsSyncScheduler`
+        interval must be used, not the generic scheduler's, or the projected
+        next-sync time would be wrong for the one source that differs."""
+        from app.core.config import get_settings
+
+        started = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+        async with session_factory() as session:
+            session.add(
+                ConnectorSyncRun(
+                    source="news_sentiment",
+                    started_at=started,
+                    completed_at=started,
+                    success=True,
+                    received=1,
+                    inserted=1,
+                )
+            )
+            await session.commit()
+
+        body = (await client.get("/api/v1/connectors")).json()
+        entry = next(e for e in body["connectors"] if e["source"] == "news_sentiment")
+        expected = started + timedelta(seconds=get_settings().news_sync_interval_seconds)
+        assert entry["next_sync_at"] == expected.isoformat().replace("+00:00", "Z")
+        # Sanity: the two scheduler intervals actually differ in this
+        # codebase's real config, or this test would pass by accident.
+        assert (
+            get_settings().news_sync_interval_seconds
+            != get_settings().external_data_sync_interval_seconds
+        )
 
 
 class TestConnectorHistoryEndpoint:

@@ -56,6 +56,7 @@ class Product(BaseModel):
     launch_time: datetime | None = None
     funding_method: str | None = None
     product_specs: ProductSpecs | None = None
+    spot_index: ProductAsset | None = None
 
 
 class DeltaTickerQuotes(BaseModel):
@@ -118,3 +119,21 @@ class CandleResponse(BaseModel):
     low: Decimal
     close: Decimal
     volume: Decimal
+
+
+class SeriesCandle(BaseModel):
+    """One point of a Delta *derived* price series from
+    ``GET /v2/history/candles`` — a ``FUNDING:<symbol>`` funding rate, a
+    ``MARK:<symbol>`` mark price, or a spot index such as ``.DEETHUSD``.
+
+    Shaped like :class:`CandleResponse`, except ``volume`` is optional: these
+    series are not traded, and Delta returns ``null`` for it (which
+    ``CandleResponse`` rightly rejects for a real OHLCV candle).
+    """
+
+    time: int
+    open: Decimal
+    high: Decimal
+    low: Decimal
+    close: Decimal
+    volume: Decimal | None = None

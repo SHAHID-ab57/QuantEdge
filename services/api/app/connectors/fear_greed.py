@@ -291,6 +291,10 @@ class FearGreedConnector:
             "trends, published by alternative.me. Free and unauthenticated."
         ),
         frequency="daily",
+        # Real observed gap (dev DB, source=fear_greed): averages just over
+        # 1 day with occasional genuine 4-day gaps — see ARCHITECTURE.md §
+        # "Connector Health Monitoring" for the query behind this number.
+        expected_interval_seconds=86_400,
         requires_auth=False,
         version="1.0.0",
         aliases=("fng", "fear-and-greed"),

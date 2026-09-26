@@ -399,6 +399,12 @@ class EtherscanConnector:
             "earlier."
         ),
         frequency="continuous (sampled per sync tick)",
+        # No fixed real-world publication cadence of its own — matches the
+        # generic scheduler's own default tick (external_data_sync_interval
+        # _seconds, app.core.config), since "stale" for a continuously
+        # -sampled source means "the scheduler itself stopped ticking",
+        # not "the source published less often than usual."
+        expected_interval_seconds=3_600,
         requires_auth=True,
         version="1.0.0",
         aliases=("gas_price", "gwei", "gas_oracle"),

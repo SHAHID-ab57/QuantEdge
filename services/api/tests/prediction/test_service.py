@@ -13,6 +13,7 @@ thing here, one step further downstream.
 import logging
 import uuid
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 import pytest
 
@@ -21,7 +22,9 @@ from app.dependencies.features import get_dataset_builder
 from app.dependencies.ml_datasets import get_target_pipeline
 from app.evaluation.metrics import load_builtin_metrics
 from app.evaluation.registry import default_registry as default_metric_registry
+from app.models import Candle
 from app.models.exchange import Exchange
+from app.models.experiment import Experiment
 from app.models.market import Market
 from app.prediction.engine import default_engine
 from app.prediction.errors import (
@@ -318,6 +321,120 @@ class TestNormalizationReuse:
         # for two different (and, per `seed_real_candles`, genuinely
         # different-valued) candles.
         assert result_latest.probabilities != result_earlier.probabilities
+
+
+@pytest.mark.asyncio
+class TestFeatureDrift:
+    """FEATURE-DRIFT-MONITOR: `PredictionService.run` computes and persists
+    `feature_drift_status`/`_worst_feature`/`_worst_z` for every prediction,
+    against the job's own already-stored normalization
+    (`app.prediction.feature_drift.compute_feature_drift`) — real unit
+    coverage of that pure function, with the real measured incident numbers,
+    lives in `tests/prediction/test_feature_drift.py`; this proves the
+    wiring end to end through the real service and the real database row,
+    not just the returned response object.
+    """
+
+    async def test_a_reading_from_the_same_training_distribution_reads_healthy(
+        self, session_factory: SessionFactory
+    ) -> None:
+        """The real latest candle a freshly-trained job predicts from is, by
+        construction, drawn from the exact series its own normalization was
+        fit on — the cleanest possible 'not drifted' case."""
+        job_id, _ = await train_completed_job(
+            session_factory,
+            symbol="DRIFTOKUSD",
+            model_type="logistic_regression",
+            normalize_features=True,
+        )
+        service = build_prediction_service(session_factory)
+
+        result = await service.run(
+            PredictionRunRequest(training_job_id=uuid.UUID(job_id), symbol="DRIFTOKUSD")
+        )
+
+        assert result.feature_drift_status == "healthy"
+        assert result.feature_drift_worst_feature is not None
+        assert result.feature_drift_worst_z is not None
+
+        # Persisted on the real database row, not only returned in the response.
+        repository = PredictionRepository(session_factory())
+        stored = await repository.get_by_id(uuid.UUID(result.id))
+        assert stored is not None
+        assert stored.feature_drift_status == "healthy"
+        assert stored.feature_drift_worst_feature == result.feature_drift_worst_feature
+        assert stored.feature_drift_worst_z == pytest.approx(result.feature_drift_worst_z)
+
+    async def test_a_reading_far_outside_the_training_distribution_reads_drifted(
+        self, session_factory: SessionFactory
+    ) -> None:
+        """Mirrors the real incidents directly: a live candle whose values sit
+        nowhere near what the job was normalized on."""
+        job_id, _ = await train_completed_job(
+            session_factory,
+            symbol="DRIFTBADUSD",
+            model_type="logistic_regression",
+            normalize_features=True,
+        )
+        market_repository = MarketRepository(session_factory())
+        market = await market_repository.get_by_symbol("DRIFTBADUSD")
+        assert market is not None
+        candle_repository = CandleRepository(session_factory())
+        latest = await candle_repository.get_latest_candle(market.id, "1h")
+        assert latest is not None
+
+        async with session_factory() as session:
+            session.add(
+                Candle(
+                    market_id=market.id,
+                    timeframe="1h",
+                    open_time=latest.open_time + timedelta(hours=1),
+                    close_time=latest.open_time + timedelta(hours=2),
+                    open=Decimal("1000000"),
+                    high=Decimal("1000002"),
+                    low=Decimal("999998"),
+                    close=Decimal("1000000"),
+                    volume=Decimal("100"),
+                    quote_volume=None,
+                    trade_count=None,
+                    source="delta",
+                )
+            )
+            await session.commit()
+
+        service = build_prediction_service(session_factory)
+        result = await service.run(
+            PredictionRunRequest(training_job_id=uuid.UUID(job_id), symbol="DRIFTBADUSD")
+        )
+
+        assert result.feature_drift_status == "drifted"
+        assert result.feature_drift_worst_feature in {"open", "high", "low", "close"}
+        assert result.feature_drift_worst_z is not None
+        assert abs(result.feature_drift_worst_z) >= 10.0
+
+        repository = PredictionRepository(session_factory())
+        stored = await repository.get_by_id(uuid.UUID(result.id))
+        assert stored is not None
+        assert stored.feature_drift_status == "drifted"
+
+    async def test_a_job_with_no_normalization_reads_unavailable_not_healthy(
+        self, session_factory: SessionFactory
+    ) -> None:
+        job_id, _ = await train_completed_job(
+            session_factory,
+            symbol="DRIFTUNAVUSD",
+            model_type="logistic_regression",
+            normalize_features=False,
+        )
+        service = build_prediction_service(session_factory)
+
+        result = await service.run(
+            PredictionRunRequest(training_job_id=uuid.UUID(job_id), symbol="DRIFTUNAVUSD")
+        )
+
+        assert result.feature_drift_status == "unavailable"
+        assert result.feature_drift_worst_feature is None
+        assert result.feature_drift_worst_z is None
 
 
 @pytest.mark.asyncio
@@ -748,3 +865,209 @@ class TestGradeNow:
         service = build_prediction_service(session_factory)
         with pytest.raises(PredictionRunNotFoundError):
             await service.grade_now(uuid.uuid4())
+
+
+async def train_completed_job_with_target_config(
+    session_factory: SessionFactory,
+    *,
+    symbol: str,
+    model_type: str,
+    target_config: list[dict[str, object]],
+) -> tuple[str, str]:
+    """`train_completed_job`'s own body, with a caller-supplied
+    `target_config` instead of `seed_experiment_with_real_config`'s
+    hardcoded `{"horizon": "1"}` — needed for a target whose own
+    look-ahead parameter isn't literally named `horizon`
+    (`triple_barrier`'s `max_hours`, `volatility_regime`'s
+    `window_hours`)."""
+    await seed_real_candles(session_factory, symbol=symbol)
+    async with session_factory() as session:
+        experiment = Experiment(
+            name="non-horizon-named target grading test",
+            dataset_version="ds-real",
+            feature_set=[{"feature": "ohlcv", "params": {}}],
+            target_config=target_config,
+            split_config={"train": 0.7, "validation": 0.15, "test": 0.15},
+        )
+        session.add(experiment)
+        await session.commit()
+        experiment_id = str(experiment.id)
+
+    training_service = build_training_service(session_factory)
+    try:
+        job = await training_service.create(
+            TrainingJobCreateRequest(
+                experiment_id=uuid.UUID(experiment_id),
+                model_type=model_type,
+                symbol=symbol,
+                timeframe="1h",
+                normalize_features=True,
+            )
+        )
+        completed = await training_service.run(uuid.UUID(job.id))
+        assert completed.status == "completed", completed.error_message
+        return completed.id, experiment_id
+    finally:
+        await training_service.repository.session.close()
+
+
+class TestGradeNowResolvesNonHorizonNamedTargets:
+    """MODEL-QUALITY-T2: `resolve_horizon` (`app/prediction/engine.py`) used
+    to read `entry.params["horizon"]` directly, silently returning `None`
+    for any target parameterizing its own look-ahead under a different
+    name — and `_grade_one`'s very first check is `if prediction.horizon is
+    None: return None`, so `triple_barrier`/`volatility_regime` predictions
+    could never be graded at all, with no error anywhere. Discovered when a
+    real regime-walkforward backtest graded 0 of 1,920 `triple_barrier`
+    predictions. These prove the fix: a real, end-to-end `grade_now` call
+    against each of the two new targets actually grades."""
+
+    _EARLY_AS_OF = EARLY_AS_OF_FOR_GRADING
+
+    async def test_grades_a_triple_barrier_prediction(
+        self, session_factory: SessionFactory
+    ) -> None:
+        job_id, _ = await train_completed_job_with_target_config(
+            session_factory,
+            symbol="TBGRADEUSD",
+            model_type="logistic_regression",
+            target_config=[
+                {"target": "triple_barrier", "params": {"barrier_pct": "0.05", "max_hours": "3"}}
+            ],
+        )
+        service = build_prediction_service(session_factory)
+        prediction = await service.run(
+            PredictionRunRequest(
+                training_job_id=uuid.UUID(job_id), symbol="TBGRADEUSD", as_of=self._EARLY_AS_OF
+            )
+        )
+        assert prediction.horizon == 3
+
+        outcome = await service.grade_now(uuid.UUID(prediction.id))
+
+        assert outcome is not None
+        assert outcome.actual_outcome in {"up", "down", "time_expired"}
+        graded = await service.get(uuid.UUID(prediction.id))
+        assert graded.graded_at is not None
+
+    async def test_grades_a_volatility_regime_prediction_with_the_exact_correct_label(
+        self, session_factory: SessionFactory
+    ) -> None:
+        """VOLATILITY-STOP-WIDTH: `resolve_horizon` alone was not enough —
+        `_grade_one` used to fetch exactly `horizon + 1` candles starting
+        *at* `as_of`, correct for every target that only looks forward from
+        its own row, but `volatility_regime` also needs `window_hours`
+        candles *before* `as_of` (its own trailing-volatility half), which
+        that window never included, so its value at row 0 was always
+        `None` by construction — a real, previously-reported limitation,
+        now fixed generally via `TargetGenerator.leading_context`/
+        `resolve_leading_context`, not a `volatility_regime`-specific
+        patch.
+
+        This does not just check *that* grading completes — it computes
+        the expected label independently, in the test itself, from the
+        exact same deterministic wobble series `seed_real_candles` seeds
+        (`price += 3.0 if i % 3 != 0 else -4.0`, starting at 100.0), and
+        asserts grading returns *that exact value*, proving the trailing
+        window used for grading is the correct one, not merely a
+        non-`None` one."""
+        import math
+        from statistics import pstdev
+
+        window = 5
+        price = 100.0
+        closes = []
+        for i in range(80):
+            price += 3.0 if i % 3 != 0 else -4.0
+            closes.append(price)
+        log_returns = [None, *(math.log(closes[i] / closes[i - 1]) for i in range(1, 80))]
+        as_of_index = 70  # matches EARLY_AS_OF_FOR_GRADING (hour 70 of the 80-candle series)
+        trailing = log_returns[as_of_index - window + 1 : as_of_index + 1]
+        forward = log_returns[as_of_index + 1 : as_of_index + 1 + window]
+        expected_label = (
+            "expand" if pstdev(forward) > pstdev(trailing) else "contract"  # type: ignore[arg-type]
+        )
+
+        job_id, _ = await train_completed_job_with_target_config(
+            session_factory,
+            symbol="VOLGRADEUSD",
+            model_type="logistic_regression",
+            target_config=[
+                {"target": "volatility_regime", "params": {"window_hours": str(window)}}
+            ],
+        )
+        service = build_prediction_service(session_factory)
+        prediction = await service.run(
+            PredictionRunRequest(
+                training_job_id=uuid.UUID(job_id), symbol="VOLGRADEUSD", as_of=self._EARLY_AS_OF
+            )
+        )
+        assert prediction.horizon == window  # the resolve_horizon fix, still holding
+
+        outcome = await service.grade_now(uuid.UUID(prediction.id))
+
+        assert outcome is not None  # the leading_context fix: grading completes at all now
+        assert outcome.actual_outcome == expected_label  # and reads the exact right window
+        graded = await service.get(uuid.UUID(prediction.id))
+        assert graded.graded_at is not None
+
+    async def test_grade_pending_also_grades_volatility_regime(
+        self, session_factory: SessionFactory
+    ) -> None:
+        """The identical fix through the *other* real caller —
+        `grade_pending` (the periodic scheduler's own path), not just the
+        Backtesting Engine's `grade_now` — since `_grade_one` is the one
+        shared implementation both call."""
+        job_id, _ = await train_completed_job_with_target_config(
+            session_factory,
+            symbol="VOLGRADEPENDUSD",
+            model_type="logistic_regression",
+            target_config=[{"target": "volatility_regime", "params": {"window_hours": "5"}}],
+        )
+        service = build_prediction_service(session_factory)
+        prediction = await service.run(
+            PredictionRunRequest(
+                training_job_id=uuid.UUID(job_id),
+                symbol="VOLGRADEPENDUSD",
+                as_of=self._EARLY_AS_OF,
+            )
+        )
+
+        summary = await service.grade_pending()
+
+        assert summary.attempted == 1
+        assert summary.graded == 1
+        assert summary.not_yet_knowable == 0
+        assert summary.failed == 0
+        graded = await service.get(uuid.UUID(prediction.id))
+        assert graded.actual_outcome in {"expand", "contract"}
+        assert graded.graded_at is not None
+
+    async def test_not_yet_gradeable_when_the_trailing_window_isnt_stored_yet(
+        self, session_factory: SessionFactory
+    ) -> None:
+        """The honest "not yet knowable" case on the *leading* side, not
+        just the trailing one `TestGradePending` already covers: predicting
+        at a very early `as_of` (hour 2 of an 80-candle series) with
+        `window_hours=5` needs candles from hour -3 onward, which do not
+        and never will exist — this must read as not-yet-gradeable, not
+        raise, and not silently grade against a wrong/shifted window."""
+        job_id, _ = await train_completed_job_with_target_config(
+            session_factory,
+            symbol="VOLNOLEADUSD",
+            model_type="logistic_regression",
+            target_config=[{"target": "volatility_regime", "params": {"window_hours": "5"}}],
+        )
+        service = build_prediction_service(session_factory)
+        too_early = datetime(2026, 1, 1, tzinfo=UTC) + timedelta(hours=2)
+        prediction = await service.run(
+            PredictionRunRequest(
+                training_job_id=uuid.UUID(job_id), symbol="VOLNOLEADUSD", as_of=too_early
+            )
+        )
+
+        outcome = await service.grade_now(uuid.UUID(prediction.id))
+
+        assert outcome is None
+        untouched = await service.get(uuid.UUID(prediction.id))
+        assert untouched.actual_outcome is None

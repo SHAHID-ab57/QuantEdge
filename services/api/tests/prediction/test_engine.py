@@ -44,9 +44,35 @@ class TestResolveHorizon:
         config = [TargetRequestDTO(target="next_direction", params={"horizon": "not-a-number"})]
         assert resolve_horizon(config, "next_direction_1") is None
 
-    def test_returns_none_when_the_matched_entry_has_no_horizon_param_at_all(self) -> None:
+    def test_falls_back_to_the_generators_own_default_horizon_when_unconfigured(self) -> None:
+        # `next_direction`'s own `HORIZON_PARAMETER` default is 1 — this is
+        # the generator's own declared default, read via `horizon(params)`,
+        # not a bug (see the MODEL-QUALITY-T2 fix below).
         config = [TargetRequestDTO(target="next_direction", params={})]
-        assert resolve_horizon(config, "next_direction_1") is None
+        assert resolve_horizon(config, "next_direction_1") == 1
+
+    def test_resolves_a_target_whose_own_horizon_parameter_isnt_literally_named_horizon(
+        self,
+    ) -> None:
+        # MODEL-QUALITY-T2: `resolve_horizon` used to read `params["horizon"]`
+        # directly, silently returning None for any target parameterizing its
+        # own look-ahead under a different name — which meant `_grade_one`
+        # could never grade a `triple_barrier`/`volatility_regime` prediction
+        # at all (its very first check is `if horizon is None: return None`).
+        # Reading the generator's own `horizon(params)` instead fixes both.
+        config = [
+            TargetRequestDTO(
+                target="triple_barrier", params={"barrier_pct": "0.05", "max_hours": "72"}
+            )
+        ]
+        assert resolve_horizon(config, "triple_barrier_0.05_72") == 72
+
+        config = [TargetRequestDTO(target="volatility_regime", params={"window_hours": "24"})]
+        assert resolve_horizon(config, "volatility_regime_24") == 24
+
+    def test_returns_none_for_an_unregistered_target(self) -> None:
+        config = [TargetRequestDTO(target="not_a_real_target", params={"horizon": "1"})]
+        assert resolve_horizon(config, "not_a_real_target_1") is None
 
 
 class TestAssemble:

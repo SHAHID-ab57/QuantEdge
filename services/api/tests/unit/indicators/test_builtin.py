@@ -266,8 +266,12 @@ class TestRelativeStrengthIndex:
         after_up_tick = engine.run("rsi", series_from(balanced), {"period": "14"})
         after_down_tick = engine.run("rsi", series_from(balanced[:-1]), {"period": "14"})
 
-        assert after_up_tick.output.series[0].values[-1] > 50.0
-        assert after_down_tick.output.series[0].values[-1] < 50.0
+        up_tick_value = after_up_tick.output.series[0].values[-1]
+        down_tick_value = after_down_tick.output.series[0].values[-1]
+        assert up_tick_value is not None
+        assert down_tick_value is not None
+        assert up_tick_value > 50.0
+        assert down_tick_value < 50.0
 
     def test_warmup_is_one_longer_than_the_period(self, engine: IndicatorEngine) -> None:
         # The first candle yields no change, so RSI needs period + 1 candles.

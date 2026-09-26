@@ -7,6 +7,22 @@ import { z } from 'zod';
  * as `market.ts` and `features.ts`.
  */
 
+/**
+ * 'healthy': a new point has arrived within this source's own expected
+ * cadence. 'stale': it hasn't (see `services/api/app/connectors/health.py`).
+ * 'failing': its most recent sync attempts all errored, even if its last
+ * good point is still recent. 'never_ingested': no point has ever been
+ * stored.
+ */
+export const ConnectorHealthStatusSchema = z.enum([
+  'healthy',
+  'stale',
+  'failing',
+  'never_ingested',
+]);
+
+export type ConnectorHealthStatus = z.infer<typeof ConnectorHealthStatusSchema>;
+
 export const ConnectorSchema = z.object({
   source: z.string(),
   label: z.string(),
@@ -16,6 +32,21 @@ export const ConnectorSchema = z.object({
   /** Null when this connector is registered but has never been ingested. */
   latest_value: z.number().nullable(),
   latest_timestamp: z.string().datetime().nullable(),
+  health_status: ConnectorHealthStatusSchema,
+  /** This source's own real cadence — what 'stale' is measured against. */
+  expected_interval_seconds: z.number().int().positive(),
+  /** Every point ever stored for this source. */
+  total_points: z.number().int().nonnegative(),
+  /** When the owning scheduler last actually tried this source — success or
+   * failure, and distinct from `latest_timestamp` (an attempt can find
+   * nothing new to store). Null if no attempt has ever been recorded. */
+  last_attempt_at: z.string().datetime().nullable(),
+  /** Null exactly when `last_attempt_at` is null. */
+  last_attempt_success: z.boolean().nullable(),
+  /** `last_attempt_at` plus the owning scheduler's tick interval — an
+   * estimate. In the past means a tick is overdue. Null with no attempt on
+   * record yet. */
+  next_sync_at: z.string().datetime().nullable(),
 });
 
 export type Connector = z.infer<typeof ConnectorSchema>;

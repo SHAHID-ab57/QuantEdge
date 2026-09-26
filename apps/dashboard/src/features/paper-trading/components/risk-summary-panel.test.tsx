@@ -8,7 +8,11 @@ import { RiskSummaryPanel } from './risk-summary-panel';
 const DATA: RiskSummary = {
   account_id: 'account-1',
   balance: '89984.995',
+  equity: '99989.995',
+  margin_in_use: '10005',
   peak_balance: '100000',
+  total_notional: '11000',
+  effective_leverage: '0.11',
   current_exposure_pct: '11.11',
   max_exposure_pct: '50',
   exposure_headroom_pct: '38.89',
@@ -16,6 +20,7 @@ const DATA: RiskSummary = {
   max_drawdown_pct: '20',
   drawdown_headroom_pct: '9.985',
   max_position_size_pct: '10',
+  max_leverage: '5',
   trading_halted: false,
 };
 
@@ -76,5 +81,28 @@ describe('RiskSummaryPanel', () => {
   it('renders skeletons while loading', () => {
     renderPanel({ data: undefined, isLoading: true });
     expect(screen.queryByText('Trading active')).not.toBeInTheDocument();
+  });
+});
+
+describe('RiskSummaryPanel — equity, notional and leverage', () => {
+  it('shows equity, effective leverage and margin in use', () => {
+    renderPanel({
+      data: { ...DATA, equity: '99989.995', effective_leverage: '2.50', margin_in_use: '4000' },
+    });
+    expect(screen.getByText('$99989.99')).toBeInTheDocument();
+    expect(screen.getByText('2.50x')).toBeInTheDocument();
+    expect(screen.getByText('$4000.00')).toBeInTheDocument();
+  });
+
+  it('explains that exposure is notional over equity and that leverage does not raise it', () => {
+    renderPanel();
+    expect(screen.getByText(/leverage does not raise it/)).toBeInTheDocument();
+    expect(screen.getByText(/Max leverage: 5x/)).toBeInTheDocument();
+  });
+
+  it('describes a halt in terms of equity, and says closing still works', () => {
+    renderPanel({ data: { ...DATA, trading_halted: true } });
+    expect(screen.getByRole('alert')).toHaveTextContent(/equity has fallen more than 20%/);
+    expect(screen.getByRole('alert')).toHaveTextContent(/closing a position still works/);
   });
 });

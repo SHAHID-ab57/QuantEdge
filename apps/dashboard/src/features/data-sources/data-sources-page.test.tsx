@@ -21,6 +21,12 @@ const fearGreed: Connector = {
   requires_auth: false,
   latest_value: 42,
   latest_timestamp: '2026-01-02T00:00:00Z',
+  health_status: 'healthy',
+  expected_interval_seconds: 86_400,
+  total_points: 120,
+  last_attempt_at: '2030-01-02T00:05:00Z',
+  last_attempt_success: true,
+  next_sync_at: '2030-01-03T00:05:00Z',
 };
 
 const emptyHistory: ConnectorHistory = {
@@ -37,6 +43,12 @@ const newsSentiment: Connector = {
   requires_auth: true,
   latest_value: -0.12,
   latest_timestamp: '2026-01-02T00:00:00Z',
+  health_status: 'stale',
+  expected_interval_seconds: 21_600,
+  total_points: 34,
+  last_attempt_at: '2030-01-01T18:00:00Z',
+  last_attempt_success: true,
+  next_sync_at: '2030-01-02T00:00:00Z',
 };
 
 function renderPage() {
@@ -78,7 +90,14 @@ describe('DataSourcesPage — Active Data Sources', () => {
 
   it('shows an unavailable value for a connector registered but never ingested', async () => {
     mockedConnectorsApi.fetchConnectors.mockResolvedValue({
-      connectors: [{ ...fearGreed, latest_value: null, latest_timestamp: null }],
+      connectors: [
+        {
+          ...fearGreed,
+          latest_value: null,
+          latest_timestamp: null,
+          health_status: 'never_ingested',
+        },
+      ],
       total: 1,
     });
     renderPage();
@@ -130,6 +149,45 @@ describe('DataSourcesPage — Active Data Sources', () => {
     (await screen.findByRole('button', { name: 'Retry' })).click();
 
     expect(await screen.findByRole('heading', { name: 'Fear & Greed Index' })).toBeInTheDocument();
+  });
+});
+
+describe('DataSourcesPage — Overview banner', () => {
+  it('summarizes total points and an all-healthy status across every source', async () => {
+    mockedConnectorsApi.fetchConnectors.mockResolvedValue({
+      connectors: [fearGreed, { ...fearGreed, source: 'eth_tvl', total_points: 30 }],
+      total: 2,
+    });
+    renderPage();
+
+    expect(
+      await screen.findByRole('region', { name: 'Data sources overview' }),
+    ).toBeInTheDocument();
+    expect(screen.getByText('All sources healthy')).toBeInTheDocument();
+    expect(screen.getByText('150 data points tracked across 2 live sources')).toBeInTheDocument();
+  });
+
+  it('reports a source needing attention when any connector is stale, and its count', async () => {
+    mockedConnectorsApi.fetchConnectors.mockResolvedValue({
+      connectors: [fearGreed, newsSentiment],
+      total: 2,
+    });
+    renderPage();
+
+    await screen.findByRole('region', { name: 'Data sources overview' });
+    expect(screen.getByText('Some sources need attention')).toBeInTheDocument();
+    expect(screen.getByText('Stale: 1')).toBeInTheDocument();
+  });
+
+  it('reports a failing source as the more urgent critical state', async () => {
+    mockedConnectorsApi.fetchConnectors.mockResolvedValue({
+      connectors: [fearGreed, { ...newsSentiment, health_status: 'failing' }],
+      total: 2,
+    });
+    renderPage();
+
+    await screen.findByRole('region', { name: 'Data sources overview' });
+    expect(screen.getByText('A source is failing')).toBeInTheDocument();
   });
 });
 

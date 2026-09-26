@@ -33,6 +33,13 @@ os.environ["DB_URL"] = ""
 #: /test_redis_rate_limit.py` and friends) monkeypatch `get_settings`
 #: directly in their own fixtures, unaffected by this.
 os.environ["REDIS_URL"] = ""
+#: Same leak class as `DATABASE_URL`/`REDIS_URL` above (M5-E5-T2): a real
+#: `SENTRY_DSN` sitting in a developer's `.env` would otherwise make every
+#: test app initialize the real SDK and ship test exceptions to the real
+#: error-tracking project. Tests that want it on (`tests/monitoring/`)
+#: initialize it themselves, against an in-process transport, never a
+#: real DSN.
+os.environ["SENTRY_DSN"] = ""
 #: `app.application.startup` (M5-E2-T1) now fails the whole app at startup
 #: with no JWT secret configured — every test's `client` fixture runs the
 #: real lifespan via `LifespanManager`, so a real (test-only) secret must

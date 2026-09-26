@@ -12,6 +12,10 @@ const DATA: PaperOrderListResponse = {
       account_id: 'account-1',
       symbol: 'ETHUSD',
       side: 'buy',
+      position_side: 'long',
+      leverage: '1',
+      margin_applied: '10005',
+      reduce_only: false,
       quantity: '10',
       raw_price: '1000',
       fill_price: '1000.5',
@@ -24,6 +28,8 @@ const DATA: PaperOrderListResponse = {
       notional: '10005',
       realized_pnl: null,
       trigger_reason: null,
+      gapped_through_bankruptcy: false,
+      trigger_price_basis: null,
       created_at: '2026-01-01T00:00:00Z',
     },
   ],
@@ -138,5 +144,47 @@ describe('OrderHistoryTable', () => {
     expect(
       screen.getByText('No orders yet — place one above, and it will appear here.'),
     ).toBeInTheDocument();
+  });
+});
+
+describe('OrderHistoryTable — shorts, leverage and liquidations', () => {
+  const liquidation: PaperOrderListResponse['orders'][number] = {
+    ...DATA.orders[0]!,
+    id: 'order-2',
+    side: 'sell',
+    position_side: 'long',
+    leverage: '5',
+    margin_applied: '2001',
+    reduce_only: true,
+    trigger_reason: 'liquidation',
+    trigger_price_basis: 'mark',
+    realized_pnl: '-2001',
+  };
+
+  it('shows which kind of position each order acted on, with its leverage', () => {
+    renderTable({
+      data: {
+        ...DATA,
+        orders: [
+          DATA.orders[0]!,
+          { ...DATA.orders[0]!, id: 'o3', side: 'sell', position_side: 'short', leverage: '3' },
+        ],
+        total: 2,
+      },
+    });
+    expect(screen.getByText('Long 1x')).toBeInTheDocument();
+    expect(screen.getByText('Short 3x')).toBeInTheDocument();
+  });
+
+  it('marks a liquidation distinctly, with its forfeited margin as the realized PnL', () => {
+    renderTable({ data: { ...DATA, orders: [liquidation], total: 1 } });
+    expect(screen.getByText('Liquidation')).toBeInTheDocument();
+    expect(screen.getByText('Long 5x · reduce')).toBeInTheDocument();
+    expect(screen.getByText('-$2001.00')).toBeInTheDocument();
+  });
+
+  it('still labels an ordinary manual order Manual', () => {
+    renderTable();
+    expect(screen.getByText('Manual')).toBeInTheDocument();
   });
 });

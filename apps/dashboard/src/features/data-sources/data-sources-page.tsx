@@ -9,14 +9,16 @@ import PublicOffIcon from '@mui/icons-material/PublicOff';
 import { EmptyStateNotice } from '@/components/empty-state-notice';
 import { Section } from '@/components/section';
 import { ConnectorCard } from './components/connector-card';
+import { DataSourcesOverviewBanner } from './components/data-sources-overview-banner';
 import { PlannedDataSources } from './components/planned-data-sources';
 import { useConnectorCatalog } from './hooks/use-connector-data';
 
 function ActiveDataSourcesSkeleton() {
   return (
     <Stack spacing={2} role="status" aria-label="Loading data sources">
-      <Skeleton variant="rounded" height={140} />
-      <Skeleton variant="rounded" height={140} />
+      <Skeleton variant="rounded" height={88} />
+      <Skeleton variant="rounded" height={220} />
+      <Skeleton variant="rounded" height={220} />
     </Stack>
   );
 }
@@ -34,6 +36,13 @@ function ActiveDataSourcesSkeleton() {
  * the deliberate exception — a static, hardcoded list of what hasn't
  * shipped yet (see `lib/planned-connectors.ts`), since there is nothing
  * in the registry for an unbuilt connector to read.
+ *
+ * `DataSourcesOverviewBanner` sits above the grid for the same reason
+ * `OverallStatusBanner` sits above the Health page's component cards: eight
+ * cards each reading their own pill is a scan, not an answer — one banner
+ * says up front whether anything here actually needs attention, and how
+ * much this platform has accumulated in total, before a person reads a
+ * single card.
  */
 function ActiveDataSources() {
   const catalog = useConnectorCatalog();
@@ -65,13 +74,19 @@ function ActiveDataSources() {
   }
 
   return (
-    <Grid container spacing={2}>
-      {catalog.data.connectors.map((connector) => (
-        <Grid key={connector.source} size={{ xs: 12, sm: 6, md: 4 }}>
-          <ConnectorCard connector={connector} />
-        </Grid>
-      ))}
-    </Grid>
+    <Stack spacing={2}>
+      <DataSourcesOverviewBanner
+        connectors={catalog.data.connectors}
+        lastRefreshedAt={catalog.dataUpdatedAt}
+      />
+      <Grid container spacing={2}>
+        {catalog.data.connectors.map((connector) => (
+          <Grid key={connector.source} size={{ xs: 12, sm: 6, md: 4 }}>
+            <ConnectorCard connector={connector} />
+          </Grid>
+        ))}
+      </Grid>
+    </Stack>
   );
 }
 

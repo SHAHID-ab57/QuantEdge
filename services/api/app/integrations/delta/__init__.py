@@ -21,6 +21,7 @@ from app.integrations.delta.models import (
     DeltaTickerQuotes,
     Product,
     ProductAsset,
+    SeriesCandle,
 )
 
 __all__ = [
@@ -38,6 +39,7 @@ __all__ = [
     "Product",
     "ProductAsset",
     "RateLimitError",
+    "SeriesCandle",
     "get_delta_client",
     "get_delta_config",
 ]

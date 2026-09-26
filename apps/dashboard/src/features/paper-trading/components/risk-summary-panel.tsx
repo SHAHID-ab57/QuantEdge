@@ -107,8 +107,9 @@ export function RiskSummaryPanel({
             </Button>
           }
         >
-          Trading halted — balance has fallen more than {Number(data.max_drawdown_pct).toFixed(0)}%
-          below its peak of ${Number(data.peak_balance).toFixed(2)}.
+          Trading halted — equity has fallen more than {Number(data.max_drawdown_pct).toFixed(0)}%
+          below its peak of ${Number(data.peak_balance).toFixed(2)}. New positions and additions are
+          blocked; closing a position still works.
         </Alert>
       ) : (
         <Chip
@@ -125,17 +126,47 @@ export function RiskSummaryPanel({
         </Alert>
       ) : null}
 
+      <Stack direction="row" spacing={4} flexWrap="wrap" useFlexGap>
+        <Stack spacing={0.25}>
+          <Typography variant="caption" color="text.secondary">
+            Equity
+          </Typography>
+          <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>
+            {`$${Number(data.equity).toFixed(2)}`}
+          </Typography>
+        </Stack>
+        <Stack spacing={0.25}>
+          <Typography variant="caption" color="text.secondary">
+            Effective leverage
+          </Typography>
+          <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>
+            {`${Number(data.effective_leverage).toFixed(2)}x`}
+          </Typography>
+        </Stack>
+        <Stack spacing={0.25}>
+          <Typography variant="caption" color="text.secondary">
+            Margin in use
+          </Typography>
+          <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>
+            {`$${Number(data.margin_in_use).toFixed(2)}`}
+          </Typography>
+        </Stack>
+      </Stack>
+
       <LimitRow label="Exposure" currentPct={currentExposurePct} maxPct={maxExposurePct} />
       <LimitRow label="Drawdown" currentPct={currentDrawdownPct} maxPct={maxDrawdownPct} />
 
       <Typography variant="caption" color="text.secondary">
-        Max position size per symbol: {Number(data.max_position_size_pct).toFixed(2)}% of balance
+        Exposure is total open notional as a % of equity — leverage does not raise it. Drawdown is
+        equity against its peak. Max position size per symbol:{' '}
+        {Number(data.max_position_size_pct).toFixed(2)}% of equity. Max leverage:{' '}
+        {Number(data.max_leverage)}x.
       </Typography>
 
       <ConfirmActionDialog
         open={confirming}
         title="Resume trading?"
-        description="Clears this account's drawdown halt so new orders can be placed again, and resets the peak balance to the current balance so drawdown is measured fresh from now on."
+        description="Clears this account's drawdown halt so new positions can be opened again, and resets the peak to the current equity so drawdown is measured fresh from now on."
         confirmLabel="Resume Trading"
         busyLabel="Resuming…"
         color="primary"

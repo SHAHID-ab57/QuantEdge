@@ -44,6 +44,13 @@ def _settings(**overrides: object) -> SimpleNamespace:
         "paper_trading_strategy_default_stop_loss_pct": Decimal("5"),
         "paper_trading_strategy_scheduler_enabled": False,
         "paper_trading_strategy_interval_seconds": 300,
+        # Margin/leverage and funding (M3-E5-T2) — mirrors `app/core/config.py`.
+        "paper_trading_default_max_leverage": Decimal("5"),
+        "paper_trading_maintenance_margin_pct": Decimal("0.25"),
+        "paper_trading_max_leverage_notional": Decimal("100000"),
+        "paper_trading_funding_enabled": False,
+        "paper_trading_funding_interval_seconds": 300,
+        "paper_trading_funding_lookback_hours": 48,
         # Read by `ExternalDataSyncScheduler`'s own construction in
         # `Runtime.start` — mirrors `app/core/config.py`'s real defaults.
         "external_data_sync_enabled": False,
@@ -62,8 +69,16 @@ def _settings(**overrides: object) -> SimpleNamespace:
         "orderflow_snapshot_depth": 25,
         "orderflow_trade_flush_seconds": 5,
         "orderflow_trade_buffer_max": 500,
-        "orderflow_retention_days": 60,
+        "orderflow_retention_days": 365,
         "orderflow_prune_interval_seconds": 3600,
+        # Read by `RetrainingScheduler`'s own construction in `Runtime.start`
+        # (RETRAIN-WITH-MINIMUM-WINDOW) — mirrors `app/core/config.py`'s real
+        # defaults.
+        "retraining_scheduler_enabled": False,
+        "retraining_experiment_ids": "",
+        "retraining_tick_interval_seconds": 3600,
+        "retraining_min_interval_seconds": 168 * 3600,
+        "retraining_window_hours": 8760,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -269,6 +284,50 @@ async def test_runtime_shutdown_stops_paper_trading_strategy(
     assert runtime.paper_trading_strategy is None
 
 
+async def test_runtime_shutdown_stops_paper_funding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The funding scheduler is started and stopped like every other loop."""
+    started: list[dict[str, object]] = []
+    stopped = []
+
+    class FakeFunding:
+        def __init__(self, **kwargs: object) -> None:
+            started.append(kwargs)
+
+        async def start(self) -> None:
+            pass
+
+        async def stop(self) -> None:
+            stopped.append(True)
+
+    monkeypatch.setattr(
+        runtime_module,
+        "get_settings",
+        lambda: _settings(paper_trading_funding_enabled=True),
+    )
+    monkeypatch.setattr(runtime_module, "PaperFundingScheduler", FakeFunding)
+
+    runtime = _runtime()
+    await runtime.start()
+    assert runtime.paper_funding is not None
+    assert started[0]["interval_seconds"] == 300
+    assert started[0]["lookback_hours"] == 48
+    await runtime.shutdown()
+    assert stopped == [True]
+    assert runtime.paper_funding is None
+
+
+async def test_runtime_does_not_start_funding_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runtime_module, "get_settings", lambda: _settings())
+    runtime = _runtime()
+    await runtime.start()
+    assert runtime.paper_funding is None
+    await runtime.shutdown()
+
+
 async def test_runtime_shutdown_stops_external_data_sync(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -300,6 +359,36 @@ async def test_runtime_shutdown_stops_external_data_sync(
     await runtime.shutdown()
     assert stopped == [True]
     assert runtime.external_data_sync is None
+
+
+async def test_runtime_shutdown_stops_retraining(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The scheduled retraining loop (RETRAIN-WITH-MINIMUM-WINDOW) is
+    stopped when configured — wired into start/shutdown the identical way
+    every other scheduler already is."""
+    stopped = []
+
+    class FakeRetraining:
+        async def start(self) -> None:
+            pass
+
+        async def stop(self) -> None:
+            stopped.append(True)
+
+    monkeypatch.setattr(
+        runtime_module,
+        "get_settings",
+        lambda: _settings(
+            retraining_scheduler_enabled=True,
+            retraining_experiment_ids="6f1e4a2c-3b8d-4c9a-9e2f-1a7c5d6b8e90",
+        ),
+    )
+    monkeypatch.setattr(runtime_module, "RetrainingScheduler", lambda **_: FakeRetraining())
+
+    runtime = _runtime()
+    await runtime.start()
+    assert runtime.retraining is not None
+    await runtime.shutdown()
+    assert stopped == [True]
 
 
 async def test_runtime_shutdown_stops_news_sync(monkeypatch: pytest.MonkeyPatch) -> None:

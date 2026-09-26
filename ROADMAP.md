@@ -34,7 +34,7 @@ a versioned dataset citation, a recorded experiment) — it is now complete.
 | 2         | Prediction & Backtesting                     | COMPLETE    |
 | 3         | Paper Trading & Risk                         | COMPLETE    |
 | 4         | Data Breadth                                 | COMPLETE    |
-| 5         | Production Hardening                         | NOT STARTED |
+| 5         | Production Hardening                         | COMPLETE    |
 | 6         | Live Trading (gated on extensive validation) | NOT STARTED |
 
 **Milestone 1 — Research & Training Platform (COMPLETE).** Market data
@@ -158,6 +158,8 @@ engine beyond these account-level limits has not been started; see
 intended bounded contexts. **Independently re-verified 2026-09-06**, the
 same way as Milestone 2 — see
 `docs/audits/MILESTONE_2_3_VERIFICATION.md`.
+
+**Milestone 3, Epic 3.5 — Futures Mechanics and Leverage (manual mechanics and automated long/short built).** Milestone 3's original scope above is unchanged and remains complete. Epic 3.5 extends it. M3-E5-T1 was a research and design spike (no application code): Delta Exchange India's real perpetual-futures mechanics and a design for shorts, margin, liquidation and funding, with the leverage decisions presented for a human (`docs/research/FUTURES_MECHANICS_AND_LEVERAGE_DESIGN.md`). **M3-E5-T2 built it for manually placed orders only:** short positions, isolated-margin leverage, liquidation on the mark price (whole margin forfeited), and funding settled from Delta's real funding history, with position size, exposure and drawdown re-derived on equity and notional. **Decisions in force, none re-opened:** D1 automated trades get no leverage; D2 the automated strategy may not short; D3 drawdown measures equity (an announced behaviour change); D4 a halt blocks new risk and alerts (flattening on a halt is not built); D5 isolated margin only; D6 full margin forfeiture; D7 the exposure caps are not raised. **M3-E5-T3 then extended the automated strategy** (an explicit, twice-confirmed user decision that revisited D1/D2): it now trades **both long and short** from the model's directional call at **one fixed, per-account `strategy_leverage` (default 2) that is never derived from the prediction's confidence**, because confidence was measured to carry no reliable relationship to being right (mean 0.889 against accuracy 0.460). Every automated position carries a mandatory, direction-aware stop-loss, every existing risk limit and the halt apply identically to both directions, and every cycle is logged with its direction and leverage. **Disclosed consequence:** the live model calls "down" in over 99% of cases, so this will very likely be an almost-always-short strategy; existing accounts with the strategy enabled start trading at 2x and may short on their next tick. Open items: the linear liquidation formula is derived from Delta's documented condition and has **not** been verified against a linear-contract figure from Delta (one calculator reading closes it); the next step is watching the strategy run for a real stretch and grading its realized results against the backtest and regime-walkforward framework, not assuming that more active means better. See `ARCHITECTURE.md` § "Paper Trading".
 
 **Milestone 4 — Data Breadth (COMPLETE).** The additional external data
 connectors this platform has designed for but never implemented —
@@ -442,11 +444,73 @@ closed under two model classes, five horizons, and three regimes.
 `docs/research/CONNECTOR_FEATURE_VALUE_ASSESSMENT.md` § "Gradient
 Boosting spot-check".
 
-**Milestone 5 — Production Hardening.** CI/CD (none exists — all quality
-gates are local git hooks today), structured logging/tracing/metrics/
-error tracking (today: plain `logging.basicConfig` only), inbound rate
-limiting, and a real background job/task queue (today: in-process
-`asyncio` loops only). In progress.
+**Funding rate and open interest were then tested as features
+(M4-E3-T5, `TASKBOOK.md`), the one Delta-native signal pair the connector thread
+had never covered, and the result is the fourth negative confirmation.**
+Delta serves real hourly history for both (`FUNDING:ETHUSD` from 2024-02-05,
+`OI:ETHUSD` from 2024-02-06), so two connectors and two features were built and
+backfilled, and the identical primary comparison was run under logistic
+regression, Random Forest and Gradient Boosting. All nine model x variant cells
+sit inside the +-1.68 pp noise band on accuracy and ROC-AUC, and permutation
+importance is within noise. The live model's behavior was reproduced exactly
+(stored probabilities matched to 2e-15) and re-scored with the features:
+funding changes nothing, while open interest makes the near-constant "down" call
+_worse_ (99.7% to 100%, 27% to 77% of predictions above 0.99 confidence). The
+cause is not the features: it is the live model's `volume` column, which sits at
+a mean of 58 standard deviations from its 2024 training window on the backtest
+bars, and removing it ends the saturation. **The next step is target
+redefinition** (volatility or triple-barrier), preceded by fixing how
+scale-drifting inputs are handled. The live strategy's feature set is
+unchanged. `docs/research/CONNECTOR_FEATURE_VALUE_ASSESSMENT.md` § "M4-E3-T5".
+
+**That "fixing how scale-drifting inputs are handled" step was then scoped
+directly, and it found the live model already needs it (M4-E3-T6).** Checked
+first, before anything else: both currently strategy-enabled training jobs are
+already drifted and already producing saturated live predictions — `733082cc`
+through `volume` (z=+89 today) and `6e7fb4ed`, retrained only 13 days earlier,
+through price/SMA(20) instead, because its own 100-candle training window's
+std was too tight for an ordinary two-week move. Re-running
+`REGIME_WALKFORWARD_ASSESSMENT.md`'s exact regime windows with and without
+`volume` confirmed the near-constant-"down" behavior is the same artifact
+again, while its ROC-AUC ~0.5 "no skill" verdict survives removing that
+artifact and is independently corroborated by the horizon sweep — a precise
+correction, not a retraction, was added to that document. A general fix (a
+connector-health-style monitoring check, recommended first; rolling
+retraining with an enforced minimum window; rolling normalization as
+defense-in-depth) was designed, not implemented. Both live accounts are
+unchanged pending a follow-up task. `docs/research/FEATURE_DRIFT_INVESTIGATION.md`.
+
+**That recommended monitoring check was then built (M5-E5-T3), mirroring the
+connector-health pattern this platform had already proven once.** Every live
+prediction is now z-scored against its own job's stored normalization
+(`app/prediction/feature_drift.py`), with a threshold (10σ) derived from the
+same real data the investigation gathered — a healthy reading never exceeds
+9.32, both real incidents measured 15.4-89. The response policy was the one
+genuine judgment call the task carried, and it was put to the user rather
+than assumed: **auto-pause**. A drifted prediction is now checked before the
+confidence/signal gate — a drifted model's own saturated confidence is
+exactly the failure this exists to catch — and immediately disables that
+account's strategy, logs why, and alerts via Sentry, mirroring the drawdown
+kill switch's own no-audit-row-for-an-automated-action precedent exactly.
+Not self-healing: clearing it is a human's own explicit decision through
+`PATCH .../strategy`, surfaced as a distinct banner on the Strategy panel.
+`ARCHITECTURE.md` § "Feature Drift Monitoring".
+
+**Milestone 5 — Production Hardening (COMPLETE, against the scope
+below).** Delivered: authentication and an audit trail, inbound rate
+limiting and login lockout, Redis (rate limiting, lockout, token
+revocation), CI/CD (GitHub Actions), connector health monitoring, and
+structured logging with error tracking. **This milestone was originally
+scoped wider, and three of those items were not built:** distributed
+tracing, metrics collection, and a real background job/task queue (the
+schedulers are still in-process `asyncio` loops inside the single API
+process, which is also why the API cannot run multiple workers; see
+`docs/deployment/DEPLOYMENT.md`). They are recorded here as deliberately
+out of this milestone's delivered scope, not forgotten: nothing was
+descoped silently, and a future task can reopen any of them. Also not
+done, and not part of "complete": nothing here is deployed to the
+production droplet yet, and no uptime monitor or external check of the API
+exists.
 
 **Epic 5.1 — Authentication & Audit Trail (M5-E1-T1) is done.**
 Basic bearer-token authentication for a small number of real users
@@ -504,8 +568,29 @@ by a test written to exercise it. A
 deployment-readiness note (uvicorn's default `X-Forwarded-For` trust)
 added to `ARCHITECTURE.md` § "Deployment View" for whoever configures a
 future reverse proxy. See `ARCHITECTURE.md` § "Redis", § "Token
-Revocation", `CHANGELOG.md`, and `TASKBOOK.md` `M5-E3-T1`. CI/CD and
-monitoring round out the rest of this milestone.
+Revocation", `CHANGELOG.md`, and `TASKBOOK.md` `M5-E3-T1`.
+
+**Epic 5.4 — CI/CD (M5-E4-T1) is done.** A GitHub Actions workflow runs
+the exact checks previously run by hand on every push and pull request,
+against real PostgreSQL and Redis service containers. Its first real run
+failed, correctly, exposing 55 real `pyright` errors a locally piped
+command had been hiding; the fix pushed after it passed both jobs. Live
+external-API verification is deliberately excluded. See `ARCHITECTURE.md`
+§ "CI/CD Pipeline" and `TASKBOOK.md` `M5-E4-T1`.
+
+**Epic 5.5 — Monitoring (M5-E5-T1, M5-E5-T2) is done.** Connector health:
+per-tick sync outcomes are persisted, and each connector is `healthy`,
+`stale`, `failing` or `never_ingested` against its own real cadence
+(thresholds checked against real gap data, which changed two decisions).
+Logging and error tracking: logs are one JSON object per line; unhandled
+exceptions and a connector entering `failing` reach an error tracker over
+the Sentry protocol, with request bodies, local variables and API keys
+deliberately never sent. Two verification steps remain the operator's
+own: confirming an event and its notification in the chosen hosted tracker
+(verified here only against a local Sentry-compatible server), and the
+`/data-sources` health pill in a browser. See `ARCHITECTURE.md`
+§ "Connector Health Monitoring" and § "Structured Logging & Error
+Tracking".
 
 **Milestone 6 — Live Trading (gated on extensive validation).** Real order
 execution against a live exchange. Deliberately last, and deliberately

@@ -65,9 +65,13 @@ function orUnavailable(formatted: string): string {
 }
 
 /**
- * `funding_rate` is a signed fraction per funding interval (e.g. `-0.000116`
- * = shorts pay longs 0.0116% this interval); render it as a percentage with
- * enough precision to be meaningful at that scale.
+ * Delta publishes `funding_rate` already in percent per funding interval
+ * (e.g. `0.01` = 0.01%, the documented interest-rate floor; `-0.0067` =
+ * shorts pay longs 0.0067% this interval), so it is shown as-is with a `%`
+ * sign — never multiplied by 100. Verified against Delta's own funding
+ * formula on real funding history (docs/research/
+ * FUTURES_MECHANICS_AND_LEVERAGE_DESIGN.md § 1.4). Four decimals keep the
+ * typical sub-0.01% values legible.
  */
 function formatFundingRate(rate: string | null | undefined): string {
   if (rate === null || rate === undefined) {
@@ -77,7 +81,7 @@ function formatFundingRate(rate: string | null | undefined): string {
   if (!Number.isFinite(value)) {
     return UNAVAILABLE;
   }
-  return `${value >= 0 ? '+' : ''}${(value * 100).toFixed(4)}%`;
+  return `${value >= 0 ? '+' : ''}${value.toFixed(4)}%`;
 }
 
 function fundingIntervalLabel(seconds: number | null | undefined): string | undefined {

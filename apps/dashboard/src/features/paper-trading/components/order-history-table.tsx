@@ -29,7 +29,7 @@ function LoadingRows() {
     <>
       {Array.from({ length: 3 }, (_, index) => (
         <TableRow key={index}>
-          <TableCell colSpan={9}>
+          <TableCell colSpan={10}>
             <Skeleton variant="text" />
           </TableCell>
         </TableRow>
@@ -41,7 +41,28 @@ function LoadingRows() {
 function triggerLabel(reason: PaperOrder['trigger_reason']): string {
   if (reason === 'stop_loss') return 'Stop-Loss';
   if (reason === 'take_profit') return 'Take-Profit';
+  if (reason === 'liquidation') return 'Liquidation';
   return 'Manual';
+}
+
+function triggerColor(reason: PaperOrder['trigger_reason']): 'default' | 'error' | 'warning' {
+  if (reason === null) return 'default';
+  return reason === 'liquidation' ? 'error' : 'warning';
+}
+
+function triggerExplanation(order: PaperOrder): string {
+  if (order.trigger_reason === null) return 'Placed manually';
+  if (order.trigger_reason === 'liquidation') {
+    const basis =
+      order.trigger_price_basis === 'last_fallback'
+        ? ' (no mark price was available, so the last traded price stood in)'
+        : ' on the mark price';
+    const gap = order.gapped_through_bankruptcy
+      ? ' The price had already gapped past the bankruptcy price; the loss is still capped at the margin posted.'
+      : '';
+    return `Liquidated${basis} — the position's whole margin (${'$'}${Number(order.margin_applied).toFixed(2)}) was forfeited.${gap}`;
+  }
+  return `Closed automatically — its ${triggerLabel(order.trigger_reason).toLowerCase()} price was crossed`;
 }
 
 function pnlColor(value: number): 'success.main' | 'error.main' | 'text.primary' {
@@ -64,17 +85,19 @@ function OrderRow({ order }: { order: PaperOrder }) {
         />
       </TableCell>
       <TableCell>
-        <Tooltip
-          title={
-            order.trigger_reason === null
-              ? 'Placed manually'
-              : `Closed automatically — its ${triggerLabel(order.trigger_reason).toLowerCase()} price was crossed`
-          }
-        >
+        <Chip
+          size="small"
+          variant="outlined"
+          color={order.position_side === 'long' ? 'success' : 'error'}
+          label={`${order.position_side === 'long' ? 'Long' : 'Short'} ${Number(order.leverage)}x${order.reduce_only ? ' · reduce' : ''}`}
+        />
+      </TableCell>
+      <TableCell>
+        <Tooltip title={triggerExplanation(order)}>
           <Chip
             size="small"
             variant={order.trigger_reason === null ? 'outlined' : 'filled'}
-            color={order.trigger_reason === null ? 'default' : 'warning'}
+            color={triggerColor(order.trigger_reason)}
             label={triggerLabel(order.trigger_reason)}
           />
         </Tooltip>
@@ -125,8 +148,8 @@ function OrderRow({ order }: { order: PaperOrder }) {
  * visible as the fill itself). A stale-priced fill (the fallback candle
  * was already older than the staleness threshold) is marked with a
  * warning chip, not silently presented as current. The "Trigger" column
- * makes a market-triggered auto-close (a filled `warning`-colored chip,
- * "Stop-Loss"/"Take-Profit") clearly distinct from an ordinary,
+ * makes a market-triggered auto-close (a filled chip: `warning`-colored
+ * "Stop-Loss"/"Take-Profit", `error`-colored "Liquidation") clearly distinct from an ordinary,
  * manually-placed order (an outlined "Manual" chip) — never the same
  * plain row for both.
  */
@@ -149,6 +172,7 @@ export function OrderHistoryTable({
               <TableCell>Fill Time</TableCell>
               <TableCell>Symbol</TableCell>
               <TableCell>Side</TableCell>
+              <TableCell>Position</TableCell>
               <TableCell>Trigger</TableCell>
               <TableCell align="right">Quantity</TableCell>
               <TableCell align="right">Fill Price</TableCell>
@@ -165,7 +189,7 @@ export function OrderHistoryTable({
             )}
             {!isLoading && orders.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={9} align="center" sx={{ py: 4 }}>
+                <TableCell colSpan={10} align="center" sx={{ py: 4 }}>
                   <Typography variant="body2" color="text.secondary" role="status">
                     No orders yet — place one above, and it will appear here.
                   </Typography>

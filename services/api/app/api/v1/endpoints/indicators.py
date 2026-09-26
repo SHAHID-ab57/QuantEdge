@@ -175,7 +175,7 @@ async def calculate_indicator(
     ] = None,
 ) -> IndicatorCalculationResponse:
     """Calculate one indicator over one market/timeframe."""
-    params = {
+    params: dict[str, object] = {
         key: value for key, value in request.query_params.items() if key not in RESERVED_QUERY_KEYS
     }
     return await service.calculate(

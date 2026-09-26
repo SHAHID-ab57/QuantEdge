@@ -77,6 +77,18 @@ class TrainingJobCreateRequest(BaseModel):
         default=None,
         description="Explicit candle-range end; must be given together with `start`.",
     )
+    limit: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Candle-row ceiling for this job's own dataset build (checked against the "
+            "server's own candles_max_limit). Omitting this while `start`/`end` span more "
+            "real candles than the platform default (candles_default_limit) silently "
+            "trains on only the first candles_default_limit candles within that range, "
+            "ascending — not an error. Set this explicitly to the real row count `start`/ "
+            "`end` should span whenever that span exceeds the default."
+        ),
+    )
     target_column: str | None = Field(
         default=None,
         max_length=100,
@@ -139,6 +151,11 @@ class TrainingJobResponse(BaseModel):
         default=None,
         description="The explicit candle-range end this job trained on, if one was given.",
     )
+    dataset_limit: int | None = Field(
+        default=None,
+        description="The explicit candle-row ceiling this job's dataset build used, if one "
+        "was given; null means the platform default (candles_default_limit) applied.",
+    )
     target_column: str | None
     model_type: str
     hyperparameters: dict[str, Any]
@@ -176,6 +193,7 @@ class TrainingJobResponse(BaseModel):
             timeframe=job.timeframe,
             dataset_start=job.dataset_start,
             dataset_end=job.dataset_end,
+            dataset_limit=job.dataset_limit,
             target_column=job.target_column,
             model_type=job.model_type,
             hyperparameters=job.hyperparameters or {},

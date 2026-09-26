@@ -9,6 +9,7 @@ unchanged. End-to-end coverage against a real database lives in
 """
 
 from dataclasses import dataclass
+from typing import Any, cast
 
 import pytest
 
@@ -18,6 +19,7 @@ from app.dataset_validation.rules import load_builtin_rules
 from app.schemas.dataset_validation import DatasetValidationRequest
 from app.schemas.features import FeatureRequestItem
 from app.services.dataset_validation import DatasetValidationService
+from app.services.features import FeatureService
 from tests.dataset_validation.conftest import make_dataset
 
 
@@ -39,8 +41,8 @@ def validator() -> DatasetValidator:
     return DatasetValidator(default_registry)
 
 
-def request_body(**overrides: object) -> DatasetValidationRequest:
-    defaults: dict[str, object] = {
+def request_body(**overrides: Any) -> DatasetValidationRequest:
+    defaults: dict[str, Any] = {
         "timeframe": "1h",
         "features": [FeatureRequestItem(feature="ohlcv")],
     }
@@ -53,7 +55,9 @@ class TestValidateDataset:
         self, validator: DatasetValidator
     ) -> None:
         stub = _StubFeatureService(dataset=make_dataset(), calls=[])
-        service = DatasetValidationService(feature_service=stub, validator=validator)
+        service = DatasetValidationService(
+            feature_service=cast(FeatureService, stub), validator=validator
+        )
         body = request_body()
         await service.validate_dataset("ETHUSD", body)
         assert stub.calls == [("ETHUSD", body)]
@@ -63,7 +67,9 @@ class TestValidateDataset:
     ) -> None:
         dataset = make_dataset(dataset_id="abc123")
         stub = _StubFeatureService(dataset=dataset, calls=[])
-        service = DatasetValidationService(feature_service=stub, validator=validator)
+        service = DatasetValidationService(
+            feature_service=cast(FeatureService, stub), validator=validator
+        )
         report = await service.validate_dataset("ETHUSD", request_body())
         assert report.dataset_id == "abc123"
 
@@ -71,13 +77,17 @@ class TestValidateDataset:
         self, validator: DatasetValidator
     ) -> None:
         stub = _StubFeatureService(dataset=make_dataset(), calls=[])
-        service = DatasetValidationService(feature_service=stub, validator=validator)
+        service = DatasetValidationService(
+            feature_service=cast(FeatureService, stub), validator=validator
+        )
         report = await service.validate_dataset("ETHUSD", request_body(required_columns=["sma_20"]))
         assert any(issue.code == "missing_required_column" for issue in report.issues)
 
     async def test_forwards_a_rule_subset_to_the_engine(self, validator: DatasetValidator) -> None:
         stub = _StubFeatureService(dataset=make_dataset(), calls=[])
-        service = DatasetValidationService(feature_service=stub, validator=validator)
+        service = DatasetValidationService(
+            feature_service=cast(FeatureService, stub), validator=validator
+        )
         report = await service.validate_dataset("ETHUSD", request_body(rules=["required_columns"]))
         assert report.rules_run == ("required_columns",)
 
@@ -85,13 +95,17 @@ class TestValidateDataset:
 class TestListRules:
     def test_lists_every_registered_rule(self, validator: DatasetValidator) -> None:
         stub = _StubFeatureService(dataset=make_dataset(), calls=[])
-        service = DatasetValidationService(feature_service=stub, validator=validator)
+        service = DatasetValidationService(
+            feature_service=cast(FeatureService, stub), validator=validator
+        )
         catalogue = service.list_rules()
         assert catalogue.total == len(validator.registry)
         assert {rule.name for rule in catalogue.rules} == set(validator.registry.names())
 
     def test_reports_distinct_categories(self, validator: DatasetValidator) -> None:
         stub = _StubFeatureService(dataset=make_dataset(), calls=[])
-        service = DatasetValidationService(feature_service=stub, validator=validator)
+        service = DatasetValidationService(
+            feature_service=cast(FeatureService, stub), validator=validator
+        )
         catalogue = service.list_rules()
         assert {"structural", "data_quality", "time_series", "feature"} <= set(catalogue.categories)

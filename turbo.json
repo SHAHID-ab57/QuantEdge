@@ -5,7 +5,8 @@
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
-      "outputs": ["dist/**", ".next/**", "!.next/cache/**"]
+      "outputs": ["dist/**", ".next/**", "!.next/cache/**"],
+      "env": ["NEXT_PUBLIC_API_URL", "NEXT_PUBLIC_APP_NAME", "NEXT_PUBLIC_WS_URL"]
     },
     "lint": {
       "dependsOn": ["^lint"]

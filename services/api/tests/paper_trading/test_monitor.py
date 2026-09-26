@@ -9,19 +9,14 @@ monitor never goes through `get_db`/FastAPI's dependency overrides —
 there is no HTTP request behind a bus event.
 """
 
-import asyncio
 import uuid
-from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.events.bus import EventBus
-from app.marketdata.bus_events import TickerUpdated
-from app.marketdata.models import TickerEvent
 from app.paper_trading import monitor as monitor_module
-from app.paper_trading.errors import InsufficientPositionError
 from app.paper_trading.monitor import StopLossTakeProfitMonitor
 from app.repositories.paper_trading import PaperPositionRepository
 from app.schemas.paper_trading import PaperAccountCreateRequest, PaperOrderRequest
@@ -269,94 +264,14 @@ class TestTriggeredFillPricesFromTheEventNotAFreshResolve:
         assert float(sell_orders[0].fill_price) == pytest.approx(900 * (1 - 25 / 10000))
 
 
-@pytest.mark.asyncio
-class TestConcurrentTriggeredAndManualClose:
-    """The third occurrence of this project's own atomic check-then-act
-    concurrency guard (after the training-job duplicate-run race and the
-    exposure-limit race): a triggered auto-close and a genuinely
-    concurrent manual close of the *same* position must never both
-    succeed."""
-
-    async def test_triggered_close_and_concurrent_manual_close_result_in_exactly_one_close(
-        self, session_factory: SessionFactory
-    ) -> None:
-        await seed_market(session_factory, symbol="PTRACECLOSEUSD")
-        bus = EventBus()
-        state_manager = MarketStateManager().attach(bus)
-        build_monitor(state_manager).attach(bus)
-
-        creator = await build_service(session_factory, state_manager)
-        await publish_ticker(bus, "PTRACECLOSEUSD", "1000")
-        account = await creator.create_account(
-            PaperAccountCreateRequest(starting_balance=Decimal("100000"))
-        )
-        account_id = uuid.UUID(account.id)
-        await creator.place_order(
-            account_id,
-            PaperOrderRequest(
-                symbol="PTRACECLOSEUSD",
-                side="buy",
-                quantity=Decimal("10"),
-                stop_loss_price=Decimal("900"),
-            ),
-        )
-
-        # A second, independent service instance — its own session —
-        # racing a manual full close against the price event that's
-        # about to trigger the same position's stop-loss.
-        manual_service = await build_service(session_factory, state_manager)
-        manual_close_task = asyncio.create_task(
-            manual_service.place_order(
-                account_id,
-                PaperOrderRequest(symbol="PTRACECLOSEUSD", side="sell", quantity=Decimal("10")),
-            )
-        )
-
-        # Publish the stop-loss-crossing ticker — schedules the monitor's
-        # own handler task, but does not await it yet.
-        await bus.publish(
-            TickerUpdated(
-                source="test",
-                ticker=TickerEvent(
-                    exchange="delta",
-                    symbol="PTRACECLOSEUSD",
-                    event_time=datetime.now(UTC),
-                    last_price=Decimal("900"),
-                ),
-            )
-        )
-
-        # Run the pending bus handler task(s) and the manual close
-        # genuinely concurrently, not sequentially.
-        drain_result, manual_result = await asyncio.gather(
-            bus.drain(), manual_close_task, return_exceptions=True
-        )
-        assert not isinstance(drain_result, BaseException), drain_result
-
-        orders = await creator.list_orders(
-            account_id, sort="created_at", direction="asc", limit=10, offset=0
-        )
-        sell_orders = [o for o in orders.orders if o.side == "sell"]
-        assert len(sell_orders) == 1, f"expected exactly one closing sell, got: {orders.orders}"
-
-        positions = await creator.list_positions(account_id)
-        assert positions.positions == []  # fully closed either way
-
-        if isinstance(manual_result, BaseException):
-            # The manual attempt lost the race — it must fail because it
-            # re-read the now-emptied position (the trigger won), never
-            # any other failure mode.
-            assert isinstance(manual_result, InsufficientPositionError), (
-                f"a losing manual close must fail against an emptied position, not some "
-                f"other way: {manual_result!r}"
-            )
-        else:
-            # The manual attempt won outright — the trigger's own retry
-            # loop must have found nothing left to close and quietly
-            # stopped (proven above: exactly one sell order exists, and
-            # it's the manual one — sell_orders[0].trigger_reason is
-            # None for a manually-placed order).
-            assert sell_orders[0].trigger_reason is None
+# `TestConcurrentTriggeredAndManualClose` lived here: a triggered stop-loss
+# racing a manual close of the same position. It passed on this suite's
+# in-memory SQLite engine, but that engine shares ONE connection between every
+# session (`StaticPool`), so two "concurrent" sessions are really one
+# transaction and the race was never truly exercised. It now runs, with
+# genuinely separate connections, against real PostgreSQL in
+# `tests/paper_trading/test_concurrency_postgres.py`, where it (and its
+# liquidation and funding siblings) actually found a bug: see that module.
 
 
 @pytest.mark.asyncio

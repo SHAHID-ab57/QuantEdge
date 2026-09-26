@@ -20,9 +20,11 @@ def build_engine() -> AsyncEngine:
     """Create the async engine from application settings."""
     settings = get_settings()
     logger.info(
-        "Creating database engine (pool_size=%s, max_overflow=%s, pre_ping=true)",
+        "Creating database engine (pool_size=%s, max_overflow=%s, connect_timeout=%ss, "
+        "pre_ping=true)",
         settings.db_pool_size,
         settings.db_max_overflow,
+        settings.db_connect_timeout_seconds,
     )
     return create_async_engine(
         settings.database_url,
@@ -31,7 +33,7 @@ def build_engine() -> AsyncEngine:
         pool_size=settings.db_pool_size,
         max_overflow=settings.db_max_overflow,
         echo=settings.db_echo,
-        connect_args={"timeout": 5},
+        connect_args={"timeout": settings.db_connect_timeout_seconds},
     )
 
 

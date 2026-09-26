@@ -1,5 +1,6 @@
 """Unit tests for the database engine lifecycle and connectivity probe."""
 
+import inspect
 from types import SimpleNamespace
 
 import pytest
@@ -28,6 +29,7 @@ def _settings(**overrides: object) -> SimpleNamespace:
         "db_pool_size": 5,
         "db_max_overflow": 10,
         "db_echo": False,
+        "db_connect_timeout_seconds": 10,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -70,11 +72,41 @@ async def test_build_engine_forwards_settings(monkeypatch: pytest.MonkeyPatch) -
             db_pool_size=3,
             db_max_overflow=7,
             db_echo=True,
+            db_connect_timeout_seconds=15,
         ),
     )
     engine = build_engine()
     assert isinstance(engine, AsyncEngine)
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_build_engine_forwards_the_connect_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The real incident this exists for (2026-09-26, production): a
+    hardcoded 5s asyncpg connect timeout was too tight under real
+    concurrent load and occasionally killed an otherwise-healthy new
+    connection attempt (StopLossTakeProfitMonitor's own per-event
+    sessions, isolated but real, over a full hour on the production
+    droplet). Now configurable, defaulting higher (10s) -- this pins that
+    the configured value actually reaches asyncpg's own connect params,
+    not just that the engine builds successfully."""
+    monkeypatch.setattr(
+        engine_module,
+        "get_settings",
+        lambda: _settings(
+            database_url="postgresql+asyncpg://u:p@localhost:5432/db",
+            db_connect_timeout_seconds=15,
+        ),
+    )
+    engine = build_engine()
+    try:
+        # `pool._creator` closes over the exact kwargs asyncpg.connect()
+        # will receive -- the only way to confirm the configured value
+        # reached it without actually opening a socket.
+        closure = inspect.getclosurevars(engine.pool._creator).nonlocals
+        assert closure["cparams"]["timeout"] == 15
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.asyncio

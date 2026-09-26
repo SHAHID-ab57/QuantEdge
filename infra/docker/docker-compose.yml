@@ -1,24 +1,35 @@
 # Docker Compose — Full Local Stack
 #
 # Postgres + Redis (infrastructure), a one-shot `migrate` job, the API,
-# and the dashboard. There is no `worker` service — no queue/worker code
-# exists in this repo (see STATE.md's Cross-Cutting Infrastructure
-# section); the only application processes are `api` and `web`.
+# the standalone scheduler process, and the dashboard. There is no
+# `worker` service in the queue/task-broker sense — the only application
+# processes are `api`, `scheduler`, and `web`.
+#
+# `scheduler` (added per docs/infrastructure/EVENT_LOOP_SEPARATION_DESIGN.md,
+# Option 3) shares `api`'s build context/Dockerfile but a different
+# `command`, exactly mirroring how `migrate` already shares that same
+# context — see that service's own comment for the resulting gotcha: a
+# shared build context but a SEPARATE image tag per service means
+# `docker compose build api migrate scheduler` must run together
+# whenever any of the three change, or a stale image silently ships.
 #
 # Usage:
 #   cp infra/docker/.env.example infra/docker/.env   # POSTGRES/REDIS passwords
 #   docker compose -f infra/docker/docker-compose.yml up -d --build
 #
-# The `api` service loads services/api/.env (the same file `uv run
-# uvicorn` reads locally, per STATE.md §3/§4 — see the DELTA_*/JWT_*/
-# connector keys documented there) for everything EXCEPT DATABASE_URL and
-# REDIS_URL, which `environment:` below overrides to point at the
-# in-network `postgres`/`redis` hostnames instead of whatever host-local
-# values that file has for a bare `uv run` (`localhost:5433`/`:6379`,
-# which do not resolve the same way from inside a container). If that
-# file is absent, only JWT_SECRET_KEY genuinely needs to come from
-# somewhere else — the app already hard-fails at startup without it
-# (app/core/config.py), same as running it outside Docker.
+# The `api`/`scheduler` services load services/api/.env (the same file
+# `uv run uvicorn` reads locally, per STATE.md §3/§4 — see the
+# DELTA_*/JWT_*/connector keys documented there) for everything EXCEPT
+# DATABASE_URL and REDIS_URL, which `environment:` below overrides to
+# point at the in-network `postgres`/`redis` hostnames instead of
+# whatever host-local values that file has for a bare `uv run`
+# (`localhost:5433`/`:6379`, which do not resolve the same way from
+# inside a container). If that file is absent, only JWT_SECRET_KEY
+# genuinely needs to come from somewhere else — the app already
+# hard-fails at startup without it (app/core/config.py), same as running
+# it outside Docker. `scheduler` itself never checks JWT_SECRET_KEY (it
+# serves no HTTP), but reads the same file, so a missing one there is
+# harmless to it specifically.
 
 name: eth-ai-platform-dev
 
@@ -158,6 +169,58 @@ services:
       timeout: 5s
       retries: 5
       start_period: 15s
+
+  # Standalone process for the five schedulers with no dependency on the
+  # live WS-fed EventBus/MarketStateManager (candle sync, prediction
+  # grading, external-data sync, news sync, retraining) — moved off
+  # `api`'s request-serving event loop to resolve a confirmed,
+  # measured DB-connection-timeout contention pattern. See
+  # docs/infrastructure/WORKER_HEADROOM_CHECK.md and
+  # EVENT_LOOP_SEPARATION_DESIGN.md for the full evidence and reasoning.
+  # StopLossTakeProfitMonitor, OrderFlowCapture, and the two paper-trading
+  # schedulers stay in `api` — they read live price state that only
+  # exists in that process.
+  scheduler:
+    build:
+      context: ../../services/api
+      dockerfile: Dockerfile
+    container_name: eth-scheduler
+    restart: unless-stopped
+    env_file:
+      - path: ../../services/api/.env
+        required: false
+    command: ['python', '-m', 'app.scheduler_main']
+    # Same reasoning as `api`'s own identical mount above: `RetrainingScheduler`
+    # writes new model artifacts through the same training pipeline `api`
+    # reads from for live predictions — without sharing this mount, a
+    # freshly retrained model would be invisible to the process that
+    # actually serves it.
+    volumes:
+      - ../../services/api/var/model_artifacts:/app/var/model_artifacts
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-research}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-eth_platform}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      - eth-platform-net
+    # No HTTP port to probe -- liveness is a heartbeat file touched every
+    # HEARTBEAT_INTERVAL_SECONDS (app/scheduler_main.py) while the event
+    # loop is actually responsive.
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'python',
+          '-c',
+          "import pathlib, sys, time; p = pathlib.Path('/app/var/scheduler_heartbeat'); sys.exit(0 if p.exists() and time.time() - p.stat().st_mtime < 60 else 1)",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 
   web:
     build:

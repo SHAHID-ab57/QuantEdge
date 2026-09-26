@@ -6927,10 +6927,56 @@ Management" for the current, honest boundary between the two.
 
 ## Deployment View
 
-No production deployment topology is defined anywhere in this repository
-yet (no Dockerfile, no reverse-proxy config, no orchestration manifest) —
-the rest of this section is deliberately narrow: one concrete warning to
-apply _whenever_ that topology gets decided, not a deployment guide.
+A real topology now exists (`infra/docker/docker-compose.yml`,
+`docs/deployment/DEPLOYMENT.md`) — this section stays deliberately narrow:
+the process split worth understanding architecturally, plus one concrete
+reverse-proxy warning to apply whenever a proxy is placed in front of this
+API. `docs/deployment/DEPLOYMENT.md` is the operational source of truth
+(build/deploy commands, gotchas, rollback); this section covers the "why."
+
+### Process topology and the event-loop separation (EVENT-LOOP-SEPARATION)
+
+Two application processes share the same Docker image
+(`services/api/Dockerfile`) but run different commands, per
+`docs/infrastructure/EVENT_LOOP_SEPARATION_DESIGN.md`'s Option 3:
+
+- **`api`** (`uvicorn app.main:app`, no `--workers` flag — a single ASGI
+  worker) serves HTTP and owns everything that reads live, in-process
+  price state fed by the single Delta WebSocket connection:
+  `StopLossTakeProfitMonitor`, `OrderFlowCapture`, and the two paper-trading
+  schedulers (strategy, funding). These can't move to another process
+  without either duplicating the live feed or building a cross-process
+  state bridge — deliberately out of scope for now.
+- **`scheduler`** (`python -m app.scheduler_main`) runs the five
+  schedulers with no dependency on that live state — candle sync,
+  prediction grading, external-data sync, news sync, and retraining — on
+  its own event loop, its own DB connection pool, with no HTTP port. Its
+  liveness is a heartbeat file touched every 15s while its event loop is
+  responsive, checked by a `docker healthcheck` that verifies the file's
+  recency rather than probing a port (there's nothing to probe).
+
+This split exists because it fixed a real, measured problem: a candle-sync
+burst sharing `api`'s event loop was directly correlated with
+`StopLossTakeProfitMonitor` DB-connection `TimeoutError`s under load
+(`docs/infrastructure/WORKER_HEADROOM_CHECK.md`) — raising
+`db_pool_size` alone reduced but didn't eliminate the pattern, because the
+real mechanism was event-loop contention, not pool exhaustion or Postgres
+capacity (confirmed via direct on-server connection timing experiments).
+Moving the five DB/REST-only schedulers off `api`'s loop removes that
+specific, confirmed contention source without touching the harder,
+still-open question of whether `api` itself can ever run multiple workers
+— see `EVENT_LOOP_SEPARATION_DESIGN.md`'s Option 1/2 analysis for why that
+would need a live-state broadcast bridge (e.g. Redis pub/sub — declared
+infrastructure, not yet used by any application code) as a prerequisite.
+
+Both processes read `services/api/.env` and share the same
+`get_engine()`-per-process pattern — two independent connection pools
+against the same Postgres instance, not one shared pool. `scheduler` also
+shares `api`'s `model_artifacts` bind mount: `RetrainingScheduler` writes
+new model artifacts there, and without the shared mount they'd be
+invisible to the `api` process that actually serves predictions from them.
+
+**Reverse proxy configuration warning (M5-E3-T1).** uvicorn's own
 
 **Reverse proxy configuration warning (M5-E3-T1).** uvicorn's own
 `ProxyHeadersMiddleware` is enabled by default and trusts

@@ -15,7 +15,7 @@ from app.api.router import api_router
 from app.auth.login_lockout import build_login_lockout_tracker
 from app.auth.token_revocation import build_token_blocklist
 from app.core.config import Settings, get_settings
-from app.core.env_validation import find_duplicate_env_keys
+from app.core.env_validation import find_duplicate_env_keys, raise_for_conflicting_duplicates
 from app.core.exceptions import register_exception_handlers
 from app.core.logging import setup_logging
 from app.core.redis import dispose_redis_client, get_redis_client, probe_redis
@@ -64,30 +64,7 @@ def _check_env_duplicates() -> None:
     Only a check that runs where `.env` actually lives — here, at the
     startup of the process that reads it — closes this gap for real.
     """
-    conflicting: list[str] = []
-    for duplicate in find_duplicate_env_keys(".env"):
-        if duplicate.values_differ:
-            declarations = ", ".join(
-                f"line {line_number}={value!r}" for line_number, value in duplicate.occurrences
-            )
-            conflicting.append(
-                f"{duplicate.key} ({declarations}; effective value: {duplicate.effective_value!r})"
-            )
-        else:
-            logger.warning(
-                "%s is declared %d times in .env with the identical value — harmless, "
-                "but worth removing the redundant line(s)",
-                duplicate.key,
-                len(duplicate.occurrences),
-            )
-    if conflicting:
-        raise RuntimeError(
-            "Conflicting duplicate keys in .env (ENV-CONFIG-INTEGRITY): "
-            + "; ".join(conflicting)
-            + ". python-dotenv silently resolves each to its LAST declaration — this "
-            "is exactly how RETRAINING_EXPERIMENT_IDS sat nullified with no error "
-            "anywhere. Remove the redundant declaration(s) before starting."
-        )
+    raise_for_conflicting_duplicates(find_duplicate_env_keys(".env"), logger=logger)
 
 
 def _log_automation_config(settings: Settings) -> None:
@@ -209,7 +186,7 @@ async def shutdown() -> None:
 
     `background_tasks.cancel_all()` runs first, before anything that uses
     the same database engine is torn down — same ordering principle as
-    `Runtime.shutdown` stopping `CandleSyncScheduler` before its own engine
+    `Runtime.shutdown` stopping its own schedulers before its own engine
     use ends. Cancels every in-flight training run *and* backtest alike —
     one shared registry, one shutdown path (see
     `app/services/background_tasks.py`'s own docstring for the resulting,

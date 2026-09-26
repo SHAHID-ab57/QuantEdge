@@ -8,6 +8,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Standalone scheduler process, off the API's request-serving event
+  loop (SCHEDULER-PROCESS-SPLIT).** Builds Option 3 from
+  `docs/infrastructure/EVENT_LOOP_SEPARATION_DESIGN.md`: candle sync,
+  prediction grading, external-data sync, news sync, and retraining —
+  the five schedulers with no dependency on the live WS-fed
+  `EventBus`/`MarketStateManager` — now run in a new `app.scheduler_main`
+  process (`python -m app.scheduler_main`, new `scheduler` service in
+  `docker-compose.yml`, same build context/Dockerfile as `api`, mirroring
+  how `migrate` already shares that context) instead of on `api`'s own
+  event loop. `StopLossTakeProfitMonitor`, `OrderFlowCapture`, and the two
+  paper-trading schedulers (strategy, funding) stay in `api` — they read
+  live in-memory price state that only exists in that process, and
+  separating them would need a cross-process state bridge, deliberately
+  out of scope. `scheduler` has no HTTP port; liveness is a heartbeat
+  file touched every 15s while its event loop is responsive, checked by
+  a `docker healthcheck` verifying the file's recency. Built to resolve a
+  confirmed, measured problem, not a hypothetical one: a real
+  candle-sync burst was directly correlated with two
+  `StopLossTakeProfitMonitor` DB-connection `TimeoutError`s under load
+  (`docs/infrastructure/WORKER_HEADROOM_CHECK.md`) even after raising
+  `db_pool_size`, because the actual mechanism was event-loop contention,
+  not pool exhaustion. `ARCHITECTURE.md` § "Deployment View" → "Process
+  topology and the event-loop separation (EVENT-LOOP-SEPARATION)".
+
 - **Configuration-integrity checking: duplicate `.env` keys refuse
   startup, and every automation-gating setting's resolved value is
   logged (ENV-CONFIG-INTEGRITY).** Closes a gap in the existing

@@ -24,32 +24,29 @@ to trigger, until live mode (or a test) actually publishes events.
 
 The paper trading automated strategy
 (``app.services.paper_trading_strategy.PaperTradingStrategyScheduler``)
-is started/stopped exactly like ``CandleSyncScheduler``/
-``PredictionGradingScheduler`` — gated on its own
-``paper_trading_strategy_scheduler_enabled`` setting, database-optional.
-Unlike the monitor, it is *not* always-on: the real per-account opt-in
-(``PaperAccount.strategy_enabled``, off by default) lives in the
-database, not here — this flag only controls whether the loop that
-checks for enabled accounts runs at all.
+and the funding scheduler (``app.services.paper_funding.PaperFundingScheduler``)
+are gated on their own settings, database-optional, and stay here rather
+than in the standalone scheduler process (``app.scheduler_main``) because
+both read live price state from ``self.state_manager`` — the same reason
+``StopLossTakeProfitMonitor`` and ``OrderFlowCapture`` stay here too. See
+``docs/infrastructure/EVENT_LOOP_SEPARATION_DESIGN.md`` for the full
+reasoning. Unlike the monitor, the strategy scheduler is *not* always-on:
+the real per-account opt-in (``PaperAccount.strategy_enabled``, off by
+default) lives in the database, not here — this flag only controls
+whether the loop that checks for enabled accounts runs at all.
 
-``app.services.external_data_sync.ExternalDataSyncScheduler`` (External
-Data Connectors — ``app/connectors/``) is wired in the same way as
-``CandleSyncScheduler``: gated on ``external_data_sync_enabled``,
-database-optional, keeping every registered connector's own stored data
-current on its own interval.
-
-``app.services.news_sync.NewsSyncScheduler`` (Marketaux news,
-``app/connectors/marketaux.py``) is wired the same way but is a genuinely
-separate scheduler, not a use of ``ExternalDataSyncScheduler`` itself:
-news ingestion persists rich articles into their own table and mirrors
-only a derived daily aggregate, a shape the generic scheduler's own
-"fetch one point, persist it" tick can't express — see
-``ConnectorMetadata.auto_synced``'s own docstring.
+Candle sync, prediction grading, external-data sync, news sync, and
+retraining have no such dependency — they only ever touch the database
+and outbound REST APIs — so they run in the separate ``app.scheduler_main``
+process instead, off this process's event loop entirely (moved there to
+resolve a confirmed, measured DB-connection-timeout contention pattern;
+see ``docs/infrastructure/WORKER_HEADROOM_CHECK.md`` and
+``EVENT_LOOP_SEPARATION_DESIGN.md``). This module no longer builds or
+starts any of them.
 """
 
 import logging
 import time
-import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -67,14 +64,9 @@ from app.marketdata import DeltaNormalizer, MarketDataPipeline
 from app.marketdata.gateway import MarketStreamGateway
 from app.marketdata.orderbook import OrderBookAggregator
 from app.paper_trading.monitor import StopLossTakeProfitMonitor
-from app.services.candle_sync import CandleSyncScheduler
-from app.services.external_data_sync import ExternalDataSyncScheduler
-from app.services.grading_scheduler import PredictionGradingScheduler
-from app.services.news_sync import NewsSyncScheduler
 from app.services.order_flow_capture import OrderFlowCapture
 from app.services.paper_funding import PaperFundingScheduler
 from app.services.paper_trading_strategy import PaperTradingStrategyScheduler
-from app.services.retraining import RetrainingScheduler, RetrainingTarget
 from app.state import MarketStateManager
 from app.ws.models import WSEvent
 
@@ -166,13 +158,8 @@ class Runtime:
             ).attach(self.bus)
         self.pipeline: MarketDataPipeline | None = None
         self.delta_ws: DeltaWebSocketClient | None = None
-        self.candle_sync: CandleSyncScheduler | None = None
-        self.prediction_grading: PredictionGradingScheduler | None = None
         self.paper_trading_strategy: PaperTradingStrategyScheduler | None = None
         self.paper_funding: PaperFundingScheduler | None = None
-        self.external_data_sync: ExternalDataSyncScheduler | None = None
-        self.news_sync: NewsSyncScheduler | None = None
-        self.retraining: RetrainingScheduler | None = None
         self.last_ws_message_at: datetime | None = None
         self.last_rest_request_at: datetime | None = None
 
@@ -182,11 +169,13 @@ class Runtime:
         return self._market_data_live
 
     async def start(self) -> None:
-        """Start live components (pipeline + WebSocket), the candle sync, and grading.
+        """Start live components (pipeline + WebSocket) and the live-state-
+        coupled schedulers (paper trading strategy, funding).
 
-        The WebSocket pipeline runs only in live mode; the candle sync and
-        prediction grading schedulers are each independent and start
-        whenever the database is configured (they no-op otherwise).
+        The WebSocket pipeline runs only in live mode. Candle sync,
+        prediction grading, external-data sync, news sync, and retraining no
+        longer start here — they run in the separate `app.scheduler_main`
+        process (see this module's own docstring).
         """
         if self._market_data_live:
             self.pipeline = MarketDataPipeline(
@@ -212,17 +201,6 @@ class Runtime:
             logger.info("Live market data disabled; WebSocket components report as not running")
 
         settings = get_settings()
-        if settings.candle_sync_enabled:
-            self.candle_sync = CandleSyncScheduler(
-                interval_seconds=settings.candle_sync_interval_seconds,
-                backfill_days=settings.candle_sync_backfill_days,
-            )
-            await self.candle_sync.start()
-        if settings.prediction_grading_enabled:
-            self.prediction_grading = PredictionGradingScheduler(
-                interval_seconds=settings.prediction_grading_interval_seconds,
-            )
-            await self.prediction_grading.start()
         if settings.paper_trading_strategy_scheduler_enabled:
             self.paper_trading_strategy = PaperTradingStrategyScheduler(
                 state_manager=self.state_manager,
@@ -236,52 +214,9 @@ class Runtime:
                 lookback_hours=settings.paper_trading_funding_lookback_hours,
             )
             await self.paper_funding.start()
-        if settings.external_data_sync_enabled:
-            configured_sources = [
-                part.strip()
-                for part in settings.external_data_sync_sources.split(",")
-                if part.strip()
-            ] or None
-            self.external_data_sync = ExternalDataSyncScheduler(
-                sources=configured_sources,
-                interval_seconds=settings.external_data_sync_interval_seconds,
-                backfill_days=settings.external_data_sync_backfill_days,
-            )
-            await self.external_data_sync.start()
-        if settings.news_sync_enabled:
-            self.news_sync = NewsSyncScheduler(
-                interval_seconds=settings.news_sync_interval_seconds,
-                backfill_days=settings.news_sync_backfill_days,
-            )
-            await self.news_sync.start()
-        if settings.retraining_scheduler_enabled:
-            retraining_targets = [
-                RetrainingTarget(experiment_id=uuid.UUID(part.strip()))
-                for part in settings.retraining_experiment_ids.split(",")
-                if part.strip()
-            ]
-            # Real, hard floors (app.services.retraining.MIN_WINDOW_HOURS /
-            # MAX_RETRAIN_INTERVAL_SECONDS) are enforced by the scheduler's own
-            # constructor regardless of these settings — never configurable
-            # past them, only more conservative.
-            self.retraining = RetrainingScheduler(
-                targets=retraining_targets,
-                window_hours=settings.retraining_window_hours,
-                min_retrain_interval_seconds=settings.retraining_min_interval_seconds,
-                tick_interval_seconds=settings.retraining_tick_interval_seconds,
-            )
-            await self.retraining.start()
 
     async def shutdown(self) -> None:
-        """Stop the WebSocket client, the candle sync/grading loops, and drain handlers."""
-        candle_sync = self.candle_sync
-        if candle_sync is not None:
-            await candle_sync.stop()
-            self.candle_sync = None
-        prediction_grading = self.prediction_grading
-        if prediction_grading is not None:
-            await prediction_grading.stop()
-            self.prediction_grading = None
+        """Stop the WebSocket client, the live-state-coupled schedulers, and drain handlers."""
         paper_trading_strategy = self.paper_trading_strategy
         if paper_trading_strategy is not None:
             await paper_trading_strategy.stop()
@@ -290,18 +225,6 @@ class Runtime:
         if paper_funding is not None:
             await paper_funding.stop()
             self.paper_funding = None
-        external_data_sync = self.external_data_sync
-        if external_data_sync is not None:
-            await external_data_sync.stop()
-            self.external_data_sync = None
-        news_sync = self.news_sync
-        if news_sync is not None:
-            await news_sync.stop()
-            self.news_sync = None
-        retraining = self.retraining
-        if retraining is not None:
-            await retraining.stop()
-            self.retraining = None
         order_flow_capture = self.order_flow_capture
         if order_flow_capture is not None:
             await order_flow_capture.stop()

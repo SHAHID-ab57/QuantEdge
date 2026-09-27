@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.events.bus import EventBus
 from app.models.experiment import Experiment
+from app.paper_trading.errors import StopBeyondLiquidationError
 from app.prediction.feature_drift import FeatureDriftStatus
 from app.schemas.paper_trading import (
     PaperAccountCreateRequest,
@@ -47,6 +48,7 @@ from tests.paper_trading.test_service import (
     publish_ticker,
     seed_market,
 )
+from tests.paper_trading.test_short_and_leverage import make_env
 from tests.prediction.test_service import train_completed_job
 from tests.training.test_service import build_service as build_training_service
 
@@ -282,7 +284,7 @@ async def train_second_job_on_existing_symbol(
     already seeded by an earlier `train_completed_job`/
     `train_completed_job_with_target_config` call for that same symbol —
     VOLATILITY-STOP-WIDTH's own volatility job is always configured on the
-    same symbol the directional job already trades (`_resolve_stop_loss_pct`'s
+    same symbol the directional job already trades (`_resolve_volatility_adjustment`'s
     own symbol-match gate), and `seed_real_candles` creates a brand new
     `Exchange`/`Market` pair every time it runs, so calling it a second time
     for the identical symbol would leave two ambiguous `Market` rows for
@@ -1090,10 +1092,10 @@ class TestVolatilityStopWidth:
     .strategy_volatility_training_job_id` optionally scales a new
     automated entry's stop-loss width from a second, `logistic_regression`
     -trained `volatility_regime` forecast for the same symbol —
-    `_resolve_stop_loss_pct`'s own docstring has the full gate list. Every
+    `_resolve_volatility_adjustment`'s own docstring has the full gate list. Every
     test here trains two real, completed jobs on one shared symbol (never
     a stub standing in for `TrainingJobRepository.get_by_id`, since
-    `_resolve_stop_loss_pct` reads `job.model_type`/`job.symbol` straight
+    `_resolve_volatility_adjustment` reads `job.model_type`/`job.symbol` straight
     from the database) and stubs only the *prediction* calls
     (`stub_predictions_by_job`), for the same reason every other test in
     this file stubs `PredictionService.run` rather than depending on a
@@ -1347,7 +1349,7 @@ class TestVolatilityStopWidth:
             await service.list_strategy_decisions(uuid.UUID(account.id), limit=5, offset=0)
         ).decisions[0]
         assert "drifted" in decision.reason.lower()
-        assert "unscaled default width used" in decision.reason.lower()
+        assert "unscaled defaults used" in decision.reason.lower()
 
     async def test_a_volatility_job_of_the_wrong_model_type_falls_back_to_the_fixed_default(
         self, session_factory: SessionFactory, monkeypatch: pytest.MonkeyPatch
@@ -1357,7 +1359,7 @@ class TestVolatilityStopWidth:
         `volatility_regime`, for the same symbol) is rejected as a forecast
         source, fixed-default-fallback rather than used anyway. The stub
         below deliberately has no entry for `volatility_job_id`: if
-        `_resolve_stop_loss_pct` ever called the prediction service for a
+        `_resolve_volatility_adjustment` ever called the prediction service for a
         wrong-model-type job (a bug), the routing stub would raise
         `KeyError` and the whole cycle would crash into `no_action` instead
         of opening — this test would then fail loudly rather than passing
@@ -1414,7 +1416,7 @@ class TestVolatilityStopWidth:
             await service.list_strategy_decisions(uuid.UUID(account.id), limit=5, offset=0)
         ).decisions[0]
         assert "random_forest" in decision.reason.lower()
-        assert "unscaled default width used" in decision.reason.lower()
+        assert "unscaled defaults used" in decision.reason.lower()
 
     async def test_a_volatility_job_trained_on_a_different_symbol_falls_back_to_the_fixed_default(
         self, session_factory: SessionFactory, monkeypatch: pytest.MonkeyPatch
@@ -1477,21 +1479,29 @@ class TestVolatilityStopWidth:
             await service.list_strategy_decisions(uuid.UUID(account.id), limit=5, offset=0)
         ).decisions[0]
         assert "STRATVOLSYMBOLBUSD" in decision.reason
-        assert "unscaled default width used" in decision.reason.lower()
+        assert "unscaled defaults used" in decision.reason.lower()
 
-    async def test_direction_and_whether_to_trade_are_unaffected_only_width_differs(
+    async def test_direction_and_whether_to_trade_are_unaffected_size_and_width_differ(
         self, session_factory: SessionFactory, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The boundary-preserving test VOLATILITY-STOP-WIDTH itself asks
-        for: two accounts, identical in every respect except one has a
-        volatility job configured and the other doesn't, processed in the
-        very same tick against the very same directional signal — proves
-        the strategy's own whether-to-trade/which-direction decision is
-        unaffected by the volatility forecast being active at all, and
-        that only the stop-loss width differs. This is
-        VOLATILITY_RISK_SIZING_DESIGN.md's own central D1 claim ("trading
-        decisions stay identical, only size/width changes"), checked here
-        rather than merely asserted in a document."""
+        """The boundary-preserving test both VOLATILITY-STOP-WIDTH and
+        VOLATILITY-POSITION-SIZING ask for: two accounts, identical in every
+        respect except one has a volatility job configured and the other
+        doesn't, processed in the very same tick against the very same
+        directional signal — proves the strategy's own
+        whether-to-trade/which-direction decision is unaffected by the
+        volatility forecast being active at all. This is
+        VOLATILITY_RISK_SIZING_DESIGN.md's own central claim ("trading
+        decisions stay identical, only size/leverage/width changes"),
+        checked here rather than merely asserted in a document.
+
+        Unlike VOLATILITY-STOP-WIDTH's own original version of this test
+        (written before Option A existed), quantity and leverage are no
+        longer expected to match — that is now the entire point of Option A.
+        What must still match, byte-for-byte, is `side`/`symbol` and the
+        decision log's own `direction`/`action`/`predicted_value` — the
+        actual trading decision, made before `_resolve_volatility_adjustment`
+        is ever called at all."""
         symbol = "STRATVOLBOUNDARYUSD"
         directional_job_id, _ = await train_completed_job(
             session_factory, symbol=symbol, model_type="logistic_regression"
@@ -1554,19 +1564,17 @@ class TestVolatilityStopWidth:
         assert position_unscaled.stop_loss_price is not None
         assert position_scaled.stop_loss_price is not None
 
-        # Byte-identical: side, symbol, quantity, leverage — the actual
-        # trading decision, made before `_resolve_stop_loss_pct` is ever
-        # called.
+        # Byte-identical: side and symbol -- the actual trading decision,
+        # made before `_resolve_volatility_adjustment` is ever called.
         assert position_unscaled.side == position_scaled.side == "long"
         assert position_unscaled.symbol == position_scaled.symbol == symbol
-        assert float(position_unscaled.quantity) == pytest.approx(
-            float(position_scaled.quantity), rel=1e-12
-        )
-        assert float(position_unscaled.leverage) == pytest.approx(
-            float(position_scaled.leverage), rel=1e-12
-        )
-        # Only the stop-loss width differs — the scaled account's own is
-        # wider (the 'expand' forecast), never equal to the unscaled one.
+
+        # Deliberately DIFFERENT (VOLATILITY-POSITION-SIZING's own point):
+        # the 'expand' forecast sizes the scaled account down on both size
+        # and leverage, and widens its stop -- none of the three equal the
+        # unscaled account's own.
+        assert float(position_scaled.quantity) < float(position_unscaled.quantity)
+        assert float(position_scaled.leverage) < float(position_unscaled.leverage)
         assert float(position_scaled.stop_loss_price) != pytest.approx(
             float(position_unscaled.stop_loss_price), rel=1e-9
         )
@@ -1582,17 +1590,28 @@ class TestVolatilityStopWidth:
         assert decision_unscaled.action == decision_scaled.action == "opened"
         assert decision_unscaled.predicted_value == decision_scaled.predicted_value == "up"
 
-    async def test_a_widened_stop_that_would_cross_liquidation_is_rejected_not_placed(
+    async def test_expand_scaling_leverage_down_keeps_the_widened_stop_inside_liquidation(
         self, session_factory: SessionFactory, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A default width that comfortably clears the liquidation distance
-        at this leverage can still be pushed past it once widened — this
-        must be rejected exactly as any other stop beyond liquidation would
-        be (`StopBeyondLiquidationError`, raised inside the very same
-        `place_order` call every automated entry already goes through),
-        never silently placed anyway. At 5x leverage the real liquidation
-        distance is ~19.8% of entry; 15% clears it comfortably but 15% *
-        1.5 = 22.5% does not."""
+        """Before VOLATILITY-POSITION-SIZING existed, a widened stop-loss
+        alone (Option B) could cross liquidation at an otherwise-safe
+        leverage (this test used to prove exactly that, rejecting the
+        entry). Now that an 'expand' forecast scales leverage *down* at
+        the same time it scales the stop *wider* (Option A), that specific
+        failure mode is structurally avoided, not coincidentally: a lower
+        leverage means a farther liquidation distance, checked here with
+        real numbers, not assumed.
+
+        At 10x leverage (`max_leverage=10`), the real liquidation distance
+        is ~9.77% -- an 8% default stop clears it. Scaled by Option
+        B's own 1.5x on 'expand', the stop becomes 12%. Scaled by Option
+        A's exact-reciprocal 2/3 on the same signal, leverage becomes
+        6.667x, whose own real liquidation distance is ~14.79% -- comfortably
+        clearing the scaled 12% stop. The entry succeeds; it is not rejected.
+        (Verified algebraically for every tested leverage from 1x to 100x
+        that this coupling's own liquidation-distance ratio always exceeds
+        the stop's own 1.5x widening ratio -- this is not a coincidence of
+        the specific numbers chosen here.)"""
         symbol = "STRATVOLLIQUSD"
         directional_job_id, _ = await train_completed_job(
             session_factory, symbol=symbol, model_type="logistic_regression"
@@ -1606,15 +1625,17 @@ class TestVolatilityStopWidth:
         state_manager = MarketStateManager()
         service = await build_service(session_factory, state_manager)
         account = await service.create_account(
-            PaperAccountCreateRequest(starting_balance=Decimal("100000"))
+            PaperAccountCreateRequest(
+                starting_balance=Decimal("100000"), max_leverage=Decimal("10")
+            )
         )
         await enable_strategy(
             service,
             uuid.UUID(account.id),
             directional_job_id,
-            default_stop_loss_pct=Decimal("15"),
+            default_stop_loss_pct=Decimal("8"),
             volatility_training_job_id=uuid.UUID(volatility_job_id),
-            leverage=Decimal("5"),
+            leverage=Decimal("10"),
         )
         stub_predictions_by_job(
             monkeypatch,
@@ -1636,23 +1657,40 @@ class TestVolatilityStopWidth:
 
         scheduler = PaperTradingStrategyScheduler(state_manager=state_manager)
         summary = await scheduler.run_strategy_tick()
-        assert summary.opened == 0
-        assert summary.no_action == 1
+        assert summary.opened == 1
+        assert summary.no_action == 0
 
-        positions = await service.list_positions(uuid.UUID(account.id))
-        assert positions.positions == []
+        position = (await service.list_positions(uuid.UUID(account.id))).positions[0]
+        assert float(position.leverage) == pytest.approx(10 * (2 / 3), rel=1e-9)
 
-        decision = (
-            await service.list_strategy_decisions(uuid.UUID(account.id), limit=5, offset=0)
-        ).decisions[0]
-        assert decision.action == "no_action"
-        assert "rejected" in decision.reason.lower()
-        assert "liquidat" in decision.reason.lower()
+    async def test_place_order_still_rejects_a_stop_beyond_liquidation_at_an_expected_leverage(
+        self, session_factory: SessionFactory
+    ) -> None:
+        """A direct, non-volatility-scaled proof that `place_order`'s new
+        `expected_leverage` parameter (added for VOLATILITY-POSITION-SIZING)
+        does not weaken the pre-existing liquidation check in any way — an
+        automated entry whose `expected_leverage` differs from the account's
+        raw `strategy_leverage` still has its stop-loss checked against
+        *that* leverage's own real liquidation distance. At 20x on a $2000
+        entry, the real liquidation price is ~$1904.76; a $1900 stop sits
+        beyond it, exactly mirroring
+        `TestAutomatedCaller::test_a_stop_loss_beyond_the_liquidation_price_is_rejected`'s
+        own already-proven scenario at 10x, just at an expected, not the
+        account's raw, leverage."""
+        env = await make_env(session_factory, "STRATLIQDIRECTUSD", max_leverage="20")
+        with pytest.raises(StopBeyondLiquidationError):
+            await env.automated(
+                "buy",
+                "1",
+                leverage=Decimal("20"),
+                stop_loss_price=Decimal("1900"),
+                expected_leverage=Decimal("20"),
+            )
 
     async def test_a_manual_order_stop_loss_is_never_scaled_or_overridden(
         self, session_factory: SessionFactory
     ) -> None:
-        """`_resolve_stop_loss_pct` is only ever called from
+        """`_resolve_volatility_adjustment` is only ever called from
         `PaperTradingStrategyScheduler._open_position` — a manual order's
         own human-supplied `stop_loss_price` goes straight through
         `PaperTradingService.place_order`'s ordinary manual path, which
@@ -1689,6 +1727,329 @@ class TestVolatilityStopWidth:
         position = (await service.list_positions(account_id)).positions[0]
         assert position.stop_loss_price is not None
         assert float(position.stop_loss_price) == 900.0
+
+
+@pytest.mark.asyncio
+class TestVolatilityPositionSizing:
+    """VOLATILITY-POSITION-SIZING (Option A): the same
+    `strategy_volatility_training_job_id` forecast VOLATILITY-STOP-WIDTH
+    already scales stop-loss width from also scales target position size
+    and `strategy_leverage`, from one shared fetch
+    (`_resolve_volatility_adjustment`) — down ahead of 'expand', up (bounded
+    by the account's own existing `max_position_size_pct`/`max_leverage`,
+    never `max_exposure_pct`) ahead of 'contract'. Every fail-closed gate
+    (missing job, wrong model type, wrong symbol, unavailable forecast,
+    drifted forecast, a non-expand/contract label) is already proven once
+    for all three scaled values together by `TestVolatilityStopWidth`'s own
+    tests, since they share one gate; this class covers what's specific to
+    size/leverage: the scaling direction and magnitude, the cap, the cost
+    -asymmetry log line, and that `max_exposure_pct` is never touched at
+    all.
+    """
+
+    _VOLATILITY_TARGET_CONFIG: list[dict[str, object]] = [
+        {"target": "volatility_regime", "params": {"window_hours": "5"}}
+    ]
+
+    async def test_shrinks_position_size_and_leverage_on_an_expand_forecast(
+        self, session_factory: SessionFactory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        symbol = "STRATVOLSIZEEXPANDUSD"
+        directional_job_id, _ = await train_completed_job(
+            session_factory, symbol=symbol, model_type="logistic_regression"
+        )
+        volatility_job_id = await train_second_job_on_existing_symbol(
+            session_factory,
+            symbol=symbol,
+            model_type="logistic_regression",
+            target_config=self._VOLATILITY_TARGET_CONFIG,
+        )
+        state_manager = MarketStateManager()
+        service = await build_service(session_factory, state_manager)
+        account = await service.create_account(
+            PaperAccountCreateRequest(
+                starting_balance=Decimal("100000"), max_leverage=Decimal("5")
+            )
+        )
+        await enable_strategy(
+            service,
+            uuid.UUID(account.id),
+            directional_job_id,
+            default_stop_loss_pct=Decimal("5"),
+            volatility_training_job_id=uuid.UUID(volatility_job_id),
+            leverage=Decimal("3"),
+        )
+        stub_predictions_by_job(
+            monkeypatch,
+            {
+                directional_job_id: build_prediction(
+                    training_job_id=directional_job_id,
+                    symbol=symbol,
+                    predicted_value="up",
+                    confidence=0.9,
+                ),
+                volatility_job_id: build_prediction(
+                    training_job_id=volatility_job_id,
+                    symbol=symbol,
+                    predicted_value="expand",
+                    confidence=0.6,
+                ),
+            },
+        )
+
+        scheduler = PaperTradingStrategyScheduler(state_manager=state_manager)
+        summary = await scheduler.run_strategy_tick()
+        assert summary.opened == 1
+
+        position = (await service.list_positions(uuid.UUID(account.id))).positions[0]
+        # leverage: 3 * 2/3 = 2 exactly.
+        assert float(position.leverage) == pytest.approx(2.0, rel=1e-9)
+        order = (
+            await service.list_orders(
+                uuid.UUID(account.id), sort="created_at", direction="desc", limit=5, offset=0
+            )
+        ).orders[0]
+        # target_pct: max_position_size_pct (default) * 0.5 * 2/3 -- smaller
+        # than the unscaled 0.5 fraction would have sized.
+        default_target_pct = Decimal(account.max_position_size_pct) * Decimal("0.5")
+        unscaled_quantity = (Decimal("100000") * default_target_pct / 100) / order.raw_price
+        assert float(order.quantity) < float(unscaled_quantity)
+
+        decision = (
+            await service.list_strategy_decisions(uuid.UUID(account.id), limit=5, offset=0)
+        ).decisions[0]
+        assert "sized down" in decision.reason.lower()
+
+    async def test_grows_leverage_on_a_contract_forecast_bounded_by_max_leverage(
+        self, session_factory: SessionFactory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`strategy_leverage=5` scaled by the grow factor (4/3) would be
+        ~6.667x -- but `max_leverage=6` caps it at exactly 6, proving the
+        design doc's own "never past max_leverage" requirement actually
+        binds, not just that scaling "up" happens."""
+        symbol = "STRATVOLSIZECONTRACTUSD"
+        directional_job_id, _ = await train_completed_job(
+            session_factory, symbol=symbol, model_type="logistic_regression"
+        )
+        volatility_job_id = await train_second_job_on_existing_symbol(
+            session_factory,
+            symbol=symbol,
+            model_type="logistic_regression",
+            target_config=self._VOLATILITY_TARGET_CONFIG,
+        )
+        state_manager = MarketStateManager()
+        service = await build_service(session_factory, state_manager)
+        account = await service.create_account(
+            PaperAccountCreateRequest(
+                starting_balance=Decimal("100000"), max_leverage=Decimal("6")
+            )
+        )
+        await enable_strategy(
+            service,
+            uuid.UUID(account.id),
+            directional_job_id,
+            default_stop_loss_pct=Decimal("1"),
+            volatility_training_job_id=uuid.UUID(volatility_job_id),
+            leverage=Decimal("5"),
+        )
+        stub_predictions_by_job(
+            monkeypatch,
+            {
+                directional_job_id: build_prediction(
+                    training_job_id=directional_job_id,
+                    symbol=symbol,
+                    predicted_value="up",
+                    confidence=0.9,
+                ),
+                volatility_job_id: build_prediction(
+                    training_job_id=volatility_job_id,
+                    symbol=symbol,
+                    predicted_value="contract",
+                    confidence=0.6,
+                ),
+            },
+        )
+
+        scheduler = PaperTradingStrategyScheduler(state_manager=state_manager)
+        summary = await scheduler.run_strategy_tick()
+        assert summary.opened == 1
+
+        position = (await service.list_positions(uuid.UUID(account.id))).positions[0]
+        # Unbounded would be 5 * 4/3 = 6.667x; capped at max_leverage=6.
+        assert float(position.leverage) == pytest.approx(6.0, rel=1e-9)
+
+        order = (
+            await service.list_orders(
+                uuid.UUID(account.id), sort="created_at", direction="desc", limit=5, offset=0
+            )
+        ).orders[0]
+        # target_pct is also scaled up, and stays within max_position_size_pct
+        # -- the same "never past the existing cap" requirement, checked for
+        # size too (structurally non-binding at today's 0.5 base fraction and
+        # 4/3 grow factor, since 0.5 * 4/3 = 2/3 < 1, but asserted directly
+        # rather than assumed).
+        max_position_size_pct = Decimal(account.max_position_size_pct)
+        default_target_pct = max_position_size_pct * Decimal("0.5")
+        unscaled_quantity = (Decimal("100000") * default_target_pct / 100) / order.raw_price
+        assert float(order.quantity) > float(unscaled_quantity)
+        scaled_target_pct = order.quantity * order.raw_price * 100 / Decimal("100000")
+        assert scaled_target_pct <= max_position_size_pct
+
+        decision = (
+            await service.list_strategy_decisions(uuid.UUID(account.id), limit=5, offset=0)
+        ).decisions[0]
+        assert "sized up" in decision.reason.lower()
+        assert "contract" in decision.reason.lower()
+
+    async def test_a_drifted_volatility_forecast_leaves_size_and_leverage_unscaled(
+        self, session_factory: SessionFactory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The identical drift-fallback shape VOLATILITY-STOP-WIDTH already
+        proved for stop-loss width (`TestVolatilityStopWidth
+        ::test_a_drifted_volatility_forecast_falls_back_to_the_fixed_default_width`),
+        checked here explicitly for size/leverage: both stay at the
+        account's own unscaled defaults, never the drifted forecast's
+        'expand' call."""
+        symbol = "STRATVOLSIZEDRIFTUSD"
+        directional_job_id, _ = await train_completed_job(
+            session_factory, symbol=symbol, model_type="logistic_regression"
+        )
+        volatility_job_id = await train_second_job_on_existing_symbol(
+            session_factory,
+            symbol=symbol,
+            model_type="logistic_regression",
+            target_config=self._VOLATILITY_TARGET_CONFIG,
+        )
+        state_manager = MarketStateManager()
+        service = await build_service(session_factory, state_manager)
+        account = await service.create_account(
+            PaperAccountCreateRequest(starting_balance=Decimal("100000"))
+        )
+        await enable_strategy(
+            service,
+            uuid.UUID(account.id),
+            directional_job_id,
+            default_stop_loss_pct=Decimal("5"),
+            volatility_training_job_id=uuid.UUID(volatility_job_id),
+            leverage=Decimal("3"),
+        )
+        stub_predictions_by_job(
+            monkeypatch,
+            {
+                directional_job_id: build_prediction(
+                    training_job_id=directional_job_id,
+                    symbol=symbol,
+                    predicted_value="up",
+                    confidence=0.9,
+                ),
+                volatility_job_id: build_prediction(
+                    training_job_id=volatility_job_id,
+                    symbol=symbol,
+                    predicted_value="expand",
+                    confidence=0.6,
+                    feature_drift_status="drifted",
+                    feature_drift_worst_feature="close",
+                    feature_drift_worst_z=-12.0,
+                ),
+            },
+        )
+
+        scheduler = PaperTradingStrategyScheduler(state_manager=state_manager)
+        summary = await scheduler.run_strategy_tick()
+        assert summary.opened == 1
+
+        position = (await service.list_positions(uuid.UUID(account.id))).positions[0]
+        assert float(position.leverage) == pytest.approx(3.0, rel=1e-9)
+        order = (
+            await service.list_orders(
+                uuid.UUID(account.id), sort="created_at", direction="desc", limit=5, offset=0
+            )
+        ).orders[0]
+        default_target_pct = Decimal(account.max_position_size_pct) * Decimal("0.5")
+        expected_quantity = (Decimal("100000") * default_target_pct / 100) / order.raw_price
+        assert float(order.quantity) == pytest.approx(float(expected_quantity), rel=1e-9)
+
+    async def test_cost_asymmetry_is_logged_when_leverage_scales_up(
+        self, session_factory: SessionFactory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """VOLATILITY_RISK_SIZING_DESIGN.md Step 3's own named complication:
+        leverage amplifies the fixed round-trip transaction cost as much as
+        it amplifies exposure, so scaling it up must be visible in the
+        decision log, not left implicit in a bare leverage number."""
+        symbol = "STRATVOLCOSTUSD"
+        directional_job_id, _ = await train_completed_job(
+            session_factory, symbol=symbol, model_type="logistic_regression"
+        )
+        volatility_job_id = await train_second_job_on_existing_symbol(
+            session_factory,
+            symbol=symbol,
+            model_type="logistic_regression",
+            target_config=self._VOLATILITY_TARGET_CONFIG,
+        )
+        state_manager = MarketStateManager()
+        service = await build_service(session_factory, state_manager)
+        account = await service.create_account(
+            PaperAccountCreateRequest(starting_balance=Decimal("100000"))
+        )
+        await enable_strategy(
+            service,
+            uuid.UUID(account.id),
+            directional_job_id,
+            default_stop_loss_pct=Decimal("1"),
+            volatility_training_job_id=uuid.UUID(volatility_job_id),
+            leverage=Decimal("2"),
+        )
+        stub_predictions_by_job(
+            monkeypatch,
+            {
+                directional_job_id: build_prediction(
+                    training_job_id=directional_job_id,
+                    symbol=symbol,
+                    predicted_value="up",
+                    confidence=0.9,
+                ),
+                volatility_job_id: build_prediction(
+                    training_job_id=volatility_job_id,
+                    symbol=symbol,
+                    predicted_value="contract",
+                    confidence=0.6,
+                ),
+            },
+        )
+
+        scheduler = PaperTradingStrategyScheduler(state_manager=state_manager)
+        summary = await scheduler.run_strategy_tick()
+        assert summary.opened == 1
+
+        position = (await service.list_positions(uuid.UUID(account.id))).positions[0]
+        assert float(position.leverage) == pytest.approx(2 * (4 / 3), rel=1e-9)
+
+        decision = (
+            await service.list_strategy_decisions(uuid.UUID(account.id), limit=5, offset=0)
+        ).decisions[0]
+        assert "round-trip" in decision.reason.lower()
+        assert "transaction cost" in decision.reason.lower()
+
+    def test_max_exposure_pct_is_never_referenced_by_the_volatility_adjustment(self) -> None:
+        """Static, grep-verifiable proof of
+        `VOLATILITY_RISK_SIZING_DESIGN.md`'s own explicit requirement: this
+        feature scales size/leverage within the account's *existing* caps,
+        and never touches `max_exposure_pct` — D7's own real exposure
+        ceiling — at all."""
+        import ast
+        from pathlib import Path
+
+        source = Path(strategy_module.__file__).read_text()
+        tree = ast.parse(source)
+        (function,) = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.AsyncFunctionDef)
+            and node.name == "_resolve_volatility_adjustment"
+        ]
+        names = {n.id for n in ast.walk(function) if isinstance(n, ast.Name)}
+        attrs = {n.attr for n in ast.walk(function) if isinstance(n, ast.Attribute)}
+        assert not any("max_exposure" in x for x in names | attrs)
 
 
 @pytest.mark.asyncio
@@ -2374,11 +2735,34 @@ class TestLeverageIsFixedNeverDerivedFromConfidence:
                     if keyword.arg == "leverage" and keyword.value is not None:
                         leverage_values.append(keyword.value)
         assert leverage_values, "expected the strategy to pass leverage to its orders"
+        # Every `leverage=` value must trace back to `strategy_leverage`
+        # (the account's own raw setting) or a fixed multiple of it --
+        # VOLATILITY-POSITION-SIZING's own `_resolve_volatility_adjustment`
+        # scales it by exactly one of two module-level constants
+        # (`_VOLATILITY_SIZE_SHRINK_FACTOR`/`_VOLATILITY_SIZE_GROW_FACTOR`),
+        # gated on a separate, validated forecast -- never a value read
+        # from a prediction's own confidence or magnitude. Deliberately an
+        # explicit, narrow allowlist rather than "anything that isn't
+        # confidence", so an unexpected new name still fails loudly.
+        allowed_names = {
+            "strategy_leverage",
+            "default_leverage",
+            "scaled_leverage",
+            "adjustment",
+            "_VOLATILITY_SIZE_SHRINK_FACTOR",
+            "_VOLATILITY_SIZE_GROW_FACTOR",
+            "Decimal",
+            "max",
+            "min",
+        }
+        allowed_attrs = {"leverage"}
         for value in leverage_values:
             names = {n.id for n in ast.walk(value) if isinstance(n, ast.Name)}
             attrs = {n.attr for n in ast.walk(value) if isinstance(n, ast.Attribute)}
-            assert names == {"strategy_leverage"}, ast.dump(value)
+            assert names <= allowed_names, ast.dump(value)
+            assert attrs <= allowed_attrs, ast.dump(value)
             assert not any("confidence" in name for name in names | attrs)
+            assert not any("prediction" in name for name in names | attrs)
 
         # ...and that name is assigned from the account's setting alone.
         assignments = [

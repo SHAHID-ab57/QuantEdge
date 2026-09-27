@@ -3778,11 +3778,12 @@ Every gate below is **fail-closed to the unscaled
 widens an entry that was already going to happen, on a side that was
 already decided; it never changes _whether_ a cycle trades or _which_
 direction, and it never guesses or silently continues on a reading that
-can't be trusted (`PaperTradingStrategyScheduler._resolve_stop_loss_pct`,
+can't be trusted (`PaperTradingStrategyScheduler._resolve_volatility_adjustment`,
 called only from `_open_position`, only at position-open time — refreshing
 an already-open position's own stop on a later tick is a possible future
-extension, not built here, matching this feature's own deliberately
-smaller blast radius relative to Option A):
+extension, not built here). Since VOLATILITY-POSITION-SIZING ("Option A",
+below), this same method also resolves position-size/leverage scaling
+from the identical forecast fetch — one fetch, not two:
 
 - **Wrong model lineage.** The configured job must be `logistic_regression`
   specifically — the one model class VERIFY-VOLATILITY-FEATURE's five
@@ -3812,25 +3813,101 @@ smaller blast radius relative to Option A):
   exact same `StopBeyondLiquidationError` check — every automated
   stop-loss already goes through; a widened stop that now sits beyond the
   position's liquidation price is rejected (`no_action`, the entry never
-  placed), never silently placed anyway
-  (`test_a_widened_stop_that_would_cross_liquidation_is_rejected_not_placed`).
-- **Never a manual order.** `_resolve_stop_loss_pct` is reachable only
-  from the strategy scheduler's own `_open_position`; a manual order's
-  human-supplied `stop_loss_price`/`take_profit_price` goes straight
-  through `place_order`'s ordinary manual path and is never touched, an
-  account's volatility job configuration notwithstanding
+  placed), never silently placed anyway. **Real, checked interaction with
+  Option A**: since Option A scales leverage _down_ on the identical
+  "expand" signal that widens the stop, the combined effect is safer than
+  Option B alone ever was — a lower leverage means a farther liquidation
+  distance, verified algebraically to always outpace the stop's own 1.5×
+  widening for every leverage tested, 1x–100x
+  (`test_expand_scaling_leverage_down_keeps_the_widened_stop_inside_liquidation`,
+  which replaced an earlier version of this same test written before
+  Option A existed and could still force a rejection at 5x). The
+  liquidation check itself is unweakened — proven directly, independent of
+  the two multipliers' own interaction, by placing an order at a
+  volatility-scaled `expected_leverage` chosen to genuinely cross
+  liquidation
+  (`test_place_order_still_rejects_a_stop_beyond_liquidation_at_an_expected_leverage`).
+- **Never a manual order.** `_resolve_volatility_adjustment` is reachable
+  only from the strategy scheduler's own `_open_position`; a manual
+  order's human-supplied `stop_loss_price`/`take_profit_price`/`leverage`
+  goes straight through `place_order`'s ordinary manual path and is never
+  touched, an account's volatility job configuration notwithstanding
   (`test_a_manual_order_stop_loss_is_never_scaled_or_overridden`).
 
 **The boundary-preserving proof, not just a paragraph.**
-`test_direction_and_whether_to_trade_are_unaffected_only_width_differs`
+`test_direction_and_whether_to_trade_are_unaffected_size_and_width_differ`
 runs two accounts — identical in every respect except one has a
 volatility job configured — through the very same tick against the very
-same directional signal, and asserts the resulting positions' side,
-symbol, quantity and leverage are identical while only the stop-loss
-price differs. This is `docs/research/VOLATILITY_RISK_SIZING_DESIGN.md`'s
-own central claim about why Option B doesn't reopen D1 (leverage/direction
-must never be derived from a discredited confidence signal) — checked
-here directly, not merely asserted in a document.
+same directional signal, and asserts the resulting positions' side and
+symbol are identical while quantity, leverage, and stop-loss price all
+differ (deliberately — VOLATILITY-POSITION-SIZING's own point) and the
+decision log's own direction/action/predicted_value match exactly. This is
+`docs/research/VOLATILITY_RISK_SIZING_DESIGN.md`'s own central claim about
+why neither option reopens D1 (leverage/direction must never be derived
+from a discredited confidence signal) — checked here directly, not merely
+asserted in a document. (Before Option A existed, this same test asserted
+quantity/leverage stayed identical too — updated deliberately, not by
+oversight, once scaling them became the point.)
+
+**Volatility-Scaled Position Size and Leverage
+(VOLATILITY-POSITION-SIZING, "Option A").** The identical forecast fetch
+above also scales the target position-size fraction and `strategy_leverage`
+together, smaller ahead of `"expand"`, larger ahead of `"contract"` —
+`app.services.paper_trading_strategy.VolatilityAdjustment`, returned by
+`_resolve_volatility_adjustment` alongside the stop-loss width. **Chosen as
+the exact reciprocal of Option B's own already-validated multipliers**
+(`_VOLATILITY_SIZE_SHRINK_FACTOR = 2/3`, the reciprocal of `1.5`;
+`_VOLATILITY_SIZE_GROW_FACTOR = 4/3`, the reciprocal of `0.75`) rather than
+a second, independently-chosen pair — one coherent model: if the stop needs
+to be `W` times wider to accommodate the forecast range, sizing down by
+`1/W` keeps the expected dollar-risk on a stop-out roughly constant instead
+of widening it right when volatility is already forecast to expand. Both
+values are independently capped by the account's own existing
+`max_position_size_pct`/`max_leverage` when scaled up — **never
+`max_exposure_pct`**, D7's own real exposure ceiling, which this feature
+cannot touch at all by construction (`VolatilityAdjustment`/
+`_resolve_volatility_adjustment` never reference it, a static
+grep-verifiable fact, not merely a stated intention —
+`test_max_exposure_pct_is_never_referenced_by_the_volatility_adjustment`).
+The leverage cap genuinely binds in practice
+(`test_grows_leverage_on_a_contract_forecast_bounded_by_max_leverage`: a
+configured 5x scaled toward 6.667x is capped at a 6x `max_leverage`); the
+position-size cap is structurally non-binding at today's constants (a 0.5
+base fraction × 4/3 grow factor = 2/3 < 1, always under the cap regardless
+of the account's own `max_position_size_pct` value) but is still asserted
+directly, not assumed, matching the design doc's own explicit requirement
+regardless of whether it happens to bind today.
+
+**A leverage-scaled automated order needed a real, minimal safety-check
+change, not a workaround.** `PaperTradingService._enforce_automated_restrictions`
+required an automated entry's leverage to equal _exactly_
+`account.strategy_leverage` — a deliberate invariant (leverage is "never
+something the caller worked out from a prediction") that predates this
+feature and would otherwise hard-block it outright. `place_order` gained
+one new, optional parameter, `expected_leverage`: `None` (the default,
+every existing caller unaffected) checks against the account's raw
+`strategy_leverage` exactly as before; when the strategy scheduler supplies
+it, the check validates against that specific, already-gated, already-capped
+value instead — never a value read directly from a prediction's own
+confidence or magnitude, only ever `strategy_leverage` times one of the two
+fixed constants above. The syntax-level scan that already proved leverage
+is never confidence-derived
+(`TestLeverageIsFixedNeverDerivedFromConfidence
+::test_the_strategy_module_takes_leverage_from_the_account_setting_and_nothing_else`)
+was extended to an explicit, narrow allowlist of the legitimate new
+vocabulary (`default_leverage`, `scaled_leverage`, `adjustment.leverage`,
+the two named constants) rather than loosened generally — an unexpected
+new name in a `leverage=` expression still fails the test.
+
+**The cost asymmetry named in the design doc is logged, not left
+implicit.** Scaling leverage up ahead of a `"contract"` forecast increases
+the fixed ~0.30%-of-notional round-trip transaction cost (D1's own
+measurement) on every trade taken during that window — `_resolve_volatility_adjustment`
+appends this explicitly to the decision-log reason whenever the scaled
+leverage exceeds the account's own configured value
+(`test_cost_asymmetry_is_logged_when_leverage_scales_up`), so the tradeoff
+is visible in `GET .../strategy/decisions`, not just inferable from a bare
+leverage number after the fact.
 
 **"Just another caller," proven, not merely asserted.**
 `TestSharesExistingRiskLimits::test_a_strategy_order_that_would_breach_max_exposure_is_rejected`

@@ -66,11 +66,14 @@ for the schema side of this):
   raised. This can only ever flip `False -> True` here.
 
 **Automated caller.** `user_id is None` is this method's own contract for
-"the automated strategy" (a human caller always has one). An automated order
-is refused anything but opening/adding to an unleveraged long or reducing a
-long (`_enforce_automated_restrictions`), so the strategy — which this
-module never lets know about shorts or leverage — cannot reach either, even
-when it shares an account with a manually opened short.
+"the automated strategy" (a human caller always has one). An automated
+order is refused anything but opening or closing (never adding to) a
+position, and an entry must use exactly the account's fixed
+`strategy_leverage` — or, since VOLATILITY-POSITION-SIZING, the specific
+volatility-scaled leverage the strategy itself computed for this cycle via
+`expected_leverage` (`_enforce_automated_restrictions`); it is never a
+value derived from anything else, including the directional prediction's
+own confidence.
 
 **Concurrency**: the whole read-check-write sequence above is guarded by
 `PaperAccountRepository.try_apply_trade_effects`, an atomic
@@ -283,10 +286,13 @@ class PaperTradingService:
         self.default_strategy_default_stop_loss_pct = default_strategy_default_stop_loss_pct
         # Margin/leverage configuration is optional on purpose: the automated
         # strategy builds its own service without ever naming any of it, and
-        # must keep working unchanged (see `_enforce_automated_restrictions`
-        # for why it can never reach leverage regardless of these values).
-        # `maintenance_margin_rate` is a fraction (0.0025 = 0.25%), the form
-        # `app.paper_trading.margin` takes.
+        # must keep working unchanged. The strategy does reach leverage (its
+        # own fixed `strategy_leverage`, or a volatility-scaled variant of it
+        # since VOLATILITY-POSITION-SIZING) — but only ever a value
+        # `_enforce_automated_restrictions` independently validates, never
+        # anything derived from these defaults or from a prediction's own
+        # confidence. `maintenance_margin_rate` is a fraction (0.0025 =
+        # 0.25%), the form `app.paper_trading.margin` takes.
         self.default_max_leverage = default_max_leverage
         self.maintenance_margin_rate = maintenance_margin_rate
         self.max_leverage_notional = max_leverage_notional
@@ -386,6 +392,7 @@ class PaperTradingService:
         *,
         user_id: uuid.UUID | None = None,
         automated: bool = False,
+        expected_leverage: Decimal | None = None,
     ) -> PaperOrderResponse:
         """Fill one market order immediately, completely, and realistically
         — guarded by pre-trade risk checks, with a drawdown/halt check
@@ -432,9 +439,15 @@ class PaperTradingService:
 
         `automated=True` is the strategy's own explicit declaration (nothing
         is inferred from a missing `user_id`), and subjects the order to
-        `_enforce_automated_restrictions`: an entry must use the account's
-        fixed `strategy_leverage` and carry a stop-loss, and an automated
-        order never adds to a position.
+        `_enforce_automated_restrictions`: an entry must carry a stop-loss,
+        an automated order never adds to a position, and an entry's own
+        leverage must match `expected_leverage` exactly — the account's raw
+        `strategy_leverage` when omitted (`None`), or, since
+        VOLATILITY-POSITION-SIZING, the volatility-scaled leverage the
+        strategy computed for this cycle (`PaperTradingStrategyScheduler
+        ._resolve_volatility_adjustment`) when given. `expected_leverage` is
+        ignored for a manual order (`user_id` given) — a human's own
+        `leverage` is never second-guessed against anything.
 
         **Exactly one of `user_id` and `automated=True` must be given.** An
         order that names neither would otherwise be treated as manual and
@@ -480,7 +493,11 @@ class PaperTradingService:
                 self._enforce_automated_restrictions(
                     request=request,
                     kind=kind,
-                    strategy_leverage=Decimal(account.strategy_leverage),
+                    strategy_leverage=(
+                        expected_leverage
+                        if expected_leverage is not None
+                        else Decimal(account.strategy_leverage)
+                    ),
                 )
             thresholds_named = (
                 request.stop_loss_price is not None or request.take_profit_price is not None
@@ -1713,11 +1730,20 @@ class PaperTradingService:
 
         - It **opens** a position (long or short) or **closes** one. It never
           adds to one, which its own logic never does either.
-        - An entry must use **exactly the account's `strategy_leverage`**: the
-          single fixed number this feature allows, never anything else, and
-          never something the caller worked out from a prediction. A request
-          that names no leverage means 1x and is refused unless 1x is what is
-          configured.
+        - An entry must use **exactly `strategy_leverage`** (this parameter):
+          `place_order` resolves that to either the account's raw, human-set
+          `strategy_leverage` field, or — since VOLATILITY-POSITION-SIZING —
+          the specific volatility-scaled leverage the caller names via its
+          own `expected_leverage` argument. Either way, this function never
+          computes or trusts a leverage value itself; it only ever checks the
+          request against whichever single number `place_order` already
+          decided is the one legitimate value for this cycle, so leverage is
+          never something the caller can freely choose, only ever one of
+          exactly two well-defined values: fixed, or fixed times one of two
+          fixed, documented multipliers gated on a specific, validated model
+          — never a value read directly off a prediction's own confidence or
+          magnitude. A request that names no leverage means 1x and is
+          refused unless 1x is what is expected.
         - An entry must carry a **stop-loss**. The strategy always passes one;
           this makes it non-optional at the shared path too, so an automated
           position without a stop-loss cannot be created by any caller.

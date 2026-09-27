@@ -86,31 +86,39 @@ likely be almost always short. That is the model's own measured behaviour
 becoming visible, not something this module introduces; the decision log shows
 each cycle's direction so it can be seen and audited.
 
-**Stop-loss width can be volatility-scaled, but direction never is
-(VOLATILITY-STOP-WIDTH, "Option B").** An account may optionally set
+**Stop-loss width, position size, and leverage can all be volatility-scaled,
+but direction never is (VOLATILITY-STOP-WIDTH "Option B" + VOLATILITY-
+POSITION-SIZING "Option A").** An account may optionally set
 `PaperAccount.strategy_volatility_training_job_id` to a *second*,
 `logistic_regression`-trained job — a distinct model lineage from the one
 above that decides direction — whose fresh `volatility_regime` forecast for
-the same symbol scales `strategy_default_stop_loss_pct` on a new entry:
-wider ahead of a forecast "expand", tighter ahead of "contract"
-(`_resolve_stop_loss_pct`, called only from `_open_position`). This is
-**stop-loss width only, at position-open time only** — it never touches
-position sizing, leverage, or which side is opened (those stay exactly as
-decided above, unconditionally), and it never revisits an already-open
-position's stop on a later tick; refreshing an open position's width is a
-possible future extension, not built here, matching this feature's own
-smaller-blast-radius scope (`docs/research/VOLATILITY_RISK_SIZING_DESIGN.md`).
-Every gate is fail-closed to the unscaled `strategy_default_stop_loss_pct`
-— wrong model lineage, wrong symbol, no forecast, or the forecast's own
-inputs reported drifted all fall back rather than guess or continue on a
-reading that can't be trusted (`_resolve_stop_loss_pct`'s own docstring has
-the full list). The resulting price is still passed through the identical
-`trading_service.place_order` call as every other automated stop-loss, so
-it is still rejected exactly as before if it would sit beyond the
-position's own liquidation price. Unset (`None`, the default for every
-existing account) behaves exactly as before this feature existed. Never
-applies to a manual order — this module is the only caller that can ever
-set an automated entry's stop-loss from a forecast at all.
+the same symbol scales, together, on a new entry: `strategy_default_stop_loss_pct`
+(wider ahead of "expand", tighter ahead of "contract"), the target position
+size, and `strategy_leverage` (smaller ahead of "expand", larger — never past
+the account's own `max_position_size_pct`/`max_leverage`, never touching
+`max_exposure_pct` — ahead of "contract"), all three from one shared forecast
+fetch (`_resolve_volatility_adjustment`, called only from `_open_position`).
+This is **at position-open time only** — it never touches which side is
+opened (that stays exactly as decided above, unconditionally), and it never
+revisits an already-open position's stop/size/leverage on a later tick;
+refreshing one is a possible future extension, not built here, matching
+this feature's own smaller-blast-radius scope
+(`docs/research/VOLATILITY_RISK_SIZING_DESIGN.md`). Every gate is
+fail-closed to the unscaled defaults — wrong model lineage, wrong symbol, no
+forecast, or the forecast's own inputs reported drifted all fall back rather
+than guess or continue on a reading that can't be trusted
+(`_resolve_volatility_adjustment`'s own docstring has the full list). The
+resulting stop-loss price and leverage are still passed through the
+identical `trading_service.place_order` call as every other automated
+entry, so a stop is still rejected exactly as before if it would sit beyond
+the position's own liquidation price, and a leverage value is still checked
+against `max_leverage` exactly as before (`place_order`'s own
+`expected_leverage` parameter carries the scaled value through
+`_enforce_automated_restrictions` rather than assuming the account's raw
+`strategy_leverage`). Unset (`None`, the default for every existing
+account) behaves exactly as before either feature existed. Never applies to
+a manual order — this module is the only caller that can ever set an
+automated entry's stop-loss, size, or leverage from a forecast at all.
 
 Every one of these outcomes — including the ones that place no order —
 is persisted as exactly one `PaperStrategyDecision` row per
@@ -167,7 +175,7 @@ _TARGET_POSITION_SIZE_FRACTION = Decimal("0.5")
 #: to `strategy_default_stop_loss_pct` when the account's own configured
 #: `logistic_regression` volatility job forecasts a regime change for the
 #: symbol being traded, and that forecast is neither drift-gated nor
-#: unavailable — see `PaperTradingStrategyScheduler._resolve_stop_loss_pct`.
+#: unavailable — see `PaperTradingStrategyScheduler._resolve_volatility_adjustment`.
 #: `volatility_regime`'s own label is binary (will realized volatility
 #: expand or contract relative to the trailing window, with no magnitude),
 #: so the response is a modest, asymmetric adjustment — more protective
@@ -190,6 +198,39 @@ _TARGET_POSITION_SIZE_FRACTION = Decimal("0.5")
 #: stop, scaled or not.
 _VOLATILITY_WIDEN_FACTOR = Decimal("1.5")
 _VOLATILITY_TIGHTEN_FACTOR = Decimal("0.75")
+
+#: VOLATILITY-POSITION-SIZING (Option A): position-size/leverage scaling
+#: from the same forecast Option B already scales stop-loss width from —
+#: shrink both ahead of an "expand" forecast, grow both (capped by the
+#: account's own existing `max_position_size_pct`/`max_leverage` — never
+#: `max_exposure_pct`) ahead of a "contract" forecast. Deliberately the
+#: *exact reciprocal* of Option B's own already-validated multipliers
+#: (VOLATILITY-MULTIPLIER-CHECK: expand ratio median ~1.40-1.42, contract
+#: ratio median ~0.70-0.71 on real ETHUSD/1h and BTCUSD/1h history) rather
+#: than a second, independently-chosen pair of constants — one coherent
+#: model: if the stop needs to be W times wider to accommodate the
+#: forecast range, sizing down by 1/W keeps the expected dollar-risk on a
+#: stop-out roughly constant instead of widening it right when volatility
+#: is already forecast to expand. Exact fractions (2/3, 4/3), not decimal
+#: approximations of 1/1.5 and 1/0.75.
+_VOLATILITY_SIZE_SHRINK_FACTOR = Decimal(2) / Decimal(3)
+_VOLATILITY_SIZE_GROW_FACTOR = Decimal(4) / Decimal(3)
+
+
+@dataclass(frozen=True)
+class VolatilityAdjustment:
+    """The stop-loss width, target position-size fraction, and leverage a
+    new automated entry should actually use this cycle — `default_*`
+    values unchanged when no scaling applies (no volatility job
+    configured, or any of `_resolve_volatility_adjustment`'s own fail-closed
+    gates triggered), scaled together from one shared forecast fetch
+    otherwise. `note` is an already `f"..."`-ready clause appended verbatim
+    to the decision-log reason, empty when unscaled."""
+
+    stop_loss_pct: Decimal
+    target_pct: Decimal
+    leverage: Decimal
+    note: str
 
 
 @dataclass(frozen=True)
@@ -504,61 +545,83 @@ class PaperTradingStrategyScheduler:
                 await log_no_action(reason=f"Cycle failed unexpectedly: {exc}")
             return "no_action"
 
-    async def _resolve_stop_loss_pct(
+    async def _resolve_volatility_adjustment(
         self,
         *,
         session: AsyncSession,
         account: PaperAccount,
         symbol: str,
         default_stop_loss_pct: Decimal,
-    ) -> tuple[Decimal, str]:
-        """A new automated entry's stop-loss width, as a fraction (e.g.
-        `Decimal("0.05")` for 5%) — `default_stop_loss_pct` scaled by a
-        fresh `volatility_regime` forecast when the account has opted in
-        (`strategy_volatility_training_job_id` set), or `default_stop_loss_pct`
-        unchanged for every other account, exactly as before this feature
-        existed.
+        default_target_pct: Decimal,
+        max_position_size_pct: Decimal,
+        default_leverage: Decimal,
+        max_leverage: Decimal,
+    ) -> VolatilityAdjustment:
+        """A new automated entry's stop-loss width, target position-size
+        fraction, and leverage — all three scaled together from one shared
+        `volatility_regime` forecast fetch when the account has opted in
+        (`strategy_volatility_training_job_id` set), or every `default_*`
+        value returned unchanged for every other account, exactly as before
+        either feature existed. One fetch, not two: Option A (size/leverage,
+        this method) and Option B (stop-loss width, its own prior name) read
+        the identical forecast rather than each independently calling the
+        prediction service — this cycle's per-account inference/DB cost is
+        the same as before Option A existed, not doubled.
 
         Every gate below is fail-**closed**: any way this can't produce a
-        trustworthy forecast for *this* symbol falls back to
-        `default_stop_loss_pct` rather than guessing, silently continuing on
-        a drifted reading, or raising and losing the entry entirely. This is
+        trustworthy forecast for *this* symbol returns every `default_*`
+        value unchanged rather than guessing, silently continuing on a
+        drifted reading, or raising and losing the entry entirely. This is
         strictly downstream of the direction/whether-to-trade decision
-        already made by the caller — it only ever changes the second return
-        value used to compute `stop_loss_price`, never whether an order is
-        placed or which side it's on (VOLATILITY-STOP-WIDTH's own
-        boundary-preserving requirement; see
+        already made by the caller — it only ever changes what
+        `_open_position` computes `quantity`/`stop_loss_price` from and what
+        leverage it requests, never whether an order is placed or which side
+        it's on (the identical boundary-preserving requirement
+        VOLATILITY-STOP-WIDTH already proved; see
         `tests/paper_trading/test_strategy_scheduler.py
-        ::TestVolatilityStopWidth::test_direction_and_whether_to_trade_are_unaffected`).
+        ::TestVolatilityStopWidth::test_direction_and_whether_to_trade_are_unaffected`,
+        extended by VOLATILITY-POSITION-SIZING's own equivalent test).
 
-        Returns `(stop_loss_pct, note)` — `note` is an empty string when
-        unscaled (nothing worth mentioning happened) or a short, already
-        `f"..."`-ready clause explaining what was applied/why not, appended
-        verbatim to this cycle's own decision-log reason so every scaled (or
-        skipped) width is visible in `GET .../strategy/decisions`, not just
-        inferable from the fill price after the fact.
+        `target_pct`/`leverage` are each independently bounded by
+        `max_position_size_pct`/`max_leverage` when scaled up — the account's
+        own existing ceilings, never `max_exposure_pct` itself, exactly
+        matching `VOLATILITY_RISK_SIZING_DESIGN.md`'s own explicit
+        requirement. `VolatilityAdjustment.note` is an already `f"..."`-ready
+        clause appended verbatim to this cycle's own decision-log reason so
+        every scaled (or skipped) value is visible in
+        `GET .../strategy/decisions`, not just inferable from the fill price
+        or the resulting position's own leverage after the fact.
         """
         volatility_job_id = account.strategy_volatility_training_job_id
+        unscaled = VolatilityAdjustment(
+            stop_loss_pct=default_stop_loss_pct,
+            target_pct=default_target_pct,
+            leverage=default_leverage,
+            note="",
+        )
         if volatility_job_id is None:
-            return default_stop_loss_pct, ""
+            return unscaled
+
+        def unscaled_with(note: str) -> VolatilityAdjustment:
+            return VolatilityAdjustment(
+                stop_loss_pct=default_stop_loss_pct,
+                target_pct=default_target_pct,
+                leverage=default_leverage,
+                note=note,
+            )
 
         job = await TrainingJobRepository(session).get_by_id(volatility_job_id)
         if job is None:
-            return (
-                default_stop_loss_pct,
-                " (volatility job no longer exists — unscaled default width used)",
-            )
+            return unscaled_with(" (volatility job no longer exists — unscaled defaults used)")
         if job.model_type != "logistic_regression":
-            return (
-                default_stop_loss_pct,
+            return unscaled_with(
                 f" (volatility job is {job.model_type!r}, not logistic_regression — unscaled "
-                "default width used)",
+                "defaults used)"
             )
         if job.symbol != symbol:
-            return (
-                default_stop_loss_pct,
-                f" (volatility job trades {job.symbol!r}, not {symbol!r} — unscaled default "
-                "width used)",
+            return unscaled_with(
+                f" (volatility job trades {job.symbol!r}, not {symbol!r} — unscaled defaults "
+                "used)"
             )
 
         prediction_service = get_prediction_service(session)
@@ -567,9 +630,8 @@ class PaperTradingStrategyScheduler:
                 PredictionRunRequest(training_job_id=volatility_job_id, symbol=symbol)
             )
         except Exception as exc:  # noqa: BLE001 - a failed forecast falls back, never blocks the entry
-            return (
-                default_stop_loss_pct,
-                f" (volatility forecast unavailable ({exc}) — unscaled default width used)",
+            return unscaled_with(
+                f" (volatility forecast unavailable ({exc}) — unscaled defaults used)"
             )
 
         # Checked before the forecast's own value is trusted at all — the
@@ -578,27 +640,43 @@ class PaperTradingStrategyScheduler:
         # output is not a reading to act on, however confident it claims to
         # be.
         if forecast.feature_drift_status == "drifted":
-            return (
-                default_stop_loss_pct,
+            return unscaled_with(
                 f" (volatility forecast's own inputs are drifted "
                 f"({forecast.feature_drift_worst_feature} "
-                f"z={forecast.feature_drift_worst_z:.2f}) — unscaled default width used)",
+                f"z={forecast.feature_drift_worst_z:.2f}) — unscaled defaults used)"
             )
 
         if forecast.predicted_value == "expand":
-            return (
-                default_stop_loss_pct * _VOLATILITY_WIDEN_FACTOR,
-                " (widened: volatility forecast 'expand')",
+            return VolatilityAdjustment(
+                stop_loss_pct=default_stop_loss_pct * _VOLATILITY_WIDEN_FACTOR,
+                target_pct=default_target_pct * _VOLATILITY_SIZE_SHRINK_FACTOR,
+                leverage=max(default_leverage * _VOLATILITY_SIZE_SHRINK_FACTOR, Decimal(1)),
+                note=" (widened stop / sized down: volatility forecast 'expand')",
             )
         if forecast.predicted_value == "contract":
-            return (
-                default_stop_loss_pct * _VOLATILITY_TIGHTEN_FACTOR,
-                " (tightened: volatility forecast 'contract')",
+            scaled_leverage = min(default_leverage * _VOLATILITY_SIZE_GROW_FACTOR, max_leverage)
+            note = " (tightened stop / sized up: volatility forecast 'contract'"
+            # D1's own already-named cost asymmetry (VOLATILITY_RISK_SIZING_DESIGN.md
+            # Step 3): leverage amplifies the fixed ~0.30%-of-notional round-trip
+            # cost as much as it amplifies exposure, so scaling it up is logged
+            # plainly, not left implicit in a bare leverage number.
+            if scaled_leverage > default_leverage:
+                note += (
+                    f"; leverage {default_leverage}x -> {scaled_leverage}x increases the fixed "
+                    "round-trip transaction cost on trades taken during this window"
+                )
+            note += ")"
+            return VolatilityAdjustment(
+                stop_loss_pct=default_stop_loss_pct * _VOLATILITY_TIGHTEN_FACTOR,
+                target_pct=min(
+                    default_target_pct * _VOLATILITY_SIZE_GROW_FACTOR, max_position_size_pct
+                ),
+                leverage=scaled_leverage,
+                note=note,
             )
-        return (
-            default_stop_loss_pct,
+        return unscaled_with(
             f" (volatility job predicted {forecast.predicted_value!r}, not an expand/contract "
-            "call — unscaled default width used)",
+            "call — unscaled defaults used)"
         )
 
     async def _open_position(
@@ -615,9 +693,15 @@ class PaperTradingStrategyScheduler:
         confidence_threshold_pct: Decimal,
     ) -> str:
         """Open a long (`direction="long"`, a buy) or a short (`"short"`, a
-        sell) at the account's fixed `strategy_leverage`, with a mandatory
-        stop-loss on the losing side of the resolved price."""
+        sell) at the account's fixed `strategy_leverage` (or a
+        volatility-scaled variant of it, VOLATILITY-POSITION-SIZING), with a
+        mandatory stop-loss on the losing side of the resolved price."""
         prediction_id = uuid.UUID(prediction.id)
+        # The account's own raw, human-set configuration -- snapshotted for
+        # the decision log exactly as every other field on it already is
+        # (`PaperStrategyDecision.strategy_leverage`'s own docstring: "never
+        # re-read from the possibly-since-changed account"), independent of
+        # whatever leverage this specific cycle actually trades at.
         strategy_leverage = Decimal(account.strategy_leverage)
         market = await MarketRepository(session).get_by_symbol(symbol)
         if market is None:
@@ -635,26 +719,31 @@ class PaperTradingStrategyScheduler:
                 reason = str(exc)
             else:
                 balance = Decimal(account.balance)
-                target_pct = Decimal(account.max_position_size_pct) * _TARGET_POSITION_SIZE_FRACTION
-                quantity = (balance * target_pct / Decimal(100)) / quote.price
+                max_position_size_pct = Decimal(account.max_position_size_pct)
+                default_target_pct = max_position_size_pct * _TARGET_POSITION_SIZE_FRACTION
+                default_stop_loss_pct = Decimal(account.strategy_default_stop_loss_pct) / (
+                    Decimal(100)
+                )
+                adjustment = await self._resolve_volatility_adjustment(
+                    session=session,
+                    account=account,
+                    symbol=symbol,
+                    default_stop_loss_pct=default_stop_loss_pct,
+                    default_target_pct=default_target_pct,
+                    max_position_size_pct=max_position_size_pct,
+                    default_leverage=strategy_leverage,
+                    max_leverage=Decimal(account.max_leverage),
+                )
+                quantity = (balance * adjustment.target_pct / Decimal(100)) / quote.price
                 if quantity <= 0:
                     reason = "Balance too small to size a new automated position."
                 else:
-                    default_stop_loss_pct = Decimal(account.strategy_default_stop_loss_pct) / (
-                        Decimal(100)
-                    )
-                    stop_loss_pct, volatility_note = await self._resolve_stop_loss_pct(
-                        session=session,
-                        account=account,
-                        symbol=symbol,
-                        default_stop_loss_pct=default_stop_loss_pct,
-                    )
                     # Mandatory, and on the losing side: below a long's entry,
                     # above a short's.
                     stop_loss_price = quote.price * (
-                        Decimal(1) - stop_loss_pct
+                        Decimal(1) - adjustment.stop_loss_pct
                         if direction == "long"
-                        else Decimal(1) + stop_loss_pct
+                        else Decimal(1) + adjustment.stop_loss_pct
                     )
                     try:
                         order = await trading_service.place_order(
@@ -663,10 +752,11 @@ class PaperTradingStrategyScheduler:
                                 symbol=symbol,
                                 side="buy" if direction == "long" else "sell",
                                 quantity=quantity,
-                                leverage=strategy_leverage,
+                                leverage=adjustment.leverage,
                                 stop_loss_price=stop_loss_price,
                             ),
                             automated=True,
+                            expected_leverage=adjustment.leverage,
                         )
                     except Exception as exc:  # noqa: BLE001 - rejection is a logged no_action
                         reason = f"Automated {direction} entry rejected: {exc}"
@@ -680,9 +770,9 @@ class PaperTradingStrategyScheduler:
                                 reason=f"Confidence {prediction.confidence:.2%} >= "
                                 f"{confidence_threshold_pct}% threshold; signal "
                                 f"'{prediction.predicted_value}' while flat — opened a "
-                                f"{direction} of {quantity} {symbol} at {strategy_leverage}x "
+                                f"{direction} of {quantity} {symbol} at {adjustment.leverage}x "
                                 f"leverage with a stop-loss at {stop_loss_price}"
-                                f"{volatility_note}.",
+                                f"{adjustment.note}.",
                                 predicted_value=prediction.predicted_value,
                                 confidence=prediction.confidence,
                                 confidence_threshold_pct=confidence_threshold_pct,

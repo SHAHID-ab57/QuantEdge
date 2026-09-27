@@ -86,9 +86,20 @@ class Env:
             user_id=self.user_id,
         )
 
-    async def automated(self, side: str, quantity: str, **extra: object) -> PaperOrderResponse:
+    async def automated(
+        self,
+        side: str,
+        quantity: str,
+        *,
+        expected_leverage: Decimal | None = None,
+        **extra: object,
+    ) -> PaperOrderResponse:
         """The same order, but as the automated strategy places it: no user, and
-        declared `automated=True`."""
+        declared `automated=True`. `expected_leverage` (VOLATILITY-POSITION-SIZING)
+        is a `place_order`-level argument, not a request field, so it is kept
+        out of `**extra`/`PaperOrderRequest` and forwarded separately -- omitted,
+        the automated-order leverage check falls back to the account's own raw
+        `strategy_leverage`, exactly as before this parameter existed."""
         return await self.service.place_order(
             self.account_id,
             PaperOrderRequest(
@@ -98,6 +109,7 @@ class Env:
                 **extra,  # type: ignore[arg-type]
             ),
             automated=True,
+            expected_leverage=expected_leverage,
         )
 
     async def price(self, value: str, symbol: str | None = None) -> None:
@@ -917,8 +929,8 @@ class TestOrderActorIsRequired:
         assert unclassified == []
         assert manual == ["api/v1/endpoints/paper_trading.py:327"]
         assert sorted(automated) == [
-            "services/paper_trading_strategy.py:660",
-            "services/paper_trading_strategy.py:735",
+            "services/paper_trading_strategy.py:749",
+            "services/paper_trading_strategy.py:825",
         ]
 
 

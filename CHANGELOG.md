@@ -8,6 +8,60 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Position-size and leverage scaling from the validated volatility
+  forecast (VOLATILITY-POSITION-SIZING, Option A).** Builds the other half
+  of `docs/research/VOLATILITY_RISK_SIZING_DESIGN.md` — VOLATILITY-STOP-WIDTH
+  (Option B) shipped first. The identical `strategy_volatility_training_job_id`
+  forecast now also scales a new automated entry's target position size and
+  `strategy_leverage` from one shared fetch
+  (`PaperTradingStrategyScheduler._resolve_volatility_adjustment`, replacing
+  the old stop-width-only `_resolve_stop_loss_pct`): smaller ahead of an
+  `"expand"` forecast, larger — never past the account's own
+  `max_position_size_pct`/`max_leverage`, never `max_exposure_pct` — ahead
+  of `"contract"`, using the exact reciprocal of Option B's own
+  already-validated multipliers (`2/3`, `4/3`) rather than a second,
+  independently-chosen pair: if the stop needs to be `W` times wider, sizing
+  down by `1/W` keeps expected dollar-risk roughly constant instead of
+  widening it right when volatility is already forecast to expand. Every
+  fail-closed gate from Option B (wrong model lineage, wrong symbol,
+  unavailable forecast, drifted forecast) now falls back all three values
+  together, not just stop width.
+  - **A real, minimal safety-check change, not a workaround**:
+    `PaperTradingService.place_order` gained an optional `expected_leverage`
+    parameter so `_enforce_automated_restrictions` can validate an
+    automated entry against a volatility-scaled leverage instead of always
+    requiring the account's raw `strategy_leverage` — `None` (every
+    existing caller) keeps prior behavior exactly. Leverage is still never
+    derived from anything but `strategy_leverage` times one of the two
+    fixed, documented constants, gated on a separate, validated model —
+    never from a prediction's own confidence or magnitude, the same
+    invariant this check always enforced.
+  - **A real interaction with Option B, found and verified, not assumed**:
+    since leverage now scales _down_ on the same "expand" signal that
+    widens the stop, the combined effect is safer than Option B alone —
+    algebraically verified (every leverage 1x–100x) that the resulting
+    liquidation-distance increase always outpaces the stop's own 1.5×
+    widening. The pre-existing liquidation-crossing test needed real,
+    load-bearing new numbers (10x base leverage, not 5x) to still
+    reproduce a genuine crossing after this change; a separate, direct test
+    proves the liquidation check itself is unweakened, independent of the
+    two multipliers' own interaction.
+  - The cost asymmetry the design doc named (leverage amplifies the fixed
+    ~0.30%-of-notional round-trip cost as much as it amplifies exposure) is
+    logged explicitly in the decision reason whenever leverage scales up,
+    not left implicit in a bare number.
+  - The boundary-preserving test extended: side/symbol and the decision
+    log's direction/action/predicted_value stay byte-identical with or
+    without volatility-informed sizing active; quantity/leverage/stop-width
+    now legitimately differ (updated from Option B's own original version,
+    which asserted they stayed equal, since scaling them is now the whole
+    point). `max_exposure_pct` is never referenced by the new code at all
+    — a static, grep-verifiable fact, not just a stated intention. Tests:
+    `tests/paper_trading/test_strategy_scheduler.py::TestVolatilityPositionSizing`
+    (6 new), plus updates to `TestVolatilityStopWidth`'s own liquidation
+    and boundary tests. `ARCHITECTURE.md` § "Paper Trading" → "Automated
+    Strategy" → "Volatility-Scaled Position Size and Leverage"; `docs/api/API.md`.
+
 - **Standalone scheduler process, off the API's request-serving event
   loop (SCHEDULER-PROCESS-SPLIT).** Builds Option 3 from
   `docs/infrastructure/EVENT_LOOP_SEPARATION_DESIGN.md`: candle sync,

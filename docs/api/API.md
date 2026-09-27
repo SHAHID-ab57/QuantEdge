@@ -1852,9 +1852,10 @@ Full design in `ARCHITECTURE.md` § "Paper Trading". A virtual trading
 account: place simulated market orders against real prices, track
 positions, and compute PnL. Market orders only. A manual order may go
 long or short and use isolated-margin leverage (M3-E5-T2); the automated
-strategy also places its orders here (M3-E5-T3): long or short at its account's
-one fixed `strategy_leverage`, always with a stop-loss, never scaled by
-confidence.
+strategy also places its orders here (M3-E5-T3): long or short at its
+account's `strategy_leverage` (optionally volatility-scaled — see
+VOLATILITY-POSITION-SIZING below), always with a stop-loss, **never**
+scaled by confidence in either the scaled or unscaled case.
 
 **Shorts, leverage and margin.** One net position per market: a buy
 opens/adds to a long or reduces a short; a sell opens/adds to a short or
@@ -2161,33 +2162,38 @@ A client that polls `GET /paper-trading/accounts/{id}` may see
 `PATCH .../strategy` in the audit log — that is this, working as designed,
 not a bug.
 
-**VOLATILITY-STOP-WIDTH ("Option B") can scale a new entry's stop-loss
-width from a second, independent forecast — position sizing, leverage,
-and direction are never touched.** An account may optionally set
+**VOLATILITY-STOP-WIDTH ("Option B") and VOLATILITY-POSITION-SIZING
+("Option A") scale a new entry's stop-loss width, target size, and
+leverage from one shared forecast — direction and whether a cycle trades
+are never touched.** An account may optionally set
 `volatility_training_job_id` (`PATCH .../strategy`) to a _second_
 training job — always `logistic_regression`, always trained on
 `volatility_regime`, always for the same symbol the directional
-`training_job_id` already trades — whose fresh forecast scales
-`default_stop_loss_pct` on every new automated entry: wider ahead of a
-forecast `"expand"` (×1.5), tighter ahead of `"contract"` (×0.75). This
-is stop-loss width only, at position-open time only — never position
-size, never leverage, never which side is opened or whether a cycle
-trades at all (those are decided first, exactly as before this field
+`training_job_id` already trades — whose fresh forecast scales, together,
+on every new automated entry: `default_stop_loss_pct` (wider ahead of a
+forecast `"expand"`, ×1.5, tighter ahead of `"contract"`, ×0.75), the
+target position size, and `strategy_leverage` (smaller ahead of
+`"expand"`, larger — never past the account's own `max_position_size_pct`/
+`max_leverage`, never past `max_exposure_pct` — ahead of `"contract"`,
+using the exact reciprocal factors, 2/3 and 4/3). This is at
+position-open time only — never which side is opened or whether a cycle
+trades at all (those are decided first, exactly as before either field
 existed; see `ARCHITECTURE.md` § "Paper Trading" → "Automated Strategy"
-→ "Volatility-Scaled Stop-Loss Width" for the boundary-preserving proof).
-Every gate fails closed to the unscaled `default_stop_loss_pct` rather
-than guess: an unset field, a deleted/wrong-model-type/wrong-symbol job,
-an unavailable forecast, or that forecast's own inputs reading
-`feature_drift_status: "drifted"` all leave a new entry's stop-loss
-exactly as it would have been without this field at all. The resulting
-price still passes through the same liquidation-distance check every
-automated stop-loss already faces — a widened stop that would now sit
-beyond the position's liquidation price is rejected
-(`stop_beyond_liquidation`, 400) exactly as an unscaled one would be,
-never placed anyway. Never applies to a manually-placed order's own
-stop-loss/take-profit — those are set explicitly by a person via `PATCH
-.../positions/{symbol}` (above) or at order-open time, and this field
-never overrides them.
+for both features' full boundary-preserving proofs). Every gate fails
+closed to every unscaled default rather than guess: an unset field, a
+deleted/wrong-model-type/wrong-symbol job, an unavailable forecast, or
+that forecast's own inputs reading `feature_drift_status: "drifted"` all
+leave a new entry's stop-loss, size, and leverage exactly as they would
+have been without this field at all. The resulting stop-loss price and
+leverage both still pass through the same liquidation-distance check
+every automated entry already faces — a stop that would now sit beyond
+the position's liquidation price is rejected (`stop_beyond_liquidation`, 400) exactly as an unscaled one would be, never placed anyway (and, since
+Option A scales leverage down on the identical "expand" signal that
+widens the stop, this combination is verified safer in practice than
+Option B alone, not merely unweakened). Never applies to a
+manually-placed order's own stop-loss/take-profit/leverage — those are
+set explicitly by a person via `PATCH .../positions/{symbol}` (above) or
+at order-open time, and this field never overrides them.
 
 Every cycle for every strategy-enabled account is logged exactly once,
 acted on or not — a below-threshold prediction, a non-directional

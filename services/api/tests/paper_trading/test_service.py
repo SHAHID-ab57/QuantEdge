@@ -172,6 +172,7 @@ class _TestPaperTradingService(PaperTradingService):
         *,
         user_id: uuid.UUID | None = None,
         automated: bool = False,
+        expected_leverage: Decimal | None = None,
     ) -> PaperOrderResponse:
         """A test order is a manual one unless it says `automated=True`.
 
@@ -182,7 +183,13 @@ class _TestPaperTradingService(PaperTradingService):
         The guard itself is tested against the base class directly."""
         if not automated and user_id is None:
             user_id = self._default_user_id
-        return await super().place_order(account_id, request, user_id=user_id, automated=automated)
+        return await super().place_order(
+            account_id,
+            request,
+            user_id=user_id,
+            automated=automated,
+            expected_leverage=expected_leverage,
+        )
 
     async def update_strategy_config(
         self,

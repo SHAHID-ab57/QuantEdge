@@ -1,12 +1,12 @@
 """Standalone entrypoint for the independent, DB/REST-only background schedulers.
 
 Runs `CandleSyncScheduler`, `PredictionGradingScheduler`,
-`ExternalDataSyncScheduler`, `NewsSyncScheduler`, and `RetrainingScheduler` in
-their own process, off the API's request-serving event loop — see
-`docs/infrastructure/EVENT_LOOP_SEPARATION_DESIGN.md` (Option 3, accepted)
-for why. These five have no dependency on the live WS-fed
-`EventBus`/`MarketStateManager` (confirmed from their constructor signatures
-in `app.runtime.Runtime.start`), unlike `StopLossTakeProfitMonitor`,
+`ExternalDataSyncScheduler`, `NewsSyncScheduler`, `RedditSyncScheduler`, and
+`RetrainingScheduler` in their own process, off the API's request-serving
+event loop — see `docs/infrastructure/EVENT_LOOP_SEPARATION_DESIGN.md`
+(Option 3, accepted) for why. These six have no dependency on the live
+WS-fed `EventBus`/`MarketStateManager` (confirmed from their constructor
+signatures in `app.runtime.Runtime.start`), unlike `StopLossTakeProfitMonitor`,
 `OrderFlowCapture`, and the two paper-trading schedulers, which stay in
 `api` because separating them would require a live-state bridge that is
 deliberately out of scope here.
@@ -35,6 +35,7 @@ from app.services.candle_sync import CandleSyncScheduler
 from app.services.external_data_sync import ExternalDataSyncScheduler
 from app.services.grading_scheduler import PredictionGradingScheduler
 from app.services.news_sync import NewsSyncScheduler
+from app.services.reddit_sync import RedditSyncScheduler
 from app.services.retraining import RetrainingScheduler, RetrainingTarget
 
 logger = logging.getLogger("app.scheduler_main")
@@ -45,9 +46,9 @@ HEARTBEAT_INTERVAL_SECONDS = 15
 
 @dataclass
 class Schedulers:
-    """Whichever of the five independent schedulers are enabled — `None`
+    """Whichever of the six independent schedulers are enabled — `None`
     for a disabled one, mirroring `Runtime`'s own `X | None` attribute
-    pattern, just held in one small container instead of five separate
+    pattern, just held in one small container instead of six separate
     instance attributes since there's no `Runtime` object here to hang
     them off."""
 
@@ -55,13 +56,14 @@ class Schedulers:
     prediction_grading: PredictionGradingScheduler | None = None
     external_data_sync: ExternalDataSyncScheduler | None = None
     news_sync: NewsSyncScheduler | None = None
+    reddit_sync: RedditSyncScheduler | None = None
     retraining: RetrainingScheduler | None = None
 
 
 async def _start_schedulers(settings: Settings) -> Schedulers:
-    """Build and start whichever of the five schedulers are enabled — the
+    """Build and start whichever of the six schedulers are enabled — the
     exact same construction `app.runtime.Runtime.start` used to do for
-    these five, unmodified."""
+    these six, unmodified."""
     schedulers = Schedulers()
     if settings.candle_sync_enabled:
         schedulers.candle_sync = CandleSyncScheduler(
@@ -92,6 +94,12 @@ async def _start_schedulers(settings: Settings) -> Schedulers:
             backfill_days=settings.news_sync_backfill_days,
         )
         await schedulers.news_sync.start()
+    if settings.reddit_sync_enabled:
+        schedulers.reddit_sync = RedditSyncScheduler(
+            interval_seconds=settings.reddit_sync_interval_seconds,
+            backfill_days=settings.reddit_sync_backfill_days,
+        )
+        await schedulers.reddit_sync.start()
     if settings.retraining_scheduler_enabled:
         retraining_targets = [
             RetrainingTarget(experiment_id=uuid.UUID(part.strip()))
@@ -109,7 +117,7 @@ async def _start_schedulers(settings: Settings) -> Schedulers:
 
 
 async def _stop_schedulers(schedulers: Schedulers) -> None:
-    """Stop whichever of the five were actually started."""
+    """Stop whichever of the six were actually started."""
     if schedulers.candle_sync is not None:
         await schedulers.candle_sync.stop()
     if schedulers.prediction_grading is not None:
@@ -118,6 +126,8 @@ async def _stop_schedulers(schedulers: Schedulers) -> None:
         await schedulers.external_data_sync.stop()
     if schedulers.news_sync is not None:
         await schedulers.news_sync.stop()
+    if schedulers.reddit_sync is not None:
+        await schedulers.reddit_sync.stop()
     if schedulers.retraining is not None:
         await schedulers.retraining.stop()
 
@@ -125,7 +135,7 @@ async def _stop_schedulers(schedulers: Schedulers) -> None:
 async def _heartbeat_loop(stop: asyncio.Event) -> None:
     """Touch `HEARTBEAT_PATH` every `HEARTBEAT_INTERVAL_SECONDS` while the
     event loop is actually responsive. This is a coarser signal than "all
-    five schedulers ticked recently" deliberately — `RetrainingScheduler`
+    six schedulers ticked recently" deliberately — `RetrainingScheduler`
     alone can go up to an hour between ticks by design, which would make a
     per-scheduler heartbeat indistinguishable from a hang. A dedicated,
     short-interval loop proves the loop itself is alive without waiting on
@@ -139,7 +149,7 @@ async def _heartbeat_loop(stop: asyncio.Event) -> None:
 
 
 async def run(stop: asyncio.Event | None = None) -> int:
-    """Start the five schedulers, then block until `stop` is set.
+    """Start the six schedulers, then block until `stop` is set.
 
     `stop` is normally left as `None`, in which case a fresh `asyncio.Event`
     is created and wired to SIGINT/SIGTERM — the real production path. Tests
@@ -153,12 +163,13 @@ async def run(stop: asyncio.Event | None = None) -> int:
     logger.info(
         "Scheduler process configuration: candle_sync_enabled=%s "
         "prediction_grading_enabled=%s external_data_sync_enabled=%s "
-        "news_sync_enabled=%s retraining_scheduler_enabled=%s "
+        "news_sync_enabled=%s reddit_sync_enabled=%s retraining_scheduler_enabled=%s "
         "retraining_experiment_ids=%r",
         settings.candle_sync_enabled,
         settings.prediction_grading_enabled,
         settings.external_data_sync_enabled,
         settings.news_sync_enabled,
+        settings.reddit_sync_enabled,
         settings.retraining_scheduler_enabled,
         settings.retraining_experiment_ids,
     )

@@ -5786,6 +5786,143 @@ real-article, null-sentiment, empty, error, and filter/clear states;
 `news_sentiment` connector renders as an ordinary card with zero
 News-specific code, alongside Fear & Greed's own.
 
+#### Reddit Connector (M4-E4-T1)
+
+A seventh connector, added after Milestone 4 was already marked
+complete — reopened specifically to test whether retail sentiment/volume
+adds anything **`volatility_regime`** does not already get from
+`realized_volatility`, deliberately not direction, which
+`news_sentiment` (Marketaux) already tested for this exact signal
+category and found nothing (`docs/research/TARGET_REDEFINITION_ASSESSMENT.md`).
+
+**Step 1 of this task's own Definition of Done: is Reddit's own API
+actually usable, checked live, not assumed — no.** A real, current
+policy change (Reddit's "Responsible Builder Policy", effective 2026-06-05)
+replaced self-service OAuth app registration with a manual approval
+queue (2-4+ weeks, real rejection risk, no academic/research fast-track)
+— confirmed via third-party sources, since every Reddit-owned domain
+(`reddit.com`, `redditinc.com`, `developers.reddit.com`,
+`web.archive.org`) was unreachable from this environment. Reddit's own
+live API (`oauth.reddit.com`) is not usable here.
+
+**Arctic Shift (`arctic-shift.photon-reddit.com`), a free, keyless,
+third-party historical mirror, confirmed live instead** (GitHub:
+`ArthurHeitmann/arctic_shift`). Real behaviors confirmed by direct
+`curl`, not assumed from its docs: `limit` capped at 100/request;
+`sort=asc`/`desc` (this connector always sends `asc` explicitly);
+`after`/`before` accept both ISO dates and raw Unix seconds; its
+`fields=` allowlist is narrower than the unfiltered response's own
+field set — `permalink` is present in a full response but is **not** a
+valid `fields=` name, found for real via a live HTTP 400 during the
+first backfill attempt and removed from `_FIELDS` (`RedditComment
+.permalink` is always `null` today as a result); real historical depth
+confirmed back to at least January 2023 for r/ethereum.
+
+**Real subreddit-activity investigation (checked live, not assumed) —
+post volume is too thin, comment volume is the usable signal.**
+ETH-specific subreddits post only 1-3 times/day (r/ethereum, r/ethtrader,
+r/ethfinance, r/ethstaker all checked on real recent sample days) — too
+sparse for a feature. Comment volume is materially higher and checked
+consistently across 2023/2024/2025 samples: r/ethereum ~69-100/day,
+r/ethtrader ~90/day, r/CryptoCurrency 100+/day (hits the API's own
+100-item response cap). `reddit_subreddits` default:
+`"ethereum,ethtrader,CryptoCurrency"`.
+
+**No pre-computed sentiment score exists in Arctic Shift's response
+(unlike Marketaux) — VADER chosen as a simple, defensible, already-
+available method, per this task's own explicit instruction not to build
+custom NLP from scratch when one suffices.**
+`vaderSentiment.SentimentIntensityAnalyzer().polarity_scores(body)
+["compound"]` gives `[-1, 1]`, matching Marketaux's own `sentiment_score`
+scale. `score_comment()` returns `None` for empty/`[deleted]`/`[removed]`
+bodies — they still count toward volume, excluded from sentiment.
+
+**Why a dedicated table, following the Marketaux pattern, not
+`external_data_points` directly.** Comments (like articles) have real
+per-item shape and variable daily cardinality `RawDataPoint` cannot
+express. `RedditComment` (`app/models/reddit.py`, migration
+`433b86f94f10`) mirrors `NewsArticle`'s own shape (`reddit_id` unique
+dedup key, `subreddit`, `body`, `score`, nullable `sentiment_score`,
+`created_utc`, `raw_payload`). Because **two** aggregates are needed
+here (volume and sentiment, unlike Marketaux's single
+`news_sentiment`), `app/services/reddit_ingest.py`'s
+`_mirror_daily_aggregates` computes and upserts both
+(`reddit_volume`, `reddit_sentiment`) in one pass per ingestion run, each
+consumed by its own feature (`app/features/builtin/reddit_volume.py`,
+`reddit_sentiment.py`). `RedditSyncScheduler`
+(`app/services/reddit_sync.py`) mirrors `NewsSyncScheduler`'s own
+start/stop/loop shape, `ConnectorMetadata(auto_synced=False)`. Its own
+discovery-safety margin is deliberately much smaller than Marketaux's
+six hours (`DISCOVERY_SAFETY_MARGIN = timedelta(minutes=30)`) because
+comments are queryable promptly, unlike articles which can be indexed
+well after `published_at`.
+
+**Two real, undocumented API quirks found only by live reproduction —
+not in Arctic Shift's own docs:**
+
+- **A real HTTP 400 for an invalid `fields=` name** (`permalink`) —
+  described above.
+- **Arctic Shift's own informal rate limit signals as HTTP 422**, not
+  429, body `{"data": None, "error": "Timeout. Maybe slow down a bit"}`.
+  Found only when a real backfill run crashed. `RETRYABLE_STATUS_CODES`
+  now includes 422; a real, deliberate `reddit_page_pause_seconds=1.5`
+  pause was added between pages within one fetch, since retries alone
+  (5 attempts, exponential backoff to 8s) did not clear a sustained
+  occurrence.
+
+**A materially harder finding from the real full backfill attempt,
+past what per-request pacing can fix: the limit has a cumulative,
+session-level component, not just a per-request one.** A steadily
+paced run (already spaced by both the inter-chunk pause and
+`reddit_page_pause_seconds`) reliably drains to a sustained run of
+HTTP 422s after roughly the same ~14-16 requests each time, regardless
+of how long a prior cooldown was — a 90s cooldown and a 300s cooldown
+both recovered the identical short allowance before throttling again;
+25 minutes of patient cooldown-and-retry (five 300s cooldowns) did not
+clear one chunk at all. `scripts/backfill_reddit.py` now retries a
+failed chunk after a cooldown (`--chunk-cooldown-seconds`, default 300)
+up to `--chunk-max-retries` times (default 5), but this treats the
+symptom; a full ~2.6-year historical depth (matching this project's
+own established primary-comparison window, see below) is **not**
+obtainable from Arctic Shift's live API in one sitting, or several —
+only Arctic Shift's own monthly bulk dumps (which this task did not
+build support for) could plausibly reach that depth. A real, single
+backfill session reliably reaches only around 56 days of history before
+requiring an open-ended wait with no confirmed recovery time.
+
+**Step 3 (the actual signal test) is deferred, not run — a real
+constraint, not an oversight.** This project's own established
+methodology (`docs/research/TARGET_REDEFINITION_ASSESSMENT.md`) treats
+the full ~2.6-year history as the only **authoritative** window and a
+42-day recent slice as **explicitly weaker, cross-check-only**
+evidence, precisely because a single-window result has previously been
+mistaken for a durable finding in this research thread. Reddit's real
+backfill depth (~56 days) cannot reach the authoritative window at all,
+and while it is enough to cover the 42-day cross-check window in full,
+running only the weaker window and reporting its result as this
+connector's answer would repeat the exact mistake this project's own
+methodology exists to prevent. Given that, this task stops at
+"investigated and built, not yet evaluated" rather than publishing a
+result the platform's own evidentiary standard would immediately have
+to caveat away. See `docs/research/REDDIT_SENTIMENT_CONNECTOR_ASSESSMENT.md`
+for the full account and what would unblock Step 3 (either patient
+multi-session backfilling against the live API, or building support
+for Arctic Shift's monthly dumps).
+
+**Testing.** `tests/connectors/test_reddit.py` (25 tests): field
+mapping, multi-subreddit querying, cursor pagination, `max_pages`
+stopping with a warning when exhausted, naive-datetime/end-before-start
+rejection, malformed-comment handling, the 422-retry path, and
+`score_comment`'s empty/deleted/removed handling.
+`tests/services/test_reddit_ingest.py`: persistence, idempotent dedup,
+both daily aggregates mirrored, and (mirroring Marketaux's own
+load-bearing case) a second tick with nothing new for a day leaving it
+unrecomputed. `tests/services/test_reddit_sync.py` mirrors
+`test_news_sync.py`'s own window/start/stop/loop coverage.
+`tests/features/test_reddit_features.py` covers both features'
+discovery, generation, and a full adversarial no-look-ahead proof
+including a real, DB-backed check through `resolve_external_data`.
+
 #### Connector Health Monitoring (M5-E5-T1)
 
 **The motivating evidence: three real, silent failures.** Each of these

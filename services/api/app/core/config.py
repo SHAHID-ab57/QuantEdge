@@ -501,6 +501,60 @@ class Settings(BaseSettings):
     #: (`scripts/backfill_marketaux.py`), not a single periodic tick.
     news_sync_backfill_days: int = 3650
 
+    #: Reddit comment volume/sentiment (`app/connectors/reddit.py`) — the
+    #: seventh connector, same genuine "not one point per timestamp" shape
+    #: as Marketaux: real comments land in their own `reddit_comments`
+    #: table, with only *derived* daily aggregates (volume count, mean
+    #: VADER sentiment) ever mirrored into `external_data_points` — see
+    #: `ConnectorMetadata.auto_synced`. **Not Reddit's own live API**: as
+    #: of a June 2026 policy change, new OAuth app registration requires a
+    #: manual approval this platform has not obtained (confirmed via
+    #: current third-party documentation of Reddit's own terms) — this
+    #: instead talks to Arctic Shift (`arctic-shift.photon-reddit.com`), a
+    #: free, keyless, third-party mirror, confirmed live during
+    #: investigation. `reddit_subreddits` defaults to the three real
+    #: subreddits checked live to have real, sustained comment volume
+    #: (69-100+/day across 2023-2025 samples) — post volume on ETH-specific
+    #: subreddits was checked and found too thin (1-3/day) to be worth
+    #: ingesting on its own. `reddit_page_limit` is Arctic Shift's own
+    #: confirmed-live hard cap (a `limit` above 100 returns a real error).
+    #: `reddit_max_pages_per_fetch` bounds one `fetch_items()` call's own
+    #: pagination per subreddit — generous relative to a normal hourly
+    #: tick's own real volume, since a genuinely wide historical backfill
+    #: is `scripts/backfill_reddit.py`'s job (run repeatedly over narrower
+    #: windows), not a single call's. `reddit_page_pause_seconds` is a
+    #: real, found-not-assumed necessity: a real backfill run showed
+    #: sustained sequential pagination alone (no concurrency) triggers
+    #: Arctic Shift's own informal overload response (HTTP 422, `"error":
+    #: "Timeout. Maybe slow down a bit"`) badly enough that 5 retries with
+    #: exponential backoff up to 8s did not clear it — this pause is
+    #: between every page after the first, not just a retry-after-failure
+    #: measure.
+    reddit_base_url: str = "https://arctic-shift.photon-reddit.com"
+    reddit_subreddits: str = "ethereum,ethtrader,CryptoCurrency"
+    reddit_request_timeout: float = 15.0
+    reddit_page_limit: int = 100
+    reddit_max_pages_per_fetch: int = 20
+    reddit_page_pause_seconds: float = 1.5
+
+    #: Periodic Reddit sync (`app.services.reddit_sync.RedditSyncScheduler`)
+    #: — a separate, dedicated scheduler mirroring `NewsSyncScheduler`'s
+    #: own shape exactly, for the identical reason (rich per-item storage
+    #: plus a derived aggregate doesn't fit the generic "fetch a point,
+    #: persist it" tick). Ticks hourly, more frequent than Marketaux's own
+    #: 6h — Arctic Shift has no documented daily request quota to budget
+    #: against (unlike Marketaux's free tier), and comments (unlike a
+    #: post's own `score`/`num_comments` fields) are available promptly
+    #: after creation, so there is no discovery-latency reason to tick
+    #: less often.
+    reddit_sync_enabled: bool = True
+    reddit_sync_interval_seconds: int = 3600
+    #: Window seeded for a first-ever sync with nothing stored yet. As
+    #: with Marketaux, a genuinely wide historical backfill is
+    #: `scripts/backfill_reddit.py`'s job, run explicitly and repeatedly
+    #: over narrower windows, not a single periodic tick.
+    reddit_sync_backfill_days: int = 3650
+
     #: Periodic external data sync (`app.services.external_data_sync
     #: .ExternalDataSyncScheduler`) — mirrors `candle_sync_enabled`/
     #: `candle_sync_interval_seconds` exactly: a lightweight in-process

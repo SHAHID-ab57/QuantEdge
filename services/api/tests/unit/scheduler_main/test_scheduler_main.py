@@ -2,7 +2,9 @@
 
 Mirrors `tests/unit/runtime/test_runtime.py`'s own coverage for the five
 schedulers this module took over from `Runtime` — see
-`docs/infrastructure/EVENT_LOOP_SEPARATION_DESIGN.md`.
+`docs/infrastructure/EVENT_LOOP_SEPARATION_DESIGN.md` — plus
+`RedditSyncScheduler` (REDDIT-SENTIMENT-CONNECTOR), added later, which
+never lived in `Runtime` at all.
 """
 
 import asyncio
@@ -38,6 +40,9 @@ def _settings(**overrides: object) -> Settings:
         "news_sync_enabled": False,
         "news_sync_interval_seconds": 21600,
         "news_sync_backfill_days": 3650,
+        "reddit_sync_enabled": False,
+        "reddit_sync_interval_seconds": 3600,
+        "reddit_sync_backfill_days": 3650,
         "retraining_scheduler_enabled": False,
         "retraining_experiment_ids": "",
         "retraining_tick_interval_seconds": 3600,
@@ -116,6 +121,15 @@ async def test_start_schedulers_starts_news_sync_when_enabled(
     schedulers = await _start_schedulers(_settings(news_sync_enabled=True))
     assert schedulers.news_sync is not None
     assert schedulers.news_sync.started is True  # type: ignore[attr-defined]
+
+
+async def test_start_schedulers_starts_reddit_sync_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(scheduler_main_module, "RedditSyncScheduler", _FakeScheduler)
+    schedulers = await _start_schedulers(_settings(reddit_sync_enabled=True))
+    assert schedulers.reddit_sync is not None
+    assert schedulers.reddit_sync.started is True  # type: ignore[attr-defined]
 
 
 async def test_start_schedulers_starts_retraining_when_enabled(

@@ -496,6 +496,33 @@ Not self-healing: clearing it is a human's own explicit decision through
 `PATCH .../strategy`, surfaced as a distinct banner on the Strategy panel.
 `ARCHITECTURE.md` § "Feature Drift Monitoring".
 
+**A fourth epic, M4-E4 (Reddit Sentiment/Volume Connector), reopens
+Milestone 4 after it was already marked complete — its own capability
+is real and shipped, but the research question it was built to answer
+is deliberately left open, not answered weakly.** The connector
+(Arctic Shift, a free keyless historical mirror, chosen after Reddit's
+own API was found newly gated behind a manual-approval queue), its
+dedicated `reddit_comments` table, and its two features
+(`reddit_volume`, `reddit_sentiment`, VADER-scored) are real, tested,
+and wired in exactly like every other connector in this milestone. What
+is not done is Step 3 — testing whether either feature adds anything
+`volatility_regime` does not already get from `realized_volatility` —
+because a real, full-depth backfill attempt found Arctic Shift's
+informal rate limit has a session-cumulative component that no per-
+request pacing or cooldown length could clear (25 minutes of patient
+retry did not clear one chunk), capping one real session at roughly 56
+days of history. This project's own `TARGET_REDEFINITION_ASSESSMENT.md`
+treats anything short of the full ~2.6-year history as explicitly
+weaker, cross-check-only evidence, specifically because a single
+recent window has previously been mistaken for a durable finding in
+this same research thread. Rather than repeat that mistake by running
+only the window Reddit's real depth can reach and reporting it as the
+answer, this epic stops at "investigated and built" — see
+`ARCHITECTURE.md` § "External Data Connectors" → "Reddit Connector" and
+`docs/research/REDDIT_SENTIMENT_CONNECTOR_ASSESSMENT.md` for the full
+account and what would unblock Step 3 (patient multi-session backfilling,
+or support for Arctic Shift's monthly bulk dumps, neither built here).
+
 **Milestone 5 — Production Hardening (COMPLETE, against the scope
 below).** Delivered: authentication and an audit trail, inbound rate
 limiting and login lockout, Redis (rate limiting, lockout, token

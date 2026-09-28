@@ -348,6 +348,130 @@ class TestSyncTimingFields:
         )
 
 
+class TestHealthReason:
+    """`health_reason`/`last_attempt_error` — added after a real, live gap:
+    a bare `stale` pill on the Data Sources page could not tell a scheduler
+    that had stopped ticking (an operational problem) apart from a
+    scheduler ticking normally against a source with genuinely nothing new
+    to report (a real but non-actionable data condition). Both looked
+    identical without this. See `app.connectors.health.describe_health`.
+    """
+
+    async def test_healthy_has_no_reason(
+        self, client: httpx.AsyncClient, session_factory: SessionFactory
+    ) -> None:
+        await seed_point(
+            session_factory, value=42.0, timestamp=datetime.now(UTC) - timedelta(hours=1)
+        )
+
+        body = (await client.get("/api/v1/connectors")).json()
+        entry = next(e for e in body["connectors"] if e["source"] == "fear_greed")
+        assert entry["health_status"] == "healthy"
+        assert entry["health_reason"] is None
+        assert entry["last_attempt_error"] is None
+
+    async def test_never_ingested_with_no_attempt_names_that(
+        self, client: httpx.AsyncClient
+    ) -> None:
+        body = (await client.get("/api/v1/connectors")).json()
+        entry = next(e for e in body["connectors"] if e["source"] == "fear_greed")
+        assert entry["health_status"] == "never_ingested"
+        assert entry["health_reason"] == "No sync has been attempted for this source yet."
+
+    async def test_failing_surfaces_the_real_error_message(
+        self, client: httpx.AsyncClient, session_factory: SessionFactory
+    ) -> None:
+        await seed_point(
+            session_factory, value=42.0, timestamp=datetime.now(UTC) - timedelta(hours=1)
+        )
+        await seed_runs(session_factory, [False, False, False])
+
+        body = (await client.get("/api/v1/connectors")).json()
+        entry = next(e for e in body["connectors"] if e["source"] == "fear_greed")
+        assert entry["health_status"] == "failing"
+        assert entry["last_attempt_error"] == "upstream 503"
+        assert entry["health_reason"] == "The last 3 sync attempts all failed: upstream 503"
+
+    async def test_stale_with_a_scheduler_still_ticking_on_schedule_names_the_quiet_source(
+        self, client: httpx.AsyncClient, session_factory: SessionFactory
+    ) -> None:
+        """The real Marketaux case found live on 2026-09-27: every sync
+        attempt succeeds, but the upstream source itself has published
+        nothing new — `next_sync_at` still lands in the future."""
+        await seed_point(
+            session_factory, value=42.0, timestamp=datetime.now(UTC) - timedelta(days=30)
+        )
+        async with session_factory() as session:
+            session.add(
+                ConnectorSyncRun(
+                    source="fear_greed",
+                    started_at=datetime.now(UTC),
+                    completed_at=datetime.now(UTC),
+                    success=True,
+                    received=0,
+                    inserted=0,
+                )
+            )
+            await session.commit()
+
+        body = (await client.get("/api/v1/connectors")).json()
+        entry = next(e for e in body["connectors"] if e["source"] == "fear_greed")
+        assert entry["health_status"] == "stale"
+        assert entry["health_reason"] == (
+            "The sync is running on schedule, but no new value has been published "
+            "upstream recently — this source may genuinely have nothing new to report "
+            "right now."
+        )
+
+    async def test_stale_with_no_attempt_on_record_names_the_scheduler_as_the_suspect(
+        self, client: httpx.AsyncClient, session_factory: SessionFactory
+    ) -> None:
+        """The real local-dev case found live on 2026-09-27: the standalone
+        `scheduler_main` process was never started after the API/scheduler
+        split, so every source it owns went stale with zero recorded sync
+        attempts at all — a fully overdue, not-just-quiet, `next_sync_at`."""
+        await seed_point(
+            session_factory, value=42.0, timestamp=datetime.now(UTC) - timedelta(days=30)
+        )
+
+        body = (await client.get("/api/v1/connectors")).json()
+        entry = next(e for e in body["connectors"] if e["source"] == "fear_greed")
+        assert entry["health_status"] == "stale"
+        assert entry["next_sync_at"] is None
+        assert entry["health_reason"] == (
+            "No sync has been attempted since this value was stored — the scheduler "
+            "process that owns this source may not be running."
+        )
+
+    async def test_stale_with_an_overdue_next_sync_names_the_scheduler_as_the_suspect(
+        self, client: httpx.AsyncClient, session_factory: SessionFactory
+    ) -> None:
+        await seed_point(
+            session_factory, value=42.0, timestamp=datetime.now(UTC) - timedelta(days=30)
+        )
+        long_overdue = datetime.now(UTC) - timedelta(days=10)
+        async with session_factory() as session:
+            session.add(
+                ConnectorSyncRun(
+                    source="fear_greed",
+                    started_at=long_overdue,
+                    completed_at=long_overdue,
+                    success=True,
+                    received=1,
+                    inserted=1,
+                )
+            )
+            await session.commit()
+
+        body = (await client.get("/api/v1/connectors")).json()
+        entry = next(e for e in body["connectors"] if e["source"] == "fear_greed")
+        assert entry["health_status"] == "stale"
+        assert entry["health_reason"] == (
+            "The next sync is overdue — the scheduler process that owns this source "
+            "may not be running."
+        )
+
+
 class TestConnectorHistoryEndpoint:
     async def test_returns_points_in_the_requested_inclusive_range(
         self, client: httpx.AsyncClient, session_factory: SessionFactory

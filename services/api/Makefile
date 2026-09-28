@@ -25,10 +25,22 @@
 #   make check-env          duplicate-key check on .env.example (CI-usable;
 #                            the real .env is checked at every app startup
 #                            instead — see app.core.env_validation)
+#
+# Standalone scheduler process (see app/scheduler_main.py)
+#
+#   make run-scheduler       candle sync, prediction grading, external-data
+#                            sync, news sync, Reddit sync, and retraining —
+#                            NOT started by `uv run uvicorn app.main:app`
+#                            since the scheduler/API process split; run this
+#                            alongside the API in any local session that
+#                            needs external data / candles / retraining to
+#                            actually advance (`docker compose` already runs
+#                            both as separate services — see
+#                            infra/docker/docker-compose.yml's `scheduler`)
 
 .PHONY: db-create-migration db-upgrade db-downgrade db-history db-current db-stamp
 .PHONY: test test-verbose test-coverage test-integration test-performance test-postgres
-.PHONY: create-user check-env
+.PHONY: create-user check-env run-scheduler
 
 MESSAGE ?= "migration description"
 REV ?= -1
@@ -74,3 +86,6 @@ create-user:
 
 check-env:
 	uv run python scripts/check_env_duplicates.py
+
+run-scheduler:
+	uv run python -m app.scheduler_main

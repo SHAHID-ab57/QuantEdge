@@ -43,10 +43,18 @@ export const ConnectorSchema = z.object({
   last_attempt_at: z.string().datetime().nullable(),
   /** Null exactly when `last_attempt_at` is null. */
   last_attempt_success: z.boolean().nullable(),
+  /** The most recent sync attempt's own error message, when it failed.
+   * Null on success or when no attempt has been recorded. */
+  last_attempt_error: z.string().nullable(),
   /** `last_attempt_at` plus the owning scheduler's tick interval — an
    * estimate. In the past means a tick is overdue. Null with no attempt on
    * record yet. */
   next_sync_at: z.string().datetime().nullable(),
+  /** A plain-English reason for a non-healthy status — distinguishes a
+   * scheduler that stopped ticking from one still ticking against a
+   * source with nothing new to report, and names a real sync error.
+   * Null for 'healthy'. */
+  health_reason: z.string().nullable(),
 });
 
 export type Connector = z.infer<typeof ConnectorSchema>;

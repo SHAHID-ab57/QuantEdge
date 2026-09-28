@@ -6068,10 +6068,10 @@ the service is temporarily made to ignore sync-run history.
   if the scheduler itself later dies while the API keeps running, the last
   known state stays `failing` until a success is recorded, and staleness is
   what eventually reports the silence. The individual failure rows
-  (`error_message` etc.) are queryable through
-  `ConnectorSyncRunRepository.list_recent` but no endpoint exposes them;
-  the status only reports that a connector is failing, not why. Surfacing
-  the reason belongs with the error-tracking piece.
+  (`error_message` etc.) were queryable through
+  `ConnectorSyncRunRepository.list_recent` but no endpoint exposed them at
+  the time this was written — fixed by M5-E5-T7 below, which threads
+  `error_message` onto `GET /connectors` as `last_attempt_error`.
 - `GET /connectors` now issues one extra small query per connector (its
   newest 3 sync runs), 6 today; fine at this scale, worth batching if the
   connector count grows.
@@ -6079,6 +6079,110 @@ the service is temporarily made to ignore sync-run history.
   migration (a comment-text change on `ml_dataset_builds.ml_dataset_id`, a
   check-constraint name on `paper_strategy_decisions`) was deliberately
   left out of this migration; `alembic check` still reports it.
+
+#### Connector Health Reasons — a real stale-connector incident (M5-E5-T7)
+
+**The report, and the two real, different causes underneath one identical
+badge.** On 2026-09-27 four connectors read `Stale` on both a local dev
+session and the production droplet. Investigated directly (`docker ps`,
+real SSH access to the droplet, `connector_sync_runs` queried on both
+databases, a live unauthenticated Marketaux request run from the server
+itself) rather than assumed:
+
+- **Local: an operational gap, not a code bug.** `eth-scheduler`'s
+  equivalent — a bare `uv run python -m app.scheduler_main` — had never
+  been started in that dev session. M5-E5-T6's own API/scheduler split
+  moved every DB/REST-only scheduler out of the API process; `services/api
+/README.md`'s own "Run" section was never updated to say a second
+  process is now required for external data, candles, or retraining to
+  advance at all — a bare `uv run uvicorn app.main:app --reload` (still
+  the documented quickstart) now serves whatever was last synced,
+  silently, forever, with no error anywhere. Confirmed directly: every
+  connector's `connector_sync_runs.started_at` on the local database
+  stopped dead at the same timestamp, matching when scheduler_main was
+  last run by hand during M5-E5-T6's own work. Fixed two ways: started
+  the process for real (caught every source up within seconds, confirmed
+  via a fresh `connector_sync_runs` query), and closed the documentation
+  gap that let it happen — `services/api/README.md`'s "Run" section now
+  says explicitly that a second process is required outside Docker, and
+  a new `make run-scheduler` target makes it discoverable.
+- **Server: no bug at all — a real, confirmed external data gap.**
+  `eth-scheduler` was up and healthy the entire time; `connector_sync_runs`
+  over the last 7 days showed zero rate-limit failures on any connector,
+  and Marketaux's own tick logs read `success=true` on schedule. A live,
+  unauthenticated request run directly from the droplet
+  (`GET /news/all?symbols=ETHUSD&published_after=<last stored article>`)
+  returned `{"found":0,"returned":0}` — genuinely zero new ETHUSD articles
+  in four real days, not a quota exhaustion or a broken query (the same
+  request without the date filter returned `"found":6907`, confirming
+  the key and query both work; the newest of those 6907 was the exact
+  article already stored). This was never a rate limit, despite that
+  being the first, reasonable hypothesis before checking.
+
+**Why a bare `Stale` badge could not tell these apart, and what fixes
+it.** Both looked identical: a badge with no further explanation. The
+data to tell them apart already existed on the DTO (`next_sync_at`,
+`last_attempt_success`) but nothing synthesized it into a plain answer.
+`app.connectors.health.describe_health` (pure and database-free, the
+same contract `compute_health_status` already keeps) takes the already-
+computed status plus those same fields and returns one of a fixed set of
+plain-English reasons:
+
+- `next_sync_at` in the past (or null, meaning no attempt was ever
+  recorded against a stored point) → "the scheduler process that owns
+  this source may not be running" — the local case above.
+- `next_sync_at` still in the future and the last attempt succeeded →
+  "this source may genuinely have nothing new to report right now" — the
+  server case above.
+- `failing`, or a `stale` connector whose last attempt itself failed →
+  names the real error, via a new `ConnectorDTO.last_attempt_error` field
+  sourced from `ConnectorSyncRun.error_message` — stored per attempt
+  since M5-E5-T1 but never threaded past the database until now, closing
+  that task's own flagged limitation directly.
+- `never_ingested` → distinguishes "no attempt yet" from "the only
+  attempt on record failed" from "the only attempt succeeded but found
+  nothing to store."
+
+Reaches `GET /connectors` as `health_reason` (`null` for `healthy`) and
+`last_attempt_error`, and renders as a small icon + caption on each
+`/data-sources` card, colored by urgency (muted for `stale`/
+`never_ingested`, red for an active `failing` error) — never for
+`healthy`, so a healthy grid stays quiet.
+
+**Does a stale connector's frozen value ever reach a live prediction?
+Checked directly, not assumed.** `app.services.external_data_context
+.resolve_external_data` (the one place a connector-backed feature's
+value is looked up) has no staleness guard of any kind —
+`most_recent_value_at_or_before` will happily return a point that is
+weeks old with no warning anywhere in the prediction path. Today this is
+latent, not active: the currently live, actively-retrained experiment
+(`retraining_experiment_ids`, queried directly against its own stored
+`feature_set`) trains on `ohlc`/`volume_log`/`sma(20, close)` only — zero
+external-data connector features — so nothing a stale connector could
+freeze actually reaches a real prediction right now. This is a fact
+about today's specific deployed feature set, not a structural guarantee:
+the day a future retraining does include `fear_greed`, `news_sentiment`,
+`reddit_sentiment`, or any other connector-backed feature, that feature
+would silently keep serving however old its last stored point is,
+forever, with nothing in the prediction path to notice or flag it. Left
+open rather than built ahead of a real need for it — the connector
+features evaluated so far (`CONNECTOR_FEATURE_VALUE_ASSESSMENT.md`) carry
+no measurable predictive value in the first place, so no live experiment
+has had a reason to depend on one yet.
+
+**Testing.** `tests/connectors/test_health.py` gained a `TestDescribeHealth`
+class (11 cases: every status, both never-ingested sub-cases, a failed
+vs. successful stale attempt, an overdue vs. future `next_sync_at`, and a
+naive-datetime `next_sync_at` — the same SQLite round-trip quirk
+`compute_health_status` already guards against). `tests/api
+/test_connectors_api.py` gained a `TestHealthReason` class exercising the
+same cases end to end through the real HTTP endpoint, including the two
+real incidents above reproduced as fixtures (a scheduler gone quiet with
+no recorded attempt; a scheduler ticking on schedule against a source
+with nothing new). Frontend: `connector-card.test.tsx` gained four cases
+proving the reason note renders for `stale`/`failing` and stays absent
+for `healthy`; `ConnectorSchema`'s own test gained cases for the two new
+required-but-nullable fields.
 
 #### Delta Market-Data Connectors: Funding Rate & Open Interest History (M4-E3-T5)
 

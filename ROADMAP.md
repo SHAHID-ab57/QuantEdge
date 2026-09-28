@@ -619,6 +619,41 @@ own: confirming an event and its notification in the chosen hosted tracker
 § "Connector Health Monitoring" and § "Structured Logging & Error
 Tracking".
 
+**M5-E5-T7 closes the "surfacing the reason belongs with the error-
+tracking piece" gap M5-E5-T1 itself had flagged as a known limitation —
+found for real, not anticipated, on 2026-09-27.** A user report of four
+connectors reading `Stale` on both a local dev session and the production
+server turned out to be two different real causes wearing an identical
+badge: locally, the standalone `scheduler_main` process introduced by
+M5-E5-T6's own API/scheduler split had simply never been started in that
+session (every source it owns had been frozen at whatever it last synced
+before the split — a real, direct consequence of that split landing with
+no corresponding update to the dev quickstart, now fixed in
+`services/api/README.md` and a new `make run-scheduler` target),
+while on the server the scheduler was running correctly the whole time
+and Marketaux's live API itself confirmed, via a direct query, zero new
+ETHUSD articles in four real days — `success=true` on every attempt.
+Both looked identical as a bare `Stale` pill; nothing on the card said
+which one was true. `app.connectors.health.describe_health` (pure,
+tested the same way `compute_health_status` already is) now derives a
+plain-English reason from data the platform already collected but never
+surfaced: `next_sync_at` relative to now tells a stalled scheduler
+(overdue) apart from one still ticking against a quiet source (not
+overdue), and `ConnectorSyncRun.error_message` — stored per attempt since
+M5-E5-T1 but never threaded past the database until now — names the real
+error for a `failing` connector. Reaches `GET /connectors` as two new
+fields (`health_reason`, `last_attempt_error`) and a new note on each
+`/data-sources` card. Separately checked, not assumed: whether a stale
+connector's frozen value could be silently degrading a live prediction.
+It cannot today — the currently live, actively-retrained experiment
+trains on `ohlc`/`volume_log`/`sma(20)` only, confirmed directly against
+its stored `feature_set`, and consumes no external-data connector feature
+at all — but `resolve_external_data`'s own feature-lookup path has no
+staleness guard of any kind, so this is a real latent risk for the day a
+future retraining does include one, not a closed question. See
+`ARCHITECTURE.md` § "Connector Health Monitoring" and `TASKBOOK.md`
+`M5-E5-T7`.
+
 **Milestone 6 — Live Trading (gated on extensive validation).** Real order
 execution against a live exchange. Deliberately last, and deliberately
 gated: this platform produces analytical decision support, not financial

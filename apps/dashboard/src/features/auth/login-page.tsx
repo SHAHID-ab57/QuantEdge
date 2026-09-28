@@ -79,6 +79,7 @@ export function LoginPage() {
             ) : null}
 
             <TextField
+              id="login-email"
               label="Email"
               type="email"
               autoComplete="email"
@@ -89,6 +90,7 @@ export function LoginPage() {
               {...register('email')}
             />
             <TextField
+              id="login-password"
               label="Password"
               type="password"
               autoComplete="current-password"

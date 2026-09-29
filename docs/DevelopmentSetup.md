@@ -42,6 +42,30 @@ workspace recommendations (see `.vscode/extensions.json`).
    `code --install-extension <extension-id>` for each entry in
    `.vscode/extensions.json`.
 
+## Running the Services Locally
+
+Outside Docker, the API and its background schedulers are **two separate
+processes** — `uv run uvicorn app.main:app --reload` alone does not run
+candle sync, prediction grading, external-data sync, news sync, Reddit
+sync, or retraining. Those six were moved off the API's request-serving
+event loop onto a standalone process
+(`docs/infrastructure/EVENT_LOOP_SEPARATION_DESIGN.md`); running only the
+API leaves every source it doesn't itself own frozen at whatever it last
+synced, with no error anywhere to say so. Run both, in separate
+terminals:
+
+```bash
+cd services/api && uv run uvicorn app.main:app --reload --port 8000
+
+cd services/api && uv run python -m app.scheduler_main
+# or: make run-scheduler
+```
+
+`docker compose` (`infra/docker/docker-compose.yml`) already runs both as
+separate services (`api` and `scheduler`) — this two-process requirement
+only applies to a bare `uv run` session. See `services/api/README.md`'s
+own "Run" section for the full detail.
+
 ## Git Workflow
 
 - The main branch is always releasable; work happens on short-lived feature

@@ -464,10 +464,29 @@ class Settings(BaseSettings):
     #: `ConnectorMetadata.auto_synced`. `marketaux_api_key` hard-requires a
     #: key, the same "fail fast, no network call" contract as FRED/
     #: Etherscan, confirmed live (a real unauthenticated request returns a
-    #: real HTTP 401). `marketaux_symbols` defaults to this platform's own
-    #: primary symbol, in Marketaux's own real entity-symbol convention
-    #: (confirmed live/via docs to already match this platform's own
-    #: `ETHUSD` — no translation needed). `marketaux_articles_per_page`
+    #: real HTTP 401). **`marketaux_symbols` was `"ETHUSD"` alone from
+    #: this connector's first build (M4-E1-T7, 2026-09-08) until
+    #: MARKETAUX-SYMBOL-FIX (2026-09-29) — a real, live bug present since
+    #: the beginning, not a design choice and not something that broke
+    #: later.** The original build-time claim that `ETHUSD` "already
+    #: matches this platform's own convention, confirmed live/via docs —
+    #: no translation needed" was never really true: Marketaux's own real
+    #: crypto-entity tagging convention for Ethereum coverage is
+    #: `CC:ETH`. Checked directly, not assumed: over the connector's own
+    #: full real lifetime (2026-09-08 to 2026-09-29), `symbols=ETHUSD`
+    #: matched only 16 real articles while `symbols=CC:ETH` matched 154
+    #: in the identical window — roughly 90% of Marketaux's real,
+    #: relevant coverage was silently missed the entire time, not just
+    #: after `ETHUSD`'s own last coincidental match (2026-09-23). Now
+    #: queries **both** (`CC:ETH,ETHUSD`, comma-separated — confirmed
+    #: live that Marketaux's own `symbols` parameter accepts a
+    #: multi-symbol list) rather than swapping one string for another:
+    #: strictly more inclusive, and any future real `ETHUSD` match is
+    #: still caught without needing a second config change. See
+    #: `docs/research/CONNECTOR_FEATURE_VALUE_ASSESSMENT.md`'s own
+    #: correction note for the re-backfill/re-test this real scope
+    #: triggered.
+    #: `marketaux_articles_per_page`
     #: mirrors the *free* plan's own real, documented cap (3 articles per
     #: request, verified against Marketaux's current pricing page) —
     #: raise this only if a paid plan is actually in use.
@@ -478,7 +497,7 @@ class Settings(BaseSettings):
     #: requests/day) with real margin left for a manual backfill run.
     marketaux_base_url: str = "https://api.marketaux.com/v1"
     marketaux_api_key: str = ""
-    marketaux_symbols: str = "ETHUSD"
+    marketaux_symbols: str = "CC:ETH,ETHUSD"
     marketaux_request_timeout: float = 10.0
     marketaux_articles_per_page: int = 3
     marketaux_max_pages_per_fetch: int = 10

@@ -3185,6 +3185,41 @@ MA"]`).
 
 ### Fixed
 
+- **Critical (MARKETAUX-SYMBOL-FIX): the Marketaux news connector had
+  been missing roughly 90% of Marketaux's own real, relevant Ethereum
+  news coverage since its first build, not since some recent break.**
+  `marketaux_symbols` queried `ETHUSD` alone; Marketaux's own real
+  crypto-entity tagging convention for Ethereum coverage is `CC:ETH`.
+  Found while resolving a real report ("Marketaux has produced zero new
+  articles for 6 real days") — confirmed directly, not assumed:
+  `connector_sync_runs` showed every sync succeeding with `received=0`
+  (never failing); a live call ruled out quota exhaustion (real usage
+  headers, 94/100 remaining); a free-text search found real, current
+  Ethereum articles the connector's own query missed entirely, each
+  tagged `CC:ETH` by Marketaux itself. Checked over this connector's own
+  full real lifetime: `symbols=ETHUSD` matched 16 real articles,
+  `symbols=CC:ETH` matched 154 in the identical window.
+  - **Fix**: `marketaux_symbols` now queries both
+    (`"CC:ETH,ETHUSD"`, comma-separated — confirmed live Marketaux's own
+    `symbols` parameter accepts a multi-symbol list), not a swap from
+    one string to another.
+  - **Re-backfilled and re-tested, not left unverified.**
+    `CONNECTOR_FEATURE_VALUE_ASSESSMENT.md`'s own original `news_sentiment`
+    secondary comparison (11 real test rows, flagged "insufficient
+    statistical power" at the time) was re-run against the corrected
+    symbol over 22 of the original 34-day window's days (the remaining
+    ~12 are pending a second backfill pass — a real, hard API quota wall,
+    `HTTP 402 usage_limit_reached`, was hit mid-run and confirmed
+    directly; the connector already surfaces this as a loud
+    `ConnectorAPIError`, never a silently-swallowed empty result).
+    **Result: the corrected, ~8x-more-complete dataset (77 real test
+    rows vs. the original 11) does not change the original negative
+    finding for direction — it reinforces it.** Test-accuracy deltas
+    across all three classifiers (−3.90pp, +0.00pp, +3.90pp) sit
+    comfortably inside a ±11.17pp noise band; `news_sentiment`'s own
+    permutation importance never leads any model. Correction note added
+    to `docs/research/CONNECTOR_FEATURE_VALUE_ASSESSMENT.md`.
+
 - **Critical (WARMUP-OFFBYONE-FIX): every live prediction and every
   walk-forward backtest step using an SMA/EMA/WMA/RSI-backed feature set
   computed its feature vector from the candle _before_ the one it was

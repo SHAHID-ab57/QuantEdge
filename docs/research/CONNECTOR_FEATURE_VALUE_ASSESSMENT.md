@@ -27,6 +27,69 @@ Two passes exist:
   `8634694` + `39d4389`) has since been fixed, which is what made T2
   possible.
 
+> ## Correction (2026-09-30, MARKETAUX-SYMBOL-FIX)
+>
+> **The Marketaux secondary-comparison row below was measured against a
+> badly incomplete dataset — a real symbol-filter bug, present since this
+> connector's first build (2026-09-08), not a design choice.**
+> `marketaux_symbols` queried `ETHUSD` alone; Marketaux's own real
+> crypto-entity tagging convention for Ethereum coverage is `CC:ETH`.
+> Checked directly, not assumed: over this connector's own full real
+> lifetime, `symbols=ETHUSD` matched only 16 real articles while
+> `symbols=CC:ETH` matched 154 in the identical window — roughly 90% of
+> Marketaux's real, relevant coverage was silently missed the entire
+> time the secondary comparison below was measuring, not just after
+> `ETHUSD`'s own last coincidental match (2026-09-23, the date a real
+> user report of "Marketaux has produced nothing new" first surfaced
+> this).
+>
+> **Fixed** (`marketaux_symbols` now queries `CC:ETH,ETHUSD`) **and
+> re-tested, not just corrected and left unverified.** Re-backfilled
+> 2026-08-06 → 2026-08-28 (22 of the original 34-day window's days — the
+> remaining ~12 days are still pending a second backfill pass; a real,
+> hard API quota wall, `HTTP 402 usage_limit_reached`, was hit mid-run,
+> confirmed directly, not inferred — see `ARCHITECTURE.md` § "Marketaux
+> Symbol Fix" for the full account) and re-ran the exact original
+> comparison methodology (chronological 0.7/0.15/0.15 split, all three
+> classifiers, permutation importance) against the corrected, far more
+> complete dataset. The real improvement in statistical power alone is
+> substantial: **77 real test rows**, against the original secondary
+> comparison's 11.
+>
+> **Result: the corrected, ~8×-more-complete dataset does not change the
+> original negative finding — if anything, it reinforces it with real
+> statistical power the original comparison never had.** Test-accuracy
+> deltas vs. baseline: `logistic_regression` −3.90pp, `random_forest`
+> +0.00pp, `gradient_boosting` +3.90pp — all comfortably inside a
+> ±11.17pp noise band (binomial SE at this test size). `news_sentiment`'s
+> own permutation importance never leads: it doesn't place in the top 5
+> features for `logistic_regression` or `random_forest` at all (both
+> models rank it below every raw OHLC feature and `sma_20`), and even in
+> `gradient_boosting` — the one model where it appears at #2 — its
+> `abs_importance` (0.017) sits an order of magnitude below the dominant
+> features elsewhere in this same comparison family (0.15–0.22).
+> `random_forest`/`gradient_boosting` are both overfitting-flagged in
+> both variants regardless of `news_sentiment`'s presence (gap 0.44–0.49
+> either way) — the same small-sample memorization pattern this whole
+> research thread has repeatedly found, not something the corrected
+> symbol changed.
+>
+> **What this does and does not settle.** This directly answers "was the
+> original negative finding an artifact of a broken filter that missed
+> most of the news" — no, checked with real, complete-enough data, not
+> assumed from the fix alone. It does **not** yet cover the full original
+> 34-day window (2026-08-28 → 2026-09-09 remains unbackfilled pending
+> quota), and it was run against `next_direction` only, matching this
+> task's own explicit scope — `volatility_regime` was not re-tested here.
+> Given how far inside the noise band every delta already lands on the
+> available 22 days, finishing the remaining 12 is expected to sharpen
+> the estimate, not overturn the verdict — but that expectation is
+> reasoned, not re-verified, and is named here rather than left implicit.
+>
+> This document's own secondary-comparison table and verdict below are
+> left exactly as originally published — this is a correction note, not
+> a retraction or a silent edit.
+
 ---
 
 ## M4-E3-T2 — Redone on the corrected training pipeline

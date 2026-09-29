@@ -7322,6 +7322,80 @@ learned. The existing weekly minimum-retrain-interval floor
 prevent retraining on anything short of a real, considered signal — this
 is not one.
 
+#### Marketaux Symbol Fix (MARKETAUX-SYMBOL-FIX)
+
+**A real user report — "Marketaux has produced zero new articles for 6
+real days, resolve definitively" — traced to a symbol-filter bug present
+since this connector's first build (M4-E1-T7, 2026-09-08), not a recent
+quota exhaustion or a genuine news gap.**
+
+**Investigation, checked directly, not assumed:**
+
+- **`connector_sync_runs`**: every sync in the prior 8 days reported
+  `success=true`, `received=0` — the sync was never failing, it was
+  correctly reporting "nothing matched."
+- **A live call** for the last 3 days under `symbols=ETHUSD`: real HTTP
+  200, no `error` field, `{"found": 0}`. Real usage headers
+  (`x-usagelimit-remaining: 94/100`) ruled out quota exhaustion directly.
+- **A free-text search** for the same window found 14 real crypto
+  articles, including one from the day before with a title explicitly
+  about Ethereum — ruling out "no news exists." That article's own
+  `entities` field tagged it `CC:ETH`, never `ETHUSD`. Querying
+  `symbols=CC:ETH` directly returned 20 real articles in the same 3 days,
+  including one from that same morning.
+- **Historical scope, checked rather than assumed wrong-from-day-one**:
+  over this connector's own full real lifetime (2026-09-08 → 2026-09-29),
+  `symbols=ETHUSD` matched only 16 real articles; `symbols=CC:ETH`
+  matched 154 in the identical window. The bug was present from the
+  connector's very first build — it did not "work, then break"; it was
+  always missing roughly 90% of Marketaux's own real, relevant coverage,
+  and just happened to keep matching a real, shrinking trickle until
+  2026-09-23, after which even that trickle stopped.
+- **No account/plan API exists** (`/account`, `/usage`, `/billing` all 404) to check the configured key's real plan tier directly; the real,
+  live rate-limit headers (`x-usagelimit-limit: 100`/day) match
+  Marketaux's own documented free tier exactly.
+
+**Fix**: `marketaux_symbols` now queries **both**
+(`"CC:ETH,ETHUSD"`, comma-separated — confirmed live that Marketaux's
+own `symbols` parameter accepts a multi-symbol list) rather than
+swapping one string for another — strictly more inclusive, and any
+future real `ETHUSD` match is still caught without a second config
+change.
+
+**Re-backfilled and re-tested, not left as an unverified operational
+fix.** `CONNECTOR_FEATURE_VALUE_ASSESSMENT.md`'s own original
+`news_sentiment` secondary comparison (11 real test rows, "insufficient
+statistical power") was re-run against the corrected symbol over
+2026-08-06 → 2026-08-28 (22 of the original 34-day window's days — the
+remaining ~12 are still pending a second backfill pass, blocked by a
+real, hard API quota wall hit mid-run: **HTTP 402,
+`{"error":{"code":"usage_limit_reached", ...}}`** — confirmed directly;
+notably, the connector already surfaces this loudly as a real
+`ConnectorAPIError`, never a silently-swallowed empty result, directly
+answering the investigation's own opening concern about that failure
+mode). The re-test's own real statistical power is already substantially
+better than the original despite the incomplete window: **77 real test
+rows against the original's 11.**
+
+**Result: the corrected, ~8×-more-complete dataset does not change the
+original negative finding for direction — it reinforces it.** Test-
+accuracy deltas vs. baseline across all three classifiers (−3.90pp,
++0.00pp, +3.90pp) sit comfortably inside a ±11.17pp noise band.
+`news_sentiment`'s own permutation importance never leads any of the
+three models — absent from the top 5 for `logistic_regression`/
+`random_forest` entirely, and an order of magnitude below the dominant
+features even where it does appear (`gradient_boosting`). Full account,
+including what remains open (the final ~12 days, and no re-test yet
+against `volatility_regime`): `docs/research/
+CONNECTOR_FEATURE_VALUE_ASSESSMENT.md`'s own correction note.
+
+**Testing.** A new `TestMarketauxSymbolFix` class in `tests/connectors
+/test_marketaux.py`: one test pinning the corrected class-level default
+in isolation from whatever a local `.env` happens to contain
+(`Settings(_env_file=None)`), one proving a connector built with no
+explicit `symbols=` override sends both symbols in the real outgoing
+request.
+
 ### Feature Store
 
 > Not built. Features are computed on demand and exported; no persisted,

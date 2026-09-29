@@ -552,8 +552,25 @@ class Settings(BaseSettings):
     #: Window seeded for a first-ever sync with nothing stored yet. As
     #: with Marketaux, a genuinely wide historical backfill is
     #: `scripts/backfill_reddit.py`'s job, run explicitly and repeatedly
-    #: over narrower windows, not a single periodic tick.
-    reddit_sync_backfill_days: int = 3650
+    #: over narrower windows, not a single periodic tick. **Was 3650
+    #: (10 years) — a real, found-not-theoretical bug**: on an empty
+    #: table, that asked one unattended tick to page through 10 years of
+    #: history with no cooldown/retry babysitting, which real testing
+    #: (`docs/research/REDDIT_SENTIMENT_CONNECTOR_ASSESSMENT.md`) showed
+    #: reliably trips Arctic Shift's sustained-request rate limit well
+    #: before even one subreddit's own history is covered. Lowered to 2,
+    #: matching `reddit_sync_max_window_days`'s own default below — real
+    #: depth still comes from `scripts/backfill_reddit.py`, never this.
+    reddit_sync_backfill_days: int = 2
+    #: Hard cap on any single tick's own window span, regardless of how
+    #: large the real gap since the last stored comment is (a stopped
+    #: scheduler restarted after days offline, not just an empty table).
+    #: `_catch_up_window` clamps to `[start, min(now, start +
+    #: max_window_days)]` — a wide gap is caught up gradually over several
+    #: hourly ticks instead of one unattended burst hitting the same rate
+    #: limit that motivated `reddit_sync_backfill_days`'s own reduction
+    #: above.
+    reddit_sync_max_window_days: int = 2
 
     #: Periodic external data sync (`app.services.external_data_sync
     #: .ExternalDataSyncScheduler`) — mirrors `candle_sync_enabled`/

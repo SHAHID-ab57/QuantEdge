@@ -467,6 +467,10 @@ class RedditConnector:
         slow down a bit"`) badly enough that even 5 retries with
         exponential backoff up to 8s did not clear it. Retries alone treat
         the symptom; this addresses what was actually found to trigger it.
+        The same pause applies between subreddits, not only between pages
+        of the same one — the last page of one subreddit and the first
+        page of the next were otherwise back-to-back with no gap at all,
+        the exact same request-volume risk this pause exists to avoid.
         """
         if start.tzinfo is None or end.tzinfo is None:
             raise ValueError("start and end must be timezone-aware datetimes")
@@ -474,7 +478,9 @@ class RedditConnector:
             raise ValueError("end must not be before start")
 
         items: list[RedditItem] = []
-        for subreddit in self._subreddits:
+        for subreddit_index, subreddit in enumerate(self._subreddits):
+            if subreddit_index > 0:
+                await asyncio.sleep(self._page_pause_seconds)
             cursor = start
             for page_index in range(self._max_pages):
                 if page_index > 0:

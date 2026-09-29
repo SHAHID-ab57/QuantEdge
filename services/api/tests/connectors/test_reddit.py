@@ -225,6 +225,43 @@ class TestRedditConnectorFetchItems:
 
         assert requested_subreddits == ["ethereum", "CryptoCurrency"]
 
+    async def test_pauses_between_subreddits_the_same_as_between_pages(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The last page of one subreddit and the first page of the next
+        used to be back-to-back with zero pause — the exact same
+        sustained-request pattern that was found, for real, to trip
+        Arctic Shift's rate limit between pages. `max_pages=1` here rules
+        out a page-level pause being what's actually observed: with only
+        one page per subreddit, any sleep recorded can only be the new
+        between-subreddit one."""
+        sleep_calls: list[float] = []
+
+        async def fake_sleep(seconds: float) -> None:
+            sleep_calls.append(seconds)
+
+        monkeypatch.setattr("app.connectors.reddit.asyncio.sleep", fake_sleep)
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"data": []})
+
+        client = client_for(handler)
+        connector = RedditConnector(
+            client=client,
+            subreddits="ethereum,ethtrader,CryptoCurrency",
+            page_limit=100,
+            max_pages=1,
+            page_pause_seconds=1.5,
+        )
+        async with connector:
+            await connector.fetch_items(
+                datetime(2026, 9, 1, tzinfo=UTC), datetime(2026, 9, 2, tzinfo=UTC)
+            )
+
+        # 3 subreddits -> 2 transitions (before the 2nd and 3rd), none
+        # before the 1st (no pointless upfront delay).
+        assert sleep_calls == [1.5, 1.5]
+
     async def test_paginates_forward_past_the_last_seen_cursor(self) -> None:
         """A full page implies more results might exist within the
         window — the connector must advance its own cursor past the

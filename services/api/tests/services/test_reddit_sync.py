@@ -69,15 +69,72 @@ async def test_window_backfills_when_nothing_stored(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """With nothing stored yet, the window seeds from the configured
-    backfill window."""
+    backfill window — `max_window_days` set wide enough here not to
+    interfere, so this test stays purely about `backfill_days`; the
+    clamp itself has its own dedicated tests below."""
     monkeypatch.setattr(reddit_sync_module, "get_engine", lambda: engine)
 
-    scheduler = RedditSyncScheduler(backfill_days=7)
+    scheduler = RedditSyncScheduler(backfill_days=7, max_window_days=10)
     window = await scheduler._catch_up_window(FIXED_NOW)
     assert window is not None
     start, end = window
     assert end == FIXED_NOW
     assert start == FIXED_NOW - timedelta(days=7)
+
+
+@pytest.mark.asyncio
+async def test_default_backfill_on_an_empty_table_is_two_days_not_3650(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real, deployed default: a fresh/empty table's first tick asks
+    for 2 days, not the old 3650 — that used to hand one unattended tick
+    10 years to page through, reliably tripping Arctic Shift's own
+    sustained-request rate limit before even one subreddit's history was
+    covered (see `reddit_sync_backfill_days`'s own comment in
+    `app.core.config`)."""
+    monkeypatch.setattr(reddit_sync_module, "get_engine", lambda: engine)
+
+    scheduler = RedditSyncScheduler()
+    window = await scheduler._catch_up_window(FIXED_NOW)
+    assert window is not None
+    start, end = window
+    assert start == FIXED_NOW - timedelta(days=2)
+    assert end == FIXED_NOW
+
+
+@pytest.mark.asyncio
+async def test_a_wide_gap_is_caught_up_over_several_ticks_not_one_burst(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 5-day gap (a scheduler restarted after days offline, not just an
+    empty table) is not handed to one tick in full — `max_window_days`
+    clamps the span, and the next tick resumes from wherever the first
+    one's own real ingestion actually landed, continuing forward rather
+    than either repeating the same window or jumping straight to now."""
+    last = FIXED_NOW - timedelta(days=5)
+    await seed_comment(session_factory, created_utc=last)
+    monkeypatch.setattr(reddit_sync_module, "get_engine", lambda: engine)
+
+    scheduler = RedditSyncScheduler(max_window_days=2)
+    window = await scheduler._catch_up_window(FIXED_NOW)
+    assert window is not None
+    start, end = window
+    assert start == last
+    assert end == last + timedelta(days=2)
+    assert end < FIXED_NOW  # the full 5-day gap was not covered in one tick
+
+    # Simulate the first tick's real ingestion landing a comment right at
+    # the clamped end — the next tick should resume from there.
+    await seed_comment(session_factory, created_utc=end)
+    window2 = await scheduler._catch_up_window(FIXED_NOW)
+    assert window2 is not None
+    start2, end2 = window2
+    assert start2 == end
+    assert end2 == min(FIXED_NOW, end + timedelta(days=2))
 
 
 @pytest.mark.asyncio
@@ -95,7 +152,10 @@ async def test_window_resumes_from_the_last_stored_comment_when_recent(
     await seed_comment(session_factory, created_utc=last)
     monkeypatch.setattr(reddit_sync_module, "get_engine", lambda: engine)
 
-    scheduler = RedditSyncScheduler()
+    # max_window_days set wide enough not to clamp — this test is purely
+    # about `start` resuming from the last comment; the clamp itself has
+    # its own dedicated tests above.
+    scheduler = RedditSyncScheduler(max_window_days=10)
     window = await scheduler._catch_up_window(FIXED_NOW)
     assert window is not None
     start, end = window

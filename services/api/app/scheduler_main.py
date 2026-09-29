@@ -98,6 +98,7 @@ async def _start_schedulers(settings: Settings) -> Schedulers:
         schedulers.reddit_sync = RedditSyncScheduler(
             interval_seconds=settings.reddit_sync_interval_seconds,
             backfill_days=settings.reddit_sync_backfill_days,
+            max_window_days=settings.reddit_sync_max_window_days,
         )
         await schedulers.reddit_sync.start()
     if settings.retraining_scheduler_enabled:

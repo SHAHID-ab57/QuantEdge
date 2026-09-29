@@ -8,6 +8,7 @@ never lived in `Runtime` at all.
 """
 
 import asyncio
+import contextlib
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -42,7 +43,8 @@ def _settings(**overrides: object) -> Settings:
         "news_sync_backfill_days": 3650,
         "reddit_sync_enabled": False,
         "reddit_sync_interval_seconds": 3600,
-        "reddit_sync_backfill_days": 3650,
+        "reddit_sync_backfill_days": 2,
+        "reddit_sync_max_window_days": 2,
         "retraining_scheduler_enabled": False,
         "retraining_experiment_ids": "",
         "retraining_tick_interval_seconds": 3600,
@@ -71,6 +73,60 @@ class _FakeScheduler:
 
     async def stop(self) -> None:
         self.stopped = True
+
+
+class _TickingFakeScheduler:
+    """A stand-in whose `start()` actually spawns a real `asyncio.Task`
+    that keeps ticking on the event loop, so a test can prove it's still
+    running after a sibling's own task failed — `_FakeScheduler` above
+    can't do this, since it never creates a task at all."""
+
+    def __init__(self, **kwargs: object) -> None:
+        self.kwargs = kwargs
+        self.ticks = 0
+        self._task: asyncio.Task[None] | None = None
+        self._stopped = asyncio.Event()
+
+    async def start(self) -> None:
+        self._task = asyncio.create_task(self._loop())
+
+    async def stop(self) -> None:
+        self._stopped.set()
+        if self._task is not None and not self._task.done():
+            self._task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._task
+
+    async def _loop(self) -> None:
+        while not self._stopped.is_set():
+            self.ticks += 1
+            await asyncio.sleep(0.01)
+
+
+class _RaisingFakeScheduler:
+    """Simulates a scheduler whose own tick raises an unhandled exception
+    all the way out of its task, bypassing whatever internal try/except
+    the real class has — this tests the ORCHESTRATION layer's own
+    isolation (`_start_schedulers` giving each scheduler its own
+    independent task), not re-proving any one real class's own safety
+    net (already covered in `tests/services/test_reddit_sync.py`'s own
+    `test_run_catch_up_isolates_a_failure`)."""
+
+    def __init__(self, **kwargs: object) -> None:
+        self.kwargs = kwargs
+        self._task: asyncio.Task[None] | None = None
+
+    async def start(self) -> None:
+        self._task = asyncio.create_task(self._loop())
+
+    async def stop(self) -> None:
+        if self._task is not None and not self._task.done():
+            self._task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._task
+
+    async def _loop(self) -> None:
+        raise RuntimeError("Reddit sync exploded")
 
 
 @pytest.fixture(autouse=True)
@@ -144,6 +200,60 @@ async def test_start_schedulers_starts_retraining_when_enabled(
     )
     assert schedulers.retraining is not None
     assert schedulers.retraining.started is True  # type: ignore[attr-defined]
+
+
+async def test_one_scheduler_task_failing_does_not_stop_the_others(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_start_schedulers` gives each of the six its own independent
+    `asyncio.create_task` — never `gather`/`TaskGroup`d together. Reddit's
+    task raising an unhandled exception must not cancel or stop the
+    other five. Guards specifically against a *future* switch to
+    `asyncio.gather(*tasks)` or a `TaskGroup` in `_start_schedulers`/
+    `run` — both propagate a sibling's exception and cancel the rest,
+    which this test would catch."""
+    monkeypatch.setattr(scheduler_main_module, "CandleSyncScheduler", _TickingFakeScheduler)
+    monkeypatch.setattr(
+        scheduler_main_module, "PredictionGradingScheduler", _TickingFakeScheduler
+    )
+    monkeypatch.setattr(scheduler_main_module, "ExternalDataSyncScheduler", _TickingFakeScheduler)
+    monkeypatch.setattr(scheduler_main_module, "NewsSyncScheduler", _TickingFakeScheduler)
+    monkeypatch.setattr(scheduler_main_module, "RetrainingScheduler", _TickingFakeScheduler)
+    monkeypatch.setattr(scheduler_main_module, "RedditSyncScheduler", _RaisingFakeScheduler)
+
+    settings = _settings(
+        candle_sync_enabled=True,
+        prediction_grading_enabled=True,
+        external_data_sync_enabled=True,
+        news_sync_enabled=True,
+        reddit_sync_enabled=True,
+        retraining_scheduler_enabled=True,
+        retraining_experiment_ids="6f1e4a2c-3b8d-4c9a-9e2f-1a7c5d6b8e90",
+    )
+    schedulers = await _start_schedulers(settings)
+
+    # Let the event loop actually run: Reddit's task raises immediately;
+    # the other five keep ticking on their own real asyncio.Tasks.
+    await asyncio.sleep(0.05)
+
+    assert schedulers.reddit_sync is not None
+    reddit_task = schedulers.reddit_sync._task  # type: ignore[attr-defined]
+    assert reddit_task is not None
+    assert reddit_task.done()
+    assert isinstance(reddit_task.exception(), RuntimeError)
+
+    ticking = {
+        "candle_sync": schedulers.candle_sync,
+        "prediction_grading": schedulers.prediction_grading,
+        "external_data_sync": schedulers.external_data_sync,
+        "news_sync": schedulers.news_sync,
+        "retraining": schedulers.retraining,
+    }
+    for name, scheduler in ticking.items():
+        assert scheduler is not None, name
+        assert scheduler.ticks > 0, f"{name} stopped ticking after Reddit's task failed"  # type: ignore[attr-defined]
+
+    await _stop_schedulers(schedulers)
 
 
 async def test_stop_schedulers_stops_only_the_ones_that_started() -> None:

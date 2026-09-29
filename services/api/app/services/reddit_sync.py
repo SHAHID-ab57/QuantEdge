@@ -57,16 +57,22 @@ class RedditSyncScheduler:
     Args:
         interval_seconds: Delay between ticks.
         backfill_days: Window seeded when nothing is stored yet.
+        max_window_days: Hard cap on any single tick's own window span —
+            a wide gap (an empty table, or a scheduler restarted after
+            days offline) is caught up gradually over several ticks
+            instead of one unattended burst; see `_catch_up_window`.
     """
 
     def __init__(
         self,
         *,
         interval_seconds: int = 3600,
-        backfill_days: int = 3650,
+        backfill_days: int = 2,
+        max_window_days: int = 2,
     ) -> None:
         self._interval_seconds = max(interval_seconds, 1)
         self._backfill_days = max(backfill_days, 1)
+        self._max_window = timedelta(days=max(max_window_days, 1))
         self._stopped = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
 
@@ -166,6 +172,17 @@ class RedditSyncScheduler:
         for a smaller, deliberately-scoped reason (see this module's own
         docstring). Never returns `None` for "already caught up": a tick
         always re-checks at least the safety-margin window, deliberately.
+
+        The returned span is never wider than `max_window_days`, regardless
+        of how far `start` sits from `now` — an empty table, or a
+        scheduler restarted after days offline, would otherwise hand one
+        unattended tick a gap wide enough to trip Arctic Shift's own
+        sustained-request rate limit (found for real backfilling this
+        connector's own history; see `reddit_sync_backfill_days`'s own
+        comment in `app.core.config`). A wide gap is caught up gradually,
+        `max_window_days` at a time, one tick per interval, rather than in
+        one burst — the next tick's own `start` is just wherever this
+        one's clamped `end` landed, via the same `last_created_utc` read.
         """
         engine = get_engine()
         if engine is None:
@@ -182,7 +199,8 @@ class RedditSyncScheduler:
             if last_created_utc.tzinfo is None:
                 last_created_utc = last_created_utc.replace(tzinfo=UTC)
             start = min(last_created_utc, now - DISCOVERY_SAFETY_MARGIN)
-        return start, now
+        end = min(now, start + self._max_window)
+        return start, end
 
 
 async def run_sync_once() -> RedditSyncTickSummary:
@@ -191,5 +209,6 @@ async def run_sync_once() -> RedditSyncTickSummary:
     scheduler = RedditSyncScheduler(
         interval_seconds=settings.reddit_sync_interval_seconds,
         backfill_days=settings.reddit_sync_backfill_days,
+        max_window_days=settings.reddit_sync_max_window_days,
     )
     return await scheduler.run_catch_up()

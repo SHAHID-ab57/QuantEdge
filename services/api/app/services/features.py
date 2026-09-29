@@ -241,20 +241,42 @@ def _to_requests(items: list[FeatureRequestItem]) -> list[FeatureRequest]:
 
 
 def _cap_rows(dataset: FeatureDataset, limit: int) -> FeatureDataset:
-    """Trim a dataset to at most ``limit`` rows, keeping the earliest.
+    """Trim a dataset to at most ``limit`` rows, keeping the latest.
 
-    Keeps the *earliest* surviving rows because the candle query already
-    took the first ``limit + warmup`` candles of the range in ascending
-    order: dropping from the end therefore returns exactly the window the
-    caller's range and limit describe, with the warmup consumed off the
-    front where it belongs.
+    **Was "keeping the earliest" — a real, live bug (WARMUP-OFFBYONE-FIX),
+    not a design choice that changed on a whim.** The old reasoning ("the
+    candle query already took the first ``limit + warmup`` candles... so
+    the post-warmup-drop row count already equals ``limit``, making this
+    a no-op in the sizing-worked-as-intended case") assumed a feature's
+    own declared ``warmup()`` exactly equals how many rows its
+    ``generate()`` actually nulls. For every windowed indicator sharing
+    the ``period_warmup`` pattern (``sma``, ``ema``, ``wma``) — and
+    ``rsi``, which declares its own but with the identical off-by-one —
+    the true first valid index is ``period - 1``, one row *earlier* than
+    the declared ``period``. One row more than expected survives
+    warmup-dropping, and the old "keep earliest" trim discarded that
+    extra row from the **end** — silently dropping the single newest,
+    most-recently-requested candle from every under-sized (``limit`` <
+    naturally-available-after-warmup) request, forever, with no error.
+    Live prediction's own small ``rows_wanted`` (`app.services.prediction`)
+    is exactly such a request; a real bulk research/training build asking
+    for its entire available history essentially never is (`row_count <=
+    limit` already holds before this function does anything), which is
+    why this went unnoticed in every prior research comparison but not in
+    live inference.
+
+    Keeping the *latest* rows instead fixes the live-prediction case
+    outright and is strictly more robust than tightening ``warmup()`` for
+    each indicator individually: it stays correct even for a *future*
+    indicator whose own declared/actual warmup someday drifts the same
+    way, without needing every one of them independently audited first.
     """
     if dataset.row_count <= limit:
         return dataset
     return replace(
         dataset,
-        timestamps=dataset.timestamps[:limit],
-        rows=dataset.rows[:limit],
+        timestamps=dataset.timestamps[-limit:],
+        rows=dataset.rows[-limit:],
         # `rows_returned` must describe what the caller actually gets back,
         # not the pre-cap row count the quality report was computed against.
         quality=replace(dataset.quality, rows_returned=limit),

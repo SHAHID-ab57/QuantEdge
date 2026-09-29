@@ -74,7 +74,10 @@ class TestCatalogue:
         assert sma.version
         assert sma.author
         assert sma.complexity
-        assert sma.warmup_description == "Equal to the period parameter."
+        # WARMUP-OFFBYONE-FIX
+        assert sma.warmup_description == (
+            "One less than the period parameter — its last point completes the window."
+        )
 
     def test_publishes_search_aliases(self, session_factory: SessionFactory) -> None:
         sma = build_service(session_factory).get_indicator("sma")
@@ -130,7 +133,8 @@ class TestCalculation:
         service = build_service(session_factory)
         result = await service.calculate("ETCUSD", "sma", timeframe="1h", params={"period": "2"})
         assert result.meta.candles_analyzed == 3
-        assert result.meta.warmup_candles == 2
+        # WARMUP-OFFBYONE-FIX: period - 1 (1), not the bare period (2).
+        assert result.meta.warmup_candles == 1
         assert result.meta.cache_status == "disabled"
         assert result.meta.database_time_ms >= 0.0
 
@@ -209,7 +213,8 @@ class TestValidation:
             await build_service(session_factory).calculate(
                 "ETCUSD", "sma", timeframe="1h", params={}
             )
-        assert exc_info.value.required == 20
+        # WARMUP-OFFBYONE-FIX: period - 1 (19), not the bare period (20).
+        assert exc_info.value.required == 19
         assert exc_info.value.available == 3
 
 
@@ -262,7 +267,8 @@ class TestBatchCalculation:
             requests=[IndicatorBatchItemRequest(indicator="sma", params={"period": "2"})],
         )
         item = response.results[0]
-        assert item.warmup_candles == 2
+        # WARMUP-OFFBYONE-FIX: period - 1 (1), not the bare period (2).
+        assert item.warmup_candles == 1
         assert item.execution_time_ms is not None
         assert item.execution_time_ms >= 0.0
 

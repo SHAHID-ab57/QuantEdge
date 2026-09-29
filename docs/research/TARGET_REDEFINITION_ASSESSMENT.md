@@ -1,5 +1,47 @@
 # Target Redefinition Assessment
 
+> ## Correction (2026-09-29, WARMUP-OFFBYONE-FIX) — mixed: Step 5 affected, Steps 3-4 are not
+>
+> A real bug (`app.indicators.builtin.common.period_warmup()` declaring
+> SMA(20)'s warmup as 20 rows when its `calculate()` only nulls 19,
+> causing `_cap_rows()` to silently discard the single newest row from
+> any under-sized `FeatureService.build_raw` request) affects this
+> document unevenly, because it uses two genuinely different evaluation
+> mechanisms — checked directly against each section's own stated
+> method, not assumed uniform:
+>
+> - **Step 3 (primary comparison) and Step 4 (`realized_volatility`) are
+>   _not_ affected.** Both explicitly reuse "the same `MLDatasetService`/
+>   `build_training_dataset` code path `TrainingJobService` itself
+>   uses" — one bulk, full-history (`limit=23,000`) dataset build,
+>   evaluated by indexing into its own already-split test matrix, never
+>   a per-`as_of` live-style request. `_cap_rows` only trims when a
+>   request's own row count is smaller than what's naturally available
+>   after warmup-dropping; a bulk build asking for its entire history
+>   never is. Step 4 is additionally safe on a second count: confirmed
+>   directly (WARMUP-OFFBYONE-FIX Step 2), `realized_volatility`'s own
+>   declared warmup genuinely equals its true null count — it has no
+>   version of this bug at all.
+> - **Step 5 (the triple_barrier regime walk-forward) _is_ affected.**
+>   Its own text says so directly: "walked forward via the real,
+>   unmodified Backtesting Engine (`PredictionService.run` + `grade_now`
+>   per step...)" — the exact live-inference code path the bug lives in
+>   — over the baseline `ohlc` + `volume_log` + `sma(20)` feature set,
+>   with no `realized_volatility` present to mask it. Every step's own
+>   feature vector came from the candle before its `as_of`, not `as_of`
+>   itself.
+>
+> **What Step 5's exposure corrects: the _input_, not the _verdict_.**
+> The shift ran one bar early, never a look-ahead — a genuine predictive
+> relationship would be at least as visible from the correctly-timed
+> data withheld, not less. **"The triple_barrier lead does not survive
+> a regime walk-forward" very likely still holds**, but has not been
+> empirically re-run against the fixed pipeline to confirm it exactly.
+>
+> This document's own tables and verdicts below are left exactly as
+> originally published — this is a correction note, not a retraction or
+> a silent edit.
+
 **Question:** binary direction at a fixed horizon (`next_direction`) has now
 failed five independent, rigorous checks across this research thread
 (`CONNECTOR_FEATURE_VALUE_ASSESSMENT.md`, `HORIZON_SWEEP_ASSESSMENT.md`,

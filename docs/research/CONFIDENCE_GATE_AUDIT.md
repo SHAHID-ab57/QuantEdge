@@ -1,5 +1,39 @@
 # Confidence Gate Audit
 
+> ## Correction (2026-09-29, WARMUP-OFFBYONE-FIX)
+>
+> **Every prediction this audit measured was computed from the candle
+> _before_ the one it was actually timestamped against.** Whether stored
+> from a real live strategy tick or a backtest step, every one reaches
+> the database through the identical `PredictionService.run` →
+> `FeatureService.build_raw` path. A real bug found there
+> (`app.indicators.builtin.common.period_warmup()` declared SMA(20)'s
+> warmup as 20 rows when the indicator's own `calculate()` only nulls 19)
+> made `_cap_rows()` silently discard the single newest row from every
+> under-sized request — this document's own baseline feature set (`ohlc`
+>
+> - `volume_log` + `sma(20)`, no `realized_volatility` to mask it)
+>   included, for the full 8,126-prediction population audited below.
+>
+> **What this corrects: the _input_, not the _verdict_.** The bug shifted
+> every measured prediction's own inputs one bar earlier than its
+> `as_of` implied — a real timing error, but not a look-ahead one (no
+> future information ever leaked in). This audit's own finding —
+> confidence carries no measurable relationship to whether a prediction
+> is later graded correct — is a property of how well the model's
+> _output_ probability tracks its _own_ correctness, not of exactly
+> which bar its input came from; a systematic one-bar timing shift
+> applied identically across all 8,126 predictions gives no mechanism by
+> which it would manufacture or hide a genuine confidence-accuracy
+> relationship. **The "confidence is not meaningful, recalibration does
+> not fix it" verdict below very likely still holds**, but has not been
+> empirically re-audited against the fixed pipeline to confirm it
+> exactly.
+>
+> This document's own tables and verdict below are left exactly as
+> originally published — this is a correction note, not a retraction or
+> a silent edit.
+
 **Question:** does the automated strategy's 65% confidence threshold filter
 anything real, and if it does not, would recalibrating the model's probability
 make confidence meaningful? **Investigation only: no strategy code, threshold

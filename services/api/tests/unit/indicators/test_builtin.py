@@ -101,7 +101,10 @@ class TestSimpleMovingAverage:
     def test_leaves_the_warmup_period_null(self, engine: IndicatorEngine) -> None:
         run = engine.run("sma", series_from([1, 2, 3, 4, 5]), {"period": "3"})
         assert run.output.series[0].values[:2] == [None, None]
-        assert run.warmup == 3
+        # WARMUP-OFFBYONE-FIX: period - 1, not period -- the window's own
+        # last point (index period - 1) completes it, matching values[:2]
+        # already asserted above (2 nulls, not 3).
+        assert run.warmup == 2
 
     def test_a_period_of_one_reproduces_the_source_series(self, engine: IndicatorEngine) -> None:
         run = engine.run("sma", series_from([7, 8, 9]), {"period": "1"})
@@ -132,6 +135,8 @@ class TestExponentialMovingAverage:
     def test_leaves_the_warmup_period_null(self, engine: IndicatorEngine) -> None:
         run = engine.run("ema", series_from([1, 2, 3, 4, 5]), {"period": "3"})
         assert run.output.series[0].values[:2] == [None, None]
+        # WARMUP-OFFBYONE-FIX: period - 1, not period.
+        assert run.warmup == 2
 
     def test_reacts_faster_than_an_sma_of_the_same_period(self, engine: IndicatorEngine) -> None:
         # The defining property worth pinning: after a jump, the EMA is
@@ -159,7 +164,8 @@ class TestWeightedMovingAverage:
     def test_leaves_the_warmup_period_null(self, engine: IndicatorEngine) -> None:
         run = engine.run("wma", series_from([1, 2, 3, 4, 5]), {"period": "3"})
         assert run.output.series[0].values[:2] == [None, None]
-        assert run.warmup == 3
+        # WARMUP-OFFBYONE-FIX: period - 1, not period.
+        assert run.warmup == 2
 
     def test_a_period_of_one_reproduces_the_source_series(self, engine: IndicatorEngine) -> None:
         run = engine.run("wma", series_from([7, 8, 9]), {"period": "1"})
@@ -201,7 +207,8 @@ class TestWeightedMovingAverage:
 
         with pytest.raises(InsufficientDataError) as exc_info:
             engine.run("wma", series_from([]), {"period": "3"})
-        assert exc_info.value.required == 3
+        # WARMUP-OFFBYONE-FIX: period - 1, not period.
+        assert exc_info.value.required == 2
         assert exc_info.value.available == 0
 
     def test_rejects_a_zero_period(self, engine: IndicatorEngine) -> None:
@@ -273,10 +280,13 @@ class TestRelativeStrengthIndex:
         assert up_tick_value > 50.0
         assert down_tick_value < 50.0
 
-    def test_warmup_is_one_longer_than_the_period(self, engine: IndicatorEngine) -> None:
-        # The first candle yields no change, so RSI needs period + 1 candles.
+    def test_warmup_equals_the_period(self, engine: IndicatorEngine) -> None:
+        # WARMUP-OFFBYONE-FIX: the first candle yields no change to
+        # measure, but the window's own last point (index `period`)
+        # completes the first full window -- period nulled rows
+        # (indices 0..period-1), not period + 1.
         run = engine.run("rsi", series_from([float(i) for i in range(1, 20)]), {"period": "14"})
-        assert run.warmup == 15
+        assert run.warmup == 14
         assert run.output.series[0].values[13] is None
         assert run.output.series[0].values[14] is not None
 

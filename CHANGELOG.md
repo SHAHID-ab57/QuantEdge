@@ -3185,6 +3185,66 @@ MA"]`).
 
 ### Fixed
 
+- **Critical (WARMUP-OFFBYONE-FIX): every live prediction and every
+  walk-forward backtest step using an SMA/EMA/WMA/RSI-backed feature set
+  computed its feature vector from the candle _before_ the one it was
+  timestamped against, silently, always.** Found while debugging a real
+  local/server prediction disagreement, via a full offline pipeline
+  replication, not assumed. Root cause:
+  `app.indicators.builtin.common.period_warmup()` (shared by `sma`,
+  `ema`, `wma`) and `rsi`'s own `warmup()` each declared one row more
+  warmup than their `calculate()` actually nulls (a windowed
+  computation's first valid value lands at index `period - 1`, not
+  `period`), and `app.services.features._cap_rows` /
+  `app.services.ml_datasets._cap_rows` trusted the declared number to
+  size their own trim, silently discarding the single newest row from
+  any request smaller than what was naturally available after
+  warmup-dropping — live inference's own small `rows_wanted`, and every
+  `as_of` step a walk-forward backtest takes (`PredictionService.run`),
+  always; a bulk research/training dataset build (`MLDatasetService`,
+  requesting its full available history) essentially never.
+  - **General fix, not a per-indicator patch**: `_cap_rows` in
+    `app.services.features` now keeps the _latest_ N rows instead of the
+    earliest — correct for live prediction's "give me the freshest data"
+    intent, and robust to any future indicator with the same kind of
+    declared-vs-actual warmup mismatch without needing it individually
+    audited first. `period_warmup()` and `rsi`'s own `warmup()` were also
+    corrected to their true, empirical values, which additionally makes
+    `app.services.ml_datasets._cap_rows` (left at "keep earliest" — the
+    intentional, correct semantic for a request with an explicit
+    `start`/`limit`) size itself accurately for the first time.
+  - **Scoped, not assumed**: every windowed indicator checked directly,
+    not just SMA — `ema`/`wma` share the identical bug (never used in any
+    real experiment, latent only); `rsi` has the same off-by-one in the
+    other direction (`period + 1` declared vs. `period` actual, also
+    latent only). `realized_volatility` — the one live, currently-deployed
+    finding feeding real position-size/leverage/stop-width decisions —
+    is **not affected**: its own declared warmup genuinely equals its
+    true null count, and in the one live job combining it with `sma(20)`
+    (`volatility_regime`), its own larger, correct warmup dominates and
+    masks `sma`'s smaller, wrong one entirely.
+  - **Real blast radius, checked not assumed**: the live `next_direction`
+    job (`794eeaf6`, `ohlc` + `volume_log` + `sma(20)`, no
+    `realized_volatility` to mask it) was affected on every real
+    prediction and every walk-forward backtest step across this
+    platform's entire research thread. Correction notes added to
+    `docs/research/REGIME_WALKFORWARD_ASSESSMENT.md`,
+    `docs/research/CONFIDENCE_GATE_AUDIT.md`,
+    `docs/research/CONFIDENCE_RECHECK_POST_FIX.md`, and
+    `docs/research/TARGET_REDEFINITION_ASSESSMENT.md` (mixed — its own
+    Step 5 affected, Steps 3-4 are not, checked per-section against each
+    one's own stated method); `docs/research/HORIZON_SWEEP_ASSESSMENT.md`
+    checked and confirmed **not** affected (its own comparison never
+    leaves the bulk `MLDatasetService` path). Comparative "no skill"
+    verdicts very likely still hold — the bug shifted every affected
+    input one bar _earlier_, never a look-ahead, a strictly harder task
+    than intended, not an easier one — but have not been empirically
+    re-run against the fixed pipeline to confirm exactly.
+  - Verified live: a real automated strategy tick after the fix now uses
+    the true latest stored candle as its own `as_of`, confirmed directly
+    against the database at the same instant, the same method that
+    caught the bug in the first place.
+
 - **Critical (FIX-TRAINING-DATE-RANGE): every training job that omitted an
   explicit candle range silently trained on a market's _oldest_ candles,
   never its most recent ones — including the job that had been driving

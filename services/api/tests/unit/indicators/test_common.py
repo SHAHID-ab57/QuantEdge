@@ -51,12 +51,14 @@ class TestSourceParameter:
 
 class TestPeriodWarmup:
     def test_reads_the_period_parameter(self) -> None:
-        assert period_warmup({"period": 20}) == 20
+        # WARMUP-OFFBYONE-FIX: period - 1, not the bare period -- the
+        # window's own last point completes it.
+        assert period_warmup({"period": 20}) == 19
 
     def test_coerces_a_string_period(self) -> None:
         # Defensive: params are normally already coerced by the engine, but
         # this helper shouldn't silently misbehave if called earlier.
-        assert period_warmup({"period": "14"}) == 14
+        assert period_warmup({"period": "14"}) == 13
 
 
 class TestSingleSeriesOutput:

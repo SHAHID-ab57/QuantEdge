@@ -7185,6 +7185,143 @@ fragment of a secret that itself contained a comma).
 - **Not deployed.** Nothing here is active on the production droplet until
   it is deployed and `SENTRY_DSN` is set in `services/api/.env`.
 
+#### Indicator Warmup Off-By-One (WARMUP-OFFBYONE-FIX)
+
+**Found while debugging an unrelated local/server prediction
+disagreement, via a full offline pipeline replication, not assumed —
+every live prediction and every walk-forward backtest step using an
+SMA/EMA/WMA/RSI-backed feature set had been computing its feature vector
+from the candle _before_ the one it was timestamped against, silently,
+always.**
+
+**Root cause.** `app.indicators.builtin.common.period_warmup()` (shared
+by `sma`, `ema`, `wma`) declared a windowed average's warmup as the bare
+`period` — "the identical 'warmup equals the period' rule," per that
+module's own prior docstring. It was wrong for all three: each one's own
+`calculate()` produces its first valid value at 0-indexed position
+`period - 1` (the window's own last point completes it), so only
+`period - 1` rows are ever actually null, one fewer than declared.
+`rsi`'s own separately-declared `warmup()` had the identical class of
+bug in the other direction (`period + 1` declared, `period` actual).
+`app.services.features._cap_rows` and `app.services.ml_datasets
+._cap_rows` both trusted the declared number to size their own trim
+after warmup-dropping — under the explicit, now-falsified assumption
+that a correctly-declared warmup makes the trim a no-op in the normal
+case. One row more than expected survived, and the old "keep the
+earliest, drop the excess off the end" trim discarded that extra row
+from the **end** — the single newest, most-recently-requested candle —
+every time a caller's own requested row count was smaller than what was
+naturally available after warmup-dropping.
+
+**Real blast radius, checked feature by feature, not assumed uniform:**
+
+- **Live inference (`app.services.prediction.PredictionService.run`)
+  and every walk-forward backtest step (`app.services.backtest`, which
+  calls `PredictionService.run(as_of=...)` once per step) both request a
+  small, tightly-sized row count** — exactly the condition that triggers
+  the trim. **A bulk research/training dataset build
+  (`app.services.ml_datasets.MLDatasetService`, requesting its full
+  available history) essentially never does** — its own requested limit
+  already exceeds what warmup-dropping leaves, so the trim was already a
+  correct no-op there, checked directly against this platform's own
+  primary-comparison methodology ("the full real ETHUSD/1h history,
+  `limit=23,000`") rather than assumed.
+- **`sma`/`ema`/`wma` all share the exact bug; `rsi` shares the same
+  class with the opposite sign.** `ema`/`wma`/`rsi` have never been used
+  in any real registered experiment on this platform (confirmed by
+  querying every stored `experiments.feature_set` directly) — real but
+  latent only. `sma` has: it is this platform's own fixed baseline
+  feature (`ohlc` + `volume_log` + `sma(20)`), used throughout this
+  entire research thread.
+- **`realized_volatility` — the one live, currently-deployed finding
+  feeding real position-size/leverage/stop-width decisions right now —
+  is confirmed _not_ affected**, checked first and specifically. Its own
+  declared `warmup()` (the `window` parameter, unmodified) genuinely
+  equals its `generate()`'s true null count — verified directly against
+  its real output, not just its declaration. In the one live job that
+  combines it with `sma(20)` (`volatility_regime`, `64bf6046`),
+  `required_warmup`'s own max-across-features rule means
+  `realized_volatility`'s larger, correct warmup dominates and entirely
+  masks `sma`'s smaller, wrong one — confirmed live, via the same offline
+  replication method, against real local candles: the resolved dataset
+  landed exactly on the true latest candle.
+- **The live `next_direction` job (`794eeaf6`, `ohlc` + `volume_log` +
+  `sma(20)`, no `realized_volatility` to mask it) was affected on every
+  real prediction and every walk-forward step across this whole research
+  thread** — confirmed live: a real 2026-09-27 local/server prediction
+  disagreement traced directly to this job using `as_of=02:00` (a
+  12-hour-old candle) locally versus the server's own much-fresher
+  `as_of`, and an offline pipeline replication reproduced the mechanism
+  exactly against real local candles (a 26-candle window correctly
+  yielding 7 post-warmup rows — one more than the 6 requested — with the
+  old code discarding the true latest instead of the 7th, oldest,
+  genuinely-still-warming-up row).
+
+**The general fix, not a per-indicator patch.** `_cap_rows` in
+`app.services.features` now keeps the **latest** N rows instead of the
+earliest — correct for live prediction's own "give me the freshest
+data" intent, and robust to a _future_ indicator with the same kind of
+declared-vs-actual mismatch without needing it individually audited
+first. `period_warmup()` and `rsi.warmup()` were also corrected to their
+true, empirical values — not made redundant by the `_cap_rows` fix, but
+complementary to it: `app.services.ml_datasets._cap_rows` was
+deliberately **left** at "keep earliest" (its own explicit `start`/
+`limit` request shape means "the earliest N rows from my requested
+start" is the correct, intentional semantic there, unlike live
+prediction's implicit "give me now" — flipping it would have been a
+real, unrelated behavior change for a different caller), so its own
+correctness depends on the per-indicator declarations now being
+accurate, which they are.
+
+**The research record.** Comparative "no skill"/"no meaningful
+confidence-accuracy relationship" verdicts very likely still hold: the
+bug shifted every affected input one bar **earlier**, never a
+look-ahead (no future information ever leaked in) — a strictly harder
+forecasting task than intended, never an easier one, so a genuine
+relationship would be at least as visible from the correctly-timed data
+this bug withheld, not less. Precise correction notes (not retractions)
+were added to every document whose own stated methodology actually goes
+through the affected mechanism, checked per-document against its own
+text rather than assumed from its topic:
+`docs/research/REGIME_WALKFORWARD_ASSESSMENT.md`,
+`docs/research/CONFIDENCE_GATE_AUDIT.md`,
+`docs/research/CONFIDENCE_RECHECK_POST_FIX.md`, and
+`docs/research/TARGET_REDEFINITION_ASSESSMENT.md` (mixed within one
+document — Step 5's own walk-forward is affected, Steps 3-4's own bulk
+`MLDatasetService` comparisons are not).
+`docs/research/HORIZON_SWEEP_ASSESSMENT.md` was checked and confirmed
+**not** affected — its own comparison never leaves the bulk
+`MLDatasetService` path — and left with a note explaining why, not a
+correction. None of these numbers have been empirically re-run against
+the fixed pipeline; the "very likely holds" framing is reasoned from the
+direction of the bias, not re-measured.
+
+**Real, paper-only consequence, checked not assumed.** Job `794eeaf6`
+opened 4 and closed 6 real positions on manual-verification paper
+accounts (`paper_strategy_decisions`, confirmed via direct query on both
+databases — the same account records exist on local and server) — never
+real capital, this platform's own paper-trading design guarantees that
+regardless. The 2026-09-26 opens ran under a `confidence_threshold_pct`
+of 1%, a temporarily-lowered gate left over from prior manual
+verification work, not this platform's real ~65% live-trading
+confidence gate.
+
+**Verified live, the same method that caught the bug.** After the fix
+deployed locally, the real, already-running automated strategy's very
+next tick produced a prediction whose `as_of` matched the database's own
+true latest stored candle exactly, checked at the same instant — not a
+synthetic test, the same real mechanism that originally exposed the bug.
+
+**No off-cycle retrain recommended.** The affected job's own training
+data was built via `MLDatasetService`'s bulk path (confirmed unaffected
+above) — its learned fit is not implicated by a serving-side staleness
+bug. The fix changes which real candle gets fed to the already-correctly-
+trained model at inference time; it does not change what that model
+learned. The existing weekly minimum-retrain-interval floor
+(`docs/research/RETRAIN_WINDOW_ANALYSIS.md`) was set deliberately to
+prevent retraining on anything short of a real, considered signal — this
+is not one.
+
 ### Feature Store
 
 > Not built. Features are computed on demand and exported; no persisted,

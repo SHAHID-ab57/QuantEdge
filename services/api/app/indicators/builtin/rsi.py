@@ -58,14 +58,20 @@ class RelativeStrengthIndex(Indicator):
         author="Eth AI Platform",
         complexity="O(n) — one Wilder-smoothing pass over the candle range.",
         warmup_description=(
-            "One more than the period parameter — its first candle produces no change to measure."
+            "Equal to the period parameter — one candle is consumed computing the first "
+            "change to measure, and the window's own last point completes it "
+            "(WARMUP-OFFBYONE-FIX: was period + 1, one more than calculate() actually nulls)."
         ),
         aliases=("Relative Strength", "Wilder RSI", "Momentum Oscillator"),
     )
 
     def warmup(self, params: Mapping[str, Any]) -> int:
-        """One more than the period: the first candle produces no change."""
-        return int(params["period"]) + 1
+        """Equal to the period: index 0 has no prior change to measure, and
+        the window's own last point (index `period`) completes the first
+        full window — `period` nulled rows (indices 0..period-1), not
+        `period + 1` (WARMUP-OFFBYONE-FIX; see this module's own
+        `calculate()`, where the first valid value lands at `out[period]`)."""
+        return int(params["period"])
 
     def calculate(self, ctx: IndicatorContext) -> IndicatorOutput:
         """Seed with a simple mean of the first window, then smooth Wilder-style."""

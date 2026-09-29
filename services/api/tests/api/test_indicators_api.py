@@ -50,7 +50,10 @@ class TestCatalogueEndpoint:
         assert body["version"] == "1.0.0"
         assert body["author"] == "Eth AI Platform"
         assert "O(n)" in body["complexity"]
-        assert body["warmup_description"] == "Equal to the period parameter."
+        # WARMUP-OFFBYONE-FIX
+        assert body["warmup_description"] == (
+            "One less than the period parameter — its last point completes the window."
+        )
 
     async def test_returns_404_for_an_unknown_indicator(self, client: httpx.AsyncClient) -> None:
         response = await client.get("/api/v1/indicators/nope")
@@ -136,7 +139,8 @@ class TestCalculationEndpoint:
         )
         meta = response.json()["meta"]
         assert meta["candles_analyzed"] == 3
-        assert meta["warmup_candles"] == 2
+        # WARMUP-OFFBYONE-FIX: period - 1 (1), not the bare period (2).
+        assert meta["warmup_candles"] == 1
         assert meta["cache_status"] in {"hit", "miss", "disabled"}
 
     async def test_honours_a_source_parameter(
@@ -201,7 +205,8 @@ class TestCalculationErrors:
         assert response.status_code == 400
         body = response.json()
         assert body["code"] == "insufficient_data"
-        assert "at least 20" in body["detail"]
+        # WARMUP-OFFBYONE-FIX: period - 1 (19), not the bare period (20).
+        assert "at least 19" in body["detail"]
 
     async def test_returns_404_for_an_unknown_market(
         self, client: httpx.AsyncClient, seeded_varied: None
@@ -289,7 +294,8 @@ class TestBatchCalculationEndpoint:
         assert body["engine_version"]
         assert body["generated_at"].endswith("Z")
         item = body["results"][0]
-        assert item["warmup_candles"] == 2
+        # WARMUP-OFFBYONE-FIX: period - 1 (1), not the bare period (2).
+        assert item["warmup_candles"] == 1
         assert item["execution_time_ms"] >= 0.0
 
     async def test_one_bad_indicator_does_not_fail_the_batch(

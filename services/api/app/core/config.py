@@ -464,10 +464,29 @@ class Settings(BaseSettings):
     #: `ConnectorMetadata.auto_synced`. `marketaux_api_key` hard-requires a
     #: key, the same "fail fast, no network call" contract as FRED/
     #: Etherscan, confirmed live (a real unauthenticated request returns a
-    #: real HTTP 401). `marketaux_symbols` defaults to this platform's own
-    #: primary symbol, in Marketaux's own real entity-symbol convention
-    #: (confirmed live/via docs to already match this platform's own
-    #: `ETHUSD` — no translation needed). `marketaux_articles_per_page`
+    #: real HTTP 401). **`marketaux_symbols` was `"ETHUSD"` alone from
+    #: this connector's first build (M4-E1-T7, 2026-09-08) until
+    #: MARKETAUX-SYMBOL-FIX (2026-09-29) — a real, live bug present since
+    #: the beginning, not a design choice and not something that broke
+    #: later.** The original build-time claim that `ETHUSD` "already
+    #: matches this platform's own convention, confirmed live/via docs —
+    #: no translation needed" was never really true: Marketaux's own real
+    #: crypto-entity tagging convention for Ethereum coverage is
+    #: `CC:ETH`. Checked directly, not assumed: over the connector's own
+    #: full real lifetime (2026-09-08 to 2026-09-29), `symbols=ETHUSD`
+    #: matched only 16 real articles while `symbols=CC:ETH` matched 154
+    #: in the identical window — roughly 90% of Marketaux's real,
+    #: relevant coverage was silently missed the entire time, not just
+    #: after `ETHUSD`'s own last coincidental match (2026-09-23). Now
+    #: queries **both** (`CC:ETH,ETHUSD`, comma-separated — confirmed
+    #: live that Marketaux's own `symbols` parameter accepts a
+    #: multi-symbol list) rather than swapping one string for another:
+    #: strictly more inclusive, and any future real `ETHUSD` match is
+    #: still caught without needing a second config change. See
+    #: `docs/research/CONNECTOR_FEATURE_VALUE_ASSESSMENT.md`'s own
+    #: correction note for the re-backfill/re-test this real scope
+    #: triggered.
+    #: `marketaux_articles_per_page`
     #: mirrors the *free* plan's own real, documented cap (3 articles per
     #: request, verified against Marketaux's current pricing page) —
     #: raise this only if a paid plan is actually in use.
@@ -478,7 +497,7 @@ class Settings(BaseSettings):
     #: requests/day) with real margin left for a manual backfill run.
     marketaux_base_url: str = "https://api.marketaux.com/v1"
     marketaux_api_key: str = ""
-    marketaux_symbols: str = "ETHUSD"
+    marketaux_symbols: str = "CC:ETH,ETHUSD"
     marketaux_request_timeout: float = 10.0
     marketaux_articles_per_page: int = 3
     marketaux_max_pages_per_fetch: int = 10
@@ -500,6 +519,77 @@ class Settings(BaseSettings):
     #: historical backfill needs an explicit, patient manual run
     #: (`scripts/backfill_marketaux.py`), not a single periodic tick.
     news_sync_backfill_days: int = 3650
+
+    #: Reddit comment volume/sentiment (`app/connectors/reddit.py`) — the
+    #: seventh connector, same genuine "not one point per timestamp" shape
+    #: as Marketaux: real comments land in their own `reddit_comments`
+    #: table, with only *derived* daily aggregates (volume count, mean
+    #: VADER sentiment) ever mirrored into `external_data_points` — see
+    #: `ConnectorMetadata.auto_synced`. **Not Reddit's own live API**: as
+    #: of a June 2026 policy change, new OAuth app registration requires a
+    #: manual approval this platform has not obtained (confirmed via
+    #: current third-party documentation of Reddit's own terms) — this
+    #: instead talks to Arctic Shift (`arctic-shift.photon-reddit.com`), a
+    #: free, keyless, third-party mirror, confirmed live during
+    #: investigation. `reddit_subreddits` defaults to the three real
+    #: subreddits checked live to have real, sustained comment volume
+    #: (69-100+/day across 2023-2025 samples) — post volume on ETH-specific
+    #: subreddits was checked and found too thin (1-3/day) to be worth
+    #: ingesting on its own. `reddit_page_limit` is Arctic Shift's own
+    #: confirmed-live hard cap (a `limit` above 100 returns a real error).
+    #: `reddit_max_pages_per_fetch` bounds one `fetch_items()` call's own
+    #: pagination per subreddit — generous relative to a normal hourly
+    #: tick's own real volume, since a genuinely wide historical backfill
+    #: is `scripts/backfill_reddit.py`'s job (run repeatedly over narrower
+    #: windows), not a single call's. `reddit_page_pause_seconds` is a
+    #: real, found-not-assumed necessity: a real backfill run showed
+    #: sustained sequential pagination alone (no concurrency) triggers
+    #: Arctic Shift's own informal overload response (HTTP 422, `"error":
+    #: "Timeout. Maybe slow down a bit"`) badly enough that 5 retries with
+    #: exponential backoff up to 8s did not clear it — this pause is
+    #: between every page after the first, not just a retry-after-failure
+    #: measure.
+    reddit_base_url: str = "https://arctic-shift.photon-reddit.com"
+    reddit_subreddits: str = "ethereum,ethtrader,CryptoCurrency"
+    reddit_request_timeout: float = 15.0
+    reddit_page_limit: int = 100
+    reddit_max_pages_per_fetch: int = 20
+    reddit_page_pause_seconds: float = 1.5
+
+    #: Periodic Reddit sync (`app.services.reddit_sync.RedditSyncScheduler`)
+    #: — a separate, dedicated scheduler mirroring `NewsSyncScheduler`'s
+    #: own shape exactly, for the identical reason (rich per-item storage
+    #: plus a derived aggregate doesn't fit the generic "fetch a point,
+    #: persist it" tick). Ticks hourly, more frequent than Marketaux's own
+    #: 6h — Arctic Shift has no documented daily request quota to budget
+    #: against (unlike Marketaux's free tier), and comments (unlike a
+    #: post's own `score`/`num_comments` fields) are available promptly
+    #: after creation, so there is no discovery-latency reason to tick
+    #: less often.
+    reddit_sync_enabled: bool = True
+    reddit_sync_interval_seconds: int = 3600
+    #: Window seeded for a first-ever sync with nothing stored yet. As
+    #: with Marketaux, a genuinely wide historical backfill is
+    #: `scripts/backfill_reddit.py`'s job, run explicitly and repeatedly
+    #: over narrower windows, not a single periodic tick. **Was 3650
+    #: (10 years) — a real, found-not-theoretical bug**: on an empty
+    #: table, that asked one unattended tick to page through 10 years of
+    #: history with no cooldown/retry babysitting, which real testing
+    #: (`docs/research/REDDIT_SENTIMENT_CONNECTOR_ASSESSMENT.md`) showed
+    #: reliably trips Arctic Shift's sustained-request rate limit well
+    #: before even one subreddit's own history is covered. Lowered to 2,
+    #: matching `reddit_sync_max_window_days`'s own default below — real
+    #: depth still comes from `scripts/backfill_reddit.py`, never this.
+    reddit_sync_backfill_days: int = 2
+    #: Hard cap on any single tick's own window span, regardless of how
+    #: large the real gap since the last stored comment is (a stopped
+    #: scheduler restarted after days offline, not just an empty table).
+    #: `_catch_up_window` clamps to `[start, min(now, start +
+    #: max_window_days)]` — a wide gap is caught up gradually over several
+    #: hourly ticks instead of one unattended burst hitting the same rate
+    #: limit that motivated `reddit_sync_backfill_days`'s own reduction
+    #: above.
+    reddit_sync_max_window_days: int = 2
 
     #: Periodic external data sync (`app.services.external_data_sync
     #: .ExternalDataSyncScheduler`) — mirrors `candle_sync_enabled`/

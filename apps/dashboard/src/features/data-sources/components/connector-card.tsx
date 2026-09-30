@@ -2,6 +2,7 @@
 
 import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import ErrorIcon from '@mui/icons-material/Error';
+import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined';
 import ScheduleIcon from '@mui/icons-material/Schedule';
 import Chip from '@mui/material/Chip';
 import Divider from '@mui/material/Divider';
@@ -38,6 +39,42 @@ const HEALTH_LABEL: Record<ConnectorHealthStatus, string> = {
   failing: 'Failing',
   never_ingested: 'Never ingested',
 };
+
+/** Text color for the reason note, matching each status's own urgency —
+ * `failing` red, `stale`/`never_ingested` a quieter muted tone, since only
+ * `failing` is an active error happening right now. */
+const HEALTH_REASON_COLOR: Record<ConnectorHealthStatus, string> = {
+  healthy: 'text.secondary',
+  stale: 'warning.main',
+  failing: 'error.main',
+  never_ingested: 'text.secondary',
+};
+
+/**
+ * The plain-English reason a non-healthy status reads what it reads
+ * (`app.connectors.health.describe_health`) — added after a real, live gap:
+ * a bare "Stale" pill could not tell a scheduler that had stopped ticking
+ * (an operational problem) apart from one still ticking on schedule
+ * against a source with genuinely nothing new to report (a real,
+ * non-actionable data condition). Both looked identical without this.
+ * Renders nothing for `healthy` (`health_reason` is always null there).
+ */
+function HealthReasonNote({
+  status,
+  reason,
+}: Readonly<{ status: ConnectorHealthStatus; reason: string | null }>) {
+  if (reason === null) {
+    return null;
+  }
+  return (
+    <Stack direction="row" spacing={0.75} alignItems="flex-start" sx={{ mt: 0.5 }}>
+      <InfoOutlinedIcon sx={{ fontSize: 15, mt: '1px', color: HEALTH_REASON_COLOR[status] }} />
+      <Typography variant="caption" sx={{ color: HEALTH_REASON_COLOR[status] }}>
+        {reason}
+      </Typography>
+    </Stack>
+  );
+}
 
 /**
  * The card's own treatment by health. The corner pill alone is a small
@@ -179,6 +216,7 @@ export function ConnectorCard({ connector }: ConnectorCardProps) {
         <Typography variant="body2" color="text.secondary">
           {connector.description}
         </Typography>
+        <HealthReasonNote status={connector.health_status} reason={connector.health_reason} />
       </Stack>
       <Stack
         direction="row"

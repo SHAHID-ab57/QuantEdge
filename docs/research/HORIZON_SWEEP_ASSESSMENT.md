@@ -1,5 +1,31 @@
 # Prediction Horizon Sweep (M4-E3-T3)
 
+> ## Checked against WARMUP-OFFBYONE-FIX (2026-09-29) — not affected
+>
+> A real bug was found on 2026-09-27, live-traced from a local/server
+> prediction disagreement:
+> `app.indicators.builtin.common.period_warmup()` declared SMA(20)'s
+> warmup as 20 rows when the indicator's own `calculate()` only nulls
+> 19, and `_cap_rows()` trusted the declared number, silently discarding
+> the single newest row from any under-sized `FeatureService.build_raw`
+> request — the mechanism every real live prediction and every walk-
+> forward backtest step (`PredictionService.run(as_of=...)`, once per
+> step) goes through.
+>
+> **This document's own comparison does not go through that path at
+> all.** Per its own "Method" section below, it "reuses the exact
+> in-process dataset-build path `TrainingJobService` uses
+> (`MLDatasetService.build_ml_dataset` → `build_training_dataset`)" — one
+> bulk, full-range dataset build per horizon, evaluated by indexing
+> directly into its own already-split, in-memory test matrix, never a
+> per-`as_of` live-style request. `_cap_rows`'s own trim only fires when
+> a caller's requested row count is smaller than what's naturally
+> available after warmup-dropping — a bulk build requesting its entire
+> available history is never smaller than that. Confirmed directly
+> against this document's own stated method, not assumed. **No
+> correction needed here** — noted for completeness, since every other
+> document sharing this baseline feature set was checked.
+
 Cross-linked from
 [`CONNECTOR_FEATURE_VALUE_ASSESSMENT.md`](./CONNECTOR_FEATURE_VALUE_ASSESSMENT.md).
 That report established, across two model classes and every diagnostic it

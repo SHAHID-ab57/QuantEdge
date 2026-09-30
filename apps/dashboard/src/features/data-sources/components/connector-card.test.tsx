@@ -31,7 +31,9 @@ const baseConnector: Connector = {
   total_points: 120,
   last_attempt_at: '2030-01-02T00:05:00Z',
   last_attempt_success: true,
+  last_attempt_error: null,
   next_sync_at: '2030-01-03T00:05:00Z',
+  health_reason: null,
 };
 
 function renderCard(connector: Connector) {
@@ -78,6 +80,50 @@ describe('ConnectorCard — health status', () => {
       health_status: 'never_ingested',
     });
     expect(screen.getByText('Never ingested')).toBeInTheDocument();
+  });
+});
+
+describe('ConnectorCard — health_reason note', () => {
+  it('shows no reason note for a healthy connector', () => {
+    renderCard({ ...baseConnector, health_status: 'healthy', health_reason: null });
+    expect(
+      screen.queryByText(/scheduler process that owns this source may not be running/),
+    ).not.toBeInTheDocument();
+  });
+
+  it('names a scheduler that stopped ticking, distinct from a merely quiet source', () => {
+    renderCard({
+      ...baseConnector,
+      health_status: 'stale',
+      health_reason:
+        'The next sync is overdue — the scheduler process that owns this source may not be running.',
+    });
+    expect(
+      screen.getByText(/scheduler process that owns this source may not be running/),
+    ).toBeInTheDocument();
+  });
+
+  it('names a genuinely quiet upstream source, distinct from a broken scheduler', () => {
+    renderCard({
+      ...baseConnector,
+      health_status: 'stale',
+      health_reason:
+        'The sync is running on schedule, but no new value has been published upstream recently — this source may genuinely have nothing new to report right now.',
+    });
+    expect(
+      screen.getByText(/this source may genuinely have nothing new to report/),
+    ).toBeInTheDocument();
+  });
+
+  it('surfaces the real error message for a failing sync', () => {
+    renderCard({
+      ...baseConnector,
+      health_status: 'failing',
+      health_reason: 'The last 3 sync attempts all failed: upstream 503',
+    });
+    expect(
+      screen.getByText('The last 3 sync attempts all failed: upstream 503'),
+    ).toBeInTheDocument();
   });
 });
 

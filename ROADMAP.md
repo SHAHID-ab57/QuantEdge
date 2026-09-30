@@ -496,6 +496,33 @@ Not self-healing: clearing it is a human's own explicit decision through
 `PATCH .../strategy`, surfaced as a distinct banner on the Strategy panel.
 `ARCHITECTURE.md` § "Feature Drift Monitoring".
 
+**A fourth epic, M4-E4 (Reddit Sentiment/Volume Connector), reopens
+Milestone 4 after it was already marked complete — its own capability
+is real and shipped, but the research question it was built to answer
+is deliberately left open, not answered weakly.** The connector
+(Arctic Shift, a free keyless historical mirror, chosen after Reddit's
+own API was found newly gated behind a manual-approval queue), its
+dedicated `reddit_comments` table, and its two features
+(`reddit_volume`, `reddit_sentiment`, VADER-scored) are real, tested,
+and wired in exactly like every other connector in this milestone. What
+is not done is Step 3 — testing whether either feature adds anything
+`volatility_regime` does not already get from `realized_volatility` —
+because a real, full-depth backfill attempt found Arctic Shift's
+informal rate limit has a session-cumulative component that no per-
+request pacing or cooldown length could clear (25 minutes of patient
+retry did not clear one chunk), capping one real session at roughly 56
+days of history. This project's own `TARGET_REDEFINITION_ASSESSMENT.md`
+treats anything short of the full ~2.6-year history as explicitly
+weaker, cross-check-only evidence, specifically because a single
+recent window has previously been mistaken for a durable finding in
+this same research thread. Rather than repeat that mistake by running
+only the window Reddit's real depth can reach and reporting it as the
+answer, this epic stops at "investigated and built" — see
+`ARCHITECTURE.md` § "External Data Connectors" → "Reddit Connector" and
+`docs/research/REDDIT_SENTIMENT_CONNECTOR_ASSESSMENT.md` for the full
+account and what would unblock Step 3 (patient multi-session backfilling,
+or support for Arctic Shift's monthly bulk dumps, neither built here).
+
 **Milestone 5 — Production Hardening (COMPLETE, against the scope
 below).** Delivered: authentication and an audit trail, inbound rate
 limiting and login lockout, Redis (rate limiting, lockout, token
@@ -591,6 +618,41 @@ own: confirming an event and its notification in the chosen hosted tracker
 `/data-sources` health pill in a browser. See `ARCHITECTURE.md`
 § "Connector Health Monitoring" and § "Structured Logging & Error
 Tracking".
+
+**M5-E5-T7 closes the "surfacing the reason belongs with the error-
+tracking piece" gap M5-E5-T1 itself had flagged as a known limitation —
+found for real, not anticipated, on 2026-09-27.** A user report of four
+connectors reading `Stale` on both a local dev session and the production
+server turned out to be two different real causes wearing an identical
+badge: locally, the standalone `scheduler_main` process introduced by
+M5-E5-T6's own API/scheduler split had simply never been started in that
+session (every source it owns had been frozen at whatever it last synced
+before the split — a real, direct consequence of that split landing with
+no corresponding update to the dev quickstart, now fixed in
+`services/api/README.md` and a new `make run-scheduler` target),
+while on the server the scheduler was running correctly the whole time
+and Marketaux's live API itself confirmed, via a direct query, zero new
+ETHUSD articles in four real days — `success=true` on every attempt.
+Both looked identical as a bare `Stale` pill; nothing on the card said
+which one was true. `app.connectors.health.describe_health` (pure,
+tested the same way `compute_health_status` already is) now derives a
+plain-English reason from data the platform already collected but never
+surfaced: `next_sync_at` relative to now tells a stalled scheduler
+(overdue) apart from one still ticking against a quiet source (not
+overdue), and `ConnectorSyncRun.error_message` — stored per attempt since
+M5-E5-T1 but never threaded past the database until now — names the real
+error for a `failing` connector. Reaches `GET /connectors` as two new
+fields (`health_reason`, `last_attempt_error`) and a new note on each
+`/data-sources` card. Separately checked, not assumed: whether a stale
+connector's frozen value could be silently degrading a live prediction.
+It cannot today — the currently live, actively-retrained experiment
+trains on `ohlc`/`volume_log`/`sma(20)` only, confirmed directly against
+its stored `feature_set`, and consumes no external-data connector feature
+at all — but `resolve_external_data`'s own feature-lookup path has no
+staleness guard of any kind, so this is a real latent risk for the day a
+future retraining does include one, not a closed question. See
+`ARCHITECTURE.md` § "Connector Health Monitoring" and `TASKBOOK.md`
+`M5-E5-T7`.
 
 **Milestone 6 — Live Trading (gated on extensive validation).** Real order
 execution against a live exchange. Deliberately last, and deliberately

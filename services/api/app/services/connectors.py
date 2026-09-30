@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 
 from app.connectors import load_builtin_connectors
 from app.connectors.errors import ConnectorSourceNotFoundError
-from app.connectors.health import FAILING_STREAK, compute_health_status
+from app.connectors.health import FAILING_STREAK, compute_health_status, describe_health
 from app.connectors.registry import default_registry as default_connector_registry
 from app.core.config import get_settings
 from app.repositories.connector_sync_runs import ConnectorSyncRunRepository
@@ -85,6 +85,17 @@ class ConnectorService:
                 if last_attempt is not None
                 else None
             )
+            last_attempt_success = last_attempt.success if last_attempt is not None else None
+            last_attempt_error = (
+                last_attempt.error_message if last_attempt is not None else None
+            )
+            health_status = compute_health_status(
+                latest_timestamp=latest_timestamp,
+                expected_interval_seconds=metadata.expected_interval_seconds,
+                now=now,
+                stale_after_seconds=metadata.stale_after_seconds,
+                recent_run_successes=[run.success for run in recent_runs],
+            )
             entries.append(
                 ConnectorDTO(
                     source=metadata.source,
@@ -97,16 +108,17 @@ class ConnectorService:
                     expected_interval_seconds=metadata.expected_interval_seconds,
                     total_points=total_points,
                     last_attempt_at=last_attempt.started_at if last_attempt is not None else None,
-                    last_attempt_success=(
-                        last_attempt.success if last_attempt is not None else None
-                    ),
+                    last_attempt_success=last_attempt_success,
+                    last_attempt_error=last_attempt_error,
                     next_sync_at=next_sync_at,
-                    health_status=compute_health_status(
-                        latest_timestamp=latest_timestamp,
-                        expected_interval_seconds=metadata.expected_interval_seconds,
+                    health_status=health_status,
+                    health_reason=describe_health(
+                        health_status,
                         now=now,
-                        stale_after_seconds=metadata.stale_after_seconds,
-                        recent_run_successes=[run.success for run in recent_runs],
+                        last_attempt_at=last_attempt.started_at if last_attempt else None,
+                        last_attempt_success=last_attempt_success,
+                        next_sync_at=next_sync_at,
+                        last_attempt_error=last_attempt_error,
                     ),
                 )
             )

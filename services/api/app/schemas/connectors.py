@@ -89,6 +89,11 @@ class ConnectorDTO(BaseModel):
         description="Whether `last_attempt_at`'s attempt succeeded. Null alongside a null "
         "`last_attempt_at`.",
     )
+    last_attempt_error: str | None = Field(
+        default=None,
+        description="The most recent sync attempt's own error message, when it failed — "
+        "null on a successful attempt or when none has been recorded.",
+    )
     next_sync_at: datetime | None = Field(
         default=None,
         description=(
@@ -98,6 +103,16 @@ class ConnectorDTO(BaseModel):
             "overdue, which is itself informative: it means the scheduler stopped ticking "
             "on schedule, not that this connector's data is fine and just hasn't been "
             "asked for lately. Null when no attempt has ever been recorded."
+        ),
+    )
+    health_reason: str | None = Field(
+        default=None,
+        description=(
+            "A plain-English reason for a non-healthy status (`app.connectors.health"
+            ".describe_health`) — distinguishes a scheduler that stopped ticking "
+            "(`next_sync_at` overdue) from one still ticking on schedule against a "
+            "source that genuinely has nothing new to report, and surfaces the last "
+            "real error message for a failing sync. Null for `healthy`."
         ),
     )
 

@@ -173,10 +173,16 @@ class Runtime:
         coupled schedulers (paper trading strategy, funding).
 
         The WebSocket pipeline runs only in live mode. Candle sync,
-        prediction grading, external-data sync, news sync, and retraining no
-        longer start here — they run in the separate `app.scheduler_main`
-        process (see this module's own docstring).
+        prediction grading, external-data sync, news sync, Reddit sync, and
+        retraining no longer start here — they run in the separate
+        `app.scheduler_main` process (see this module's own docstring).
         """
+        logger.info(
+            "Candle sync, prediction grading, external-data sync, news sync, Reddit "
+            "sync, and retraining do NOT run in this process — start "
+            "`app.scheduler_main` separately (`make run-scheduler`) or every source "
+            "those six own will silently stop advancing with no error here"
+        )
         if self._market_data_live:
             self.pipeline = MarketDataPipeline(
                 normalizer=DeltaNormalizer(),

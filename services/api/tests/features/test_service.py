@@ -142,7 +142,9 @@ class TestDatasetBuilding:
         assert response.meta.pipeline_version
         assert response.meta.candles_analyzed == 3
         assert response.meta.rows_dropped == 1
-        assert response.meta.warmup_candles == 2
+        # WARMUP-OFFBYONE-FIX: now consistent with rows_dropped exactly
+        # (period - 1, not the bare period).
+        assert response.meta.warmup_candles == 1
         assert response.meta.database_time_ms >= 0.0
         assert response.features[0].parameters == {"period": 2, "source": "close"}
 

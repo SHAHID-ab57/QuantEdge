@@ -26,7 +26,9 @@ const fearGreed: Connector = {
   total_points: 120,
   last_attempt_at: '2030-01-02T00:05:00Z',
   last_attempt_success: true,
+  last_attempt_error: null,
   next_sync_at: '2030-01-03T00:05:00Z',
+  health_reason: null,
 };
 
 const emptyHistory: ConnectorHistory = {
@@ -48,7 +50,10 @@ const newsSentiment: Connector = {
   total_points: 34,
   last_attempt_at: '2030-01-01T18:00:00Z',
   last_attempt_success: true,
+  last_attempt_error: null,
   next_sync_at: '2030-01-02T00:00:00Z',
+  health_reason:
+    'The sync is running on schedule, but no new value has been published upstream recently — this source may genuinely have nothing new to report right now.',
 };
 
 function renderPage() {

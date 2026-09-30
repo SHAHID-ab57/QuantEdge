@@ -35,6 +35,25 @@ uv run uvicorn app.main:app --reload --port 8000
 MARKET_DATA_LIVE=true uv run uvicorn app.main:app --reload --port 8000
 ```
 
+**This alone does not run candle sync, prediction grading, external-data
+sync, news sync, Reddit sync, or retraining** — those six schedulers were
+moved out of the API process onto their own event loop (see
+`docs/infrastructure/EVENT_LOOP_SEPARATION_DESIGN.md`) and now live in a
+separate standalone process, `app/scheduler_main.py`. Run it alongside the
+API in any local session that needs external data, candles, or retraining
+to actually advance — the API alone will keep serving whatever was last
+synced, silently, with no error:
+
+```bash
+make run-scheduler
+# or directly:
+uv run python -m app.scheduler_main
+```
+
+`docker compose` (`infra/docker/docker-compose.yml`) already runs both as
+separate services (`api` and `scheduler`) — this only matters for a bare
+`uv run` session outside Docker.
+
 Interactive API documentation (Swagger UI) is served at
 <http://localhost:8000/docs> (ReDoc at <http://localhost:8000/redoc>).
 
@@ -322,12 +341,13 @@ ingestion fails with guidance otherwise.
 
 #### Catch-up synchronization
 
-The API process runs a periodic catch-up scheduler (`CANDLE_SYNC_ENABLED`)
-that keeps every configured symbol/timeframe current: each tick it fills the
-window from the newest stored candle to the last closed bucket, reusing the
-same idempotent ingestion path above. Markets with no stored candles are
-seeded from the `CANDLE_SYNC_BACKFILL_DAYS` window. A one-off pass can be
-run manually:
+The standalone scheduler process (`make run-scheduler` / `app/scheduler_main.py`
+— **not** the API process, see "Run" above) runs a periodic catch-up
+scheduler (`CANDLE_SYNC_ENABLED`) that keeps every configured
+symbol/timeframe current: each tick it fills the window from the newest
+stored candle to the last closed bucket, reusing the same idempotent
+ingestion path above. Markets with no stored candles are seeded from the
+`CANDLE_SYNC_BACKFILL_DAYS` window. A one-off pass can be run manually:
 
 ```bash
 uv run python scripts/sync_candles.py

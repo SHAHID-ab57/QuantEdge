@@ -30,6 +30,7 @@ from app.models.paper_trading import (
     PaperStrategyDecision,
 )
 from app.models.prediction import Prediction
+from app.models.reddit import RedditComment
 from app.models.training import TrainingJob, TrainingJobLog
 from app.models.user import User
 
@@ -58,6 +59,7 @@ __all__ = [
     "PaperPosition",
     "PaperStrategyDecision",
     "Prediction",
+    "RedditComment",
     "TrainingJob",
     "TrainingJobLog",
     "User",

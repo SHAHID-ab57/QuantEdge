@@ -212,6 +212,30 @@ class TestRealizedVolatility:
         assert pipeline.warmup_for("realized_volatility", {"window": "24"}) == 24
         assert pipeline.warmup_for("realized_volatility") == 24  # default
 
+    def test_declared_warmup_matches_the_true_null_count_not_affected_by_warmup_offbyone_fix(
+        self, pipeline: FeaturePipeline
+    ) -> None:
+        """WARMUP-OFFBYONE-FIX Step 2: checked first and specifically,
+        since this feature is live, feeding real position-size/leverage/
+        stop-width decisions right now. Unlike sma/ema/wma/rsi, its
+        declared `warmup()` (the window parameter, unmodified) genuinely
+        equals its own `generate()`'s real null count — confirmed here
+        directly against the actual output, not just the declaration —
+        so `_cap_rows` was never fed a wrong number for it, and the live
+        `volatility_regime` predictions using it have always used the
+        true latest candle."""
+        window = 24
+        bars = [
+            candle(i, open_=100 + i, high=101 + i, low=99 + i, close=100 + i)
+            for i in range(window + 3)
+        ]
+        run = pipeline.run("realized_volatility", bars, {"window": str(window)})
+        values = columns_of(run.output)[f"realized_volatility_{window}"]
+
+        declared_warmup = pipeline.warmup_for("realized_volatility", {"window": str(window)})
+        true_null_count = sum(1 for v in values if v is None)
+        assert true_null_count == declared_warmup == window
+
     def test_column_name_encodes_the_window(self, pipeline: FeaturePipeline) -> None:
         bars = [candle(i, open_=100 + i, high=101 + i, low=99 + i, close=100 + i) for i in range(6)]
         run = pipeline.run("realized_volatility", bars, {"window": "3"})
@@ -380,8 +404,9 @@ class TestIndicatorBackedFeatures:
     def test_warmup_is_inherited_from_the_wrapped_indicator(
         self, pipeline: FeaturePipeline
     ) -> None:
-        assert pipeline.warmup_for("sma", {"period": "20"}) == 20
-        assert pipeline.warmup_for("ema", {"period": "12"}) == 12
+        # WARMUP-OFFBYONE-FIX: period - 1, not the bare period.
+        assert pipeline.warmup_for("sma", {"period": "20"}) == 19
+        assert pipeline.warmup_for("ema", {"period": "12"}) == 11
 
     def test_metadata_is_derived_from_the_indicator_not_restated(
         self, pipeline: FeaturePipeline

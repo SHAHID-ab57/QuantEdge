@@ -8,6 +8,7 @@ from app.connectors.health import (
     FAILING_STREAK,
     STALE_MULTIPLIER,
     compute_health_status,
+    describe_health,
     entered_failing,
 )
 
@@ -335,3 +336,107 @@ class TestEnteredFailing:
             flips.append(entered_failing(history))
             assert entered_failing(history) == (now_status == "failing" and was != "failing")
         assert flips.count(True) == 2
+
+
+class TestDescribeHealth:
+    """`describe_health` — a plain-English reason, distinguishing a
+    scheduler that stopped ticking from one still ticking against a
+    source with nothing new to report, and surfacing a real error."""
+
+    def test_healthy_has_no_reason(self) -> None:
+        assert describe_health("healthy", now=NOW) is None
+
+    def test_never_ingested_with_no_attempt(self) -> None:
+        assert describe_health("never_ingested", now=NOW) == (
+            "No sync has been attempted for this source yet."
+        )
+
+    def test_never_ingested_with_a_failed_attempt_names_the_error(self) -> None:
+        reason = describe_health(
+            "never_ingested",
+            now=NOW,
+            last_attempt_at=NOW,
+            last_attempt_success=False,
+            last_attempt_error="connection refused",
+        )
+        assert reason == (
+            "No data has been ingested yet — the last sync attempt failed: connection refused"
+        )
+
+    def test_never_ingested_with_a_successful_but_empty_attempt(self) -> None:
+        reason = describe_health(
+            "never_ingested", now=NOW, last_attempt_at=NOW, last_attempt_success=True
+        )
+        assert reason == (
+            "No data has been ingested yet, though the last sync attempt succeeded — "
+            "the source may not have published anything in its backfill window yet."
+        )
+
+    def test_failing_names_the_real_error(self) -> None:
+        reason = describe_health(
+            "failing",
+            now=NOW,
+            last_attempt_success=False,
+            last_attempt_error="HTTP 500",
+        )
+        assert reason == f"The last {FAILING_STREAK} sync attempts all failed: HTTP 500"
+
+    def test_failing_without_an_error_message_still_names_the_streak(self) -> None:
+        reason = describe_health("failing", now=NOW, last_attempt_success=False)
+        assert reason == f"The last {FAILING_STREAK} sync attempts all failed."
+
+    def test_stale_with_no_attempt_on_record_names_the_scheduler(self) -> None:
+        reason = describe_health("stale", now=NOW, next_sync_at=None)
+        assert reason == (
+            "No sync has been attempted since this value was stored — the scheduler "
+            "process that owns this source may not be running."
+        )
+
+    def test_stale_with_an_overdue_next_sync_names_the_scheduler(self) -> None:
+        reason = describe_health(
+            "stale",
+            now=NOW,
+            next_sync_at=NOW - timedelta(hours=1),
+            last_attempt_success=True,
+        )
+        assert reason == (
+            "The next sync is overdue — the scheduler process that owns this source "
+            "may not be running."
+        )
+
+    def test_stale_with_a_future_next_sync_and_success_names_the_quiet_source(self) -> None:
+        reason = describe_health(
+            "stale",
+            now=NOW,
+            next_sync_at=NOW + timedelta(minutes=15),
+            last_attempt_success=True,
+        )
+        assert reason == (
+            "The sync is running on schedule, but no new value has been published "
+            "upstream recently — this source may genuinely have nothing new to report "
+            "right now."
+        )
+
+    def test_stale_with_a_future_next_sync_but_a_failed_attempt_names_the_error(self) -> None:
+        reason = describe_health(
+            "stale",
+            now=NOW,
+            next_sync_at=NOW + timedelta(minutes=15),
+            last_attempt_success=False,
+            last_attempt_error="timeout",
+        )
+        assert reason == "The most recent sync attempt failed: timeout"
+
+    def test_naive_next_sync_at_is_treated_as_utc(self) -> None:
+        """SQLite round-trips a `DateTime(timezone=True)` column as naive
+        (the same quirk `compute_health_status` already normalizes for
+        `latest_timestamp`) — a naive `next_sync_at` must not crash the
+        overdue comparison."""
+        naive_overdue = (NOW - timedelta(hours=1)).replace(tzinfo=None)
+        reason = describe_health(
+            "stale", now=NOW, next_sync_at=naive_overdue, last_attempt_success=True
+        )
+        assert reason == (
+            "The next sync is overdue — the scheduler process that owns this source "
+            "may not be running."
+        )

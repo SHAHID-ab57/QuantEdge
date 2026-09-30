@@ -475,3 +475,53 @@ class TestMarketauxConnectorFetchProtocol:
             )
 
         assert points == ()
+
+
+class TestMarketauxSymbolFix:
+    """MARKETAUX-SYMBOL-FIX (2026-09-29) — `marketaux_symbols` was
+    `"ETHUSD"` alone from this connector's first build, missing ~90% of
+    Marketaux's own real Ethereum coverage the entire time (checked
+    live: `CC:ETH` matched 154 real articles vs. `ETHUSD`'s 16 over the
+    connector's own lifetime — Marketaux's real crypto-entity tagging
+    convention is `CC:ETH`, not `ETHUSD`). Pins the corrected default so
+    a future revert back to `ETHUSD` alone fails loudly here, not
+    silently in production six days later.
+    """
+
+    def test_the_configured_default_queries_both_symbols(self) -> None:
+        """Isolated from whatever the local `.env` happens to contain —
+        `_env_file=None` tests the real Python-level class default
+        directly, the one every fresh deploy/environment actually gets."""
+        from app.core.config import Settings
+
+        settings = Settings(_env_file=None)  # type: ignore[call-arg]
+        assert settings.marketaux_symbols == "CC:ETH,ETHUSD"
+
+    async def test_connector_queries_both_symbols_when_none_given_explicitly(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """End to end: a connector built with no explicit `symbols=`
+        override (the real construction `get_marketaux_client`'s own
+        caller uses) must send *both* symbols in the real outgoing
+        request, not silently fall back to just one."""
+        import app.connectors.marketaux as marketaux_module
+        from app.core.config import Settings
+
+        monkeypatch.setattr(
+            marketaux_module, "get_settings", lambda: Settings(_env_file=None)  # type: ignore[call-arg]
+        )
+
+        captured: dict[str, str] = {}
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            captured["url"] = str(request.url)
+            return httpx.Response(200, json=_page(_REAL_SHAPED_ARTICLE))
+
+        client = client_for(handler)
+        connector = MarketauxConnector(client=client)  # no symbols= override
+        async with connector:
+            await connector.fetch_articles(
+                datetime(2024, 11, 1, tzinfo=UTC), datetime(2024, 11, 30, tzinfo=UTC)
+            )
+
+        assert "symbols=CC%3AETH%2CETHUSD" in captured["url"]

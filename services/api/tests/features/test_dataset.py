@@ -151,7 +151,9 @@ class TestWarmupTrimming:
         )
         assert dataset.row_count == 4
         assert dataset.rows_dropped == 2
-        assert dataset.warmup_candles == 3
+        # WARMUP-OFFBYONE-FIX: period - 1 (2), not the bare period (3) --
+        # matches rows_dropped exactly now, which is the whole point.
+        assert dataset.warmup_candles == 2
 
     def test_trimming_is_driven_by_the_longest_warmup(self, builder: FeatureDatasetBuilder) -> None:
         # ohlcv needs 0 candles, sma(4) needs 4 — the dataset is only
@@ -162,7 +164,8 @@ class TestWarmupTrimming:
             candles(8),
             [FeatureRequest("ohlcv"), FeatureRequest("sma", {"period": "4"})],
         )
-        assert dataset.warmup_candles == 4
+        # WARMUP-OFFBYONE-FIX: period - 1 (3), not the bare period (4).
+        assert dataset.warmup_candles == 3
         assert dataset.row_count == 5
 
     def test_no_row_in_a_trimmed_dataset_contains_a_null(
@@ -218,7 +221,8 @@ class TestWarmupTrimming:
         warmup = builder.required_warmup(
             [FeatureRequest("ohlcv"), FeatureRequest("sma", {"period": "50"})]
         )
-        assert warmup == 50
+        # WARMUP-OFFBYONE-FIX: period - 1 (49), not the bare period (50).
+        assert warmup == 49
 
     def test_required_warmup_of_no_requests_is_zero(self, builder: FeatureDatasetBuilder) -> None:
         assert builder.required_warmup([]) == 0
@@ -248,7 +252,8 @@ class TestWarmupTrimming:
         failure = dataset.quality.feature_failures[0]
         assert failure.feature == "sma"
         assert failure.error_code == "insufficient_data"
-        assert "10" in failure.error_detail
+        # WARMUP-OFFBYONE-FIX: period - 1 (9), not the bare period (10).
+        assert "9" in failure.error_detail
         assert "3" in failure.error_detail
 
     def test_raises_when_every_row_is_incomplete_despite_enough_candles(
@@ -274,6 +279,90 @@ class TestWarmupTrimming:
             )
         assert exc_info.value.code == "empty_dataset"
         assert "Widen the date range" in exc_info.value.message
+
+
+class TestCapRows:
+    """`app.services.features._cap_rows` (WARMUP-OFFBYONE-FIX).
+
+    Used to keep the *earliest* survivors on the (wrong) assumption that a
+    correctly-declared warmup makes it a no-op in the normal case — real
+    live predictions showed a feature's declared `warmup()` can overshoot
+    its own actual null count by one, leaving one extra row to trim, and
+    the old code trimmed it off the **end**: the single newest,
+    most-recently-requested candle, silently, every time. See
+    `app.indicators.builtin.common`'s own module docstring for the full
+    root-cause account.
+    """
+
+    def test_keeps_the_latest_rows_not_the_earliest(
+        self, builder: FeatureDatasetBuilder
+    ) -> None:
+        # ohlcv has zero warmup, so which end survives is attributable to
+        # _cap_rows alone, not entangled with any warmup trimming.
+        from app.services.features import _cap_rows
+
+        dataset = builder.build("ETHUSD", "1h", candles(10), [FeatureRequest("ohlcv")])
+        assert dataset.row_count == 10
+
+        capped = _cap_rows(dataset, 3)
+        assert capped.row_count == 3
+        assert capped.quality.rows_returned == 3
+        # The three most recent candles (hours 7, 8, 9 of candles(10),
+        # 0-indexed) — not the three oldest (0, 1, 2).
+        assert capped.timestamps == dataset.timestamps[-3:]
+        assert capped.timestamps[-1] == dataset.timestamps[-1]
+
+    def test_is_a_no_op_when_already_within_the_limit(
+        self, builder: FeatureDatasetBuilder
+    ) -> None:
+        from app.services.features import _cap_rows
+
+        dataset = builder.build("ETHUSD", "1h", candles(5), [FeatureRequest("ohlcv")])
+        assert _cap_rows(dataset, 100) is dataset
+
+    def test_sma_worked_example_retains_the_true_latest_candle(
+        self, builder: FeatureDatasetBuilder
+    ) -> None:
+        """The exact worked example the bug was found with: SMA(20) +
+        ohlc + volume_log, a live-prediction-shaped request (a small
+        ``rows_wanted`` against a candle window sized by the feature
+        set's own warmup) — proving the response now lands on the true
+        newest candle, not one hour behind it.
+
+        With `period_warmup` also fixed (WARMUP-OFFBYONE-FIX), a caller
+        sizing from today's *correct* `required_warmup()` (19) no longer
+        overshoots at all — 19 + 6 candles in, 19 nulled, exactly 6 out,
+        `_cap_rows` a true no-op. To actually exercise the overshoot
+        `_cap_rows` itself must recover from — the scenario that made
+        live predictions land one candle stale in the first place, and
+        the one a *future* indicator with the same kind of declared-vs-
+        actual mismatch would reproduce regardless of this specific fix
+        — this sizes the window the old, unfixed `period` (20) would
+        have, one candle wider than truly needed.
+        """
+        from app.services.features import _cap_rows
+
+        requests = [
+            FeatureRequest("ohlc", {}),
+            FeatureRequest("volume_log", {}),
+            FeatureRequest("sma", {"period": "20", "source": "close"}),
+        ]
+        assert builder.required_warmup(requests) == 19  # period - 1, not 20
+
+        rows_wanted = 6
+        period = 20
+        all_candles = candles(period + rows_wanted)  # the old, unfixed sizing
+        true_latest = all_candles[-1].open_time
+
+        dataset = builder.build("ETHUSD", "1h", all_candles, requests, drop_warmup=True)
+        # 19 nulled (the real SMA(20) null count) leaves 26 - 19 = 7 rows
+        # -- one more than rows_wanted, the exact overshoot that used to
+        # get trimmed from the wrong end.
+        assert dataset.row_count == 7
+
+        capped = _cap_rows(dataset, rows_wanted)
+        assert capped.row_count == rows_wanted
+        assert capped.timestamps[-1] == true_latest
 
 
 class TestPartialSuccess:
@@ -370,7 +459,8 @@ class TestProvenance:
         assert info.feature == "sma"
         assert info.version == "1.0.0"
         assert info.columns == ["sma_2"]
-        assert info.warmup == 2
+        # WARMUP-OFFBYONE-FIX: period - 1 (1), not the bare period (2).
+        assert info.warmup == 1
         assert info.execution_time_ms >= 0.0
 
     def test_records_the_market_and_timeframe(self, builder: FeatureDatasetBuilder) -> None:

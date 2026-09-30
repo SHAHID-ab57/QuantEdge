@@ -28,9 +28,19 @@ Marketaux's current API documentation and the real live API:**
    real example article ("Bitcoin (BTC/USD), Ethereum (ETH/USD) Crushed
    as Cryptocurrency Market is Overrun by Sellers") carrying a real
    `sentiment_score` of `-0.4215` on its own highlighted text — this is
-   not a stock-only news API pressed into crypto use, and its own
+   not a stock-only news API pressed into crypto use. **The "its own
    `symbol` convention already matches this platform's own `ETHUSD`, no
-   translation needed.
+   translation needed" conclusion drawn from that documented example was
+   real evidence, honestly read — but wrong about live behavior
+   (MARKETAUX-SYMBOL-FIX, 2026-09-29): Marketaux's own real, live
+   crypto-entity tagging uses `CC:ETH`, confirmed by direct query
+   against real, current articles. `ETHUSD` still matched something
+   occasionally (a real minority of real articles, ~10% of relevant
+   coverage over this connector's own lifetime), just never the bulk of
+   it — a documented example is one data point, not a live-traffic
+   census, and this is the gap between the two.** `marketaux_symbols`
+   now queries `CC:ETH,ETHUSD` (comma-separated — confirmed live
+   Marketaux's own `symbols` parameter accepts a multi-symbol list).
 4. **Sentiment scoring: confirmed present, real scale, per-*entity* not
    per-article** — `data > entities > sentiment_score`: "Average
    sentiment of all highlighted text found for the identified entity...

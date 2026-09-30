@@ -53,7 +53,9 @@ class SimpleMovingAverage(Indicator):
         version="1.0.0",
         author="Eth AI Platform",
         complexity="O(n) — one running-sum pass over the candle range.",
-        warmup_description="Equal to the period parameter.",
+        warmup_description=(
+            "One less than the period parameter — its last point completes the window."
+        ),
         aliases=("MA", "Moving Average", "Simple MA"),
     )
 

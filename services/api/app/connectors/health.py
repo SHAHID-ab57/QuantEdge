@@ -25,6 +25,7 @@ __all__ = [
     "STALE_MULTIPLIER",
     "ConnectorHealthStatus",
     "compute_health_status",
+    "describe_health",
     "entered_failing",
 ]
 
@@ -116,3 +117,80 @@ def compute_health_status(
     if age_seconds > threshold:
         return "stale"
     return "healthy"
+
+
+def describe_health(
+    status: ConnectorHealthStatus,
+    *,
+    now: datetime | None = None,
+    last_attempt_at: datetime | None = None,
+    last_attempt_success: bool | None = None,
+    next_sync_at: datetime | None = None,
+    last_attempt_error: str | None = None,
+) -> str | None:
+    """A plain-English reason for a non-`healthy` status, or `None` for
+    `healthy` (a fresh connector needs no explanation).
+
+    Motivated directly by a real, live gap: a `stale` pill alone does not
+    say whether the owning scheduler process has simply stopped ticking
+    (an operational problem — the exact one found on 2026-09-27, where a
+    local dev session had never started the standalone `scheduler_main`
+    process introduced by the API/scheduler split, so every source it
+    drives went quiet at the same time) or whether the scheduler is
+    ticking normally and the upstream source itself has genuinely
+    published nothing new (a real, non-actionable data condition — the
+    same day, Marketaux's own live API confirmed zero new ETHUSD articles
+    in four real days, `success=true` on every attempt). Both looked
+    identical as a bare "Stale" badge; `next_sync_at` relative to `now`
+    is what tells them apart, since a scheduler that stopped ticking never
+    advances its own projected next attempt past "now," while one that is
+    still running keeps pushing it into the future tick after tick.
+
+    `failing` always surfaces the most recent attempt's own
+    `last_attempt_error`, when the caller has one — the same message
+    `ConnectorSyncRun.error_message` already stores per attempt but which
+    reaching this function's caller depends on threading it through
+    (`ConnectorDTO.last_attempt_error`), otherwise a real error sits in
+    the database with no path to the person looking at the card.
+    """
+    if status == "healthy":
+        return None
+
+    current = now if now is not None else datetime.now(UTC)
+
+    if status == "never_ingested":
+        if last_attempt_at is None:
+            return "No sync has been attempted for this source yet."
+        if last_attempt_success is False:
+            suffix = f": {last_attempt_error}" if last_attempt_error else "."
+            return f"No data has been ingested yet — the last sync attempt failed{suffix}"
+        return (
+            "No data has been ingested yet, though the last sync attempt succeeded — "
+            "the source may not have published anything in its backfill window yet."
+        )
+
+    if status == "failing":
+        suffix = f": {last_attempt_error}" if last_attempt_error else "."
+        return f"The last {FAILING_STREAK} sync attempts all failed{suffix}"
+
+    # status == "stale"
+    if next_sync_at is None:
+        return (
+            "No sync has been attempted since this value was stored — the scheduler "
+            "process that owns this source may not be running."
+        )
+    if next_sync_at.tzinfo is None:
+        next_sync_at = next_sync_at.replace(tzinfo=UTC)
+    if next_sync_at <= current:
+        return (
+            "The next sync is overdue — the scheduler process that owns this source "
+            "may not be running."
+        )
+    if last_attempt_success is False:
+        suffix = f": {last_attempt_error}" if last_attempt_error else "."
+        return f"The most recent sync attempt failed{suffix}"
+    return (
+        "The sync is running on schedule, but no new value has been published "
+        "upstream recently — this source may genuinely have nothing new to report "
+        "right now."
+    )

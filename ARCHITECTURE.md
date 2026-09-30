@@ -5786,6 +5786,143 @@ real-article, null-sentiment, empty, error, and filter/clear states;
 `news_sentiment` connector renders as an ordinary card with zero
 News-specific code, alongside Fear & Greed's own.
 
+#### Reddit Connector (M4-E4-T1)
+
+A seventh connector, added after Milestone 4 was already marked
+complete — reopened specifically to test whether retail sentiment/volume
+adds anything **`volatility_regime`** does not already get from
+`realized_volatility`, deliberately not direction, which
+`news_sentiment` (Marketaux) already tested for this exact signal
+category and found nothing (`docs/research/TARGET_REDEFINITION_ASSESSMENT.md`).
+
+**Step 1 of this task's own Definition of Done: is Reddit's own API
+actually usable, checked live, not assumed — no.** A real, current
+policy change (Reddit's "Responsible Builder Policy", effective 2026-06-05)
+replaced self-service OAuth app registration with a manual approval
+queue (2-4+ weeks, real rejection risk, no academic/research fast-track)
+— confirmed via third-party sources, since every Reddit-owned domain
+(`reddit.com`, `redditinc.com`, `developers.reddit.com`,
+`web.archive.org`) was unreachable from this environment. Reddit's own
+live API (`oauth.reddit.com`) is not usable here.
+
+**Arctic Shift (`arctic-shift.photon-reddit.com`), a free, keyless,
+third-party historical mirror, confirmed live instead** (GitHub:
+`ArthurHeitmann/arctic_shift`). Real behaviors confirmed by direct
+`curl`, not assumed from its docs: `limit` capped at 100/request;
+`sort=asc`/`desc` (this connector always sends `asc` explicitly);
+`after`/`before` accept both ISO dates and raw Unix seconds; its
+`fields=` allowlist is narrower than the unfiltered response's own
+field set — `permalink` is present in a full response but is **not** a
+valid `fields=` name, found for real via a live HTTP 400 during the
+first backfill attempt and removed from `_FIELDS` (`RedditComment
+.permalink` is always `null` today as a result); real historical depth
+confirmed back to at least January 2023 for r/ethereum.
+
+**Real subreddit-activity investigation (checked live, not assumed) —
+post volume is too thin, comment volume is the usable signal.**
+ETH-specific subreddits post only 1-3 times/day (r/ethereum, r/ethtrader,
+r/ethfinance, r/ethstaker all checked on real recent sample days) — too
+sparse for a feature. Comment volume is materially higher and checked
+consistently across 2023/2024/2025 samples: r/ethereum ~69-100/day,
+r/ethtrader ~90/day, r/CryptoCurrency 100+/day (hits the API's own
+100-item response cap). `reddit_subreddits` default:
+`"ethereum,ethtrader,CryptoCurrency"`.
+
+**No pre-computed sentiment score exists in Arctic Shift's response
+(unlike Marketaux) — VADER chosen as a simple, defensible, already-
+available method, per this task's own explicit instruction not to build
+custom NLP from scratch when one suffices.**
+`vaderSentiment.SentimentIntensityAnalyzer().polarity_scores(body)
+["compound"]` gives `[-1, 1]`, matching Marketaux's own `sentiment_score`
+scale. `score_comment()` returns `None` for empty/`[deleted]`/`[removed]`
+bodies — they still count toward volume, excluded from sentiment.
+
+**Why a dedicated table, following the Marketaux pattern, not
+`external_data_points` directly.** Comments (like articles) have real
+per-item shape and variable daily cardinality `RawDataPoint` cannot
+express. `RedditComment` (`app/models/reddit.py`, migration
+`433b86f94f10`) mirrors `NewsArticle`'s own shape (`reddit_id` unique
+dedup key, `subreddit`, `body`, `score`, nullable `sentiment_score`,
+`created_utc`, `raw_payload`). Because **two** aggregates are needed
+here (volume and sentiment, unlike Marketaux's single
+`news_sentiment`), `app/services/reddit_ingest.py`'s
+`_mirror_daily_aggregates` computes and upserts both
+(`reddit_volume`, `reddit_sentiment`) in one pass per ingestion run, each
+consumed by its own feature (`app/features/builtin/reddit_volume.py`,
+`reddit_sentiment.py`). `RedditSyncScheduler`
+(`app/services/reddit_sync.py`) mirrors `NewsSyncScheduler`'s own
+start/stop/loop shape, `ConnectorMetadata(auto_synced=False)`. Its own
+discovery-safety margin is deliberately much smaller than Marketaux's
+six hours (`DISCOVERY_SAFETY_MARGIN = timedelta(minutes=30)`) because
+comments are queryable promptly, unlike articles which can be indexed
+well after `published_at`.
+
+**Two real, undocumented API quirks found only by live reproduction —
+not in Arctic Shift's own docs:**
+
+- **A real HTTP 400 for an invalid `fields=` name** (`permalink`) —
+  described above.
+- **Arctic Shift's own informal rate limit signals as HTTP 422**, not
+  429, body `{"data": None, "error": "Timeout. Maybe slow down a bit"}`.
+  Found only when a real backfill run crashed. `RETRYABLE_STATUS_CODES`
+  now includes 422; a real, deliberate `reddit_page_pause_seconds=1.5`
+  pause was added between pages within one fetch, since retries alone
+  (5 attempts, exponential backoff to 8s) did not clear a sustained
+  occurrence.
+
+**A materially harder finding from the real full backfill attempt,
+past what per-request pacing can fix: the limit has a cumulative,
+session-level component, not just a per-request one.** A steadily
+paced run (already spaced by both the inter-chunk pause and
+`reddit_page_pause_seconds`) reliably drains to a sustained run of
+HTTP 422s after roughly the same ~14-16 requests each time, regardless
+of how long a prior cooldown was — a 90s cooldown and a 300s cooldown
+both recovered the identical short allowance before throttling again;
+25 minutes of patient cooldown-and-retry (five 300s cooldowns) did not
+clear one chunk at all. `scripts/backfill_reddit.py` now retries a
+failed chunk after a cooldown (`--chunk-cooldown-seconds`, default 300)
+up to `--chunk-max-retries` times (default 5), but this treats the
+symptom; a full ~2.6-year historical depth (matching this project's
+own established primary-comparison window, see below) is **not**
+obtainable from Arctic Shift's live API in one sitting, or several —
+only Arctic Shift's own monthly bulk dumps (which this task did not
+build support for) could plausibly reach that depth. A real, single
+backfill session reliably reaches only around 56 days of history before
+requiring an open-ended wait with no confirmed recovery time.
+
+**Step 3 (the actual signal test) is deferred, not run — a real
+constraint, not an oversight.** This project's own established
+methodology (`docs/research/TARGET_REDEFINITION_ASSESSMENT.md`) treats
+the full ~2.6-year history as the only **authoritative** window and a
+42-day recent slice as **explicitly weaker, cross-check-only**
+evidence, precisely because a single-window result has previously been
+mistaken for a durable finding in this research thread. Reddit's real
+backfill depth (~56 days) cannot reach the authoritative window at all,
+and while it is enough to cover the 42-day cross-check window in full,
+running only the weaker window and reporting its result as this
+connector's answer would repeat the exact mistake this project's own
+methodology exists to prevent. Given that, this task stops at
+"investigated and built, not yet evaluated" rather than publishing a
+result the platform's own evidentiary standard would immediately have
+to caveat away. See `docs/research/REDDIT_SENTIMENT_CONNECTOR_ASSESSMENT.md`
+for the full account and what would unblock Step 3 (either patient
+multi-session backfilling against the live API, or building support
+for Arctic Shift's monthly dumps).
+
+**Testing.** `tests/connectors/test_reddit.py` (25 tests): field
+mapping, multi-subreddit querying, cursor pagination, `max_pages`
+stopping with a warning when exhausted, naive-datetime/end-before-start
+rejection, malformed-comment handling, the 422-retry path, and
+`score_comment`'s empty/deleted/removed handling.
+`tests/services/test_reddit_ingest.py`: persistence, idempotent dedup,
+both daily aggregates mirrored, and (mirroring Marketaux's own
+load-bearing case) a second tick with nothing new for a day leaving it
+unrecomputed. `tests/services/test_reddit_sync.py` mirrors
+`test_news_sync.py`'s own window/start/stop/loop coverage.
+`tests/features/test_reddit_features.py` covers both features'
+discovery, generation, and a full adversarial no-look-ahead proof
+including a real, DB-backed check through `resolve_external_data`.
+
 #### Connector Health Monitoring (M5-E5-T1)
 
 **The motivating evidence: three real, silent failures.** Each of these
@@ -5931,10 +6068,10 @@ the service is temporarily made to ignore sync-run history.
   if the scheduler itself later dies while the API keeps running, the last
   known state stays `failing` until a success is recorded, and staleness is
   what eventually reports the silence. The individual failure rows
-  (`error_message` etc.) are queryable through
-  `ConnectorSyncRunRepository.list_recent` but no endpoint exposes them;
-  the status only reports that a connector is failing, not why. Surfacing
-  the reason belongs with the error-tracking piece.
+  (`error_message` etc.) were queryable through
+  `ConnectorSyncRunRepository.list_recent` but no endpoint exposed them at
+  the time this was written — fixed by M5-E5-T7 below, which threads
+  `error_message` onto `GET /connectors` as `last_attempt_error`.
 - `GET /connectors` now issues one extra small query per connector (its
   newest 3 sync runs), 6 today; fine at this scale, worth batching if the
   connector count grows.
@@ -5942,6 +6079,110 @@ the service is temporarily made to ignore sync-run history.
   migration (a comment-text change on `ml_dataset_builds.ml_dataset_id`, a
   check-constraint name on `paper_strategy_decisions`) was deliberately
   left out of this migration; `alembic check` still reports it.
+
+#### Connector Health Reasons — a real stale-connector incident (M5-E5-T7)
+
+**The report, and the two real, different causes underneath one identical
+badge.** On 2026-09-27 four connectors read `Stale` on both a local dev
+session and the production droplet. Investigated directly (`docker ps`,
+real SSH access to the droplet, `connector_sync_runs` queried on both
+databases, a live unauthenticated Marketaux request run from the server
+itself) rather than assumed:
+
+- **Local: an operational gap, not a code bug.** `eth-scheduler`'s
+  equivalent — a bare `uv run python -m app.scheduler_main` — had never
+  been started in that dev session. M5-E5-T6's own API/scheduler split
+  moved every DB/REST-only scheduler out of the API process; `services/api
+/README.md`'s own "Run" section was never updated to say a second
+  process is now required for external data, candles, or retraining to
+  advance at all — a bare `uv run uvicorn app.main:app --reload` (still
+  the documented quickstart) now serves whatever was last synced,
+  silently, forever, with no error anywhere. Confirmed directly: every
+  connector's `connector_sync_runs.started_at` on the local database
+  stopped dead at the same timestamp, matching when scheduler_main was
+  last run by hand during M5-E5-T6's own work. Fixed two ways: started
+  the process for real (caught every source up within seconds, confirmed
+  via a fresh `connector_sync_runs` query), and closed the documentation
+  gap that let it happen — `services/api/README.md`'s "Run" section now
+  says explicitly that a second process is required outside Docker, and
+  a new `make run-scheduler` target makes it discoverable.
+- **Server: no bug at all — a real, confirmed external data gap.**
+  `eth-scheduler` was up and healthy the entire time; `connector_sync_runs`
+  over the last 7 days showed zero rate-limit failures on any connector,
+  and Marketaux's own tick logs read `success=true` on schedule. A live,
+  unauthenticated request run directly from the droplet
+  (`GET /news/all?symbols=ETHUSD&published_after=<last stored article>`)
+  returned `{"found":0,"returned":0}` — genuinely zero new ETHUSD articles
+  in four real days, not a quota exhaustion or a broken query (the same
+  request without the date filter returned `"found":6907`, confirming
+  the key and query both work; the newest of those 6907 was the exact
+  article already stored). This was never a rate limit, despite that
+  being the first, reasonable hypothesis before checking.
+
+**Why a bare `Stale` badge could not tell these apart, and what fixes
+it.** Both looked identical: a badge with no further explanation. The
+data to tell them apart already existed on the DTO (`next_sync_at`,
+`last_attempt_success`) but nothing synthesized it into a plain answer.
+`app.connectors.health.describe_health` (pure and database-free, the
+same contract `compute_health_status` already keeps) takes the already-
+computed status plus those same fields and returns one of a fixed set of
+plain-English reasons:
+
+- `next_sync_at` in the past (or null, meaning no attempt was ever
+  recorded against a stored point) → "the scheduler process that owns
+  this source may not be running" — the local case above.
+- `next_sync_at` still in the future and the last attempt succeeded →
+  "this source may genuinely have nothing new to report right now" — the
+  server case above.
+- `failing`, or a `stale` connector whose last attempt itself failed →
+  names the real error, via a new `ConnectorDTO.last_attempt_error` field
+  sourced from `ConnectorSyncRun.error_message` — stored per attempt
+  since M5-E5-T1 but never threaded past the database until now, closing
+  that task's own flagged limitation directly.
+- `never_ingested` → distinguishes "no attempt yet" from "the only
+  attempt on record failed" from "the only attempt succeeded but found
+  nothing to store."
+
+Reaches `GET /connectors` as `health_reason` (`null` for `healthy`) and
+`last_attempt_error`, and renders as a small icon + caption on each
+`/data-sources` card, colored by urgency (muted for `stale`/
+`never_ingested`, red for an active `failing` error) — never for
+`healthy`, so a healthy grid stays quiet.
+
+**Does a stale connector's frozen value ever reach a live prediction?
+Checked directly, not assumed.** `app.services.external_data_context
+.resolve_external_data` (the one place a connector-backed feature's
+value is looked up) has no staleness guard of any kind —
+`most_recent_value_at_or_before` will happily return a point that is
+weeks old with no warning anywhere in the prediction path. Today this is
+latent, not active: the currently live, actively-retrained experiment
+(`retraining_experiment_ids`, queried directly against its own stored
+`feature_set`) trains on `ohlc`/`volume_log`/`sma(20, close)` only — zero
+external-data connector features — so nothing a stale connector could
+freeze actually reaches a real prediction right now. This is a fact
+about today's specific deployed feature set, not a structural guarantee:
+the day a future retraining does include `fear_greed`, `news_sentiment`,
+`reddit_sentiment`, or any other connector-backed feature, that feature
+would silently keep serving however old its last stored point is,
+forever, with nothing in the prediction path to notice or flag it. Left
+open rather than built ahead of a real need for it — the connector
+features evaluated so far (`CONNECTOR_FEATURE_VALUE_ASSESSMENT.md`) carry
+no measurable predictive value in the first place, so no live experiment
+has had a reason to depend on one yet.
+
+**Testing.** `tests/connectors/test_health.py` gained a `TestDescribeHealth`
+class (11 cases: every status, both never-ingested sub-cases, a failed
+vs. successful stale attempt, an overdue vs. future `next_sync_at`, and a
+naive-datetime `next_sync_at` — the same SQLite round-trip quirk
+`compute_health_status` already guards against). `tests/api
+/test_connectors_api.py` gained a `TestHealthReason` class exercising the
+same cases end to end through the real HTTP endpoint, including the two
+real incidents above reproduced as fixtures (a scheduler gone quiet with
+no recorded attempt; a scheduler ticking on schedule against a source
+with nothing new). Frontend: `connector-card.test.tsx` gained four cases
+proving the reason note renders for `stale`/`failing` and stays absent
+for `healthy`; `ConnectorSchema`'s own test gained cases for the two new
+required-but-nullable fields.
 
 #### Delta Market-Data Connectors: Funding Rate & Open Interest History (M4-E3-T5)
 
@@ -6943,6 +7184,217 @@ fragment of a secret that itself contained a comma).
   before; it now appears as a `message` field.
 - **Not deployed.** Nothing here is active on the production droplet until
   it is deployed and `SENTRY_DSN` is set in `services/api/.env`.
+
+#### Indicator Warmup Off-By-One (WARMUP-OFFBYONE-FIX)
+
+**Found while debugging an unrelated local/server prediction
+disagreement, via a full offline pipeline replication, not assumed —
+every live prediction and every walk-forward backtest step using an
+SMA/EMA/WMA/RSI-backed feature set had been computing its feature vector
+from the candle _before_ the one it was timestamped against, silently,
+always.**
+
+**Root cause.** `app.indicators.builtin.common.period_warmup()` (shared
+by `sma`, `ema`, `wma`) declared a windowed average's warmup as the bare
+`period` — "the identical 'warmup equals the period' rule," per that
+module's own prior docstring. It was wrong for all three: each one's own
+`calculate()` produces its first valid value at 0-indexed position
+`period - 1` (the window's own last point completes it), so only
+`period - 1` rows are ever actually null, one fewer than declared.
+`rsi`'s own separately-declared `warmup()` had the identical class of
+bug in the other direction (`period + 1` declared, `period` actual).
+`app.services.features._cap_rows` and `app.services.ml_datasets
+._cap_rows` both trusted the declared number to size their own trim
+after warmup-dropping — under the explicit, now-falsified assumption
+that a correctly-declared warmup makes the trim a no-op in the normal
+case. One row more than expected survived, and the old "keep the
+earliest, drop the excess off the end" trim discarded that extra row
+from the **end** — the single newest, most-recently-requested candle —
+every time a caller's own requested row count was smaller than what was
+naturally available after warmup-dropping.
+
+**Real blast radius, checked feature by feature, not assumed uniform:**
+
+- **Live inference (`app.services.prediction.PredictionService.run`)
+  and every walk-forward backtest step (`app.services.backtest`, which
+  calls `PredictionService.run(as_of=...)` once per step) both request a
+  small, tightly-sized row count** — exactly the condition that triggers
+  the trim. **A bulk research/training dataset build
+  (`app.services.ml_datasets.MLDatasetService`, requesting its full
+  available history) essentially never does** — its own requested limit
+  already exceeds what warmup-dropping leaves, so the trim was already a
+  correct no-op there, checked directly against this platform's own
+  primary-comparison methodology ("the full real ETHUSD/1h history,
+  `limit=23,000`") rather than assumed.
+- **`sma`/`ema`/`wma` all share the exact bug; `rsi` shares the same
+  class with the opposite sign.** `ema`/`wma`/`rsi` have never been used
+  in any real registered experiment on this platform (confirmed by
+  querying every stored `experiments.feature_set` directly) — real but
+  latent only. `sma` has: it is this platform's own fixed baseline
+  feature (`ohlc` + `volume_log` + `sma(20)`), used throughout this
+  entire research thread.
+- **`realized_volatility` — the one live, currently-deployed finding
+  feeding real position-size/leverage/stop-width decisions right now —
+  is confirmed _not_ affected**, checked first and specifically. Its own
+  declared `warmup()` (the `window` parameter, unmodified) genuinely
+  equals its `generate()`'s true null count — verified directly against
+  its real output, not just its declaration. In the one live job that
+  combines it with `sma(20)` (`volatility_regime`, `64bf6046`),
+  `required_warmup`'s own max-across-features rule means
+  `realized_volatility`'s larger, correct warmup dominates and entirely
+  masks `sma`'s smaller, wrong one — confirmed live, via the same offline
+  replication method, against real local candles: the resolved dataset
+  landed exactly on the true latest candle.
+- **The live `next_direction` job (`794eeaf6`, `ohlc` + `volume_log` +
+  `sma(20)`, no `realized_volatility` to mask it) was affected on every
+  real prediction and every walk-forward step across this whole research
+  thread** — confirmed live: a real 2026-09-27 local/server prediction
+  disagreement traced directly to this job using `as_of=02:00` (a
+  12-hour-old candle) locally versus the server's own much-fresher
+  `as_of`, and an offline pipeline replication reproduced the mechanism
+  exactly against real local candles (a 26-candle window correctly
+  yielding 7 post-warmup rows — one more than the 6 requested — with the
+  old code discarding the true latest instead of the 7th, oldest,
+  genuinely-still-warming-up row).
+
+**The general fix, not a per-indicator patch.** `_cap_rows` in
+`app.services.features` now keeps the **latest** N rows instead of the
+earliest — correct for live prediction's own "give me the freshest
+data" intent, and robust to a _future_ indicator with the same kind of
+declared-vs-actual mismatch without needing it individually audited
+first. `period_warmup()` and `rsi.warmup()` were also corrected to their
+true, empirical values — not made redundant by the `_cap_rows` fix, but
+complementary to it: `app.services.ml_datasets._cap_rows` was
+deliberately **left** at "keep earliest" (its own explicit `start`/
+`limit` request shape means "the earliest N rows from my requested
+start" is the correct, intentional semantic there, unlike live
+prediction's implicit "give me now" — flipping it would have been a
+real, unrelated behavior change for a different caller), so its own
+correctness depends on the per-indicator declarations now being
+accurate, which they are.
+
+**The research record.** Comparative "no skill"/"no meaningful
+confidence-accuracy relationship" verdicts very likely still hold: the
+bug shifted every affected input one bar **earlier**, never a
+look-ahead (no future information ever leaked in) — a strictly harder
+forecasting task than intended, never an easier one, so a genuine
+relationship would be at least as visible from the correctly-timed data
+this bug withheld, not less. Precise correction notes (not retractions)
+were added to every document whose own stated methodology actually goes
+through the affected mechanism, checked per-document against its own
+text rather than assumed from its topic:
+`docs/research/REGIME_WALKFORWARD_ASSESSMENT.md`,
+`docs/research/CONFIDENCE_GATE_AUDIT.md`,
+`docs/research/CONFIDENCE_RECHECK_POST_FIX.md`, and
+`docs/research/TARGET_REDEFINITION_ASSESSMENT.md` (mixed within one
+document — Step 5's own walk-forward is affected, Steps 3-4's own bulk
+`MLDatasetService` comparisons are not).
+`docs/research/HORIZON_SWEEP_ASSESSMENT.md` was checked and confirmed
+**not** affected — its own comparison never leaves the bulk
+`MLDatasetService` path — and left with a note explaining why, not a
+correction. None of these numbers have been empirically re-run against
+the fixed pipeline; the "very likely holds" framing is reasoned from the
+direction of the bias, not re-measured.
+
+**Real, paper-only consequence, checked not assumed.** Job `794eeaf6`
+opened 4 and closed 6 real positions on manual-verification paper
+accounts (`paper_strategy_decisions`, confirmed via direct query on both
+databases — the same account records exist on local and server) — never
+real capital, this platform's own paper-trading design guarantees that
+regardless. The 2026-09-26 opens ran under a `confidence_threshold_pct`
+of 1%, a temporarily-lowered gate left over from prior manual
+verification work, not this platform's real ~65% live-trading
+confidence gate.
+
+**Verified live, the same method that caught the bug.** After the fix
+deployed locally, the real, already-running automated strategy's very
+next tick produced a prediction whose `as_of` matched the database's own
+true latest stored candle exactly, checked at the same instant — not a
+synthetic test, the same real mechanism that originally exposed the bug.
+
+**No off-cycle retrain recommended.** The affected job's own training
+data was built via `MLDatasetService`'s bulk path (confirmed unaffected
+above) — its learned fit is not implicated by a serving-side staleness
+bug. The fix changes which real candle gets fed to the already-correctly-
+trained model at inference time; it does not change what that model
+learned. The existing weekly minimum-retrain-interval floor
+(`docs/research/RETRAIN_WINDOW_ANALYSIS.md`) was set deliberately to
+prevent retraining on anything short of a real, considered signal — this
+is not one.
+
+#### Marketaux Symbol Fix (MARKETAUX-SYMBOL-FIX)
+
+**A real user report — "Marketaux has produced zero new articles for 6
+real days, resolve definitively" — traced to a symbol-filter bug present
+since this connector's first build (M4-E1-T7, 2026-09-08), not a recent
+quota exhaustion or a genuine news gap.**
+
+**Investigation, checked directly, not assumed:**
+
+- **`connector_sync_runs`**: every sync in the prior 8 days reported
+  `success=true`, `received=0` — the sync was never failing, it was
+  correctly reporting "nothing matched."
+- **A live call** for the last 3 days under `symbols=ETHUSD`: real HTTP
+  200, no `error` field, `{"found": 0}`. Real usage headers
+  (`x-usagelimit-remaining: 94/100`) ruled out quota exhaustion directly.
+- **A free-text search** for the same window found 14 real crypto
+  articles, including one from the day before with a title explicitly
+  about Ethereum — ruling out "no news exists." That article's own
+  `entities` field tagged it `CC:ETH`, never `ETHUSD`. Querying
+  `symbols=CC:ETH` directly returned 20 real articles in the same 3 days,
+  including one from that same morning.
+- **Historical scope, checked rather than assumed wrong-from-day-one**:
+  over this connector's own full real lifetime (2026-09-08 → 2026-09-29),
+  `symbols=ETHUSD` matched only 16 real articles; `symbols=CC:ETH`
+  matched 154 in the identical window. The bug was present from the
+  connector's very first build — it did not "work, then break"; it was
+  always missing roughly 90% of Marketaux's own real, relevant coverage,
+  and just happened to keep matching a real, shrinking trickle until
+  2026-09-23, after which even that trickle stopped.
+- **No account/plan API exists** (`/account`, `/usage`, `/billing` all 404) to check the configured key's real plan tier directly; the real,
+  live rate-limit headers (`x-usagelimit-limit: 100`/day) match
+  Marketaux's own documented free tier exactly.
+
+**Fix**: `marketaux_symbols` now queries **both**
+(`"CC:ETH,ETHUSD"`, comma-separated — confirmed live that Marketaux's
+own `symbols` parameter accepts a multi-symbol list) rather than
+swapping one string for another — strictly more inclusive, and any
+future real `ETHUSD` match is still caught without a second config
+change.
+
+**Re-backfilled and re-tested, not left as an unverified operational
+fix.** `CONNECTOR_FEATURE_VALUE_ASSESSMENT.md`'s own original
+`news_sentiment` secondary comparison (11 real test rows, "insufficient
+statistical power") was re-run against the corrected symbol over
+2026-08-06 → 2026-08-28 (22 of the original 34-day window's days — the
+remaining ~12 are still pending a second backfill pass, blocked by a
+real, hard API quota wall hit mid-run: **HTTP 402,
+`{"error":{"code":"usage_limit_reached", ...}}`** — confirmed directly;
+notably, the connector already surfaces this loudly as a real
+`ConnectorAPIError`, never a silently-swallowed empty result, directly
+answering the investigation's own opening concern about that failure
+mode). The re-test's own real statistical power is already substantially
+better than the original despite the incomplete window: **77 real test
+rows against the original's 11.**
+
+**Result: the corrected, ~8×-more-complete dataset does not change the
+original negative finding for direction — it reinforces it.** Test-
+accuracy deltas vs. baseline across all three classifiers (−3.90pp,
++0.00pp, +3.90pp) sit comfortably inside a ±11.17pp noise band.
+`news_sentiment`'s own permutation importance never leads any of the
+three models — absent from the top 5 for `logistic_regression`/
+`random_forest` entirely, and an order of magnitude below the dominant
+features even where it does appear (`gradient_boosting`). Full account,
+including what remains open (the final ~12 days, and no re-test yet
+against `volatility_regime`): `docs/research/
+CONNECTOR_FEATURE_VALUE_ASSESSMENT.md`'s own correction note.
+
+**Testing.** A new `TestMarketauxSymbolFix` class in `tests/connectors
+/test_marketaux.py`: one test pinning the corrected class-level default
+in isolation from whatever a local `.env` happens to contain
+(`Settings(_env_file=None)`), one proving a connector built with no
+explicit `symbols=` override sends both symbols in the real outgoing
+request.
 
 ### Feature Store
 

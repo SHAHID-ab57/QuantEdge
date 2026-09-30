@@ -200,7 +200,8 @@ class TestDatasetEndpoint:
         assert body["meta"]["pipeline_version"]
         assert body["meta"]["candles_analyzed"] == 3
         assert body["meta"]["rows_dropped"] == 1
-        assert body["meta"]["warmup_candles"] == 2
+        # WARMUP-OFFBYONE-FIX: now consistent with rows_dropped exactly.
+        assert body["meta"]["warmup_candles"] == 1
         assert body["features"][0]["parameters"] == {"period": 2, "source": "close"}
         assert body["features"][0]["columns"] == ["sma_2"]
         assert body["features"][0]["cache_status"] in ("hit", "miss", "disabled")
@@ -337,7 +338,8 @@ class TestDatasetErrors:
         assert body["columns"] == []
         failure = body["quality"]["feature_failures"][0]
         assert failure["error_code"] == "insufficient_data"
-        assert "at least 20" in failure["error_detail"]
+        # WARMUP-OFFBYONE-FIX: period - 1 (19), not the bare period (20).
+        assert "at least 19" in failure["error_detail"]
 
     async def test_rejects_an_unsupported_timeframe(
         self, client: httpx.AsyncClient, seeded_varied: None

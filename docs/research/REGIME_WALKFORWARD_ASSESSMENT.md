@@ -39,6 +39,39 @@ it, [`CONNECTOR_FEATURE_VALUE_ASSESSMENT.md`](./CONNECTOR_FEATURE_VALUE_ASSESSME
 > originally published — this is a correction note, not a retraction or a
 > silent edit.
 
+A second, independent correction followed three days later.
+
+> ## Correction (2026-09-29, WARMUP-OFFBYONE-FIX)
+>
+> **Every walk-forward step below fed the model a feature vector computed
+> from the candle _before_ the `as_of` it was graded against, not `as_of`
+> itself.** `app.services.backtest`'s own per-step evaluation calls
+> `PredictionService.run(as_of=...)` once per step (confirmed directly in
+> its source), the same live-inference code path a real 2026-09-27
+> local/server prediction disagreement traced a real bug to:
+> `app.indicators.builtin.common.period_warmup()` declared SMA(20)'s
+> warmup as 20 rows when the indicator's own `calculate()` only ever
+> nulls 19, and `_cap_rows()` trusted the declared number, silently
+> discarding the single newest row from every under-sized request — this
+> document's own baseline feature set (`ohlc` + `volume_log` + `sma(20)`,
+> no `realized_volatility` to mask it) included.
+>
+> **What this corrects: the _input_, not the _verdict_.** The bug made
+> every step here a strictly _harder_ task than intended — forecasting
+> the true future from data one bar staler than the `as_of` implied,
+> never the reverse (no look-ahead; the shift ran the safe direction). A
+> genuine predictive relationship, if present, would be at least as
+> visible from the correctly-timed data this bug withheld, not less.
+> **The regime-invariant "no skill" verdict — already independently
+> reached twice over in this document (the drift-corrected mechanism
+> above, and the original analysis below) — very likely still holds**,
+> but has not been empirically re-run against the fixed pipeline to
+> confirm it exactly.
+>
+> This document's own tables and verdict below are left exactly as
+> originally published — this is a second, independent correction note,
+> not a retraction or a silent edit.
+
 Every experiment in this thread — M4-E3-T1 through the horizon sweep —
 rested on a single chronological train/val/test split, evaluated against
 exactly one test-period market regime. The horizon sweep's own diagnosis

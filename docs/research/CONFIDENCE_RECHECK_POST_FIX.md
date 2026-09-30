@@ -1,5 +1,32 @@
 # Confidence Re-Check, Post Drift Fix
 
+> ## Correction (2026-09-29, WARMUP-OFFBYONE-FIX)
+>
+> **`794eeaf6` is the exact job a real local/server prediction
+> disagreement later traced this bug to directly** — confirmed live,
+> not inferred: `app.indicators.builtin.common.period_warmup()` declared
+> SMA(20)'s warmup as 20 rows when the indicator's own `calculate()`
+> only nulls 19, and `_cap_rows()` silently discarded the single newest
+> row from every under-sized `FeatureService.build_raw` request this
+> job's own `ohlc` + `volume_log` + `sma(20)` feature set made — live
+> tick or backtest step alike, both reach the database through the
+> identical path. Every one of the 1,314 predictions measured below was
+> computed from the candle _before_ the one it was timestamped against.
+>
+> **What this corrects: the _input_, not the _verdict_.** The shift ran
+> one bar early, never a look-ahead (no future information ever leaked
+> in). Confidence-vs-correctness is a property of the model's own output
+> calibration, not of exactly which real bar its input came from; a
+> systematic one-bar timing shift applied identically across all 1,314
+> predictions gives no mechanism by which it would manufacture or hide a
+> genuine relationship. **"The core finding holds, and is now stronger"
+> below very likely still holds**, but has not been empirically
+> re-measured against the fixed pipeline to confirm it exactly.
+>
+> This document's own tables and verdict below are left exactly as
+> originally published — this is a correction note, not a retraction or
+> a silent edit.
+
 **Question:** now that RETRAIN-WITH-MINIMUM-WINDOW has replaced the drift-affected
 job (`733082cc`) with a fresh, correctly-windowed one (`794eeaf6`, `ohlc` +
 `volume_log` + `sma(20)`, 365-day window), does `CONFIDENCE_GATE_AUDIT.md`'s
